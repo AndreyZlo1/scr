@@ -196,6 +196,9 @@ local SA_CONFIG = {
 	TracerDuration = 1.4,
 	TracerFadeIn = 0.12,
 	TracerThickness = 0.9,
+	TracerColor = Color3.fromRGB(255, 90, 35),
+	TracerTransparency = 0,
+	AimLineEnabled = false,
 	AimVisualStyle = "Swastika",
 	AimVisualScale = 0.5,
 	HitSound = true,
@@ -223,7 +226,7 @@ local SA_CONFIG = {
 	-- ._bulletProcess → GetFromBodyPart → ActorClass:GetSelf) 3-й возврат,
 	-- который код принимал за "Unix" снапшота lag-comp, на деле = solveIK(part)
 	-- (ActorClass: `local u23 = v1("solveIK")` → `return UID, self, u23(part)`).
-	-- Это геометрия IK текущей позы, а НЕ индекс серверной истории для отмотки.
+	-- Это ге��метрия IK текущей позы, а НЕ индекс серверной истории для отмотки.
 	-- Хит-рег клиент-авторитетный по {UID, Part}; переигрыш старого значения
 	-- ничего не отматывает и лишь рискует провалить валидацию попадания.
 	-- ── Resolver/MultiPoint FPS-бюджет (масштабирование по игрокам) ──
@@ -245,7 +248,7 @@ local SA_CONFIG = {
 	LocalBulletsOnly = true,
 	TracerLocalOnly = true,
 	ModifyEnabled = false,       -- weapon mods OFF by default
-	ModifyReapplyInterval = 1.0, -- как часто (сек) переприменять моды (ловит смену оружия для ВСЕХ пушек)
+	ModifyReapplyInterval = 0.5, -- как часто (сек) переприменять моды (ловит смену оружия для ВСЕХ пушек)
 	ModifyRPMValue = 1200,
 	ModifyBulletSpeedValue = 2000,
 	ModifyPresets = {
@@ -376,7 +379,7 @@ function Bridge.spawnShotTracer(origin, targetPos, opts)
 	if (targetPos - origin).Magnitude < 0.05 then return end
 	local line = Drawing.new("Line")
 	line.Thickness = CONFIG.TracerThickness or 0.9
-	line.Color = Color3.fromRGB(255, 90, 35)
+	line.Color = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35)
 	line.ZIndex = 30
 	line.Visible = true
 	Bridge.setDrawingAlpha(line, 0)
@@ -424,8 +427,10 @@ function Bridge.updateShotTracers()
 				e.line.From = Vector2.new(sp1.X, sp1.Y)
 				e.line.To = Vector2.new(sp2.X, sp2.Y)
 				e.line.Thickness = (CONFIG.TracerThickness or 0.9) + alpha * 0.5
-				Bridge.showDrawing(e.line, alpha)
-				e.line.Color = Color3.fromRGB(255, math.floor(70 + alpha * 80), 25)
+				local tracerBaseColor = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35)
+				e.line.Color = tracerBaseColor:Lerp(Color3.new(1, 1, 1), alpha * 0.18)
+				local tracerVis = 1 - (CONFIG.TracerTransparency or 0)
+				Bridge.showDrawing(e.line, alpha * tracerVis)
 			else
 				e.line.Visible = false
 			end
@@ -1182,7 +1187,7 @@ function Bridge.scanGcForFireServerClosure()
 end
 
 function Bridge.hookDischargeClosure()
-	-- Отключено: дубли����ует namecall FireServer patch.
+	-- ��тключено: дубли����ует namecall FireServer patch.
 	return false
 end
 
@@ -1998,6 +2003,7 @@ function Bridge.hideAimViz(reason, detail)
 		if viz.btPast then viz.btPast.Visible = false end
 		if viz.btLine then viz.btLine.Visible = false end
 		if viz.btText then viz.btText.Visible = false end
+		if viz.aimLine then viz.aimLine.Visible = false end
 		if viz.boxLines then
 			for _, l in ipairs(viz.boxLines) do l.Visible = false end
 		end
@@ -2174,9 +2180,13 @@ function Bridge.updateAimVisuals()
 
 	local cx, cy = sp.X, sp.Y
 	local tier = State.lastAimVisTier or 0
-	local tierColor = tier == 0 and Color3.fromRGB(120, 255, 120)
+	-- Используем CONFIG.AimVisualColor если задан, иначе tier-цвет
+	local tierColor = CONFIG.AimVisualColor or (
+		tier == 0 and Color3.fromRGB(120, 255, 120)
 		or (tier == 1 and Color3.fromRGB(255, 220, 80)
 		or (tier == 3 and Color3.fromRGB(120, 180, 255) or Color3.fromRGB(255, 90, 90)))
+	)
+	local reticleAlpha = 0.95 * (1 - (CONFIG.AimVisualTransparency or 0))
 
 	-- Backtrack удалён v4 — скрываем bt-drawings если есть
 	if viz.btCurrent then viz.btCurrent.Visible = false end
@@ -2184,7 +2194,26 @@ function Bridge.updateAimVisuals()
 	if viz.btLine then viz.btLine.Visible = false end
 	if viz.btText then viz.btText.Visible = false end
 
-	drawAimReticle(viz, cx, cy, tierColor, 0.95, now)
+	drawAimReticle(viz, cx, cy, tierColor, reticleAlpha, now)
+
+	-- AimLine: линия от центра экрана (прицел) до точки aim
+	if CONFIG.AimLineEnabled then
+		local vp = cam.ViewportSize
+		local screenCx, screenCy = vp.X / 2, vp.Y / 2
+		local al = viz.aimLine
+		if not al then
+			al = Drawing.new("Line")
+			al.Thickness = 1.5
+			al.ZIndex = 43
+			viz.aimLine = al
+		end
+		al.From = Vector2.new(screenCx, screenCy)
+		al.To = Vector2.new(cx, cy)
+		al.Color = tierColor
+		Bridge.showDrawing(al, reticleAlpha * 0.7)
+	elseif viz.aimLine then
+		viz.aimLine.Visible = false
+	end
 
 	-- Клиентская линия: muzzle → aim (predict)
 	if CONFIG.MuzzleVisual then
@@ -3229,7 +3258,7 @@ function Bridge.clearAimVisuals()
 	Bridge.clearBulletTracers()
 	if State.aimViz then
 		pcall(function()
-			for _, key in ipairs({ "crossH", "crossV", "dot", "ring", "ringOuter", "line", "label" }) do
+			for _, key in ipairs({ "crossH", "crossV", "dot", "ring", "ringOuter", "line", "label", "aimLine" }) do
 				local d = State.aimViz[key]
 				if d then d:Remove() end
 			end
@@ -4077,11 +4106,11 @@ local function startAimThread()
 			Bridge.hideAimViz()
 		end
 
-		-- FIX v11: FOV Circle — показывается только при наличии огнестрельного оружия
+		-- FIX v11: FOV Circle — показывается только при наличии огнестрельного оружия И включённом SilentAim
 		do
 			local fc = State.fovCircle
 			if fc then
-				local wantShow = CONFIG.FovCircle == true
+				local wantShow = CONFIG.FovCircle == true and CONFIG.SilentAim == true
 				if wantShow then
 					local fovCheckT = State.lastFovWeaponCheck or 0
 					local wCtx = State.fovWeaponCtx
@@ -4196,6 +4225,7 @@ function SilentAim.buildUI(ui)
 	local flag = ui.flag or function(s) return "SA_" .. s end
 	local tabSA = ui.tabs and ui.tabs.SilentAim
 	local tabGM = ui.tabs and ui.tabs.GunMods
+	local ntf = ui.notify or function() end
 	-- Sync a MacLib toggle's visual state with its CONFIG value (used by keybinds).
 	local function syncToggle(f, v)
 		local ML = ui.MacLib
@@ -4209,12 +4239,16 @@ function SilentAim.buildUI(ui)
 		local L = tabSA:Section({ Name = "Silent Aim", Side = "Left" })
 		L:Header({ Name = "Silent Aim" })
 		L:Toggle({ Name = "Enabled", Default = CONFIG.SilentAim,
-			Callback = function(v) CONFIG.SilentAim = v end }, flag("SilentAim"))
+			Callback = function(v)
+				CONFIG.SilentAim = v
+				ntf("Silent Aim", v and "Enabled" or "Disabled")
+			end }, flag("SilentAim"))
 		if ui.keybind then
 			ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("SilentAim_KB"),
 				Toggle = function()
 					CONFIG.SilentAim = not CONFIG.SilentAim
 					syncToggle(flag("SilentAim"), CONFIG.SilentAim)
+					ntf("Silent Aim", CONFIG.SilentAim and "Enabled" or "Disabled")
 				end })
 		end
 		L:SubLabel({ Text = "Redirects your shots to the best target inside the FOV." })
@@ -4225,7 +4259,10 @@ function SilentAim.buildUI(ui)
 			Callback = function(v) CONFIG.SilentAimMaxDistance = v end }, flag("MaxDist"))
 		L:Dropdown({ Name = "Target Bone", Options = { "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart" },
 			Default = CONFIG.SilentAimBone or "Head",
-			Callback = function(v) CONFIG.SilentAimBone = v end }, flag("Bone"))
+			Callback = function(v)
+				CONFIG.SilentAimBone = v
+				ntf("Target Bone", v)
+			end }, flag("Bone"))
 		L:Toggle({ Name = "Force Zero Spread", Default = CONFIG.ForceZeroSpread,
 			Callback = function(v) CONFIG.ForceZeroSpread = v end }, flag("ZeroSpread"))
 		L:Divider()
@@ -4292,28 +4329,47 @@ function SilentAim.buildUI(ui)
 		-- ── Left #2: visuals & feedback ─────────────────────────────────────
 		local V = tabSA:Section({ Name = "Visuals", Side = "Left" })
 		V:Header({ Name = "FOV Circle" })
-		V:Toggle({ Name = "Show FOV Circle", Default = CONFIG.FovCircle,
-			Callback = function(v) CONFIG.FovCircle = v end }, flag("FovCircle"))
-		V:Colorpicker({ Name = "Circle Color", Default = CONFIG.FovCircleColor,
+		V:Toggle({ Name = "Enabled", Default = CONFIG.FovCircle,
+			Callback = function(v)
+				CONFIG.FovCircle = v
+				ntf("FOV Circle", v and "Enabled" or "Disabled")
+			end }, flag("FovCircle"))
+		V:Colorpicker({ Name = "Color", Default = CONFIG.FovCircleColor,
 			Callback = function(c) CONFIG.FovCircleColor = c end }, flag("FovColor"))
 		V:Toggle({ Name = "Filled", Default = CONFIG.FovCircleFilled,
 			Callback = function(v) CONFIG.FovCircleFilled = v end }, flag("FovFilled"))
-		V:Slider({ Name = "Circle Thickness", Default = CONFIG.FovCircleThickness, Minimum = 1, Maximum = 6,
+		V:Slider({ Name = "Thickness", Default = CONFIG.FovCircleThickness, Minimum = 1, Maximum = 6,
 			Precision = 0, Callback = function(v) CONFIG.FovCircleThickness = v end }, flag("FovThick"))
-		V:Slider({ Name = "Circle Transparency", Default = math.floor((CONFIG.FovCircleTransparency or 0.6) * 100),
+		V:Slider({ Name = "Transparency", Default = math.floor((CONFIG.FovCircleTransparency or 0.6) * 100),
 			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
 			Callback = function(v) CONFIG.FovCircleTransparency = v / 100 end }, flag("FovTransp"))
 		V:Divider()
 		V:Header({ Name = "Aim Marker" })
-		V:Toggle({ Name = "Aim Visuals", Default = CONFIG.AimVisuals,
-			Callback = function(v) CONFIG.AimVisuals = v end }, flag("AimVisuals"))
+		V:Toggle({ Name = "Enabled", Default = CONFIG.AimVisuals,
+			Callback = function(v)
+				CONFIG.AimVisuals = v
+				ntf("Aim Marker", v and "Enabled" or "Disabled")
+			end }, flag("AimVisuals"))
 		V:Dropdown({ Name = "Marker Style",
 			Options = { "Default", "DefaultV2", "CrossGap", "Diamond", "Swastika" },
 			Default = CONFIG.AimVisualStyle or "Default",
-			Callback = function(v) CONFIG.AimVisualStyle = v end }, flag("AimStyle"))
+			Callback = function(v)
+				CONFIG.AimVisualStyle = v
+				ntf("Aim Marker Style", v)
+			end }, flag("AimStyle"))
 		V:Slider({ Name = "Marker Scale", Default = math.floor((CONFIG.AimVisualScale or 0.5) * 100),
 			Minimum = 20, Maximum = 200, Precision = 0, Suffix = "%",
 			Callback = function(v) CONFIG.AimVisualScale = v / 100 end }, flag("AimScale"))
+		V:Colorpicker({ Name = "Marker Color", Default = CONFIG.AimVisualColor or Color3.fromRGB(255, 60, 60),
+			Callback = function(c) CONFIG.AimVisualColor = c end }, flag("AimColor"))
+		V:Slider({ Name = "Marker Transparency", Default = math.floor((CONFIG.AimVisualTransparency or 0) * 100),
+			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+			Callback = function(v) CONFIG.AimVisualTransparency = v / 100 end }, flag("AimTransp"))
+		V:Toggle({ Name = "Aim Line", Default = CONFIG.AimLineEnabled,
+			Callback = function(v)
+				CONFIG.AimLineEnabled = v
+				ntf("Aim Line", v and "Enabled" or "Disabled")
+			end }, flag("AimLine"))
 		V:Toggle({ Name = "Swastika RGB", Default = CONFIG.SwastikaRGB,
 			Callback = function(v) CONFIG.SwastikaRGB = v end }, flag("SwasRGB"))
 		V:Toggle({ Name = "Muzzle Visual", Default = CONFIG.MuzzleVisual,
@@ -4334,8 +4390,16 @@ function SilentAim.buildUI(ui)
 			Callback = function(v) CONFIG.HitParticleWireframe = v end }, flag("HpWire"))
 		F:Divider()
 		F:Header({ Name = "Tracers" })
-		F:Toggle({ Name = "Shot Tracers", Default = CONFIG.ShotTracers,
-			Callback = function(v) CONFIG.ShotTracers = v end }, flag("ShotTracers"))
+		F:Toggle({ Name = "Enabled", Default = CONFIG.ShotTracers,
+			Callback = function(v)
+				CONFIG.ShotTracers = v
+				ntf("Shot Tracers", v and "Enabled" or "Disabled")
+			end }, flag("ShotTracers"))
+		F:Colorpicker({ Name = "Tracer Color", Default = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35),
+			Callback = function(c) CONFIG.TracerColor = c end }, flag("TracerColor"))
+		F:Slider({ Name = "Tracer Transparency", Default = math.floor((CONFIG.TracerTransparency or 0) * 100),
+			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+			Callback = function(v) CONFIG.TracerTransparency = v / 100 end }, flag("TracerTransp"))
 		F:Slider({ Name = "Tracer Duration", Default = CONFIG.TracerDuration, Minimum = 0.2, Maximum = 4,
 			Precision = 1, Suffix = " s", Callback = function(v) CONFIG.TracerDuration = v end }, flag("TracerDur"))
 		F:Slider({ Name = "Tracer Thickness", Default = CONFIG.TracerThickness, Minimum = 0.5, Maximum = 4,
@@ -4358,7 +4422,11 @@ function SilentAim.buildUI(ui)
 		end
 		G:Header({ Name = "Weapon Mods" })
 		G:Toggle({ Name = "Enabled", Default = CONFIG.ModifyEnabled,
-			Callback = function(v) CONFIG.ModifyEnabled = v; forceReapply() end }, flag("ModifyEnabled"))
+			Callback = function(v)
+				CONFIG.ModifyEnabled = v
+				ntf("Weapon Mods", v and "Enabled" or "Disabled")
+				forceReapply()
+			end }, flag("ModifyEnabled"))
 		G:SubLabel({ Text = "Applies to the held weapon and auto re-applies on every weapon switch." })
 		G:Button({ Name = "Re-apply Now", Callback = forceReapply }, flag("ModifyForce"))
 		local P = CONFIG.ModifyPresets or {}
