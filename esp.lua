@@ -162,7 +162,7 @@ local ESP_BOX_PARTS  = {
 -- ── Кэш частей тела (главная оптимизация фризов update/batch) ────────────────
 -- Раньше draw-кадр вызывал model:FindFirstChild(name) для КАЖДОЙ части КАЖДОГО
 -- актора КАЖДЫЙ кадр. FindFirstChild линейно обходит детей — на R6-ригах поиск
--- R15-имён (LeftFoot и т.п.) промахивался и обходил всех детей вхолостую каждый
+-- R15-имён (LeftFoot и т.п.) промахив��лся и обходил всех детей вхолостую каждый
 -- кадр. Кэшируем по модели (weak-key): попадания → O(1)+про��ерка Parent, промахи
 -- перепроверяются не чаще раза в секу��ду. Частота ESP и число элементов не тронуты.
 local espPartCache = setmetatable({}, { __mode = "k" })
@@ -1538,14 +1538,21 @@ end
 
 function Bridge.clearAllEspDrawings()
 	if not State.drawings then return end
-	for uid, entry in pairs(State.drawings) do
-		Bridge.hideEspEntry(entry, "clear_all")
-		Bridge.destroyEspEntry(entry)
-		Bridge.removeEspChams(uid)
-	end
+	-- FIX: immediately swap out the drawings table so the draw-loop sees empty state
+	-- this frame, then destroy the old entries in a deferred task to avoid a
+	-- multi-ms freeze spike when clearing 50+ Drawing objects synchronously.
+	local oldDrawings = State.drawings
 	State.drawings     = {}
 	State.espRanked    = nil
+	State.espVisibleCache = {}
 	State.espVisibleBatchIndex = 0
+	task.defer(function()
+		for uid, entry in pairs(oldDrawings) do
+			pcall(Bridge.hideEspEntry, entry, "clear_all")
+			pcall(Bridge.destroyEspEntry, entry)
+			pcall(Bridge.removeEspChams, uid)
+		end
+	end)
 end
 
 function Bridge.hideAllEspDrawings(reason)
@@ -2127,7 +2134,7 @@ local _M = {
 				Bridge.tickRepSyncBatch(16)
 			end)
 		end
-		local tFull = 0; local tGc = 0; local tEnrich = 0
+		local tFull = 0; local tGc = 0; local tEnrich = 0; local tSquad = 0
 		espConn = game:GetService("RunService").Heartbeat:Connect(function(dt)
 			local t = os.clock()
 			if not CONFIG.ESP then return end
@@ -2154,6 +2161,26 @@ local _M = {
 			if t - tGc >= 5 then
 				tGc = t
 				Bridge.cleanupEspCache()
+			end
+			-- FIX: full rescan timer — triggers Bridge.clearAllEspDrawings + full actor
+			-- re-discover so stale Drawing objects don't freeze the screen.
+			if t - tFull >= (CONFIG.EspFullRescanInterval or 30) then
+				tFull = t
+				if type(Bridge.clearESP) == "function" then
+					task.defer(function() Bridge.clearESP() end)
+				else
+					Bridge.clearAllEspDrawings()
+				end
+				State.espRanked = nil
+				State.espLastActorCount = -1
+				Bridge.invalidateReplicatorCache()
+			end
+			-- FIX: periodically refresh squad assignments so teammates are never treated as enemies long-term
+			if t - tSquad >= 2 then
+				tSquad = t
+				if type(Bridge.refreshActorSquads) == "function" then
+					pcall(Bridge.refreshActorSquads)
+				end
 			end
 		end)
 	end,
