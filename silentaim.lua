@@ -141,7 +141,7 @@ local SA_CONFIG = {
 	ServerFirstBullet = false,
 	ServerOnlyAimPatch = false,
 	ServerAimDebug = false,
-	SilentAim = true,
+	SilentAim = false,           -- master OFF by default
 	SilentAimFOV = 120,
 	FovCircle = true,            -- FOV v11: показывать FOV circle
 	FovCircleColor = Color3.fromRGB(255, 255, 255),
@@ -244,7 +244,8 @@ local SA_CONFIG = {
 	BulletLogHitsOnly = true,
 	LocalBulletsOnly = true,
 	TracerLocalOnly = true,
-	ModifyEnabled = true,
+	ModifyEnabled = false,       -- weapon mods OFF by default
+	ModifyReapplyInterval = 1.0, -- как часто (сек) переприменять моды (ловит смену оружия для ВСЕХ пушек)
 	ModifyRPMValue = 1200,
 	ModifyBulletSpeedValue = 2000,
 	ModifyPresets = {
@@ -1181,7 +1182,7 @@ function Bridge.scanGcForFireServerClosure()
 end
 
 function Bridge.hookDischargeClosure()
-	-- Отключено: дубли��ует namecall FireServer patch.
+	-- Отключено: дубли����ует namecall FireServer patch.
 	return false
 end
 
@@ -2106,7 +2107,7 @@ function Bridge.updateAimVisuals()
 		muzzlePos = cam.CFrame.Position
 	end
 
-	-- Единая точка: viz всегда показывает predicted aim (если Prediction включён).
+	-- Един��я точка: viz всегда показывает predicted aim (если Prediction включён).
 	local head = Bridge.getHeadPart(target.Parent, target) or target
 	local ctx = Bridge.getAimWeaponContext and Bridge.getAimWeaponContext(true)
 		or Bridge.peekWeaponContext()
@@ -3960,7 +3961,7 @@ local function resetAfterRespawn()
 	State.lastInventoryGcScore = 0
 	State.hudLastLines = { "[Weapon]", "HANDS: scanning...", "respawn" }
 	pcall(Bridge.syncWeaponHud, State.hudLastLines)
-	-- v18 PATCH: сброс locked resolvers — без этого resolveEquippedHand использует метод от старого кл��ента
+	-- v18 PATCH: сброс locked resolvers — без ��того resolveEquippedHand использует метод от старого ��л��ента
 	State.methods = {}
 	-- v18 PATCH: сброс weapon context cache
 	State.weaponCtxCache = nil
@@ -4044,8 +4045,12 @@ local function startAimThread()
 
 		-- FullAuto modify assist (LMB)
 		tickFullAutoAssist()
-		if CONFIG.ModifyEnabled and CONFIG.ModifyPresets.FullAuto
-			and t - (State.lastFullAutoApply or 0) > 1.0 then
+		-- Weapon Mods re-apply. IMPORTANT: this must run whenever ModifyEnabled is on,
+		-- NOT only when FullAuto is set — otherwise mods (NoRecoil/NoSpread/etc.) never
+		-- re-apply on weapon switch and end up missing on many weapons. applyWeaponModify
+		-- (force=false) is cheap: it early-returns when the held weapon's uid is unchanged.
+		if CONFIG.ModifyEnabled
+			and t - (State.lastFullAutoApply or 0) > (CONFIG.ModifyReapplyInterval or 1.0) then
 			State.lastFullAutoApply = t
 			Bridge.applyWeaponModify(false)
 		end
@@ -4191,20 +4196,40 @@ function SilentAim.buildUI(ui)
 	local flag = ui.flag or function(s) return "SA_" .. s end
 	local tabSA = ui.tabs and ui.tabs.SilentAim
 	local tabGM = ui.tabs and ui.tabs.GunMods
+	-- Sync a MacLib toggle's visual state with its CONFIG value (used by keybinds).
+	local function syncToggle(f, v)
+		local ML = ui.MacLib
+		if ML and ML.Options and ML.Options[f] then
+			pcall(function() ML.Options[f]:UpdateState(v) end)
+		end
+	end
+
 	if tabSA then
-		local L = tabSA:Section({ Side = "Left" })
+		-- ── Left: core + targeting ─────────────────────────────────────────
+		local L = tabSA:Section({ Name = "Silent Aim", Side = "Left" })
 		L:Header({ Name = "Silent Aim" })
 		L:Toggle({ Name = "Enabled", Default = CONFIG.SilentAim,
 			Callback = function(v) CONFIG.SilentAim = v end }, flag("SilentAim"))
+		if ui.keybind then
+			ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("SilentAim_KB"),
+				Toggle = function()
+					CONFIG.SilentAim = not CONFIG.SilentAim
+					syncToggle(flag("SilentAim"), CONFIG.SilentAim)
+				end })
+		end
+		L:SubLabel({ Text = "Redirects your shots to the best target inside the FOV." })
 		L:Slider({ Name = "FOV", Default = CONFIG.SilentAimFOV, Minimum = 10, Maximum = 360,
-			Precision = 0, Callback = function(v) CONFIG.SilentAimFOV = v end }, flag("FOV"))
+			Precision = 0, Suffix = "°", Callback = function(v) CONFIG.SilentAimFOV = v end }, flag("FOV"))
 		L:Slider({ Name = "Max Distance", Default = CONFIG.SilentAimMaxDistance, Minimum = 50,
 			Maximum = 2000, Precision = 0, Suffix = " studs",
 			Callback = function(v) CONFIG.SilentAimMaxDistance = v end }, flag("MaxDist"))
 		L:Dropdown({ Name = "Target Bone", Options = { "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart" },
 			Default = CONFIG.SilentAimBone or "Head",
 			Callback = function(v) CONFIG.SilentAimBone = v end }, flag("Bone"))
+		L:Toggle({ Name = "Force Zero Spread", Default = CONFIG.ForceZeroSpread,
+			Callback = function(v) CONFIG.ForceZeroSpread = v end }, flag("ZeroSpread"))
 		L:Divider()
+		L:Header({ Name = "Targeting" })
 		L:Toggle({ Name = "Target Players", Default = CONFIG.SilentAimTargetPlayers,
 			Callback = function(v) CONFIG.SilentAimTargetPlayers = v end }, flag("TgtPlayers"))
 		L:Toggle({ Name = "Target Hostiles/NPC", Default = CONFIG.SilentAimTargetHostile,
@@ -4213,46 +4238,135 @@ function SilentAim.buildUI(ui)
 			Callback = function(v) CONFIG.SilentAimIgnoreNpc = v end }, flag("IgnoreNpc"))
 		L:Toggle({ Name = "Ignore Players in PVE", Default = CONFIG.SilentAimIgnorePlayersInPve,
 			Callback = function(v) CONFIG.SilentAimIgnorePlayersInPve = v end }, flag("IgnorePvePlayers"))
+		L:Toggle({ Name = "Prefer Players", Default = CONFIG.SilentAimPreferPlayers,
+			Callback = function(v) CONFIG.SilentAimPreferPlayers = v end }, flag("PreferPlayers"))
 		L:Toggle({ Name = "Team Check", Default = CONFIG.TeamCheck,
 			Callback = function(v) CONFIG.TeamCheck = v end }, flag("TeamCheck"))
+		L:Toggle({ Name = "Ignore Teammates", Default = CONFIG.IgnoreTeammates,
+			Callback = function(v) CONFIG.IgnoreTeammates = v end }, flag("IgnoreTeammates"))
+		L:Toggle({ Name = "Skip Dead (0 HP)", Default = CONFIG.AimSkipDeadHP,
+			Callback = function(v) CONFIG.AimSkipDeadHP = v end }, flag("SkipDead"))
 
-		local R = tabSA:Section({ Side = "Right" })
+		-- ── Right: accuracy (resolver / multipoint / forcehit / prediction) ─
+		local R = tabSA:Section({ Name = "Accuracy", Side = "Right" })
+		R:Header({ Name = "Resolver" })
+		R:Toggle({ Name = "Resolver Lite", Default = CONFIG.ResolverLite,
+			Callback = function(v) CONFIG.ResolverLite = v end }, flag("ResolverLite"))
+		R:SubLabel({ Text = "Picks a body part that is actually exposed, reducing wall-blocked misses." })
+		R:Slider({ Name = "Resolver Inset", Default = CONFIG.ResolverLiteInset, Minimum = 0, Maximum = 0.4,
+			Precision = 2, Callback = function(v) CONFIG.ResolverLiteInset = v end }, flag("ResInset"))
+		R:Divider()
+		R:Header({ Name = "MultiPoint" })
+		R:Toggle({ Name = "MultiPoint", Default = CONFIG.MultiPoint,
+			Callback = function(v) CONFIG.MultiPoint = v end }, flag("MultiPoint"))
+		R:Toggle({ Name = "Lite MultiPoint", Default = CONFIG.LiteMultiPoint,
+			Callback = function(v) CONFIG.LiteMultiPoint = v end }, flag("LiteMP"))
+		R:SubLabel({ Text = "Tries several bones per target to find a hittable point." })
+		R:Slider({ Name = "Lite MP Max Distance", Default = CONFIG.LiteMultiPointMaxDist, Minimum = 2,
+			Maximum = 30, Precision = 0, Suffix = " studs",
+			Callback = function(v) CONFIG.LiteMultiPointMaxDist = v end }, flag("LiteMPDist"))
+		R:Slider({ Name = "Lite MP Max Actors", Default = CONFIG.LiteMultiPointMaxActors, Minimum = 1,
+			Maximum = 10, Precision = 0,
+			Callback = function(v) CONFIG.LiteMultiPointMaxActors = v end }, flag("LiteMPActors"))
+		R:Divider()
+		R:Header({ Name = "Force Hit" })
+		R:Toggle({ Name = "Force Hit", Default = CONFIG.ForceHit,
+			Callback = function(v) CONFIG.ForceHit = v end }, flag("ForceHit"))
+		R:Toggle({ Name = "Force Client Hit", Default = CONFIG.ForceClientHit,
+			Callback = function(v) CONFIG.ForceClientHit = v end }, flag("ForceClientHit"))
+		R:SubLabel({ Text = "Marks bullets as hits client-side. Disable if you get kicked." })
+		R:Divider()
 		R:Header({ Name = "Prediction" })
 		R:Toggle({ Name = "Prediction (ballistic)", Default = CONFIG.Prediction,
 			Callback = function(v) CONFIG.Prediction = v end }, flag("Prediction"))
-		R:Toggle({ Name = "Light Prediction (test)", Default = CONFIG.PredictionLite,
+		R:Toggle({ Name = "Light Prediction", Default = CONFIG.PredictionLite,
 			Callback = function(v) CONFIG.PredictionLite = v end }, flag("PredLite"))
 		R:Slider({ Name = "Light Predict Time", Default = CONFIG.PredictionLiteTime, Minimum = 0,
 			Maximum = 0.5, Precision = 2, Suffix = " s",
 			Callback = function(v) CONFIG.PredictionLiteTime = v end }, flag("PredLiteTime"))
-		R:Divider()
-		R:Header({ Name = "FOV Circle" })
-		R:Toggle({ Name = "Show FOV Circle", Default = CONFIG.FovCircle,
+		R:Toggle({ Name = "Vertical Prediction", Default = CONFIG.PredictionVertical,
+			Callback = function(v) CONFIG.PredictionVertical = v end }, flag("PredVert"))
+		R:Toggle({ Name = "Ping Compensation", Default = CONFIG.PingCompensation,
+			Callback = function(v) CONFIG.PingCompensation = v end }, flag("PingComp"))
+
+		-- ── Left #2: visuals & feedback ─────────────────────────────────────
+		local V = tabSA:Section({ Name = "Visuals", Side = "Left" })
+		V:Header({ Name = "FOV Circle" })
+		V:Toggle({ Name = "Show FOV Circle", Default = CONFIG.FovCircle,
 			Callback = function(v) CONFIG.FovCircle = v end }, flag("FovCircle"))
-		R:Colorpicker({ Name = "FOV Color", Default = CONFIG.FovCircleColor,
+		V:Colorpicker({ Name = "Circle Color", Default = CONFIG.FovCircleColor,
 			Callback = function(c) CONFIG.FovCircleColor = c end }, flag("FovColor"))
-		R:Toggle({ Name = "Filled", Default = CONFIG.FovCircleFilled,
+		V:Toggle({ Name = "Filled", Default = CONFIG.FovCircleFilled,
 			Callback = function(v) CONFIG.FovCircleFilled = v end }, flag("FovFilled"))
-		R:Divider()
-		R:Header({ Name = "Visuals / Feedback" })
-		R:Toggle({ Name = "Hit Sound", Default = CONFIG.HitSound,
+		V:Slider({ Name = "Circle Thickness", Default = CONFIG.FovCircleThickness, Minimum = 1, Maximum = 6,
+			Precision = 0, Callback = function(v) CONFIG.FovCircleThickness = v end }, flag("FovThick"))
+		V:Slider({ Name = "Circle Transparency", Default = math.floor((CONFIG.FovCircleTransparency or 0.6) * 100),
+			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+			Callback = function(v) CONFIG.FovCircleTransparency = v / 100 end }, flag("FovTransp"))
+		V:Divider()
+		V:Header({ Name = "Aim Marker" })
+		V:Toggle({ Name = "Aim Visuals", Default = CONFIG.AimVisuals,
+			Callback = function(v) CONFIG.AimVisuals = v end }, flag("AimVisuals"))
+		V:Dropdown({ Name = "Marker Style",
+			Options = { "Default", "DefaultV2", "CrossGap", "Diamond", "Swastika" },
+			Default = CONFIG.AimVisualStyle or "Default",
+			Callback = function(v) CONFIG.AimVisualStyle = v end }, flag("AimStyle"))
+		V:Slider({ Name = "Marker Scale", Default = math.floor((CONFIG.AimVisualScale or 0.5) * 100),
+			Minimum = 20, Maximum = 200, Precision = 0, Suffix = "%",
+			Callback = function(v) CONFIG.AimVisualScale = v / 100 end }, flag("AimScale"))
+		V:Toggle({ Name = "Swastika RGB", Default = CONFIG.SwastikaRGB,
+			Callback = function(v) CONFIG.SwastikaRGB = v end }, flag("SwasRGB"))
+		V:Toggle({ Name = "Muzzle Visual", Default = CONFIG.MuzzleVisual,
+			Callback = function(v) CONFIG.MuzzleVisual = v end }, flag("MuzzleVisual"))
+
+		-- ── Right #2: feedback (sound / particles / tracers) ────────────────
+		local F = tabSA:Section({ Name = "Feedback", Side = "Right" })
+		F:Header({ Name = "Hit Feedback" })
+		F:Toggle({ Name = "Hit Sound", Default = CONFIG.HitSound,
 			Callback = function(v) CONFIG.HitSound = v end }, flag("HitSound"))
-		R:Toggle({ Name = "Hit Particles", Default = CONFIG.HitParticles,
+		F:Toggle({ Name = "Hit Particles", Default = CONFIG.HitParticles,
 			Callback = function(v) CONFIG.HitParticles = v end }, flag("HitParticles"))
-		R:Toggle({ Name = "Shot Tracers", Default = CONFIG.ShotTracers,
+		F:Slider({ Name = "Particle Count", Default = CONFIG.HitParticleCount, Minimum = 8, Maximum = 48,
+			Precision = 0, Callback = function(v) CONFIG.HitParticleCount = v end }, flag("HpCount"))
+		F:Slider({ Name = "Particle Duration", Default = CONFIG.HitParticleDuration, Minimum = 0.3, Maximum = 3,
+			Precision = 1, Suffix = " s", Callback = function(v) CONFIG.HitParticleDuration = v end }, flag("HpDur"))
+		F:Toggle({ Name = "Wireframe Particles", Default = CONFIG.HitParticleWireframe,
+			Callback = function(v) CONFIG.HitParticleWireframe = v end }, flag("HpWire"))
+		F:Divider()
+		F:Header({ Name = "Tracers" })
+		F:Toggle({ Name = "Shot Tracers", Default = CONFIG.ShotTracers,
 			Callback = function(v) CONFIG.ShotTracers = v end }, flag("ShotTracers"))
+		F:Slider({ Name = "Tracer Duration", Default = CONFIG.TracerDuration, Minimum = 0.2, Maximum = 4,
+			Precision = 1, Suffix = " s", Callback = function(v) CONFIG.TracerDuration = v end }, flag("TracerDur"))
+		F:Slider({ Name = "Tracer Thickness", Default = CONFIG.TracerThickness, Minimum = 0.5, Maximum = 4,
+			Precision = 1, Callback = function(v) CONFIG.TracerThickness = v end }, flag("TracerThick"))
 	end
+
 	if tabGM then
-		-- Модификации оружия (SA presets). GunMods-таб — общий с FreeGun из visuals.
-		local G = tabGM:Section({ Side = "Left" })
-		G:Header({ Name = "Weapon Mods (Silent Aim)" })
-		G:Toggle({ Name = "Enable Weapon Mods", Default = CONFIG.ModifyEnabled,
-			Callback = function(v) CONFIG.ModifyEnabled = v end }, flag("ModifyEnabled"))
+		-- Weapon modifications (SA presets). GunMods tab is shared with FreeGun (visuals).
+		local G = tabGM:Section({ Name = "Weapon Mods", Side = "Left" })
+		-- Force the next heartbeat tick to (re)apply mods to the held weapon even if
+		-- its uid is unchanged (used when a preset/toggle changes mid-hold).
+		local function forceReapply()
+			State.modifyAppliedUid = nil
+			State.lastFullAutoApply = 0
+			if CONFIG.ModifyEnabled then
+				pcall(function() Bridge.applyWeaponModify(true) end)
+			else
+				pcall(function() Bridge.restoreWeaponModify() end)
+			end
+		end
+		G:Header({ Name = "Weapon Mods" })
+		G:Toggle({ Name = "Enabled", Default = CONFIG.ModifyEnabled,
+			Callback = function(v) CONFIG.ModifyEnabled = v; forceReapply() end }, flag("ModifyEnabled"))
+		G:SubLabel({ Text = "Applies to the held weapon and auto re-applies on every weapon switch." })
+		G:Button({ Name = "Re-apply Now", Callback = forceReapply }, flag("ModifyForce"))
 		local P = CONFIG.ModifyPresets or {}
 		CONFIG.ModifyPresets = P
-		local function preset(name, label)
-			G:Toggle({ Name = label, Default = P[name] ~= false,
-				Callback = function(v) P[name] = v end }, flag("Preset_" .. name))
+		local function preset(name, label, desc)
+			G:Toggle({ Name = label, Default = P[name] == true,
+				Callback = function(v) P[name] = v; forceReapply() end }, flag("Preset_" .. name))
+			if desc then G:SubLabel({ Text = desc }) end
 		end
 		preset("NoSpread", "No Spread")
 		preset("NoRecoil", "No Recoil")
@@ -4262,15 +4376,63 @@ function SilentAim.buildUI(ui)
 		preset("FastEquip", "Fast Equip")
 		preset("NoSway", "No Sway")
 		preset("NoSpeedPenalty", "No Speed Penalty")
+		preset("LightWeight", "Light Weight")
+		preset("FlatBallistics", "Flat Ballistics")
 
-		local G2 = tabGM:Section({ Side = "Right" })
-		G2:Header({ Name = "Weapon Tuning" })
+		local G2 = tabGM:Section({ Name = "Weapon Tuning", Side = "Right" })
+		G2:Header({ Name = "Fire Rate" })
+		G2:Toggle({ Name = "Override RPM", Default = P.RPM == true,
+			Callback = function(v) P.RPM = v; forceReapply() end }, flag("RPMOn"))
 		G2:Slider({ Name = "RPM", Default = CONFIG.ModifyRPMValue, Minimum = 60, Maximum = 3000,
-			Precision = 0, Callback = function(v) CONFIG.ModifyRPMValue = v; P.RPM = true end }, flag("RPM"))
+			Precision = 0, Callback = function(v) CONFIG.ModifyRPMValue = v; forceReapply() end }, flag("RPM"))
+		G2:Divider()
+		G2:Header({ Name = "Bullet Speed" })
 		G2:Toggle({ Name = "Override Bullet Speed", Default = P.BulletSpeed == true,
-			Callback = function(v) P.BulletSpeed = v end }, flag("BulletSpeedOn"))
+			Callback = function(v) P.BulletSpeed = v; forceReapply() end }, flag("BulletSpeedOn"))
 		G2:Slider({ Name = "Bullet Speed", Default = CONFIG.ModifyBulletSpeedValue, Minimum = 100,
-			Maximum = 5000, Precision = 0, Callback = function(v) CONFIG.ModifyBulletSpeedValue = v end }, flag("BulletSpeed"))
+			Maximum = 5000, Precision = 0, Suffix = " studs/s",
+			Callback = function(v) CONFIG.ModifyBulletSpeedValue = v; forceReapply() end }, flag("BulletSpeed"))
+		G2:Divider()
+		G2:Header({ Name = "Advanced" })
+		G2:Slider({ Name = "Re-apply Interval", Default = math.floor((CONFIG.ModifyReapplyInterval or 1.0) * 1000),
+			Minimum = 250, Maximum = 3000, Precision = 0, Suffix = " ms",
+			Callback = function(v) CONFIG.ModifyReapplyInterval = v / 1000 end }, flag("ModifyReapply"))
+		G2:SubLabel({ Text = "How often mods are re-checked/applied to catch weapon switches." })
+	end
+
+	-- ── Debug tab subsection: intervals, budgets, logs, diagnostics ─────────
+	local dtab = ui.tabs and ui.tabs.Debug
+	if dtab then
+		local D = dtab:Section({ Name = "Silent Aim", Side = "Left" })
+		D:Header({ Name = "Silent Aim — Intervals" })
+		D:Slider({ Name = "Target Refresh", Default = math.floor((CONFIG.AimTargetRefreshInterval or 0.06) * 1000),
+			Minimum = 10, Maximum = 250, Precision = 0, Suffix = " ms",
+			Callback = function(v) CONFIG.AimTargetRefreshInterval = v / 1000 end }, flag("DbgTgt"))
+		D:Slider({ Name = "Resolver Scan", Default = math.floor((CONFIG.ResolverScanInterval or 0.18) * 1000),
+			Minimum = 30, Maximum = 500, Precision = 0, Suffix = " ms",
+			Callback = function(v) CONFIG.ResolverScanInterval = v / 1000 end }, flag("DbgRes"))
+		D:Slider({ Name = "Lite MP Refresh", Default = math.floor((CONFIG.LiteMultiPointRefreshInterval or 0.09) * 1000),
+			Minimum = 20, Maximum = 400, Precision = 0, Suffix = " ms",
+			Callback = function(v) CONFIG.LiteMultiPointRefreshInterval = v / 1000 end }, flag("DbgLiteMP"))
+		D:Slider({ Name = "MultiPoint Cache", Default = math.floor((CONFIG.MultiPointCacheSec or 0.28) * 1000),
+			Minimum = 50, Maximum = 1000, Precision = 0, Suffix = " ms",
+			Callback = function(v) CONFIG.MultiPointCacheSec = v / 1000 end }, flag("DbgMPCache"))
+		D:Slider({ Name = "Resolver Budget / frame", Default = CONFIG.ResolverBudgetPerFrame or 4,
+			Minimum = 1, Maximum = 16, Precision = 0,
+			Callback = function(v) CONFIG.ResolverBudgetPerFrame = v end }, flag("DbgBudget"))
+		D:Divider()
+		D:Header({ Name = "Silent Aim — Logging" })
+		D:SubLabel({ Text = "Console diagnostics. Leave off for normal play." })
+		D:Toggle({ Name = "Server Aim Debug", Default = CONFIG.ServerAimDebug,
+			Callback = function(v) CONFIG.ServerAimDebug = v end }, flag("DbgServerAim"))
+		D:Toggle({ Name = "Force Hit Debug", Default = CONFIG.ForceHitDebug,
+			Callback = function(v) CONFIG.ForceHitDebug = v end }, flag("DbgForceHit"))
+		D:Toggle({ Name = "Log Bullet Payload", Default = CONFIG.LogBulletPayload,
+			Callback = function(v) CONFIG.LogBulletPayload = v end }, flag("DbgBulletPayload"))
+		D:Toggle({ Name = "Log Bullet Event", Default = CONFIG.LogBulletEvent,
+			Callback = function(v) CONFIG.LogBulletEvent = v end }, flag("DbgBulletEvent"))
+		D:Toggle({ Name = "Quiet Logs", Default = CONFIG.QuietLogs,
+			Callback = function(v) CONFIG.QuietLogs = v end }, flag("DbgQuiet"))
 	end
 end
 
