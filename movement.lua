@@ -20,6 +20,11 @@ return function(Lib)
     local Workspace  = game:GetService("Workspace")
     local LP         = Players.LocalPlayer
 
+    -- Console spam disabled: shadow the global `print` with a no-op for this whole
+    -- module. The diagnostic-file buffer (see log()/runDiagnostic) still records
+    -- lines; only console output is silenced. `warn` is left intact for real errors.
+    local print = function() end
+
     local MOV = {
 
         Speed          = true,
@@ -120,7 +125,7 @@ return function(Lib)
         -- (a[6]=Orientation, a[10]=CameraY, a[11]=Lean) и стейт (a[8]). Позиция
         -- ВСЕГДА настоящая → jitter/unreal реально уходят на сервер.
         FakeAnglesSender       = false, -- (опц.) отдельный высокочастотный Sender
-        FakeAnglesSendHz       = 22,    -- целевы�� Г�� Sender'а, если включён
+        FakeAnglesSendHz       = 22,    -- целевы��� Г�� Sender'а, если включён
         FakeAnglesSendBurstCap = 3,     -- макс пакетов за кадр Sender'а
         FakeAnglesSuppressGame = false, -- НЕ глушить штатный пакет (in-place десинк)
 
@@ -1543,7 +1548,7 @@ return function(Lib)
         if fakeAngMode == 0 and not velDesyncActive then return end
         if not (hooksSetup and origFireUnrel and hookedNet and faUid ~= nil) then return end
 
-        -- Кол-во отправок за этот кадр. hz=0 → одна на Heartbeat (~макс без фл��да).
+        -- Кол-во отправок за этот кадр. hz=0 → одна на Heartbeat (~макс без фл����да).
         -- hz>fps → burst (несколько пакетов за кадр, «ускоряя» реплиацию), cap 8.
         local hz = MOV.FakeAnglesSendHz or 0
         local cap = MOV.FakeAnglesSendBurstCap or 3
@@ -1574,7 +1579,7 @@ return function(Lib)
         local n = 12
 
         for _ = 1, sends do
-            -- сброс базы каждую итерацию (позиция + углы), десинк/фейк меняют их
+            -- сбро�� базы каждую итерацию (позиция + углы), десинк/фейк меняют их
             a[3], a[4], a[5] = pos.X, pos.Y, pos.Z
             a[6], a[9], a[10], a[11] = bOri, bCamX, bCamY, bLean
             faSenderPkt  = faSenderPkt + 1
@@ -1896,7 +1901,7 @@ return function(Lib)
             invisActive=false
             tpActive=false; MOV.NoClip=false
         end
-        -- тр��нзит (всегда): физ-якоря, кэш коллизий, клон, оценка скорости
+        -- ��р��нзит (всегда): физ-якоря, кэш коллизий, клон, оценка скорости
         pcall(applySpeedState)
         fakeAngPhase=0; faPacket=0
         nfFalling=false; nfGroundHS=nil
@@ -2252,7 +2257,7 @@ return function(Lib)
 
         -- В машине персонажного контроллера НЕТ (ctrl == nil), но мы ЖИВЫ. Без этой
         -- ветки tick принимал вход в транспорт за смерть (ctrl исчез) и дёргал
-        -- handleLocalDeath → сброс фич/ложный «респавн». Считаем себя живыми, не
+        -- handleLocalDeath → сброс ��ич/ложный «респавн». Считаем себя живыми, не
         -- трогаем персонажные тики и НЕ меняем wasCtrlAliveLastFrame (чтобы выход
         -- из машины тоже не читался как смерть).
         if ctrl == nil and inVehicleNow() then
@@ -2308,8 +2313,12 @@ return function(Lib)
         conns[2] = RunService.RenderStepped:Connect(newcclosure(function(dt)
             pcall(renderTick, dt)
         end))
-        conns[3] = UIS.InputBegan:Connect(newcclosure(onInput))
-        conns[4] = UIS.InputBegan:Connect(newcclosure(onJumpInput))
+        -- NOTE: physical toggle-hotkeys are intentionally NOT connected here.
+        -- All features are driven from the UI (toggles) and via user-assigned
+        -- MacLib keybinds (empty by default, set in the Movement tab). onInput /
+        -- onJumpInput remain as the shared dispatch used by _M.doAction / _M.superJump.
+        -- Held movement keys (Sprint/FlyUp/FlyDown) are polled via IsKeyDown and are
+        -- unaffected. To restore old always-on physical keys, reconnect them here.
 
         conns[5] = LP.CharacterRemoving:Connect(newcclosure(function()
             crRemovingCount = crRemovingCount + 1
@@ -2365,6 +2374,57 @@ return function(Lib)
         onInput({ UserInputType = Enum.UserInputType.Keyboard, KeyCode = kc }, false)
     end
 
+    -- ── UI state bridge ─────────────────────────────────────────────────────
+    -- Toggle-state lives in module upvalues (flyActive, invisActive, …) and in a
+    -- couple of MOV fields (Speed, NoClip). These helpers let buildUI read the
+    -- real state and set it IDEMPOTENTLY (only fire the toggle key when the value
+    -- actually needs to change), so UI toggles and keybinds never desync.
+    local FEATURE_KEY = {
+        Speed = MOV.SpeedToggleKey, Fly = MOV.FlyToggleKey, NoClip = MOV.NoClipKey,
+        Strafer = MOV.StraferKey, Invisible = MOV.InvisibleKey,
+        VelDesync = MOV.VelocityDesyncKey, LeanLock = MOV.LeanLockKey,
+        SpinBot = MOV.SpinBotKey, NoFall = MOV.NoFallKey, ThirdPerson = MOV.ThirdPersonKey,
+    }
+    function _M.isActive(name)
+        if name == "Speed" then return MOV.Speed == true end
+        if name == "NoClip" then return MOV.NoClip == true end
+        if name == "Fly" then return flyActive end
+        if name == "Strafer" then return straferActive end
+        if name == "Invisible" then return invisActive end
+        if name == "VelDesync" then return velDesyncActive end
+        if name == "LeanLock" then return leanLockActive end
+        if name == "SpinBot" then return spinBotActive end
+        if name == "NoFall" then return noFallActive end
+        if name == "ThirdPerson" then return tpActive end
+        return false
+    end
+    function _M.setFeature(name, want)
+        want = want and true or false
+        if _M.isActive(name) ~= want then
+            _M.simulateKey(FEATURE_KEY[name])
+        end
+    end
+    function _M.getSpeedStateMode() return speedStateMode end
+    function _M.getFakeAngMode() return fakeAngMode end
+    -- Cycle-based setters (SpeedState / FakeAngles advance by one per key press).
+    function _M.setSpeedStateMode(target)
+        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
+        local n = #order + 1
+        for _ = 1, n do
+            if speedStateMode == target % n then break end
+            _M.simulateKey(MOV.SpeedStateKey)
+        end
+    end
+    function _M.setFakeAngMode(target)
+        for _ = 1, 9 do
+            if fakeAngMode == target % 9 then break end
+            _M.simulateKey(MOV.FakeAnglesKey)
+        end
+    end
+    function _M.superJump()
+        onJumpInput({ UserInputType = Enum.UserInputType.Keyboard, KeyCode = MOV.SuperJumpKey }, false)
+    end
+
     -- ─────────────────────────────────────────────────────────────────────
     -- UI-интеграция (MacLib). Movement-таб.
     --   Числовые настройки (SpeedValue/SprintSpeed/FlySpeed) читаются в рантайме
@@ -2376,10 +2436,33 @@ return function(Lib)
         local flag = ui.flag or function(s) return "MOV_" .. s end
         local tab = ui.tabs and ui.tabs.Movement
         if not tab then return end
-        local L = tab:Section({ Side = "Left" })
+        local dtab = ui.tabs and ui.tabs.Debug
+
+        local ML = ui.MacLib
+        local function syncToggle(f, val)
+            if ML and ML.Options and ML.Options[f] then
+                pcall(function() ML.Options[f]:UpdateState(val) end)
+            end
+        end
+        -- Feature toggle helper: UI toggle + optional empty keybind, both idempotent.
+        local function feature(section, label, name, desc)
+            section:Toggle({ Name = label, Default = _M.isActive(name),
+                Callback = function(v) _M.setFeature(name, v) end }, flag(name))
+            if ui.keybind then
+                ui.keybind(section, { Name = label .. " Keybind", Flag = flag(name .. "_KB"),
+                    Toggle = function()
+                        local nv = not _M.isActive(name)
+                        _M.setFeature(name, nv)
+                        syncToggle(flag(name), nv)
+                    end })
+            end
+            if desc then section:SubLabel({ Text = desc }) end
+        end
+
+        -- ── Left: movement core ────────────────────────────────────────────
+        local L = tab:Section({ Name = "Movement", Side = "Left" })
         L:Header({ Name = "Speed" })
-        L:Toggle({ Name = "Speed", Default = MOV.Speed,
-            Callback = function(v) if v ~= MOV.Speed then _M.simulateKey(MOV.SpeedToggleKey) end end }, flag("Speed"))
+        feature(L, "Speed", "Speed", "Overrides walk/sprint speed.")
         L:Slider({ Name = "Walk Speed", Default = MOV.SpeedValue, Minimum = 16, Maximum = 120,
             Precision = 0, Callback = function(v) MOV.SpeedValue = v end }, flag("SpeedValue"))
         L:Slider({ Name = "Sprint Speed", Default = MOV.SprintSpeed, Minimum = 16, Maximum = 200,
@@ -2388,29 +2471,146 @@ return function(Lib)
             Callback = function(v) MOV.AutoSprint = v end }, flag("AutoSprint"))
         L:Divider()
         L:Header({ Name = "Fly" })
-        L:Toggle({ Name = "Fly", Default = false,
-            Callback = function() _M.simulateKey(MOV.FlyToggleKey) end }, flag("Fly"))
+        feature(L, "Fly", "Fly", "Free-cam style flight. Hold Space/Ctrl for up/down.")
         L:Slider({ Name = "Fly Speed", Default = MOV.FlySpeed, Minimum = 8, Maximum = 200,
             Precision = 0, Callback = function(v) MOV.FlySpeed = v end }, flag("FlySpeed"))
-        L:Toggle({ Name = "No Clip", Default = MOV.NoClip,
-            Callback = function(v) if v ~= MOV.NoClip then _M.simulateKey(MOV.NoClipKey) end end }, flag("NoClip"))
+        L:Divider()
+        L:Header({ Name = "Clipping" })
+        feature(L, "No Clip", "NoClip", "Walk through walls and objects.")
 
-        local R = tab:Section({ Side = "Left" })
-        R:Header({ Name = "Desync / Anti-Aim" })
-        R:Toggle({ Name = "Strafer", Default = false,
-            Callback = function() _M.simulateKey(MOV.StraferKey) end }, flag("Strafer"))
-        R:Toggle({ Name = "Invisible", Default = false,
-            Callback = function() _M.simulateKey(MOV.InvisibleKey) end }, flag("Invis"))
-        R:Toggle({ Name = "Velocity Desync", Default = false,
-            Callback = function() _M.simulateKey(MOV.VelocityDesyncKey) end }, flag("VelDesync"))
-        R:Toggle({ Name = "Lean Lock", Default = false,
-            Callback = function() _M.simulateKey(MOV.LeanLockKey) end }, flag("LeanLock"))
-        R:Button({ Name = "Cycle Fake Angles",
-            Callback = function() _M.simulateKey(MOV.FakeAnglesKey) end }, flag("FakeAngles"))
-        R:Button({ Name = "Toggle Spin Bot",
-            Callback = function() _M.simulateKey(MOV.SpinBotKey) end }, flag("SpinBot"))
-        R:Toggle({ Name = "No Fall", Default = false,
-            Callback = function() _M.simulateKey(MOV.NoFallKey) end }, flag("NoFall"))
+        -- ── Left #2: jump ──────────────────────────────────────────────────
+        local J = tab:Section({ Name = "Jump", Side = "Left" })
+        J:Header({ Name = "Jump" })
+        J:Toggle({ Name = "Infinite Jump", Default = MOV.InfiniteJump,
+            Callback = function(v) MOV.InfiniteJump = v end }, flag("InfJump"))
+        J:Toggle({ Name = "Bunny Hop", Default = MOV.BunnyHop,
+            Callback = function(v) MOV.BunnyHop = v end }, flag("Bhop"))
+        J:Slider({ Name = "Super Jump Power", Default = MOV.SuperJumpVel, Minimum = 20, Maximum = 200,
+            Precision = 0, Callback = function(v) MOV.SuperJumpVel = v end }, flag("SJVel"))
+        if ui.keybind then
+            ui.keybind(J, { Name = "Super Jump Keybind", Flag = flag("SuperJump_KB"),
+                Toggle = function() _M.superJump() end })
+        end
+        J:SubLabel({ Text = "Super Jump fires once per press (bind a key above)." })
+        J:Divider()
+        J:Header({ Name = "Anti Void" })
+        J:Toggle({ Name = "Anti Void", Default = MOV.AntiVoid,
+            Callback = function(v) MOV.AntiVoid = v end }, flag("AntiVoid"))
+        J:Slider({ Name = "Void Y Threshold", Default = MOV.AntiVoidY, Minimum = -500, Maximum = 0,
+            Precision = 0, Callback = function(v) MOV.AntiVoidY = v end }, flag("AntiVoidY"))
+        J:Slider({ Name = "Teleport-to Y", Default = MOV.AntiVoidSafeY, Minimum = 0, Maximum = 500,
+            Precision = 0, Callback = function(v) MOV.AntiVoidSafeY = v end }, flag("AntiVoidSafeY"))
+        J:SubLabel({ Text = "Teleports you up when you fall below the threshold." })
+
+        -- ── Right: desync / anti-aim ───────────────────────────────────────
+        local R = tab:Section({ Name = "Desync / Anti-Aim", Side = "Right" })
+        R:Header({ Name = "Desync" })
+        feature(R, "Strafer", "Strafer", "Free air-strafe (turn without input).")
+        feature(R, "Invisible", "Invisible", "Offsets your replicated position to appear invisible.")
+        R:Slider({ Name = "Invisible Y Offset", Default = MOV.InvisibleYOffset, Minimum = -10, Maximum = 10,
+            Precision = 1, Suffix = " st", Callback = function(v) MOV.InvisibleYOffset = v end }, flag("InvisY"))
+        feature(R, "Velocity Desync", "VelDesync", "Jitters replicated velocity to confuse prediction.")
+        R:Slider({ Name = "Desync Amplitude", Default = MOV.VelocityDesyncAmp, Minimum = 0.5, Maximum = 10,
+            Precision = 1, Suffix = " st", Callback = function(v) MOV.VelocityDesyncAmp = v end }, flag("VelAmp"))
+        feature(R, "Lean Lock", "LeanLock", "Locks the lean value for a fixed body angle.")
+        R:Slider({ Name = "Lean Value", Default = MOV.LeanLockValue, Minimum = -1, Maximum = 1,
+            Precision = 2, Callback = function(v) MOV.LeanLockValue = v end }, flag("LeanVal"))
+
+        -- ── Right #2: fake angles ──────────────────────────────────────────
+        local FA = tab:Section({ Name = "Fake Angles", Side = "Right" })
+        FA:Header({ Name = "Fake Angles" })
+        local FA_MODES = { "Off", "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch", "Break (test)", "Chaos (test)" }
+        FA:Dropdown({ Name = "Mode", Options = FA_MODES, Default = FA_MODES[(_M.getFakeAngMode() or 0) + 1] or "Off",
+            Callback = function(n)
+                local idx = table.find(FA_MODES, n)
+                if idx then _M.setFakeAngMode(idx - 1) end
+            end }, flag("FAMode"))
+        if ui.keybind then
+            ui.keybind(FA, { Name = "Cycle Mode Keybind", Flag = flag("FACycle_KB"),
+                Toggle = function() _M.simulateKey(MOV.FakeAnglesKey) end })
+        end
+        FA:SubLabel({ Text = "Spoofs your replicated body angles. 'test' modes may break hit-reg." })
+        FA:Slider({ Name = "Jitter (yaw)", Default = MOV.FakeAnglesJitter, Minimum = 0, Maximum = 6.28,
+            Precision = 2, Callback = function(v) MOV.FakeAnglesJitter = v end }, flag("FAJitter"))
+        FA:Slider({ Name = "Pitch Amount", Default = MOV.FakeAnglesPitchAmp, Minimum = 0, Maximum = 3.14,
+            Precision = 2, Callback = function(v) MOV.FakeAnglesPitchAmp = v end }, flag("FAPitch"))
+        FA:Slider({ Name = "Spin Step", Default = MOV.FakeAnglesSpinStep, Minimum = 0.1, Maximum = 3.14,
+            Precision = 2, Callback = function(v) MOV.FakeAnglesSpinStep = v end }, flag("FASpin"))
+        FA:Toggle({ Name = "Rotate Body Yaw (safe)", Default = MOV.FakeAnglesYaw,
+            Callback = function(v) MOV.FakeAnglesYaw = v end }, flag("FAYaw"))
+        FA:Toggle({ Name = "Rotate Lean (safe)", Default = MOV.FakeAnglesLean,
+            Callback = function(v) MOV.FakeAnglesLean = v end }, flag("FALean"))
+        FA:Toggle({ Name = "Rotate Aim Yaw (breaks hitreg)", Default = MOV.FakeAnglesAimYaw,
+            Callback = function(v) MOV.FakeAnglesAimYaw = v end }, flag("FAAimYaw"))
+        FA:Toggle({ Name = "Rotate Aim Pitch (breaks hitreg)", Default = MOV.FakeAnglesPitch,
+            Callback = function(v) MOV.FakeAnglesPitch = v end }, flag("FAAimPitch"))
+        FA:Divider()
+        FA:Header({ Name = "Ghost" })
+        FA:Toggle({ Name = "Show Ghost Model", Default = MOV.FakeAnglesGhost,
+            Callback = function(v) MOV.FakeAnglesGhost = v end }, flag("FAGhost"))
+        FA:Colorpicker({ Name = "Ghost Color", Default = MOV.FakeAnglesGhostColor,
+            Callback = function(c) MOV.FakeAnglesGhostColor = c end }, flag("FAGhostCol"))
+        FA:Slider({ Name = "Ghost Transparency", Default = math.floor((MOV.FakeAnglesGhostTransparency or 0.5) * 100),
+            Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+            Callback = function(v) MOV.FakeAnglesGhostTransparency = v / 100 end }, flag("FAGhostTr"))
+
+        -- ── Right #3: spin bot / camera / no fall ──────────────────────────
+        local S = tab:Section({ Name = "Visual Angles", Side = "Right" })
+        S:Header({ Name = "Spin Bot" })
+        feature(S, "Spin Bot", "SpinBot", "Spins your third-person model.")
+        S:Slider({ Name = "Spin Speed (RPS)", Default = MOV.SpinBotRPS, Minimum = 1, Maximum = 30,
+            Precision = 0, Callback = function(v) MOV.SpinBotRPS = v end }, flag("SpinRPS"))
+        S:Divider()
+        S:Header({ Name = "Camera" })
+        feature(S, "Force Third Person", "ThirdPerson", "Forces a third-person camera.")
+        S:Slider({ Name = "Camera Distance", Default = MOV.ThirdPersonDist, Minimum = 5, Maximum = 40,
+            Precision = 0, Callback = function(v) MOV.ThirdPersonDist = v end }, flag("TPDist"))
+        S:Divider()
+        S:Header({ Name = "Falling" })
+        feature(S, "No Fall", "NoFall", "Spoofs the height state to cancel fall damage.")
+        S:Toggle({ Name = "Lean on Sprint", Default = MOV.LeanSprint,
+            Callback = function(v) MOV.LeanSprint = v end }, flag("LeanSprint"))
+        S:Slider({ Name = "Lean Angle", Default = MOV.LeanAngle, Minimum = 0, Maximum = 20,
+            Precision = 0, Suffix = "°", Callback = function(v) MOV.LeanAngle = v end }, flag("LeanAngle"))
+
+        -- ── Right #4: speed state ──────────────────────────────────────────
+        local SS = tab:Section({ Name = "Speed State", Side = "Right" })
+        SS:Header({ Name = "Speed State" })
+        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
+        local ssOpts = { "Off" }
+        for _, n in ipairs(order) do ssOpts[#ssOpts + 1] = n end
+        SS:Dropdown({ Name = "State", Options = ssOpts, Default = ssOpts[(_M.getSpeedStateMode() or 0) + 1] or "Off",
+            Callback = function(n)
+                local idx = table.find(ssOpts, n)
+                if idx then _M.setSpeedStateMode(idx - 1) end
+            end }, flag("SpeedState"))
+        if ui.keybind then
+            ui.keybind(SS, { Name = "Cycle State Keybind", Flag = flag("SSCycle_KB"),
+                Toggle = function() _M.simulateKey(MOV.SpeedStateKey) end })
+        end
+        SS:SubLabel({ Text = "Applies a movement-state multiplier (e.g. Skydiving is very fast)." })
+
+        -- ── Debug subsection ───────────────────────────────────────────────
+        if dtab then
+            local D = dtab:Section({ Name = "Movement", Side = "Right" })
+            D:Header({ Name = "Movement — Fake Angles" })
+            D:Slider({ Name = "Ghost Update Rate", Default = MOV.FakeAnglesSendHz or 22, Minimum = 5, Maximum = 60,
+                Precision = 0, Suffix = " Hz", Callback = function(v) MOV.FakeAnglesSendHz = v end }, flag("DbgFAHz"))
+            D:Slider({ Name = "State Hold (packets)", Default = MOV.FakeAnglesStateHold or 8, Minimum = 1, Maximum = 30,
+                Precision = 0, Callback = function(v) MOV.FakeAnglesStateHold = v end }, flag("DbgFAHold"))
+            D:Toggle({ Name = "Clamp Safe Angles", Default = MOV.FakeAnglesClampSafe,
+                Callback = function(v) MOV.FakeAnglesClampSafe = v end }, flag("DbgFAClamp"))
+            D:Toggle({ Name = "Suppress Game Packet", Default = MOV.FakeAnglesSuppressGame,
+                Callback = function(v) MOV.FakeAnglesSuppressGame = v end }, flag("DbgFASuppress"))
+            D:Divider()
+            D:Header({ Name = "Movement — Logging" })
+            D:SubLabel({ Text = "Console diagnostics. Leave off for normal play." })
+            D:Toggle({ Name = "Fake Angles Diagnostics", Default = MOV.FakeAnglesDiag,
+                Callback = function(v) MOV.FakeAnglesDiag = v end }, flag("DbgFADiag"))
+            D:Slider({ Name = "Diagnostic Packet Count", Default = MOV.FakeAnglesDiagCount or 20, Minimum = 5, Maximum = 100,
+                Precision = 0, Callback = function(v) MOV.FakeAnglesDiagCount = v end }, flag("DbgFADiagN"))
+            D:Button({ Name = "Run Diagnostic (console)", Callback = function() task.spawn(runDiagnostic) end }, flag("DbgRunDiag"))
+        end
     end
 
     return _M
