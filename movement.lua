@@ -2437,6 +2437,7 @@ return function(Lib)
         local tab = ui.tabs and ui.tabs.Movement
         if not tab then return end
         local dtab = ui.tabs and ui.tabs.Debug
+        local ntf = ui.notify or function() end
 
         local ML = ui.MacLib
         local function syncToggle(f, val)
@@ -2444,106 +2445,163 @@ return function(Lib)
                 pcall(function() ML.Options[f]:UpdateState(val) end)
             end
         end
-        -- Feature toggle helper: UI toggle + optional empty keybind, both idempotent.
+        -- Feature toggle + keybind helper.
         local function feature(section, label, name, desc)
-            section:Toggle({ Name = label, Default = _M.isActive(name),
-                Callback = function(v) _M.setFeature(name, v) end }, flag(name))
+            section:Toggle({ Name = "Enabled", Default = _M.isActive(name),
+                Callback = function(v)
+                    _M.setFeature(name, v)
+                    ntf(label, v and "Enabled" or "Disabled")
+                end }, flag(name))
             if ui.keybind then
-                ui.keybind(section, { Name = label .. " Keybind", Flag = flag(name .. "_KB"),
+                ui.keybind(section, { Name = "Keybind", Flag = flag(name .. "_KB"),
                     Toggle = function()
                         local nv = not _M.isActive(name)
                         _M.setFeature(name, nv)
                         syncToggle(flag(name), nv)
+                        ntf(label, nv and "Enabled" or "Disabled")
                     end })
             end
             if desc then section:SubLabel({ Text = desc }) end
         end
 
-        -- ── Left: movement core ────────────────────────────────────────────
-        local L = tab:Section({ Name = "Movement", Side = "Left" })
-        L:Header({ Name = "Speed" })
-        feature(L, "Speed", "Speed", "Overrides walk/sprint speed.")
-        L:Slider({ Name = "Walk Speed", Default = MOV.SpeedValue, Minimum = 16, Maximum = 120,
+        -- ── Speed ─────────────────────────────────────────────────────────
+        local LS = tab:Section({ Name = "Speed", Side = "Left" })
+        LS:Header({ Name = "Speed" })
+        feature(LS, "Speed", "Speed", "Overrides walk/sprint speed.")
+        LS:Slider({ Name = "Walk Speed", Default = MOV.SpeedValue, Minimum = 16, Maximum = 120,
             Precision = 0, Callback = function(v) MOV.SpeedValue = v end }, flag("SpeedValue"))
-        L:Slider({ Name = "Sprint Speed", Default = MOV.SprintSpeed, Minimum = 16, Maximum = 200,
+        LS:Slider({ Name = "Sprint Speed", Default = MOV.SprintSpeed, Minimum = 16, Maximum = 200,
             Precision = 0, Callback = function(v) MOV.SprintSpeed = v end }, flag("SprintSpeed"))
-        L:Toggle({ Name = "Auto Sprint", Default = MOV.AutoSprint,
+        LS:Toggle({ Name = "Auto Sprint", Default = MOV.AutoSprint,
             Callback = function(v) MOV.AutoSprint = v end }, flag("AutoSprint"))
-        L:Divider()
-        L:Header({ Name = "Fly" })
-        feature(L, "Fly", "Fly", "Free-cam style flight. Hold Space/Ctrl for up/down.")
-        L:Slider({ Name = "Fly Speed", Default = MOV.FlySpeed, Minimum = 8, Maximum = 200,
-            Precision = 0, Callback = function(v) MOV.FlySpeed = v end }, flag("FlySpeed"))
-        L:Divider()
-        L:Header({ Name = "Clipping" })
-        feature(L, "No Clip", "NoClip", "Walk through walls and objects.")
 
-        -- ── Left #2: jump ──────────────────────────────────────────────────
-        local J = tab:Section({ Name = "Jump", Side = "Left" })
-        J:Header({ Name = "Jump" })
-        J:Toggle({ Name = "Infinite Jump", Default = MOV.InfiniteJump,
-            Callback = function(v) MOV.InfiniteJump = v end }, flag("InfJump"))
-        J:Toggle({ Name = "Bunny Hop", Default = MOV.BunnyHop,
-            Callback = function(v) MOV.BunnyHop = v end }, flag("Bhop"))
-        J:Slider({ Name = "Super Jump Power", Default = MOV.SuperJumpVel, Minimum = 20, Maximum = 200,
+        -- ── Fly ───────────────────────────────────────────────────────────
+        local LF = tab:Section({ Name = "Fly", Side = "Left" })
+        LF:Header({ Name = "Fly" })
+        feature(LF, "Fly", "Fly", "Free-cam style flight. Hold Space/Ctrl for up/down.")
+        LF:Slider({ Name = "Fly Speed", Default = MOV.FlySpeed, Minimum = 8, Maximum = 200,
+            Precision = 0, Callback = function(v) MOV.FlySpeed = v end }, flag("FlySpeed"))
+
+        -- ── No Clip ───────────────────────────────────────────────────────
+        local LC = tab:Section({ Name = "No Clip", Side = "Left" })
+        LC:Header({ Name = "No Clip" })
+        feature(LC, "No Clip", "NoClip", "Walk through walls and objects.")
+
+        -- ── Jump ─────────────────────────────────────────────────────────
+        local LJ = tab:Section({ Name = "Jump", Side = "Left" })
+        LJ:Header({ Name = "Jump" })
+        LJ:Toggle({ Name = "Infinite Jump", Default = MOV.InfiniteJump,
+            Callback = function(v)
+                MOV.InfiniteJump = v
+                ntf("Infinite Jump", v and "Enabled" or "Disabled")
+            end }, flag("InfJump"))
+        LJ:Toggle({ Name = "Bunny Hop", Default = MOV.BunnyHop,
+            Callback = function(v)
+                MOV.BunnyHop = v
+                ntf("Bunny Hop", v and "Enabled" or "Disabled")
+            end }, flag("Bhop"))
+        LJ:Slider({ Name = "Super Jump Power", Default = MOV.SuperJumpVel, Minimum = 20, Maximum = 200,
             Precision = 0, Callback = function(v) MOV.SuperJumpVel = v end }, flag("SJVel"))
         if ui.keybind then
-            ui.keybind(J, { Name = "Super Jump Keybind", Flag = flag("SuperJump_KB"),
-                Toggle = function() _M.superJump() end })
+            ui.keybind(LJ, { Name = "Super Jump Keybind", Flag = flag("SuperJump_KB"),
+                Toggle = function()
+                    _M.superJump()
+                    ntf("Super Jump", "Fired")
+                end })
         end
-        J:SubLabel({ Text = "Super Jump fires once per press (bind a key above)." })
-        J:Divider()
-        J:Header({ Name = "Anti Void" })
-        J:Toggle({ Name = "Anti Void", Default = MOV.AntiVoid,
-            Callback = function(v) MOV.AntiVoid = v end }, flag("AntiVoid"))
-        J:Slider({ Name = "Void Y Threshold", Default = MOV.AntiVoidY, Minimum = -500, Maximum = 0,
-            Precision = 0, Callback = function(v) MOV.AntiVoidY = v end }, flag("AntiVoidY"))
-        J:Slider({ Name = "Teleport-to Y", Default = MOV.AntiVoidSafeY, Minimum = 0, Maximum = 500,
-            Precision = 0, Callback = function(v) MOV.AntiVoidSafeY = v end }, flag("AntiVoidSafeY"))
-        J:SubLabel({ Text = "Teleports you up when you fall below the threshold." })
+        LJ:SubLabel({ Text = "Super Jump fires once per press (bind a key above)." })
 
-        -- ── Right: desync / anti-aim ───────────────────────────────────────
-        local R = tab:Section({ Name = "Desync / Anti-Aim", Side = "Right" })
-        R:Header({ Name = "Desync" })
-        feature(R, "Strafer", "Strafer", "Free air-strafe (turn without input).")
-        feature(R, "Invisible", "Invisible", "Offsets your replicated position to appear invisible.")
-        R:Slider({ Name = "Invisible Y Offset", Default = MOV.InvisibleYOffset, Minimum = -10, Maximum = 10,
-            Precision = 1, Suffix = " st", Callback = function(v) MOV.InvisibleYOffset = v end }, flag("InvisY"))
-        feature(R, "Velocity Desync", "VelDesync", "Jitters replicated velocity to confuse prediction.")
-        R:Slider({ Name = "Desync Amplitude", Default = MOV.VelocityDesyncAmp, Minimum = 0.5, Maximum = 10,
+        -- ── No Fall ───────────────────────────────────────────────────────
+        local RNF = tab:Section({ Name = "No Fall", Side = "Right" })
+        RNF:Header({ Name = "No Fall" })
+        feature(RNF, "No Fall", "NoFall", "Spoofs the height state to cancel fall damage.")
+        RNF:Toggle({ Name = "Lean on Sprint", Default = MOV.LeanSprint,
+            Callback = function(v) MOV.LeanSprint = v end }, flag("LeanSprint"))
+        RNF:Slider({ Name = "Lean Angle", Default = MOV.LeanAngle, Minimum = 0, Maximum = 20,
+            Precision = 0, Suffix = "°", Callback = function(v) MOV.LeanAngle = v end }, flag("LeanAngle"))
+
+        -- ── Third Person Camera ───────────────────────────────────────────
+        local RTP = tab:Section({ Name = "Third Person", Side = "Right" })
+        RTP:Header({ Name = "Third Person Camera" })
+        feature(RTP, "Force Third Person", "ThirdPerson", "Forces a third-person camera.")
+        RTP:Slider({ Name = "Camera Distance", Default = MOV.ThirdPersonDist, Minimum = 5, Maximum = 40,
+            Precision = 0, Callback = function(v) MOV.ThirdPersonDist = v end }, flag("TPDist"))
+
+        -- ── Spin Bot ─────────────────────────────────────────────────────
+        local RSB = tab:Section({ Name = "Spin Bot", Side = "Right" })
+        RSB:Header({ Name = "Spin Bot" })
+        feature(RSB, "Spin Bot", "SpinBot", "Spins your third-person model.")
+        RSB:Slider({ Name = "Spin Speed (RPS)", Default = MOV.SpinBotRPS, Minimum = 1, Maximum = 30,
+            Precision = 0, Callback = function(v) MOV.SpinBotRPS = v end }, flag("SpinRPS"))
+
+        -- ── Strafer ───────────────────────────────────────────────────────
+        local RST = tab:Section({ Name = "Strafer", Side = "Right" })
+        RST:Header({ Name = "Strafer" })
+        feature(RST, "Strafer", "Strafer", "Free air-strafe (turn without input).")
+
+        -- ── Velocity Desync ───────────────────────────────────────────────
+        local RVD = tab:Section({ Name = "Velocity Desync", Side = "Right" })
+        RVD:Header({ Name = "Velocity Desync" })
+        feature(RVD, "Velocity Desync", "VelDesync", "Jitters replicated velocity to confuse prediction.")
+        RVD:Slider({ Name = "Desync Amplitude", Default = MOV.VelocityDesyncAmp, Minimum = 0.5, Maximum = 10,
             Precision = 1, Suffix = " st", Callback = function(v) MOV.VelocityDesyncAmp = v end }, flag("VelAmp"))
-        feature(R, "Lean Lock", "LeanLock", "Locks the lean value for a fixed body angle.")
-        R:Slider({ Name = "Lean Value", Default = MOV.LeanLockValue, Minimum = -1, Maximum = 1,
+
+        -- ── Lean Lock ─────────────────────────────────────────────────────
+        local RLL = tab:Section({ Name = "Lean Lock", Side = "Right" })
+        RLL:Header({ Name = "Lean Lock" })
+        feature(RLL, "Lean Lock", "LeanLock", "Locks the lean value for a fixed body angle.")
+        RLL:Slider({ Name = "Lean Value", Default = MOV.LeanLockValue, Minimum = -1, Maximum = 1,
             Precision = 2, Callback = function(v) MOV.LeanLockValue = v end }, flag("LeanVal"))
 
-        -- ── Right #2: fake angles ──────────────────────────────────────────
+        -- ── Fake Angles ───────────────────────────────────────────────────
+        -- Вместо Dropdown+Keybind: простой Toggle ON/OFF (Keybind) + выбор режима через Dropdown.
+        -- Keybind включает/выключает последний выбранный режим (не Off).
         local FA = tab:Section({ Name = "Fake Angles", Side = "Right" })
         FA:Header({ Name = "Fake Angles" })
-        local FA_MODES = { "Off", "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch", "Break (test)", "Chaos (test)" }
-        FA:Dropdown({ Name = "Mode", Options = FA_MODES, Default = FA_MODES[(_M.getFakeAngMode() or 0) + 1] or "Off",
+        local FA_MODES = { "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch" }
+        -- Enabled toggle: On = включает первый/последний режим, Off = режим 0 (Off)
+        FA:Toggle({ Name = "Enabled", Default = _M.getFakeAngMode() ~= 0,
+            Callback = function(v)
+                if v then
+                    -- включить: используем текущий режим или Instant по умолчанию
+                    local mode = _M.getFakeAngMode()
+                    if mode == 0 then _M.setFakeAngMode(1) end
+                else
+                    _M.setFakeAngMode(0)
+                end
+                ntf("Fake Angles", v and "Enabled" or "Disabled")
+            end }, flag("FAEnabled"))
+        if ui.keybind then
+            ui.keybind(FA, { Name = "Keybind", Flag = flag("FA_KB"),
+                Toggle = function()
+                    local mode = _M.getFakeAngMode()
+                    if mode ~= 0 then
+                        _M.setFakeAngMode(0)
+                        syncToggle(flag("FAEnabled"), false)
+                        ntf("Fake Angles", "Disabled")
+                    else
+                        _M.setFakeAngMode(1)  -- Instant по умолчанию
+                        syncToggle(flag("FAEnabled"), true)
+                        ntf("Fake Angles", "Enabled")
+                    end
+                end })
+        end
+        FA:Dropdown({ Name = "Mode", Options = FA_MODES, Default = FA_MODES[math.max(1, _M.getFakeAngMode())] or "Instant",
             Callback = function(n)
                 local idx = table.find(FA_MODES, n)
-                if idx then _M.setFakeAngMode(idx - 1) end
+                if idx then
+                    _M.setFakeAngMode(idx)
+                    syncToggle(flag("FAEnabled"), true)
+                    ntf("Fake Angles Mode", n)
+                end
             end }, flag("FAMode"))
-        if ui.keybind then
-            ui.keybind(FA, { Name = "Cycle Mode Keybind", Flag = flag("FACycle_KB"),
-                Toggle = function() _M.simulateKey(MOV.FakeAnglesKey) end })
-        end
-        FA:SubLabel({ Text = "Spoofs your replicated body angles. 'test' modes may break hit-reg." })
+        FA:SubLabel({ Text = "Spoofs replicated body angles. Does NOT affect your aim/shots." })
         FA:Slider({ Name = "Jitter (yaw)", Default = MOV.FakeAnglesJitter, Minimum = 0, Maximum = 6.28,
             Precision = 2, Callback = function(v) MOV.FakeAnglesJitter = v end }, flag("FAJitter"))
         FA:Slider({ Name = "Pitch Amount", Default = MOV.FakeAnglesPitchAmp, Minimum = 0, Maximum = 3.14,
             Precision = 2, Callback = function(v) MOV.FakeAnglesPitchAmp = v end }, flag("FAPitch"))
         FA:Slider({ Name = "Spin Step", Default = MOV.FakeAnglesSpinStep, Minimum = 0.1, Maximum = 3.14,
             Precision = 2, Callback = function(v) MOV.FakeAnglesSpinStep = v end }, flag("FASpin"))
-        FA:Toggle({ Name = "Rotate Body Yaw (safe)", Default = MOV.FakeAnglesYaw,
-            Callback = function(v) MOV.FakeAnglesYaw = v end }, flag("FAYaw"))
-        FA:Toggle({ Name = "Rotate Lean (safe)", Default = MOV.FakeAnglesLean,
-            Callback = function(v) MOV.FakeAnglesLean = v end }, flag("FALean"))
-        FA:Toggle({ Name = "Rotate Aim Yaw (breaks hitreg)", Default = MOV.FakeAnglesAimYaw,
-            Callback = function(v) MOV.FakeAnglesAimYaw = v end }, flag("FAAimYaw"))
-        FA:Toggle({ Name = "Rotate Aim Pitch (breaks hitreg)", Default = MOV.FakeAnglesPitch,
-            Callback = function(v) MOV.FakeAnglesPitch = v end }, flag("FAAimPitch"))
         FA:Divider()
         FA:Header({ Name = "Ghost" })
         FA:Toggle({ Name = "Show Ghost Model", Default = MOV.FakeAnglesGhost,
@@ -2554,41 +2612,28 @@ return function(Lib)
             Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
             Callback = function(v) MOV.FakeAnglesGhostTransparency = v / 100 end }, flag("FAGhostTr"))
 
-        -- ── Right #3: spin bot / camera / no fall ──────────────────────────
-        local S = tab:Section({ Name = "Visual Angles", Side = "Right" })
-        S:Header({ Name = "Spin Bot" })
-        feature(S, "Spin Bot", "SpinBot", "Spins your third-person model.")
-        S:Slider({ Name = "Spin Speed (RPS)", Default = MOV.SpinBotRPS, Minimum = 1, Maximum = 30,
-            Precision = 0, Callback = function(v) MOV.SpinBotRPS = v end }, flag("SpinRPS"))
-        S:Divider()
-        S:Header({ Name = "Camera" })
-        feature(S, "Force Third Person", "ThirdPerson", "Forces a third-person camera.")
-        S:Slider({ Name = "Camera Distance", Default = MOV.ThirdPersonDist, Minimum = 5, Maximum = 40,
-            Precision = 0, Callback = function(v) MOV.ThirdPersonDist = v end }, flag("TPDist"))
-        S:Divider()
-        S:Header({ Name = "Falling" })
-        feature(S, "No Fall", "NoFall", "Spoofs the height state to cancel fall damage.")
-        S:Toggle({ Name = "Lean on Sprint", Default = MOV.LeanSprint,
-            Callback = function(v) MOV.LeanSprint = v end }, flag("LeanSprint"))
-        S:Slider({ Name = "Lean Angle", Default = MOV.LeanAngle, Minimum = 0, Maximum = 20,
-            Precision = 0, Suffix = "°", Callback = function(v) MOV.LeanAngle = v end }, flag("LeanAngle"))
-
-        -- ── Right #4: speed state ──────────────────────────────────────────
-        local SS = tab:Section({ Name = "Speed State", Side = "Right" })
-        SS:Header({ Name = "Speed State" })
+        -- ── Speed State ───────────────────────────────────────────────────
+        local RSS = tab:Section({ Name = "Speed State", Side = "Right" })
+        RSS:Header({ Name = "Speed State" })
         local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
         local ssOpts = { "Off" }
         for _, n in ipairs(order) do ssOpts[#ssOpts + 1] = n end
-        SS:Dropdown({ Name = "State", Options = ssOpts, Default = ssOpts[(_M.getSpeedStateMode() or 0) + 1] or "Off",
+        RSS:Dropdown({ Name = "State", Options = ssOpts, Default = ssOpts[(_M.getSpeedStateMode() or 0) + 1] or "Off",
             Callback = function(n)
                 local idx = table.find(ssOpts, n)
-                if idx then _M.setSpeedStateMode(idx - 1) end
+                if idx then
+                    _M.setSpeedStateMode(idx - 1)
+                    ntf("Speed State", n)
+                end
             end }, flag("SpeedState"))
         if ui.keybind then
-            ui.keybind(SS, { Name = "Cycle State Keybind", Flag = flag("SSCycle_KB"),
-                Toggle = function() _M.simulateKey(MOV.SpeedStateKey) end })
+            ui.keybind(RSS, { Name = "Cycle Keybind", Flag = flag("SSCycle_KB"),
+                Toggle = function()
+                    _M.simulateKey(MOV.SpeedStateKey)
+                    ntf("Speed State", "Cycled")
+                end })
         end
-        SS:SubLabel({ Text = "Applies a movement-state multiplier (e.g. Skydiving is very fast)." })
+        RSS:SubLabel({ Text = "Applies a movement-state multiplier (e.g. Skydiving is very fast)." })
 
         -- ── Debug subsection ───────────────────────────────────────────────
         if dtab then
