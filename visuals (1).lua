@@ -332,8 +332,11 @@ return function(Lib)
                     end
                 end
             end
-            if (opts.transp or 0) > 0 and d.Transparency < 1 then
-                d.Transparency = opts.transp
+            -- При transp > 0 → ставим, при transp == 0 → восстанавливаем оригинал (если часть не полностью невидима)
+            if (opts.transp or 0) > 0 then
+                if d.Transparency < 1 then d.Transparency = opts.transp end
+            elseif rec and (rec.T or 0) < 1 then
+                d.Transparency = rec.T or 0
             end
         end)
         return true
@@ -371,21 +374,41 @@ return function(Lib)
         local t = (p < 0.5) and (p * 2) or (2 - p * 2)   -- ping-pong 0..1..0
         return a:Lerp(b, t)
     end
-    -- Фаза части по её МИРОВОЙ позиции: соседние части → близкая фаза → волна
-    -- переливается плавно и «постепенно» по модели (для оружия — умно, не всё разом).
-    -- spread растягивает/сжимает волну; 0 → все части в фазе (синхронно).
-    local function partGradientPhase(part, spread)
-        local ok, p = pcall(function() return part.Position end)
-        if not ok or typeof(p) ~= "Vector3" then return 0 end
-        return ((p.X * 0.25 + p.Y * 0.5 + p.Z * 0.25) * (spread or 1)) % 1
-    end
-    -- Перекрашивает уже зарегистрированные в store части под текущую фазу времени.
-    -- rec.gp кэшируется (пер-парт сдвиг) — считаем один раз на часть.
+    -- Фаза части по её ИНДЕКСУ в store (не по мировой позиции — та меняется при движении и даёт джиттер).
+    -- Индекс определяется один раз: сортируем части по начальной мировой Y+X, присваиваем idx.
+    -- spread растягивает/сжимает волну по индексам; 0 → все части в фазе (синхронно).
     local function tickGradientStore(store, spread, baseHue)
+        -- 1) Собираем пары (part, rec) где нужно посчитать gp
+        local needPhase = {}
+        local total = 0
         for part, rec in pairs(store) do
             if part and part.Parent then
-                if rec.gp == nil then rec.gp = partGradientPhase(part, spread) end
-                local col = gradientColorAt(baseHue + rec.gp)
+                total = total + 1
+                if rec.gp == nil then needPhase[part] = rec end
+            end
+        end
+        if total == 0 then return end
+        -- 2) Для частей без фазы — назначаем по сортировке idx/total
+        if next(needPhase) then
+            local arr = {}
+            for part in pairs(needPhase) do arr[#arr + 1] = part end
+            -- Сортировка по базовой позиции: стабильная, не меняется при движении игрока
+            table.sort(arr, function(a, b)
+                local pa = pcall(function() return a.Position end) and a.Position or Vector3.zero
+                local pb = pcall(function() return b.Position end) and b.Position or Vector3.zero
+                return (pa.Y + pa.X) < (pb.Y + pb.X)
+            end)
+            for i, part in ipairs(arr) do
+                local rec = needPhase[part]
+                if rec then
+                    rec.gp = ((i - 1) / math.max(1, #arr)) * (spread or 1)
+                end
+            end
+        end
+        -- 3) Красим с кэшированными фазами
+        for part, rec in pairs(store) do
+            if part and part.Parent then
+                local col = gradientColorAt(baseHue + (rec.gp or 0))
                 pcall(function() part.Color = col end)
             end
         end
@@ -585,11 +608,23 @@ return function(Lib)
     ---------------------------------------------------------------------------
     local FOV_BIND = "BRM5_FOV"
     local fovBound = false
+    local fovApplied = false  -- флаг: мы изменили FOV → надо восстановить при выключении
     local function fovStep()
         local fov = V.ViewmodelFOV or 0
-        if not (V.ViewmodelEnabled and fov > 0) then return end
-        local cam = Workspace.CurrentCamera
-        if cam then pcall(function() cam.FieldOfView = fov end) end
+        if V.ViewmodelEnabled and fov > 0 then
+            local cam = Workspace.CurrentCamera
+            if cam then
+                pcall(function() cam.FieldOfView = fov end)
+                fovApplied = true
+            end
+        else
+            -- FOV выключен или равен 0 → восстановить стандартный FOV игры
+            if fovApplied then
+                local cam = Workspace.CurrentCamera
+                if cam then pcall(function() cam.FieldOfView = 70 end) end
+                fovApplied = false
+            end
+        end
     end
 
     ---------------------------------------------------------------------------
@@ -621,7 +656,7 @@ return function(Lib)
         if not (selfHighlight and selfHighlight.Parent) then
             selfHighlight = Instance.new("Highlight")
             selfHighlight.Name = "BRM5_SelfHL"
-            selfHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
+            selfHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         end
         selfHighlight.FillColor          = V.ThirdPersonFill
         selfHighlight.OutlineColor       = V.ThirdPersonOutline
@@ -1170,11 +1205,12 @@ return function(Lib)
 
     function M.buildUI(ui)
         local flag = ui.flag or function(s) return "VIS_" .. s end
-        local tabV = ui.tabs and ui.tabs.Visuals
+        local tabV   = ui.tabs and ui.tabs.Visuals
         local tabMov = ui.tabs and ui.tabs.Movement
-        local tabGM = ui.tabs and ui.tabs.GunMods
+        local tabGM  = ui.tabs and ui.tabs.GunMods
         local tabMisc = ui.tabs and ui.tabs.Misc
-        local tabDbg = ui.tabs and ui.tabs.Debug
+        local tabDbg  = ui.tabs and ui.tabs.Debug
+        local ntf = ui.notify or function() end
 
         -- Sync a MacLib toggle's visual state with V[<key>] (used by keybinds).
         local function syncToggle(f, val)
@@ -1184,10 +1220,14 @@ return function(Lib)
             end
         end
         -- Keybind that toggles a V[key] boolean and updates its paired toggle.
-        local function kbToggle(section, name, key, toggleFlag)
+        local function kbToggle(section, name, key, toggleFlag, label)
             if not ui.keybind then return end
             ui.keybind(section, { Name = name, Flag = flag(key .. "_KB"),
-                Toggle = function() V[key] = not V[key]; syncToggle(flag(toggleFlag), V[key]) end })
+                Toggle = function()
+                    V[key] = not V[key]
+                    syncToggle(flag(toggleFlag), V[key])
+                    ntf(label or name, V[key] and "Enabled" or "Disabled")
+                end })
         end
 
         if tabV then
@@ -1195,8 +1235,11 @@ return function(Lib)
             local S = tabV:Section({ Name = "Viewmodel", Side = "Left" })
             S:Header({ Name = "Viewmodel (hands)" })
             S:Toggle({ Name = "Enabled", Default = V.ViewmodelEnabled,
-                Callback = function(v) V.ViewmodelEnabled = v end }, flag("VM"))
-            kbToggle(S, "Toggle Keybind", "ViewmodelEnabled", "VM")
+                Callback = function(v)
+                    V.ViewmodelEnabled = v
+                    ntf("Viewmodel", v and "Enabled" or "Disabled")
+                end }, flag("VM"))
+            kbToggle(S, "Keybind", "ViewmodelEnabled", "VM", "Viewmodel")
             S:SubLabel({ Text = "Recolors/re-materializes your first-person arms." })
             S:Toggle({ Name = "Recolor", Default = V.ViewmodelColorEnabled,
                 Callback = function(v) V.ViewmodelColorEnabled = v end }, flag("VMColorOn"))
@@ -1205,25 +1248,38 @@ return function(Lib)
             S:Toggle({ Name = "Change Material", Default = V.ViewmodelMaterialEnabled,
                 Callback = function(v) V.ViewmodelMaterialEnabled = v end }, flag("VMMatOn"))
             S:Dropdown({ Name = "Material", Options = MATERIALS, Default = matName(V.ViewmodelMaterial),
-                Callback = function(n) V.ViewmodelMaterial = matFromName(n) end }, flag("VMMat"))
+                Callback = function(n)
+                    V.ViewmodelMaterial = matFromName(n)
+                    ntf("Viewmodel Material", n)
+                end }, flag("VMMat"))
             S:Slider({ Name = "Transparency", Default = math.floor((V.ViewmodelTransparency or 0) * 100),
                 Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-                Callback = function(v) V.ViewmodelTransparency = v / 100 end }, flag("VMTransp"))
+                Callback = function(v)
+                    V.ViewmodelTransparency = v / 100
+                    -- при изменении прозрачности сбросить кэш store чтобы переприменить
+                    restoreViewmodelStyle()
+                end }, flag("VMTransp"))
             S:Slider({ Name = "Custom FOV", Default = V.ViewmodelFOV or 0, Minimum = 0, Maximum = 120,
                 Precision = 0, Callback = function(v) V.ViewmodelFOV = v end }, flag("VMFov"))
-            S:SubLabel({ Text = "0 = don't touch camera FOV." })
+            S:SubLabel({ Text = "0 = don't change camera FOV." })
             S:Divider()
             S:Header({ Name = "Viewmodel Gradient" })
             S:Toggle({ Name = "Gradient", Default = V.ViewmodelGradientEnabled,
-                Callback = function(v) V.ViewmodelGradientEnabled = v end }, flag("VMGrad"))
+                Callback = function(v)
+                    V.ViewmodelGradientEnabled = v
+                    ntf("VM Gradient", v and "Enabled" or "Disabled")
+                end }, flag("VMGrad"))
             S:SubLabel({ Text = "Two-color gradient (set colors on the right)." })
 
             -- ── Gun Model ──────────────────────────────────────────────────
             local G = tabV:Section({ Name = "Gun Model", Side = "Left" })
             G:Header({ Name = "Gun Model" })
             G:Toggle({ Name = "Enabled", Default = V.GunModelEnabled,
-                Callback = function(v) V.GunModelEnabled = v end }, flag("GM"))
-            kbToggle(G, "Toggle Keybind", "GunModelEnabled", "GM")
+                Callback = function(v)
+                    V.GunModelEnabled = v
+                    ntf("Gun Model", v and "Enabled" or "Disabled")
+                end }, flag("GM"))
+            kbToggle(G, "Keybind", "GunModelEnabled", "GM", "Gun Model")
             G:Toggle({ Name = "Recolor", Default = V.GunModelColorEnabled,
                 Callback = function(v) V.GunModelColorEnabled = v end }, flag("GMColorOn"))
             G:Colorpicker({ Name = "Color", Default = V.GunModelColor,
@@ -1231,30 +1287,45 @@ return function(Lib)
             G:Toggle({ Name = "Change Material", Default = V.GunModelMaterialEnabled,
                 Callback = function(v) V.GunModelMaterialEnabled = v end }, flag("GMMatOn"))
             G:Dropdown({ Name = "Material", Options = MATERIALS, Default = matName(V.GunModelMaterial),
-                Callback = function(n) V.GunModelMaterial = matFromName(n) end }, flag("GMMat"))
+                Callback = function(n)
+                    V.GunModelMaterial = matFromName(n)
+                    ntf("Gun Model Material", n)
+                end }, flag("GMMat"))
             G:Slider({ Name = "Transparency", Default = math.floor((V.GunModelTransparency or 0) * 100),
                 Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-                Callback = function(v) V.GunModelTransparency = v / 100 end }, flag("GMTransp"))
+                Callback = function(v)
+                    V.GunModelTransparency = v / 100
+                    restoreGunStyle()
+                end }, flag("GMTransp"))
             G:Divider()
             G:Header({ Name = "Gun Model Gradient" })
             G:Toggle({ Name = "Gradient", Default = V.GunModelGradientEnabled,
-                Callback = function(v) V.GunModelGradientEnabled = v end }, flag("GMGrad"))
+                Callback = function(v)
+                    V.GunModelGradientEnabled = v
+                    ntf("GM Gradient", v and "Enabled" or "Disabled")
+                end }, flag("GMGrad"))
             G:SubLabel({ Text = "Wave flows part-to-part (see Wave Spread on the right)." })
 
             -- ── Third person + shared gradient colors ──────────────────────
             local S2 = tabV:Section({ Name = "Third Person", Side = "Right" })
             S2:Header({ Name = "Third Person Model" })
             S2:Toggle({ Name = "Enabled", Default = V.ThirdPersonEnabled,
-                Callback = function(v) V.ThirdPersonEnabled = v end }, flag("TP"))
-            kbToggle(S2, "Toggle Keybind", "ThirdPersonEnabled", "TP")
-            S2:SubLabel({ Text = "Styles your own body in third person (camera is in Movement)." })
+                Callback = function(v)
+                    V.ThirdPersonEnabled = v
+                    ntf("Third Person", v and "Enabled" or "Disabled")
+                end }, flag("TP"))
+            kbToggle(S2, "Keybind", "ThirdPersonEnabled", "TP", "Third Person")
+            S2:SubLabel({ Text = "Styles your own body (visible in third person camera)." })
             S2:Colorpicker({ Name = "Body Color", Default = V.ThirdPersonBodyColor,
                 Callback = function(c) V.ThirdPersonBodyColor = c end }, flag("TPColor"))
             S2:Slider({ Name = "Body Transparency", Default = math.floor((V.ThirdPersonBodyTransparency or 0) * 100),
                 Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
                 Callback = function(v) V.ThirdPersonBodyTransparency = v / 100 end }, flag("TPTransp"))
             S2:Toggle({ Name = "Gradient", Default = V.ThirdPersonGradientEnabled,
-                Callback = function(v) V.ThirdPersonGradientEnabled = v end }, flag("TPGrad"))
+                Callback = function(v)
+                    V.ThirdPersonGradientEnabled = v
+                    ntf("TP Gradient", v and "Enabled" or "Disabled")
+                end }, flag("TPGrad"))
 
             local GC = tabV:Section({ Name = "Gradient Colors", Side = "Right" })
             GC:Header({ Name = "Gradient (2-color)" })
@@ -1264,58 +1335,101 @@ return function(Lib)
             GC:Colorpicker({ Name = "Color B", Default = V.GradientColorB,
                 Callback = function(c) V.GradientColorB = c end }, flag("GradB"))
             GC:Slider({ Name = "Speed", Default = V.GradientSpeed, Minimum = 0.05, Maximum = 2,
-                Precision = 2, Suffix = " Hz", Callback = function(v) V.GradientSpeed = v end }, flag("GradSpeed"))
+                Precision = 2, Suffix = " Hz",
+                Callback = function(v) V.GradientSpeed = v end }, flag("GradSpeed"))
             GC:Slider({ Name = "Gun Wave Spread", Default = V.GunModelGradientSpread, Minimum = 0,
-                Maximum = 5, Precision = 1, Callback = function(v) V.GunModelGradientSpread = v end }, flag("GradSpread"))
+                Maximum = 5, Precision = 1,
+                Callback = function(v)
+                    V.GunModelGradientSpread = v
+                    -- сбросить кэш фаз частей (gp) чтобы волна пересчиталась
+                    for _, rec in pairs(gunStyledParts) do rec.gp = nil end
+                end }, flag("GradSpread"))
             GC:SubLabel({ Text = "0 = all gun parts change color together." })
         end
 
         if tabMov then
             local S = tabMov:Section({ Name = "Vehicle", Side = "Right" })
             S:Header({ Name = "Vehicle" })
-            S:Toggle({ Name = "Vehicle Fly", Default = V.VehicleFlyEnabled,
-                Callback = function(v) V.VehicleFlyEnabled = v end }, flag("VehFly"))
-            kbToggle(S, "Fly Keybind", "VehicleFlyEnabled", "VehFly")
+            S:Toggle({ Name = "Enabled", Default = V.VehicleFlyEnabled,
+                Callback = function(v)
+                    V.VehicleFlyEnabled = v
+                    ntf("Vehicle Fly", v and "Enabled" or "Disabled")
+                end }, flag("VehFly"))
+            kbToggle(S, "Fly Keybind", "VehicleFlyEnabled", "VehFly", "Vehicle Fly")
             S:Slider({ Name = "Fly Speed", Default = V.VehicleFlySpeed, Minimum = 20, Maximum = 400,
-                Precision = 0, Suffix = " st/s", Callback = function(v) V.VehicleFlySpeed = v end }, flag("VehFlySpeed"))
-            S:Toggle({ Name = "Vehicle Speed", Default = V.VehicleSpeedEnabled,
-                Callback = function(v) V.VehicleSpeedEnabled = v end }, flag("VehSpeed"))
-            kbToggle(S, "Speed Keybind", "VehicleSpeedEnabled", "VehSpeed")
+                Precision = 0, Suffix = " st/s",
+                Callback = function(v) V.VehicleFlySpeed = v end }, flag("VehFlySpeed"))
+            S:Divider()
+            S:Header({ Name = "Vehicle Speed" })
+            S:Toggle({ Name = "Enabled", Default = V.VehicleSpeedEnabled,
+                Callback = function(v)
+                    V.VehicleSpeedEnabled = v
+                    ntf("Vehicle Speed", v and "Enabled" or "Disabled")
+                end }, flag("VehSpeed"))
+            kbToggle(S, "Speed Keybind", "VehicleSpeedEnabled", "VehSpeed", "Vehicle Speed")
             S:Slider({ Name = "Speed Multiplier", Default = V.VehicleSpeedMult, Minimum = 1, Maximum = 6,
-                Precision = 1, Suffix = "x", Callback = function(v) V.VehicleSpeedMult = v end }, flag("VehSpeedMult"))
+                Precision = 1, Suffix = "x",
+                Callback = function(v) V.VehicleSpeedMult = v end }, flag("VehSpeedMult"))
         end
 
         if tabGM then
             local S = tabGM:Section({ Name = "Free Gun", Side = "Left" })
             S:Header({ Name = "Free Gun" })
             S:Toggle({ Name = "Enabled", Default = V.FreeGunEnabled,
-                Callback = function(v) V.FreeGunEnabled = v end }, flag("FreeGun"))
-            kbToggle(S, "Toggle Keybind", "FreeGunEnabled", "FreeGun")
+                Callback = function(v)
+                    V.FreeGunEnabled = v
+                    ntf("Free Gun", v and "Enabled" or "Disabled")
+                end }, flag("FreeGun"))
+            kbToggle(S, "Keybind", "FreeGunEnabled", "FreeGun", "Free Gun")
             S:SubLabel({ Text = "Removes the equip block (e.g. lets you draw a weapon inside vehicles)." })
         end
 
         if tabMisc then
-            local S = tabMisc:Section({ Name = "World / Lighting", Side = "Left" })
-            S:Header({ Name = "World / Lighting" })
-            S:Toggle({ Name = "Fullbright", Default = V.FullbrightEnabled,
-                Callback = function(v) V.FullbrightEnabled = v end }, flag("Fullbright"))
-            kbToggle(S, "Fullbright Keybind", "FullbrightEnabled", "Fullbright")
-            S:Toggle({ Name = "No Fog", Default = V.NoFogEnabled,
-                Callback = function(v) V.NoFogEnabled = v end }, flag("NoFog"))
-            S:Toggle({ Name = "Ambient (time of day)", Default = V.AmbientEnabled,
-                Callback = function(v) V.AmbientEnabled = v end }, flag("Ambient"))
-            S:Slider({ Name = "Clock Time", Default = V.AmbientClockTime, Minimum = 0, Maximum = 24,
-                Precision = 0, Suffix = "h", Callback = function(v) V.AmbientClockTime = v end }, flag("ClockTime"))
-            S:Slider({ Name = "Ambient Brightness", Default = V.AmbientBrightness or 2, Minimum = 0, Maximum = 10,
-                Precision = 1, Callback = function(v) V.AmbientBrightness = v end }, flag("AmbBright"))
-            S:Divider()
-            S:Header({ Name = "Interactions" })
-            S:Toggle({ Name = "No Prompt Hold (NoFWait)", Default = V.NoFWaitEnabled,
-                Callback = function(v) V.NoFWaitEnabled = v end }, flag("NoFWait"))
-            S:SubLabel({ Text = "Interactions trigger instantly instead of holding F." })
-            S:Toggle({ Name = "Lockpick Bypass", Default = V.LockpickBypassEnabled,
-                Callback = function(v) V.LockpickBypassEnabled = v end }, flag("Lockpick"))
-            S:SubLabel({ Text = "Auto-completes the lockpick minigame." })
+            local SFB = tabMisc:Section({ Name = "Fullbright", Side = "Left" })
+            SFB:Header({ Name = "Fullbright" })
+            SFB:Toggle({ Name = "Enabled", Default = V.FullbrightEnabled,
+                Callback = function(v)
+                    V.FullbrightEnabled = v
+                    ntf("Fullbright", v and "Enabled" or "Disabled")
+                end }, flag("Fullbright"))
+            kbToggle(SFB, "Keybind", "FullbrightEnabled", "Fullbright", "Fullbright")
+
+            local SNF = tabMisc:Section({ Name = "No Fog", Side = "Left" })
+            SNF:Header({ Name = "No Fog" })
+            SNF:Toggle({ Name = "Enabled", Default = V.NoFogEnabled,
+                Callback = function(v)
+                    V.NoFogEnabled = v
+                    ntf("No Fog", v and "Enabled" or "Disabled")
+                end }, flag("NoFog"))
+
+            local SA = tabMisc:Section({ Name = "Ambient", Side = "Left" })
+            SA:Header({ Name = "Ambient (time of day)" })
+            SA:Toggle({ Name = "Enabled", Default = V.AmbientEnabled,
+                Callback = function(v)
+                    V.AmbientEnabled = v
+                    ntf("Ambient", v and "Enabled" or "Disabled")
+                end }, flag("Ambient"))
+            SA:Slider({ Name = "Clock Time", Default = V.AmbientClockTime, Minimum = 0, Maximum = 24,
+                Precision = 0, Suffix = "h",
+                Callback = function(v) V.AmbientClockTime = v end }, flag("ClockTime"))
+            SA:Slider({ Name = "Brightness", Default = V.AmbientBrightness or 2, Minimum = 0, Maximum = 10,
+                Precision = 1,
+                Callback = function(v) V.AmbientBrightness = v end }, flag("AmbBright"))
+
+            local SIN = tabMisc:Section({ Name = "Interactions", Side = "Left" })
+            SIN:Header({ Name = "Interactions" })
+            SIN:Toggle({ Name = "No Prompt Hold", Default = V.NoFWaitEnabled,
+                Callback = function(v)
+                    V.NoFWaitEnabled = v
+                    ntf("No Prompt Hold", v and "Enabled" or "Disabled")
+                end }, flag("NoFWait"))
+            SIN:SubLabel({ Text = "Interactions trigger instantly instead of holding F." })
+            SIN:Toggle({ Name = "Lockpick Bypass", Default = V.LockpickBypassEnabled,
+                Callback = function(v)
+                    V.LockpickBypassEnabled = v
+                    ntf("Lockpick Bypass", v and "Enabled" or "Disabled")
+                end }, flag("Lockpick"))
+            SIN:SubLabel({ Text = "Auto-completes the lockpick minigame." })
         end
 
         if tabDbg then
