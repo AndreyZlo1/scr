@@ -75,6 +75,7 @@ return function(Lib)
         --== 2 · GUNMODEL — подсветка МОДЕЛИ ОРУЖИЯ. Хоткей: Numpad 2 ==
         GunModelEnabled           = false,
         GunModelKey               = Enum.KeyCode.KeypadTwo,
+        GunModelHighlightEnabled  = true,   -- show Highlight instance on gun
         GunModelFill              = Color3.fromRGB(0, 170, 255),
         GunModelOutline           = Color3.fromRGB(255, 255, 255),
         GunModelFillTransparency  = 0.5,
@@ -99,7 +100,7 @@ return function(Lib)
         ThirdPersonBodyTransparency = 0.35,
 
         --== 3b · GRADIENT — плавный градиент МЕЖДУ ДВУМЯ ЦВЕТАМИ ==
-        --   НЕ радуга: цвет пингпонг-лерпит ColorA ⇆ ColorB (по умолчанию
+        --   НЕ радуга: цвет пингпонг-л��рпит ColorA ⇆ ColorB (по умолчанию
         --   светло-фиолетовый ⇆ голубой). Работает поверх перекраски рук/оружия/
         --   тела. Для оружия «умный»: фаза бежит волной по частям (GradientSpread),
         --   поэтому части переливаются постепенно, а не все разом.
@@ -262,8 +263,9 @@ return function(Lib)
     local vmOrigRef   = nil   -- ← значение, ВОЗВРАЩЁННОЕ hookfunction (НЕ исходный rawget)
 
     -- Список стилизованных частей: { [part] = { M, C, T } } для restore
-    local vmStyledParts = {}
-    local vmStyledVM    = nil
+    local vmStyledParts  = {}
+    local vmStyledVM     = nil
+    local _vmStyleApplied = nil   -- FIX: declared here so restoreViewmodelStyle can reset it
 
     local function restoreViewmodelStyle()
         for part, s in pairs(vmStyledParts) do
@@ -286,6 +288,7 @@ return function(Lib)
         end
         vmStyledParts = {}
         vmStyledVM    = nil
+        _vmStyleApplied = nil
     end
 
     -- ── ПОДХОД (переписан): красим ИМЕННО РУКИ ────────────────────────────
@@ -427,7 +430,12 @@ return function(Lib)
     end
 
     local function applyViewmodelStyle(vm)
-        if vmStyledVM ~= nil and vmStyledVM ~= vm then restoreViewmodelStyle() end
+        if vmStyledVM ~= nil and vmStyledVM ~= vm then
+            restoreViewmodelStyle()  -- resets _vmStyleApplied = nil
+        end
+        -- FIX FPS: only iterate GetDescendants when vm/weapon changes, not every frame
+        if _vmStyleApplied == vm and not V.ViewmodelGradientEnabled then return end
+        _vmStyleApplied = vm
         local weapon = rawget(vm, "CurrentModel")   -- модель оружия — НЕ трогаем
 
         -- 1) явные корни рук + всё, что к ним приварено/вложено (перчатки, рукав, часы)
@@ -450,21 +458,27 @@ return function(Lib)
     end
 
     -- ── GUNMODEL: та же перекраска/материал, но для МОДЕЛИ ОРУЖИЯ ──────────────
-    local gunStyledParts = {}     -- [part] = { M, C, T, tex, sa }
-    local gunStyledModel = nil
+    local gunStyledParts  = {}     -- [part] = { M, C, T, tex, sa }
+    local gunStyledModel  = nil
+    local _gunStyleApplied = nil  -- FIX: declared here so restoreGunStyle can reset it
     local function restoreGunStyle()
         restoreStore(gunStyledParts)
         gunStyledModel = nil
+        _gunStyleApplied = nil
     end
     local function applyGunStyle(vm)
         local weapon = rawget(vm, "CurrentModel")
         if not (typeof(weapon) == "Instance" and weapon.Parent) then
-            if gunStyledModel then restoreGunStyle() end
+            if gunStyledModel then restoreGunStyle() end  -- resets _gunStyleApplied = nil
             return
         end
         if gunStyledModel ~= nil and gunStyledModel ~= weapon then
             restoreGunStyle()   -- сменили ствол → вернуть старый
+            _gunStyleApplied = nil
         end
+        -- FIX FPS: only call GetDescendants() when weapon changes, not every frame
+        if _gunStyleApplied == weapon and not V.GunModelGradientEnabled then return end
+        _gunStyleApplied = weapon
         local opts = {
             colorOn = V.GunModelColorEnabled or V.GunModelGradientEnabled,
             color   = V.GunModelColor,
@@ -537,20 +551,26 @@ return function(Lib)
                     local root2 = rawget(self, "Root")
                     local container = root2 and root2.Parent
                     local weapon = rawget(self, "CurrentModel")
-                    if container and weapon and weapon.Parent then
-                        if not (gunHighlight and gunHighlight.Parent) then
-                            gunHighlight = Instance.new("Highlight")
-                            gunHighlight.Name = "BRM5_GunHL"
-                            gunHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    -- Highlight is optional — can be disabled without disabling full GunModel
+                    if V.GunModelHighlightEnabled ~= false then
+                        if container and weapon and weapon.Parent then
+                            if not (gunHighlight and gunHighlight.Parent) then
+                                gunHighlight = Instance.new("Highlight")
+                                gunHighlight.Name = "BRM5_GunHL"
+                                gunHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                            end
+                            gunHighlight.FillColor          = V.GunModelFill
+                            gunHighlight.OutlineColor       = V.GunModelOutline
+                            gunHighlight.FillTransparency   = V.GunModelFillTransparency
+                            gunHighlight.OutlineTransparency = V.GunModelOutlineTransparency
+                            if gunHighlight.Adornee ~= weapon then gunHighlight.Adornee = weapon end
+                            gunHighlight.Parent = container
+                        elseif gunHighlight then
+                            gunHighlight.Adornee = nil  -- оружие не экипировано сейчас
                         end
-                        gunHighlight.FillColor          = V.GunModelFill
-                        gunHighlight.OutlineColor       = V.GunModelOutline
-                        gunHighlight.FillTransparency   = V.GunModelFillTransparency
-                        gunHighlight.OutlineTransparency = V.GunModelOutlineTransparency
-                        if gunHighlight.Adornee ~= weapon then gunHighlight.Adornee = weapon end
-                        gunHighlight.Parent = container
                     elseif gunHighlight then
-                        gunHighlight.Adornee = nil  -- оружие не экипировано сейчас
+                        -- Highlight toggled off while GunModel is still on
+                        pcall(function() gunHighlight:Destroy() end); gunHighlight = nil
                     end
                     -- та же перекраска/материал, что и у рук — но для оружия
                     if V.GunModelColorEnabled or V.GunModelMaterialEnabled
@@ -676,11 +696,9 @@ return function(Lib)
     local function restoreSelfBody()
         for part, s in pairs(tpOrig) do
             if part and part.Parent then
-                pcall(function()
-                    part.Material    = s.M
-                    part.Color       = s.C
-                    part.Transparency = s.T
-                end)
+                pcall(function() part.Material     = s.M end)
+                pcall(function() part.Color        = s.C end)
+                pcall(function() part.Transparency = s.T end)
             end
         end
         tpOrig = {}
@@ -689,19 +707,28 @@ return function(Lib)
 
     local function styleSelfBody(char)
         restoreSelfBody()
+        local bodyTranp = V.ThirdPersonBodyTransparency or 0
         for _, d in ipairs(char:GetDescendants()) do
             if (d:IsA("BasePart") or d:IsA("MeshPart")) then
-                tpOrig[d] = { M = d.Material, C = d.Color, T = d.Transparency }
-                pcall(function()
-                    if V.ThirdPersonMaterial then d.Material = V.ThirdPersonMaterial end
-                    d.Color = V.ThirdPersonBodyColor
-                    if d.Transparency < 1 then d.Transparency = V.ThirdPersonBodyTransparency end
-                end)
+                local origT = d.Transparency
+                -- FIX: skip parts that are already fully hidden by the viewmodel/arms system
+                -- (Transparency == 1 means it was deliberately hidden — don't touch it or
+                -- we record T=1 as "original" and it stays invisible after restore)
+                if origT >= 1 then continue end
+                tpOrig[d] = { M = d.Material, C = d.Color, T = origT }
+                -- Apply each property separately so a failure on one doesn't
+                -- block the others (e.g. some BRM5 mesh parts reject Material changes)
+                if V.ThirdPersonMaterial then
+                    pcall(function() d.Material = V.ThirdPersonMaterial end)
+                end
+                pcall(function() d.Color = V.ThirdPersonBodyColor end)
+                pcall(function() d.Transparency = bodyTranp end)
             end
         end
         tpStyledChar = char
     end
 
+    local _tpRestyeT = 0
     local function thirdPersonStep()
         if not V.ThirdPersonEnabled then
             if tpStyledChar then restoreSelfBody() end
@@ -716,7 +743,13 @@ return function(Lib)
             return
         end
         applySelfHighlight(char)
-        if tpStyledChar ~= char then styleSelfBody(char) end
+        -- FIX: check if character changed OR re-style every 3s to catch late-spawning parts
+        -- (avoids calling styleSelfBody / GetDescendants on every single heartbeat frame)
+        local t = now()
+        if tpStyledChar ~= char or (t - _tpRestyeT) > 3 then
+            _tpRestyeT = t
+            styleSelfBody(char)
+        end
         -- градиент по телу: перекрас каждый кадр под текущую фазу
         if V.ThirdPersonGradientEnabled then
             tickGradientStore(tpOrig, 0.5, now() * (V.GradientSpeed or 0.35))
@@ -1191,7 +1224,7 @@ return function(Lib)
     end
 
     -- ─────────────────────────────────────────────────────────────────────
-    -- UI-интеграция (MacLib). Visuals-модуль раскидывает контролы по табам:
+    -- UI-интеграция (MacLib). Visuals-модуль раскидывает ко��тролы по табам:
     --   Visuals  → Viewmodel / GunModel / Gradient / ThirdPerson
     --   Movement → Vehicle (fly/speed) — это движение
     --   GunMods  → FreeGun — это изменение оружия
@@ -1219,13 +1252,17 @@ return function(Lib)
                 pcall(function() ML.Options[f]:UpdateState(val) end)
             end
         end
+        -- FIX double-notify: syncToggle re-fires the Toggle Callback which also calls ntf().
+        local _notifyBlocked = false
         -- Keybind that toggles a V[key] boolean and updates its paired toggle.
         local function kbToggle(section, name, key, toggleFlag, label)
             if not ui.keybind then return end
             ui.keybind(section, { Name = name, Flag = flag(key .. "_KB"),
                 Toggle = function()
                     V[key] = not V[key]
+                    _notifyBlocked = true
                     syncToggle(flag(toggleFlag), V[key])
+                    _notifyBlocked = false
                     ntf(label or name, V[key] and "Enabled" or "Disabled")
                 end })
         end
@@ -1237,7 +1274,7 @@ return function(Lib)
             S:Toggle({ Name = "Enabled", Default = V.ViewmodelEnabled,
                 Callback = function(v)
                     V.ViewmodelEnabled = v
-                    ntf("Viewmodel", v and "Enabled" or "Disabled")
+                    if not _notifyBlocked then ntf("Viewmodel", v and "Enabled" or "Disabled") end
                 end }, flag("VM"))
             kbToggle(S, "Keybind", "ViewmodelEnabled", "VM", "Viewmodel")
             S:SubLabel({ Text = "Recolors/re-materializes your first-person arms." })
@@ -1277,9 +1314,18 @@ return function(Lib)
             G:Toggle({ Name = "Enabled", Default = V.GunModelEnabled,
                 Callback = function(v)
                     V.GunModelEnabled = v
-                    ntf("Gun Model", v and "Enabled" or "Disabled")
+                    if not _notifyBlocked then ntf("Gun Model", v and "Enabled" or "Disabled") end
                 end }, flag("GM"))
             kbToggle(G, "Keybind", "GunModelEnabled", "GM", "Gun Model")
+            G:Toggle({ Name = "Highlight", Default = V.GunModelHighlightEnabled ~= false,
+                Callback = function(v)
+                    V.GunModelHighlightEnabled = v
+                    if not v and gunHighlight then
+                        pcall(function() gunHighlight:Destroy() end); gunHighlight = nil
+                    end
+                    ntf("Gun Highlight", v and "Enabled" or "Disabled")
+                end }, flag("GMHighlight"))
+            G:SubLabel({ Text = "Uncheck to keep recolor/material without the colored outline." })
             G:Toggle({ Name = "Recolor", Default = V.GunModelColorEnabled,
                 Callback = function(v) V.GunModelColorEnabled = v end }, flag("GMColorOn"))
             G:Colorpicker({ Name = "Color", Default = V.GunModelColor,
@@ -1312,7 +1358,7 @@ return function(Lib)
             S2:Toggle({ Name = "Enabled", Default = V.ThirdPersonEnabled,
                 Callback = function(v)
                     V.ThirdPersonEnabled = v
-                    ntf("Third Person", v and "Enabled" or "Disabled")
+                    if not _notifyBlocked then ntf("Third Person", v and "Enabled" or "Disabled") end
                 end }, flag("TP"))
             kbToggle(S2, "Keybind", "ThirdPersonEnabled", "TP", "Third Person")
             S2:SubLabel({ Text = "Styles your own body (visible in third person camera)." })
