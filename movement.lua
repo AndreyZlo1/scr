@@ -1,14 +1,3 @@
--- movement.lua v32.0 (BRM5 Movement)
--- FakeDeath removed. NoFall = HeightState spoof: while falling we report
--- the last grounded HeightState so the server never registers a fall.
--- FakeAngles = per-packet (max-rate, ~10Hz) jitter of the synced angles
--- yaw a[6], aim-yaw a[9], pitch a[10] (CameraY) and lean a[11]. Static
--- values replicate faithfully (no desync), so we roll them to exploit
--- the receiver-side interpolation. The fake pose is shown as a cloned
--- character model (not Drawing). Model note: no Roblox Character; state
--- lives on the engine CharacterController; pose is client-replicated via
--- the net ReplicateMovement packet.
-
 return function(Lib)
     local Bridge    = Lib.Bridge
     local CONFIG    = Lib.CONFIG
@@ -1427,6 +1416,9 @@ return function(Lib)
         if typeof(char) ~= "Instance" then return end
         if not faGhostModel or not faGhostModel.Parent then
             destroyFakeGhost()
+            -- FIX: destroyFakeGhost resets faGhostHidden=false; buildFakeGhost
+            -- creates fresh parts at ghostTr so the firstPerson re-check below
+            -- will correctly apply hide/show on the very first tick.
             pcall(buildFakeGhost, char)
             if not faGhostModel then return end
         end
@@ -1457,9 +1449,12 @@ return function(Lib)
             end
             if firstPerson ~= faGhostHidden then
                 faGhostHidden = firstPerson
+                -- FIX: LocalTransparencyModifier is unreliable in BRM5 (custom renderer).
+                -- Use actual Transparency property instead. Store originals to restore.
+                local ghostTr = MOV.FakeAnglesGhostTransparency or 0.5
                 for _, d in ipairs(faGhostModel:GetDescendants()) do
                     if d:IsA("BasePart") then
-                        pcall(function() d.LocalTransparencyModifier = firstPerson and 1 or 0 end)
+                        pcall(function() d.Transparency = firstPerson and 1 or ghostTr end)
                     end
                 end
                 if faGhostHL then pcall(function() faGhostHL.Enabled = not firstPerson end) end
@@ -1888,7 +1883,7 @@ return function(Lib)
     local function handleLocalDeath(oldCtrl)
         -- v19.2 FIX «настройки сбрасываются п��сле смерти»:
         -- Раньше здесь обнулялись ВСЕ intent-флаги (flyActive, fakeAngMode,
-        -- velDesyncActive, invisActive, NoClip …) → после респавна всё надо было
+        -- velDesyncActive, invisActive, NoClip …) → после респавна ��сё надо было
         -- включать заново. Теперь по умолчанию НАМЕРЕНИЕ пользователя сохраняется:
         -- tick-петля сама переприменит фичи, как только liveCtrl появится вновь.
         -- Сбрасываем только ТРАНЗИТНОЕ состояние, привязанное к мёртвому инстансу.
@@ -2446,18 +2441,25 @@ return function(Lib)
             end
         end
         -- Feature toggle + keybind helper.
+        -- FIX double-notify: syncToggle(flag) re-triggers the Toggle Callback which
+        -- calls ntf() again. Block Toggle Callbacks during programmatic state sync.
+        local _notifyBlocked = false
         local function feature(section, label, name, desc)
             section:Toggle({ Name = "Enabled", Default = _M.isActive(name),
                 Callback = function(v)
                     _M.setFeature(name, v)
-                    ntf(label, v and "Enabled" or "Disabled")
+                    if not _notifyBlocked then
+                        ntf(label, v and "Enabled" or "Disabled")
+                    end
                 end }, flag(name))
             if ui.keybind then
                 ui.keybind(section, { Name = "Keybind", Flag = flag(name .. "_KB"),
                     Toggle = function()
                         local nv = not _M.isActive(name)
                         _M.setFeature(name, nv)
+                        _notifyBlocked = true
                         syncToggle(flag(name), nv)
+                        _notifyBlocked = false
                         ntf(label, nv and "Enabled" or "Disabled")
                     end })
             end
@@ -2481,6 +2483,12 @@ return function(Lib)
         feature(LF, "Fly", "Fly", "Free-cam style flight. Hold Space/Ctrl for up/down.")
         LF:Slider({ Name = "Fly Speed", Default = MOV.FlySpeed, Minimum = 8, Maximum = 200,
             Precision = 0, Callback = function(v) MOV.FlySpeed = v end }, flag("FlySpeed"))
+        LF:Toggle({ Name = "TP Bypass", Default = MOV.FlyTPBypass ~= false,
+            Callback = function(v)
+                MOV.FlyTPBypass = v
+                ntf("Fly TP Bypass", v and "Enabled" or "Disabled")
+            end }, flag("FlyTPBypass"))
+        LF:SubLabel({ Text = "Teleport-bypass: keeps the server position in sync while flying to avoid rubber-band kicks." })
 
         -- ── No Clip ───────────────────────────────────────────────────────
         local LC = tab:Section({ Name = "No Clip", Side = "Left" })
@@ -2560,28 +2568,33 @@ return function(Lib)
         FA:Header({ Name = "Fake Angles" })
         local FA_MODES = { "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch" }
         -- Enabled toggle: On = включает первый/последний режим, Off = режим 0 (Off)
+        local _faNotifyBlocked = false
         FA:Toggle({ Name = "Enabled", Default = _M.getFakeAngMode() ~= 0,
             Callback = function(v)
                 if v then
-                    -- включить: используем текущий режим или Instant по умолчанию
                     local mode = _M.getFakeAngMode()
                     if mode == 0 then _M.setFakeAngMode(1) end
                 else
                     _M.setFakeAngMode(0)
                 end
-                ntf("Fake Angles", v and "Enabled" or "Disabled")
+                if not _faNotifyBlocked then
+                    ntf("Fake Angles", v and "Enabled" or "Disabled")
+                end
             end }, flag("FAEnabled"))
         if ui.keybind then
             ui.keybind(FA, { Name = "Keybind", Flag = flag("FA_KB"),
                 Toggle = function()
                     local mode = _M.getFakeAngMode()
+                    _faNotifyBlocked = true
                     if mode ~= 0 then
                         _M.setFakeAngMode(0)
                         syncToggle(flag("FAEnabled"), false)
+                        _faNotifyBlocked = false
                         ntf("Fake Angles", "Disabled")
                     else
-                        _M.setFakeAngMode(1)  -- Instant по умолчанию
+                        _M.setFakeAngMode(1)
                         syncToggle(flag("FAEnabled"), true)
+                        _faNotifyBlocked = false
                         ntf("Fake Angles", "Enabled")
                     end
                 end })
@@ -2591,7 +2604,9 @@ return function(Lib)
                 local idx = table.find(FA_MODES, n)
                 if idx then
                     _M.setFakeAngMode(idx)
+                    _faNotifyBlocked = true
                     syncToggle(flag("FAEnabled"), true)
+                    _faNotifyBlocked = false
                     ntf("Fake Angles Mode", n)
                 end
             end }, flag("FAMode"))
