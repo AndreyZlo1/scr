@@ -42,7 +42,7 @@ return function(Lib)
     local LP         = Players.LocalPlayer
 
     local function now() return os.clock() end
-    local function log(...) print("[VIS]", ...) end
+    local function log() end   -- logging disabled (was print("[VIS]", ...))
 
     ---------------------------------------------------------------------------
     -- ⚙️  НАСТРОЙКИ ВИЗУАЛОВ  ─────────────────────────────────────────────────
@@ -98,16 +98,17 @@ return function(Lib)
         ThirdPersonBodyColor      = Color3.fromRGB(120, 200, 255),
         ThirdPersonBodyTransparency = 0.35,
 
-        --== 3b · GRADIENT — плавно переливающийся радужный градиент ==
-        --   Работает поверх перекраски рук/оружия/тела. Для оружия — «умный»:
-        --   волна фазы бежит по частям (см. GunModelGradientSpread), поэтому
-        --   переливается не всё разом, а постепенно и красиво.
+        --== 3b · GRADIENT — плавный градиент МЕЖДУ ДВУМЯ ЦВЕТАМИ ==
+        --   НЕ радуга: цвет пингпонг-лерпит ColorA ⇆ ColorB (по умолчанию
+        --   светло-фиолетовый ⇆ голубой). Работает поверх перекраски рук/оружия/
+        --   тела. Для оружия «умный»: фаза бежит волной по частям (GradientSpread),
+        --   поэтому части переливаются постепенно, а не все разом.
         ViewmodelGradientEnabled   = false,   -- переливать руки (Viewmodel)
         GunModelGradientEnabled    = false,   -- переливать оружие (GunModel)
         ThirdPersonGradientEnabled = false,   -- переливать тело (ThirdPerson)
-        GradientSpeed              = 0.35,     -- полных циклов радуги в секунду
-        GradientSaturation         = 1.0,      -- HSV насыщенность (0..1)
-        GradientValue              = 1.0,      -- HSV яркость (0..1)
+        GradientSpeed              = 0.35,     -- скорость перелива (циклов A⇆B в секунду)
+        GradientColorA             = Color3.fromRGB(190, 150, 255), -- светло-фиолетовый
+        GradientColorB             = Color3.fromRGB(120, 210, 255), -- голубой
         GunModelGradientSpread     = 1.6,      -- «растяжение» волны по частям оружия (0 = все синхронно)
 
         --== 4 · VEHICLE FLY — полёт на транспорте (WASD + Space/Ctrl). Numpad 4 ==
@@ -360,10 +361,15 @@ return function(Lib)
         table.clear(store)
     end
 
-    -- ── GRADIENT (переливающийся радужный градиент) ──────────────────────────
-    -- Цвет по HSV: hue бежит по кругу → плавное переливание всех оттенков.
+    -- ── GRADIENT (плавный перелив между ДВУМЯ цветами, НЕ радуга) ─────────────
+    -- phase01 крутится 0..1; треугольная (пинг-понг) волна t: 0→1→0 даёт
+    -- плавный ColorA → ColorB → ColorA без резкого скачка на стыке цикла.
     local function gradientColorAt(phase01)
-        return Color3.fromHSV(phase01 % 1, V.GradientSaturation or 1, V.GradientValue or 1)
+        local a = V.GradientColorA or Color3.fromRGB(190, 150, 255)
+        local b = V.GradientColorB or Color3.fromRGB(120, 210, 255)
+        local p = phase01 % 1
+        local t = (p < 0.5) and (p * 2) or (2 - p * 2)   -- ping-pong 0..1..0
+        return a:Lerp(b, t)
     end
     -- Фаза части по её МИРОВОЙ позиции: соседние части → близкая фаза → волна
     -- переливается плавно и «постепенно» по модели (для оружия — умно, не всё разом).
@@ -560,7 +566,7 @@ return function(Lib)
         end
 
         -- Fallback: заменяем метод в таблице
-        -- В ��том случае origFn и есть оригинал — кладём его в vmOrigRef
+        -- В ����том случае origFn и есть оригинал — кладём его в vmOrigRef
         vmOrigRef = origFn
         local ok2 = pcall(function() cls.Update = wrapped end)
         if ok2 then
@@ -1157,87 +1163,167 @@ return function(Lib)
     --   Misc     → Fullbright / Ambient / NoFog / NoFWait
     -- Все колбэки пишут в V (= CONFIG.Visuals), heartbeat применяет каждый кадр.
     -- ─────────────────────────────────────────────────────────────────────
+    -- Материалы для дропдаунов (строка ⇄ Enum.Material).
+    local MATERIALS = { "ForceField", "Neon", "Glass", "SmoothPlastic", "Plastic", "Metal", "Marble" }
+    local function matName(m) return (typeof(m) == "EnumItem") and m.Name or tostring(m or "ForceField") end
+    local function matFromName(n) return Enum.Material[n] or Enum.Material.ForceField end
+
     function M.buildUI(ui)
         local flag = ui.flag or function(s) return "VIS_" .. s end
         local tabV = ui.tabs and ui.tabs.Visuals
         local tabMov = ui.tabs and ui.tabs.Movement
         local tabGM = ui.tabs and ui.tabs.GunMods
         local tabMisc = ui.tabs and ui.tabs.Misc
+        local tabDbg = ui.tabs and ui.tabs.Debug
+
+        -- Sync a MacLib toggle's visual state with V[<key>] (used by keybinds).
+        local function syncToggle(f, val)
+            local ML = ui.MacLib
+            if ML and ML.Options and ML.Options[f] then
+                pcall(function() ML.Options[f]:UpdateState(val) end)
+            end
+        end
+        -- Keybind that toggles a V[key] boolean and updates its paired toggle.
+        local function kbToggle(section, name, key, toggleFlag)
+            if not ui.keybind then return end
+            ui.keybind(section, { Name = name, Flag = flag(key .. "_KB"),
+                Toggle = function() V[key] = not V[key]; syncToggle(flag(toggleFlag), V[key]) end })
+        end
 
         if tabV then
-            local S = tabV:Section({ Side = "Left" })
+            -- ── Viewmodel (hands) ──────────────────────────────────────────
+            local S = tabV:Section({ Name = "Viewmodel", Side = "Left" })
             S:Header({ Name = "Viewmodel (hands)" })
             S:Toggle({ Name = "Enabled", Default = V.ViewmodelEnabled,
                 Callback = function(v) V.ViewmodelEnabled = v end }, flag("VM"))
+            kbToggle(S, "Toggle Keybind", "ViewmodelEnabled", "VM")
+            S:SubLabel({ Text = "Recolors/re-materializes your first-person arms." })
             S:Toggle({ Name = "Recolor", Default = V.ViewmodelColorEnabled,
                 Callback = function(v) V.ViewmodelColorEnabled = v end }, flag("VMColorOn"))
             S:Colorpicker({ Name = "Color", Default = V.ViewmodelColor,
                 Callback = function(c) V.ViewmodelColor = c end }, flag("VMColor"))
-            S:Toggle({ Name = "Gradient (rainbow)", Default = V.ViewmodelGradientEnabled,
+            S:Toggle({ Name = "Change Material", Default = V.ViewmodelMaterialEnabled,
+                Callback = function(v) V.ViewmodelMaterialEnabled = v end }, flag("VMMatOn"))
+            S:Dropdown({ Name = "Material", Options = MATERIALS, Default = matName(V.ViewmodelMaterial),
+                Callback = function(n) V.ViewmodelMaterial = matFromName(n) end }, flag("VMMat"))
+            S:Slider({ Name = "Transparency", Default = math.floor((V.ViewmodelTransparency or 0) * 100),
+                Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+                Callback = function(v) V.ViewmodelTransparency = v / 100 end }, flag("VMTransp"))
+            S:Slider({ Name = "Custom FOV", Default = V.ViewmodelFOV or 0, Minimum = 0, Maximum = 120,
+                Precision = 0, Callback = function(v) V.ViewmodelFOV = v end }, flag("VMFov"))
+            S:SubLabel({ Text = "0 = don't touch camera FOV." })
+            S:Divider()
+            S:Header({ Name = "Viewmodel Gradient" })
+            S:Toggle({ Name = "Gradient", Default = V.ViewmodelGradientEnabled,
                 Callback = function(v) V.ViewmodelGradientEnabled = v end }, flag("VMGrad"))
+            S:SubLabel({ Text = "Two-color gradient (set colors on the right)." })
 
-            S:Header({ Name = "Gun Model" })
-            S:Toggle({ Name = "Enabled", Default = V.GunModelEnabled,
+            -- ── Gun Model ──────────────────────────────────────────────────
+            local G = tabV:Section({ Name = "Gun Model", Side = "Left" })
+            G:Header({ Name = "Gun Model" })
+            G:Toggle({ Name = "Enabled", Default = V.GunModelEnabled,
                 Callback = function(v) V.GunModelEnabled = v end }, flag("GM"))
-            S:Toggle({ Name = "Recolor", Default = V.GunModelColorEnabled,
+            kbToggle(G, "Toggle Keybind", "GunModelEnabled", "GM")
+            G:Toggle({ Name = "Recolor", Default = V.GunModelColorEnabled,
                 Callback = function(v) V.GunModelColorEnabled = v end }, flag("GMColorOn"))
-            S:Colorpicker({ Name = "Color", Default = V.GunModelColor,
+            G:Colorpicker({ Name = "Color", Default = V.GunModelColor,
                 Callback = function(c) V.GunModelColor = c end }, flag("GMColor"))
-            S:Toggle({ Name = "Gradient (smart rainbow)", Default = V.GunModelGradientEnabled,
+            G:Toggle({ Name = "Change Material", Default = V.GunModelMaterialEnabled,
+                Callback = function(v) V.GunModelMaterialEnabled = v end }, flag("GMMatOn"))
+            G:Dropdown({ Name = "Material", Options = MATERIALS, Default = matName(V.GunModelMaterial),
+                Callback = function(n) V.GunModelMaterial = matFromName(n) end }, flag("GMMat"))
+            G:Slider({ Name = "Transparency", Default = math.floor((V.GunModelTransparency or 0) * 100),
+                Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+                Callback = function(v) V.GunModelTransparency = v / 100 end }, flag("GMTransp"))
+            G:Divider()
+            G:Header({ Name = "Gun Model Gradient" })
+            G:Toggle({ Name = "Gradient", Default = V.GunModelGradientEnabled,
                 Callback = function(v) V.GunModelGradientEnabled = v end }, flag("GMGrad"))
+            G:SubLabel({ Text = "Wave flows part-to-part (see Wave Spread on the right)." })
 
-            local S2 = tabV:Section({ Side = "Right" })
-            S2:Header({ Name = "Third Person Visual" })
+            -- ── Third person + shared gradient colors ──────────────────────
+            local S2 = tabV:Section({ Name = "Third Person", Side = "Right" })
+            S2:Header({ Name = "Third Person Model" })
             S2:Toggle({ Name = "Enabled", Default = V.ThirdPersonEnabled,
                 Callback = function(v) V.ThirdPersonEnabled = v end }, flag("TP"))
+            kbToggle(S2, "Toggle Keybind", "ThirdPersonEnabled", "TP")
+            S2:SubLabel({ Text = "Styles your own body in third person (camera is in Movement)." })
             S2:Colorpicker({ Name = "Body Color", Default = V.ThirdPersonBodyColor,
                 Callback = function(c) V.ThirdPersonBodyColor = c end }, flag("TPColor"))
-            S2:Toggle({ Name = "Gradient (rainbow)", Default = V.ThirdPersonGradientEnabled,
+            S2:Slider({ Name = "Body Transparency", Default = math.floor((V.ThirdPersonBodyTransparency or 0) * 100),
+                Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+                Callback = function(v) V.ThirdPersonBodyTransparency = v / 100 end }, flag("TPTransp"))
+            S2:Toggle({ Name = "Gradient", Default = V.ThirdPersonGradientEnabled,
                 Callback = function(v) V.ThirdPersonGradientEnabled = v end }, flag("TPGrad"))
-            S2:Divider()
-            S2:Header({ Name = "Gradient Settings" })
-            S2:Slider({ Name = "Speed", Default = V.GradientSpeed, Minimum = 0.05, Maximum = 2,
+
+            local GC = tabV:Section({ Name = "Gradient Colors", Side = "Right" })
+            GC:Header({ Name = "Gradient (2-color)" })
+            GC:SubLabel({ Text = "Smoothly blends Color A into Color B and back. Not a rainbow." })
+            GC:Colorpicker({ Name = "Color A", Default = V.GradientColorA,
+                Callback = function(c) V.GradientColorA = c end }, flag("GradA"))
+            GC:Colorpicker({ Name = "Color B", Default = V.GradientColorB,
+                Callback = function(c) V.GradientColorB = c end }, flag("GradB"))
+            GC:Slider({ Name = "Speed", Default = V.GradientSpeed, Minimum = 0.05, Maximum = 2,
                 Precision = 2, Suffix = " Hz", Callback = function(v) V.GradientSpeed = v end }, flag("GradSpeed"))
-            S2:Slider({ Name = "Gun Wave Spread", Default = V.GunModelGradientSpread, Minimum = 0,
+            GC:Slider({ Name = "Gun Wave Spread", Default = V.GunModelGradientSpread, Minimum = 0,
                 Maximum = 5, Precision = 1, Callback = function(v) V.GunModelGradientSpread = v end }, flag("GradSpread"))
-            S2:Slider({ Name = "Saturation", Default = V.GradientSaturation, Minimum = 0, Maximum = 1,
-                Precision = 2, Callback = function(v) V.GradientSaturation = v end }, flag("GradSat"))
-            S2:Slider({ Name = "Value", Default = V.GradientValue, Minimum = 0, Maximum = 1,
-                Precision = 2, Callback = function(v) V.GradientValue = v end }, flag("GradVal"))
+            GC:SubLabel({ Text = "0 = all gun parts change color together." })
         end
 
         if tabMov then
-            local S = tabMov:Section({ Side = "Right" })
+            local S = tabMov:Section({ Name = "Vehicle", Side = "Right" })
             S:Header({ Name = "Vehicle" })
             S:Toggle({ Name = "Vehicle Fly", Default = V.VehicleFlyEnabled,
                 Callback = function(v) V.VehicleFlyEnabled = v end }, flag("VehFly"))
+            kbToggle(S, "Fly Keybind", "VehicleFlyEnabled", "VehFly")
+            S:Slider({ Name = "Fly Speed", Default = V.VehicleFlySpeed, Minimum = 20, Maximum = 400,
+                Precision = 0, Suffix = " st/s", Callback = function(v) V.VehicleFlySpeed = v end }, flag("VehFlySpeed"))
             S:Toggle({ Name = "Vehicle Speed", Default = V.VehicleSpeedEnabled,
                 Callback = function(v) V.VehicleSpeedEnabled = v end }, flag("VehSpeed"))
+            kbToggle(S, "Speed Keybind", "VehicleSpeedEnabled", "VehSpeed")
             S:Slider({ Name = "Speed Multiplier", Default = V.VehicleSpeedMult, Minimum = 1, Maximum = 6,
                 Precision = 1, Suffix = "x", Callback = function(v) V.VehicleSpeedMult = v end }, flag("VehSpeedMult"))
         end
 
         if tabGM then
-            local S = tabGM:Section({ Side = "Right" })
+            local S = tabGM:Section({ Name = "Free Gun", Side = "Left" })
             S:Header({ Name = "Free Gun" })
-            S:Toggle({ Name = "Free Gun (equip anywhere)", Default = V.FreeGunEnabled,
+            S:Toggle({ Name = "Enabled", Default = V.FreeGunEnabled,
                 Callback = function(v) V.FreeGunEnabled = v end }, flag("FreeGun"))
-            S:SubLabel({ Text = "Снимает блок экипировки оружия в транспорте и пр." })
+            kbToggle(S, "Toggle Keybind", "FreeGunEnabled", "FreeGun")
+            S:SubLabel({ Text = "Removes the equip block (e.g. lets you draw a weapon inside vehicles)." })
         end
 
         if tabMisc then
-            local S = tabMisc:Section({ Side = "Left" })
+            local S = tabMisc:Section({ Name = "World / Lighting", Side = "Left" })
             S:Header({ Name = "World / Lighting" })
             S:Toggle({ Name = "Fullbright", Default = V.FullbrightEnabled,
                 Callback = function(v) V.FullbrightEnabled = v end }, flag("Fullbright"))
+            kbToggle(S, "Fullbright Keybind", "FullbrightEnabled", "Fullbright")
             S:Toggle({ Name = "No Fog", Default = V.NoFogEnabled,
                 Callback = function(v) V.NoFogEnabled = v end }, flag("NoFog"))
             S:Toggle({ Name = "Ambient (time of day)", Default = V.AmbientEnabled,
                 Callback = function(v) V.AmbientEnabled = v end }, flag("Ambient"))
             S:Slider({ Name = "Clock Time", Default = V.AmbientClockTime, Minimum = 0, Maximum = 24,
                 Precision = 0, Suffix = "h", Callback = function(v) V.AmbientClockTime = v end }, flag("ClockTime"))
+            S:Slider({ Name = "Ambient Brightness", Default = V.AmbientBrightness or 2, Minimum = 0, Maximum = 10,
+                Precision = 1, Callback = function(v) V.AmbientBrightness = v end }, flag("AmbBright"))
+            S:Divider()
+            S:Header({ Name = "Interactions" })
             S:Toggle({ Name = "No Prompt Hold (NoFWait)", Default = V.NoFWaitEnabled,
                 Callback = function(v) V.NoFWaitEnabled = v end }, flag("NoFWait"))
+            S:SubLabel({ Text = "Interactions trigger instantly instead of holding F." })
+            S:Toggle({ Name = "Lockpick Bypass", Default = V.LockpickBypassEnabled,
+                Callback = function(v) V.LockpickBypassEnabled = v end }, flag("Lockpick"))
+            S:SubLabel({ Text = "Auto-completes the lockpick minigame." })
+        end
+
+        if tabDbg then
+            local D = tabDbg:Section({ Name = "Visuals", Side = "Left" })
+            D:Header({ Name = "Visuals — Intervals" })
+            D:Slider({ Name = "Lockpick Scan Interval", Default = math.floor((V.LockpickScanInterval or 0.4) * 1000),
+                Minimum = 100, Maximum = 2000, Precision = 0, Suffix = " ms",
+                Callback = function(v) V.LockpickScanInterval = v / 1000 end }, flag("DbgLockpick"))
         end
     end
 
