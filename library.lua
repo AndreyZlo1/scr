@@ -5831,9 +5831,9 @@ function Bridge.isSameSquad(mySquad, theirSquad)
 end
 
 function Bridge.refreshActorSquads()
-	-- v2: throttle — не чаще раз в 5s
+	-- FIX: throttle reduced 5s→1s so teammate detection updates within one second of joining a squad.
 	local now = os.clock()
-	if (now - (State.lastSquadRefresh or 0)) < 5.0 then return end
+	if (now - (State.lastSquadRefresh or 0)) < 1.0 then return end
 	State.lastSquadRefresh = now
 	rebuildUidMap(false)
 	Bridge.resolveClientServiceInstance(false)
@@ -5892,7 +5892,8 @@ function Bridge.isEnemyActor(data)
 
 		local mySquad = State.localSquad
 		if mySquad == nil then
-			Bridge.refreshLocalTeamKey()
+			-- FIX: rebuild full squad table, not just local key, so all squadmates are known
+			Bridge.refreshActorSquads()
 			mySquad = State.localSquad
 		end
 
@@ -7679,7 +7680,7 @@ function Bridge.getBoneLosSamples(bone, origin)
 	return points
 end
 
--- Строгая проверка видимости: Head → UpperTorso → LowerTorso, ≤2 луча на ко��ть, early exit
+-- Строгая проверка видимости: Head → UpperTorso → LowerTorso, ≤2 луча на ко����ть, early exit
 function Bridge.checkCoreBodyVisible(model, origin, losFn)
 	if typeof(model) ~= "Instance" or not model:IsA("Model") or typeof(origin) ~= "Vector3" then
 		return false, nil, nil
@@ -8992,7 +8993,9 @@ end
 Bridge.getLiveWeaponContext = function(force)
 	local now = os.clock()
 	local cacheTtl = CONFIG.WeaponCtxCacheSec or 0.55
-	local emptyTtl = CONFIG.WeaponCtxEmptyCacheSec or 8.0
+	-- FIX: 8s empty-cache was preventing detection of newly equipped weapons.
+	-- Reduced to 0.4s so weapon switches register within one heartbeat cycle.
+	local emptyTtl = CONFIG.WeaponCtxEmptyCacheSec or 0.4
 	if not force and State.weaponCtxCacheTime then
 		local age = now - State.weaponCtxCacheTime
 		if State.weaponCtxCache == WEAPON_CTX_EMPTY then
@@ -10907,7 +10910,7 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 	--   взлёте / ускоряется на падении — линейная экстраполяция переоценивает Y),
 	--   а по стоящей на земле ловил physics-джиттер vel.Y и слегка приподнимал аим.
 	--   Стало: opt-in (== true), гравитационная кинематика Δy = vy*t − ½·g·t²,
-	--   гейт по минимальной вертикальной скорости (игнор джиттера) и жёсткий
+	--   гейт по ми��имальной вертикальной скорости (игнор джиттера) и жёсткий
 	--   кламп смещения, чтобы аим НИКОГДА не уходил заметно выше головы.
 	local doVert   = CONFIG.PredictionVertical == true
 	local vcap     = CONFIG.PredictionVertCap or 50
