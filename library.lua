@@ -112,7 +112,7 @@ local CONFIG = {
 	WeaponHudMaxLines = 0,
 	WeaponHudMaxTuneLines = 22,
 	WeaponHudLineHeight = 16,
-	WeaponHud = true,
+	WeaponHud = false,
 	LogBulletEvent = false,
 	LogBulletPayload = false,
 	LocalBulletsOnly = true,
@@ -255,7 +255,7 @@ local CONFIG = {
 	NewActorPriorityPerTick = 24,    -- сколько НОВЫХ акторов обрабатывать немедленно за тик (в обход NPC-троттла)
 	RepSyncQueueSortSec = 2.0,       -- nearest-first очередь actor sync
 	MaxTrackedActors = 96,           -- v18 PATCH: было 64 (дубль 128 удалён), оптимальный баланс
-	PerfHud = true,
+	PerfHud = false,
 	PerfHudInterval = 0.35,
 	PerfHudRows = 22,
 	PerfHudTextSize = 13,
@@ -4226,10 +4226,18 @@ function Bridge.hookSharedInventoryTable(si, mods)
 			State.modifyAppliedUid = nil
 			Bridge.invalidateWeaponCache()
 			markResolver("hand", "equip.hook")
-			task.defer(function()
+			task.spawn(function()
+				task.wait(0.2)
 				if not State.running then return end
 				if CONFIG.ModifyEnabled then
+					-- первая попытка
 					pcall(Bridge.applyWeaponModify, true)
+					-- повторная через 0.5 с — на случай если tune ещё не прикреплён
+					task.wait(0.5)
+					if State.running and CONFIG.ModifyEnabled then
+						State.modifyAppliedUid = nil
+						pcall(Bridge.applyWeaponModify, true)
+					end
 				end
 				Bridge.requestHudRefresh(true)
 			end)
@@ -7671,7 +7679,7 @@ function Bridge.getBoneLosSamples(bone, origin)
 	return points
 end
 
--- Строгая проверка видимости: Head → UpperTorso → LowerTorso, ≤2 луча на кость, early exit
+-- Строгая проверка видимости: Head → UpperTorso → LowerTorso, ≤2 луча на ко��ть, early exit
 function Bridge.checkCoreBodyVisible(model, origin, losFn)
 	if typeof(model) ~= "Instance" or not model:IsA("Model") or typeof(origin) ~= "Vector3" then
 		return false, nil, nil
@@ -10849,6 +10857,15 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 	if CONFIG.PredictionLite == true and typeof(currentPos) == "Vector3"
 		and part and part:IsA("BasePart") then
 		local uidL = Bridge.resolveActorUidForPart(part, uid)
+		-- Принудительно обновляем EMA-трек скорости перед чтением
+		if uidL and part.Parent then
+			local root = part.Parent:FindFirstChild("HumanoidRootPart")
+				or part.Parent:FindFirstChild("UpperTorso")
+				or part
+			if root and root:IsA("BasePart") then
+				pcall(updateActorVelocity, uidL, root)
+			end
+		end
 		local vel = Bridge.getActorRootVelocity(part, uidL)
 		local t = tonumber(CONFIG.PredictionLiteTime) or 0.12
 		local lead = vel * t  -- полная скорость (X,Y,Z), без клампа и гравитации
