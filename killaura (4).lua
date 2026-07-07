@@ -70,7 +70,7 @@ local getgc = getgc
 
 local KA_CONFIG = {
     -- ── Основные ────────────────────────────────────────────────────────────
-    KillAura            = true,
+    KillAura            = false,
     KillAuraDistance    = 25,      -- максимальная дистанция до цели (studs)
     KillAuraFOV         = 360,     -- угол обзора при выборе цели (градусы)
     KillAuraPredictMs   = 290,     -- упреждение velocity цели (0 = выкл)
@@ -104,7 +104,7 @@ local KA_CONFIG = {
     -- Теперь модифицируется _timer оружия (интервал между свингами в _use-цикле)
     -- через хук _use с флагом self-swing: killaura свингует в СВОЁМ темпе, а
     -- ручные удары (зажал ЛКМ) — ускоренные. Сервер не трогаем (клиентский _timer).
-    MeleeSwingSpeed     = true,  -- вкл. модификацию темпа ручных ударов
+    MeleeSwingSpeed     = false, -- вкл. модификацию темпа ручных ударов
     MeleeSwingSpeedMult = 2.0,   -- 2.0 = вдвое быстрее ручные свинги (_timer/mult)
     MeleeSwingScaleDelay = false,-- также ускорять _delay (slash→impact). Осторожно!
     -- ── Визуализация кольца ──────────���───────────────────────���──────────────
@@ -370,7 +370,7 @@ local function getEquippedRep(actor)
     local eq  = rawget(actor, "_equipped")
     local inv = rawget(actor, "_inventory")
     if not eq or type(inv) ~= "table" then return nil end
-    -- ТОЛЬКО экипированный предмет. Если это не melee → nil (KillAura спит).
+    -- Т��ЛЬКО экипированный предмет. Если это не melee → nil (KillAura спит).
     local h = inv[eq] or inv[tonumber(eq)]
     if isMeleeRep(h) then return h end
     return nil
@@ -1066,7 +1066,7 @@ local function triggerGameMeleeUse(svc, actor, ctx, aimPart, targetData)
     --   1. FireServer("InventoryAction", "Slash", N)    ← немедленно
     --   2. task.delay(svc._delay, ...)
     --      FireServer("InventoryAction", "Impact", ...) ← через weaponDelay
-    -- PacketAuto: _use НЕ вызывается, Slash и Impact шлются вручную.
+    -- PacketAuto: _use НЕ вызывается, Slash и Impact шлются вручн��ю.
     -- LegitAuto:  _use вызывается — он сам обрабатывает Slash+Impact внутри.
     local useFn = getHandlerMethod(svc, "_use")
     if type(useFn) ~= "function" then
@@ -2144,28 +2144,52 @@ function _M.buildUI(ui)
     local flag = ui.flag or function(s) return "KA_" .. s end
     local tab = ui.tabs and ui.tabs.KillAura
     if not tab then return end
+    local dtab = ui.tabs and ui.tabs.Debug
 
-    local L = tab:Section({ Side = "Left" })
+    local ML = ui.MacLib
+    local function syncToggle(f, val)
+        if ML and ML.Options and ML.Options[f] then
+            pcall(function() ML.Options[f]:UpdateState(val) end)
+        end
+    end
+
+    -- ── Left: targeting ────────────────────────────────────────────────────
+    local L = tab:Section({ Name = "Kill Aura", Side = "Left" })
     L:Header({ Name = "Kill Aura" })
     L:Toggle({ Name = "Enabled", Default = CONFIG.KillAura,
         Callback = function(v) CONFIG.KillAura = v end }, flag("KillAura"))
+    if ui.keybind then
+        ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("KillAura_KB"),
+            Toggle = function()
+                CONFIG.KillAura = not CONFIG.KillAura
+                syncToggle(flag("KillAura"), CONFIG.KillAura)
+            end })
+    end
     L:Dropdown({ Name = "Mode", Options = { "Hook", "PacketAuto", "LegitAuto" },
         Default = CONFIG.KillAuraMode or "Hook",
         Callback = function(v) CONFIG.KillAuraMode = v end }, flag("Mode"))
+    L:SubLabel({ Text = "Hook = redirect your own swings; PacketAuto/LegitAuto = auto swing." })
     L:Slider({ Name = "Distance", Default = CONFIG.KillAuraDistance, Minimum = 5, Maximum = 60,
         Precision = 0, Suffix = " studs", Callback = function(v) CONFIG.KillAuraDistance = v end }, flag("Distance"))
     L:Slider({ Name = "FOV", Default = CONFIG.KillAuraFOV, Minimum = 30, Maximum = 360,
-        Precision = 0, Callback = function(v) CONFIG.KillAuraFOV = v end }, flag("FOV"))
+        Precision = 0, Suffix = "°", Callback = function(v) CONFIG.KillAuraFOV = v end }, flag("FOV"))
     L:Slider({ Name = "Prediction", Default = CONFIG.KillAuraPredictMs, Minimum = 0, Maximum = 600,
         Precision = 0, Suffix = " ms", Callback = function(v) CONFIG.KillAuraPredictMs = v end }, flag("PredictMs"))
     L:Slider({ Name = "Swing Cooldown", Default = CONFIG.KillAuraSwingCd, Minimum = 0.1, Maximum = 1.5,
         Precision = 2, Suffix = " s", Callback = function(v) CONFIG.KillAuraSwingCd = v end }, flag("SwingCd"))
+    L:Slider({ Name = "Reach", Default = CONFIG.KillAuraReach, Minimum = 5, Maximum = 999,
+        Precision = 0, Suffix = " studs", Callback = function(v) CONFIG.KillAuraReach = v end }, flag("Reach"))
+    L:Slider({ Name = "Switch Margin", Default = CONFIG.KillAuraSwitchMargin, Minimum = 0, Maximum = 10,
+        Precision = 1, Suffix = " studs", Callback = function(v) CONFIG.KillAuraSwitchMargin = v end }, flag("SwitchMargin"))
     L:Dropdown({ Name = "Force Bone", Options = { "Auto", "Head", "UpperTorso", "LowerTorso" },
         Default = CONFIG.KillAuraForceBone or "Head",
         Callback = function(v) CONFIG.KillAuraForceBone = (v == "Auto") and nil or v end }, flag("ForceBone"))
+    L:Toggle({ Name = "No Wall Check", Default = CONFIG.KillAuraNoWallCheck,
+        Callback = function(v) CONFIG.KillAuraNoWallCheck = v end }, flag("NoWall"))
     L:Button({ Name = "Swing Once", Callback = function() pcall(_M.swingOnce) end }, flag("SwingOnce"))
 
-    local R = tab:Section({ Side = "Right" })
+    -- ── Right: melee mods ──────────────────────────────────────────────────
+    local R = tab:Section({ Name = "Melee Mods", Side = "Right" })
     R:Header({ Name = "Melee Mods (client)" })
     R:Slider({ Name = "Anim Speed", Default = CONFIG.MeleeAnimSpeed, Minimum = 1, Maximum = 5,
         Precision = 1, Suffix = "x", Callback = function(v) CONFIG.MeleeAnimSpeed = v end }, flag("AnimSpeed"))
@@ -2175,16 +2199,56 @@ function _M.buildUI(ui)
         Callback = function(v) CONFIG.MeleeSwingSpeed = v end }, flag("SwingSpeedOn"))
     R:Slider({ Name = "Swing Speed Mult", Default = CONFIG.MeleeSwingSpeedMult, Minimum = 1, Maximum = 5,
         Precision = 1, Suffix = "x", Callback = function(v) CONFIG.MeleeSwingSpeedMult = v end }, flag("SwingSpeedMult"))
-    R:Divider()
-    R:Header({ Name = "Visuals" })
-    R:Toggle({ Name = "Target Ring", Default = CONFIG.KillAuraViz,
+    R:Toggle({ Name = "Scale Slash→Impact Delay", Default = CONFIG.MeleeSwingScaleDelay,
+        Callback = function(v) CONFIG.MeleeSwingScaleDelay = v end }, flag("SwingScaleDelay"))
+    R:SubLabel({ Text = "Client-only. Server packets are unchanged." })
+
+    -- ── Right #2: visuals ──────────────────────────────────────────────────
+    local V = tab:Section({ Name = "Visuals", Side = "Right" })
+    V:Header({ Name = "Target Ring" })
+    V:Toggle({ Name = "Target Ring", Default = CONFIG.KillAuraViz,
         Callback = function(v) CONFIG.KillAuraViz = v end }, flag("Viz"))
-    R:Toggle({ Name = "Packet Lock-on HUD", Default = CONFIG.KillAuraPacketViz,
-        Callback = function(v) CONFIG.KillAuraPacketViz = v end }, flag("PacketViz"))
-    R:Colorpicker({ Name = "Ring Color A", Default = CONFIG.KillAuraVizColorA,
+    V:Colorpicker({ Name = "Ring Color A", Default = CONFIG.KillAuraVizColorA,
         Callback = function(c) CONFIG.KillAuraVizColorA = c end }, flag("VizColorA"))
-    R:Colorpicker({ Name = "Ring Color B", Default = CONFIG.KillAuraVizColorB,
+    V:Colorpicker({ Name = "Ring Color B", Default = CONFIG.KillAuraVizColorB,
         Callback = function(c) CONFIG.KillAuraVizColorB = c end }, flag("VizColorB"))
+    V:Slider({ Name = "Ring Radius", Default = CONFIG.KillAuraVizRadius, Minimum = 0.5, Maximum = 5,
+        Precision = 1, Callback = function(v) CONFIG.KillAuraVizRadius = v end }, flag("VizRadius"))
+    V:Slider({ Name = "Ring Segments", Default = CONFIG.KillAuraVizSegments, Minimum = 8, Maximum = 48,
+        Precision = 0, Callback = function(v) CONFIG.KillAuraVizSegments = v end }, flag("VizSeg"))
+    V:Toggle({ Name = "Ring Spin", Default = CONFIG.KillAuraVizSpin,
+        Callback = function(v) CONFIG.KillAuraVizSpin = v end }, flag("VizSpin"))
+    V:Slider({ Name = "Spin Speed", Default = CONFIG.KillAuraVizSpinSpeed, Minimum = 0, Maximum = 6,
+        Precision = 1, Callback = function(v) CONFIG.KillAuraVizSpinSpeed = v end }, flag("VizSpinSpeed"))
+    V:Divider()
+    V:Header({ Name = "Lock-on HUD" })
+    V:Toggle({ Name = "Packet Lock-on HUD", Default = CONFIG.KillAuraPacketViz,
+        Callback = function(v) CONFIG.KillAuraPacketViz = v end }, flag("PacketViz"))
+    V:Colorpicker({ Name = "HUD Color", Default = CONFIG.KillAuraPacketVizColor,
+        Callback = function(c) CONFIG.KillAuraPacketVizColor = c end }, flag("PVizColor"))
+    V:Colorpicker({ Name = "Hit Flash Color", Default = CONFIG.KillAuraPacketVizFlash,
+        Callback = function(c) CONFIG.KillAuraPacketVizFlash = c end }, flag("PVizFlash"))
+    V:Slider({ Name = "HUD Thickness", Default = CONFIG.KillAuraPacketVizThick, Minimum = 1, Maximum = 5,
+        Precision = 1, Callback = function(v) CONFIG.KillAuraPacketVizThick = v end }, flag("PVizThick"))
+    V:Toggle({ Name = "Shockwave on Hit", Default = CONFIG.KillAuraPacketVizShock,
+        Callback = function(v) CONFIG.KillAuraPacketVizShock = v end }, flag("PVizShock"))
+
+    -- ── Debug subsection ───────────────────────────────────────────────────
+    if dtab then
+        local D = dtab:Section({ Name = "Kill Aura", Side = "Left" })
+        D:Header({ Name = "Kill Aura — Timing" })
+        D:Slider({ Name = "Tick Interval", Default = CONFIG.KillAuraTickInterval, Minimum = 0.05, Maximum = 1,
+            Precision = 2, Suffix = " s", Callback = function(v) CONFIG.KillAuraTickInterval = v end }, flag("DbgTick"))
+        D:Slider({ Name = "Pick Interval", Default = CONFIG.KillAuraPickInterval, Minimum = 0.05, Maximum = 1,
+            Precision = 2, Suffix = " s", Callback = function(v) CONFIG.KillAuraPickInterval = v end }, flag("DbgPick"))
+        D:Slider({ Name = "Context Cache", Default = CONFIG.KillAuraCtxCacheSec, Minimum = 0.5, Maximum = 5,
+            Precision = 1, Suffix = " s", Callback = function(v) CONFIG.KillAuraCtxCacheSec = v end }, flag("DbgCtx"))
+        D:Divider()
+        D:Header({ Name = "Kill Aura — Diagnostics" })
+        D:SubLabel({ Text = "Prints target/context state to the console." })
+        D:Button({ Name = "Dump State (console)", Callback = function() task.spawn(function() dumpDebug(false) end) end }, flag("DbgDump"))
+        D:Button({ Name = "Dump + Test Swing", Callback = function() task.spawn(function() dumpDebug(true) end) end }, flag("DbgDumpSwing"))
+    end
 end
 
 _M.Bridge            = Bridge
