@@ -199,6 +199,12 @@ local SA_CONFIG = {
 	TracerColor = Color3.fromRGB(255, 90, 35),
 	TracerTransparency = 0,
 	AimLineEnabled = false,
+	TargetRingEnabled = false,
+	TargetRingColor = Color3.fromRGB(255, 60, 60),
+	TargetRingRadius = 1.2,       -- studs radius around the bone
+	TargetRingSegments = 32,      -- smoothness of the ring
+	TargetRingThickness = 1.5,
+	TargetRingTransparency = 0.2,
 	AimVisualStyle = "Swastika",
 	AimVisualScale = 0.5,
 	HitSound = true,
@@ -1187,7 +1193,7 @@ function Bridge.scanGcForFireServerClosure()
 end
 
 function Bridge.hookDischargeClosure()
-	-- ��тключено: дубли����ует namecall FireServer patch.
+	-- ����тключено: дубли����ует namecall FireServer patch.
 	return false
 end
 
@@ -2004,6 +2010,11 @@ function Bridge.hideAimViz(reason, detail)
 		if viz.btLine then viz.btLine.Visible = false end
 		if viz.btText then viz.btText.Visible = false end
 		if viz.aimLine then viz.aimLine.Visible = false end
+		if viz.ringSegs then
+			for _, seg in ipairs(viz.ringSegs) do
+				if seg then seg.Visible = false end
+			end
+		end
 		if viz.boxLines then
 			for _, l in ipairs(viz.boxLines) do l.Visible = false end
 		end
@@ -2213,6 +2224,55 @@ function Bridge.updateAimVisuals()
 		Bridge.showDrawing(al, reticleAlpha * 0.7)
 	elseif viz.aimLine then
 		viz.aimLine.Visible = false
+	end
+
+	-- TargetRing: 3-D circle drawn around the locked bone projected onto screen
+	if CONFIG.TargetRingEnabled and target and target:IsA("BasePart") then
+		local N = math.clamp(math.floor(CONFIG.TargetRingSegments or 32), 6, 64)
+		local r = CONFIG.TargetRingRadius or 1.2
+		local ringCol = CONFIG.TargetRingColor or Color3.fromRGB(255, 60, 60)
+		local ringAlpha = 1 - (CONFIG.TargetRingTransparency or 0.2)
+		local ringTh = CONFIG.TargetRingThickness or 1.5
+		viz.ringSegs = viz.ringSegs or {}
+		-- ensure N lines exist
+		for i = #viz.ringSegs + 1, N do
+			local l = Drawing.new("Line"); l.Thickness = ringTh; l.ZIndex = 44
+			viz.ringSegs[i] = l
+		end
+		-- hide extra lines if N shrank
+		for i = N + 1, #viz.ringSegs do
+			if viz.ringSegs[i] then viz.ringSegs[i].Visible = false end
+		end
+		-- compute a right/up axis perpendicular to camera→target
+		local toTgt = (target.Position - cam.CFrame.Position)
+		local right = toTgt:Cross(Vector3.yAxis)
+		if right.Magnitude < 0.01 then right = toTgt:Cross(Vector3.xAxis) end
+		right = right.Unit * r
+		local up = toTgt.Unit:Cross(right.Unit) * r
+		local TWO_PI = math.pi * 2
+		for i = 1, N do
+			local a0 = (i - 1) / N * TWO_PI
+			local a1 = i       / N * TWO_PI
+			local p0 = target.Position + right * math.cos(a0) + up * math.sin(a0)
+			local p1 = target.Position + right * math.cos(a1) + up * math.sin(a1)
+			local s0, vis0 = cam:WorldToViewportPoint(p0)
+			local s1, vis1 = cam:WorldToViewportPoint(p1)
+			local seg = viz.ringSegs[i]
+			if seg then
+				if vis0 and vis1 and s0.Z > 0 and s1.Z > 0 then
+					seg.From  = Vector2.new(s0.X, s0.Y)
+					seg.To    = Vector2.new(s1.X, s1.Y)
+					seg.Color = ringCol
+					Bridge.showDrawing(seg, ringAlpha)
+				else
+					seg.Visible = false
+				end
+			end
+		end
+	elseif viz.ringSegs then
+		for _, seg in ipairs(viz.ringSegs) do
+			if seg then seg.Visible = false end
+		end
 	end
 
 	-- Клиентская линия: muzzle → aim (predict)
@@ -3258,7 +3318,13 @@ function Bridge.clearAimVisuals()
 	Bridge.clearBulletTracers()
 	if State.aimViz then
 		pcall(function()
-			for _, key in ipairs({ "crossH", "crossV", "dot", "ring", "ringOuter", "line", "label", "aimLine" }) do
+			if viz.ringSegs then
+			for _, seg in ipairs(viz.ringSegs) do
+				if seg then pcall(function() seg:Remove() end) end
+			end
+			viz.ringSegs = nil
+		end
+		for _, key in ipairs({ "crossH", "crossV", "dot", "ring", "ringOuter", "line", "label", "aimLine" }) do
 				local d = State.aimViz[key]
 				if d then d:Remove() end
 			end
@@ -4227,6 +4293,9 @@ function SilentAim.buildUI(ui)
 	local tabGM = ui.tabs and ui.tabs.GunMods
 	local ntf = ui.notify or function() end
 	-- Sync a MacLib toggle's visual state with its CONFIG value (used by keybinds).
+	-- FIX double-notify: syncToggle re-triggers the MacLib Toggle Callback which
+	-- also calls ntf(). Block Toggle Callbacks during programmatic state sync.
+	local _notifyBlocked = false
 	local function syncToggle(f, v)
 		local ML = ui.MacLib
 		if ML and ML.Options and ML.Options[f] then
@@ -4241,13 +4310,17 @@ function SilentAim.buildUI(ui)
 		L:Toggle({ Name = "Enabled", Default = CONFIG.SilentAim,
 			Callback = function(v)
 				CONFIG.SilentAim = v
-				ntf("Silent Aim", v and "Enabled" or "Disabled")
+				if not _notifyBlocked then
+					ntf("Silent Aim", v and "Enabled" or "Disabled")
+				end
 			end }, flag("SilentAim"))
 		if ui.keybind then
 			ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("SilentAim_KB"),
 				Toggle = function()
 					CONFIG.SilentAim = not CONFIG.SilentAim
+					_notifyBlocked = true
 					syncToggle(flag("SilentAim"), CONFIG.SilentAim)
+					_notifyBlocked = false
 					ntf("Silent Aim", CONFIG.SilentAim and "Enabled" or "Disabled")
 				end })
 		end
@@ -4370,6 +4443,24 @@ function SilentAim.buildUI(ui)
 				CONFIG.AimLineEnabled = v
 				ntf("Aim Line", v and "Enabled" or "Disabled")
 			end }, flag("AimLine"))
+		V:Divider()
+		V:Header({ Name = "Target Ring" })
+		V:Toggle({ Name = "Enabled", Default = CONFIG.TargetRingEnabled,
+			Callback = function(v)
+				CONFIG.TargetRingEnabled = v
+				ntf("Target Ring", v and "Enabled" or "Disabled")
+			end }, flag("TargetRing"))
+		V:Colorpicker({ Name = "Ring Color", Default = CONFIG.TargetRingColor or Color3.fromRGB(255, 60, 60),
+			Callback = function(c) CONFIG.TargetRingColor = c end }, flag("RingColor"))
+		V:Slider({ Name = "Ring Radius", Default = math.floor((CONFIG.TargetRingRadius or 1.2) * 10),
+			Minimum = 2, Maximum = 30, Precision = 0,
+			Callback = function(v) CONFIG.TargetRingRadius = v / 10 end }, flag("RingRadius"))
+		V:Slider({ Name = "Ring Thickness", Default = math.floor((CONFIG.TargetRingThickness or 1.5) * 2),
+			Minimum = 1, Maximum = 10, Precision = 0,
+			Callback = function(v) CONFIG.TargetRingThickness = v / 2 end }, flag("RingThick"))
+		V:Slider({ Name = "Ring Transparency", Default = math.floor((CONFIG.TargetRingTransparency or 0.2) * 100),
+			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+			Callback = function(v) CONFIG.TargetRingTransparency = v / 100 end }, flag("RingTransp"))
 		V:Toggle({ Name = "Swastika RGB", Default = CONFIG.SwastikaRGB,
 			Callback = function(v) CONFIG.SwastikaRGB = v end }, flag("SwasRGB"))
 		V:Toggle({ Name = "Muzzle Visual", Default = CONFIG.MuzzleVisual,
