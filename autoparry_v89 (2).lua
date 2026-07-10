@@ -140,6 +140,7 @@ local Config = {
 	ExposedEscapeDodge = true,
 	ExposedDodgeWindow = 0.28,
 	DashSpeed     = 30,
+	MaxHeightDiff = 12,   -- [module] ignore attackers whose Y differs by more than this (different floor/level)
 	DashDuration  = 0.20,
 	DodgeConfirm  = 0.18,
 	DodgeCenter   = true,
@@ -657,6 +658,12 @@ local function willHitMe(th)
 	if not myHRP then return Config.FilterFailSafe end
 	if not aHRP or not aHRP.Parent then return false end
 
+	-- [module] VERTICAL GATE: the hitbox math below is flat (X/Z only), so an attacker
+	-- standing on another floor directly above/below used to register as point-blank.
+	-- Reject anyone whose vertical offset exceeds MaxHeightDiff before any 2D test.
+	local maxDY = Config.MaxHeightDiff or 12
+	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > maxDY then return false end
+
 	-- [V88] LATCH: как только закоммиченный свинг хоть раз признан угрозой (в упор, лицом
 	-- или через доворот-на-нас), держим true до конца жизни угрозы. Это чинит финты с
 	-- разворотом: враг бьёт спиной и доворачивается — раньше поздний кадр с "смотрит мимо"
@@ -1026,7 +1033,7 @@ local function hitTimelineBase(info, combo)
 	return base + WINDUP_EXTRA
 end
 
--- [V71] реальная задержка = base / attackSpeedMult(attacker). Это ровно то, что
+-- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��вно то, что
 -- делает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
 -- база подтянется из её же конфига, а скорость — из роста атакующего.
@@ -2384,15 +2391,19 @@ local function hookAnimator(animator)
 	if hooked[animator] then return end
 	hooked[animator] = true
 	animator.AnimationPlayed:Connect(function(track)
-		if not Config.Enabled then return end
 		local anim = track and track.Animation
 		if not anim then return end
 		local id = cachedAnimId(anim)
 		if not id then return end
 		local rec = cachedOwner(animator)
+		-- [module] Attack Desync is a SEPARATE feature from AutoParry. Desyncing YOUR OWN
+		-- swings (delay/idlemask own-track handling) must run even when AutoParry (the
+		-- parry/dodge brain) is fully OFF. Do it BEFORE the Enabled gate below.
 		if Config.DesyncAttack and AnimLib.desyncOwnTrack and rec.isLocal then
 			AnimLib.desyncOwnTrack(track, id, animator)
 		end
+		-- Everything past here is parry logic and requires AutoParry to be enabled.
+		if not Config.Enabled then return end
 		if not rec.enemy then return end
 		-- [V85] защитная анимация врага (блок/парри/perfect) — это НЕ входящая атака, не парируем.
 		if BlockIds[id] then return end
@@ -3003,7 +3014,7 @@ local function toggleDesyncTest()
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end) end
 		-- [V82] интервал переигрывания = длина анимации атаки (fallback 0.5с). Зацикленный
 		-- трек остаётся IsPlaying=true навсегда → AnimationPlayed НЕ срабатывает повторно, и
-		-- у наблюдателя стейт "протухает" через длину анимации. Поэтому раз в ~длину делаем
+		-- у наблюдателя стейт "протухает" через длину анимации. По��тому раз в ~длину делаем
 		-- ЧИСТЫЙ Stop+Play → свежи�� сетевой AnimationPlayed → атака возобновляется снова и снова.
 		local replayEvery = 0.5
 		pcall(function() local L = _testTrack.Length; if type(L) == "number" and L > 0.15 then replayEvery = L * 0.92 end end)
@@ -3888,7 +3899,9 @@ end
 local function vizUpdate(dt)
 	if not LinePool.ok then return end
 	local cam = Workspace.CurrentCamera
-	if not (Config.ShowVisuals and cam) then vizHideAll(); return end
+	-- [module] AutoParry visuals belong to AutoParry: hide them the instant the feature
+	-- is disabled, not just when ShowVisuals is off.
+	if not (Config.Enabled and Config.ShowVisuals and cam) then vizHideAll(); return end
 	Viz.t += dt
 
 	LinePool:begin(); TriPool:begin()
@@ -3937,7 +3950,10 @@ Players.PlayerAdded:Connect(function(plr)
 	end)
 end)
 task.spawn(function()
-	while true do task.wait(3); if Config.Enabled then scanAnimators() end end
+	-- [module] Rescan always: hooking is idempotent (dedup via `hooked`) and the parry
+	-- logic stays gated inside AnimationPlayed. This keeps Attack Desync working on your
+	-- own animator even while AutoParry is disabled.
+	while true do task.wait(3); scanAnimators() end
 end)
 
 task.spawn(function() pcall(installDesyncSelfVerify) end)
@@ -3966,10 +3982,11 @@ return function(_Lib, _Core)
 			if uiReady then pcall(ctx.notify, title, body) end
 		end
 
-		-- ── notify-EXACTLY-ONCE boolean feature (toggle + optional keybind) ──────
+		-- ── notify-EXACTLY-ONCE boolean feature (Header + "Enabled" toggle + Keybind) ──
 		-- Re-entrancy guard makes the notify fire once regardless of whether MacLib's
-		-- UpdateState re-invokes the toggle Callback. Keybind flips the SAME commit
-		-- path, so PC/mobile FAB and the on-screen toggle stay in sync with one notify.
+		-- UpdateState re-invokes the toggle Callback. The Keybind flips the SAME commit
+		-- path, so PC / mobile FAB and the on-screen toggle stay in sync with one notify.
+		-- Call this right after the section's Header — the toggle is always named "Enabled".
 		local function feature(section, o)
 			local guard, togEl = false, nil
 			local function commit(val)
@@ -3990,15 +4007,16 @@ return function(_Lib, _Core)
 			}, ctx.flag(o.Flag))
 			if o.Desc then section:SubLabel({ Text = o.Desc }) end
 			-- Unbound keybind (no default key). Works on PC + mobile FAB, persisted.
+			-- Named simply "Keybind" per request.
 			ctx.keybind(section, {
-				Name = o.Title .. " Toggle",
+				Name = "Keybind",
 				Flag = ctx.flag(o.Flag .. "_KB"),
 				Toggle = function() commit(not o.get()) end,
 			})
 			return { commit = commit }
 		end
 
-		-- Generic bool toggle WITHOUT the "Enabled" name (secondary options).
+		-- Secondary bool toggle (its own label, notifies Enabled/Disabled once).
 		local function boolToggle(section, name, title, get, set)
 			local guard, togEl = false, nil
 			togEl = section:Toggle({
@@ -4012,201 +4030,237 @@ return function(_Lib, _Core)
 			return togEl
 		end
 
+		-- Slider WITHOUT any notify (sliders never notify, per request).
+		local function slider(section, o)
+			section:Slider({
+				Name = o.Name, Default = o.Default, Minimum = o.Min, Maximum = o.Max,
+				Precision = o.Precision or 0, Suffix = o.Suffix,
+				Callback = o.Callback,
+			}, ctx.flag(o.Flag))
+		end
+
 		-- ═══════════════════ TAB: AutoParry ═══════════════════
 		local AP = ctx.tabs.AutoParry
-		local apL = AP:Section({ Side = "Left" })
-		local apR = AP:Section({ Side = "Right" })
 
-		-- Main
-		apL:Header({ Name = "AutoParry" })
-		feature(apL, {
+		-- Section 1 — AutoParry core (own box)
+		local apMain = AP:Section({ Side = "Left" })
+		apMain:Header({ Name = "AutoParry" })
+		feature(apMain, {
 			Title = "AutoParry", Flag = "AP_Enabled",
 			get = function() return Config.Enabled end,
 			set = function(v)
 				Config.Enabled = v
 				if not v then pcall(releaseBlock); pcall(vizHideAll) end
 			end,
-			Desc = "Auto-blocks/parries and dodges incoming attacks. Keybind works on PC and mobile.",
+			Desc = "Auto-blocks / parries and dodges incoming attacks. Keybind works on PC and mobile.",
 		})
-
-		apL:Divider()
-		local ddMode = apL:Dropdown({
+		apMain:Divider()
+		apMain:Dropdown({
 			Name = "Accuracy Mode",
 			Options = { "Low", "High" },
 			Default = Config.AccuracyMode or "Low",
 			Callback = function(v)
 				Config.AccuracyMode = v
-				notify("Accuracy Mode", v)
+				notify("Accuracy Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("AP_AccuracyMode"))
-		apL:SubLabel({ Text = "Low = wider reaction cone, trusts point-blank hits (safer vs feints). High = stricter facing checks, fewer wasted blocks." })
+		apMain:SubLabel({ Text = "Low = wider reaction cone, trusts point-blank hits (safer vs feints). High = stricter facing checks, fewer wasted blocks." })
+		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
+			Min = 8, Max = 64, Suffix = " studs", Callback = function(v) Config.Range = v end })
+		apMain:SubLabel({ Text = "Max distance at which enemy attacks are considered." })
+		slider(apMain, { Name = "Dodge Reaction (lead)", Flag = "AP_DodgeLead",
+			Default = math.floor((Config.DodgeLead or 0.10) * 1000), Min = 40, Max = 300,
+			Suffix = " ms", Callback = function(v) Config.DodgeLead = v / 1000 end })
+		slider(apMain, { Name = "Dodge Speed", Flag = "AP_DashSpeed", Default = Config.DashSpeed or 30,
+			Min = 10, Max = 90, Suffix = " studs/s", Callback = function(v) Config.DashSpeed = v end })
+		apMain:SubLabel({ Text = "Movement speed of the dodge dash itself — higher = you travel farther/faster out of the hitbox." })
+		slider(apMain, { Name = "i-Frame Window", Flag = "AP_IFrame",
+			Default = math.floor((Config.IFrameDur or 0.30) * 1000), Min = 120, Max = 500,
+			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
+		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
+			Min = 4, Max = 40, Suffix = " studs", Callback = function(v) Config.MaxHeightDiff = v end })
+		apMain:SubLabel({ Text = "Ignore attackers whose vertical offset is larger than this (players on another floor/level)." })
 
-		apL:Slider({
-			Name = "Range", Default = Config.Range or 32, Minimum = 8, Maximum = 64,
-			Precision = 0, Suffix = " studs",
-			Callback = function(v) Config.Range = v end,
-			onInputComplete = function(v) notify("Range", tostring(v) .. " studs") end,
-		}, ctx.flag("AP_Range"))
-		apL:SubLabel({ Text = "Max distance at which enemy attacks are considered." })
-
-		apL:Slider({
-			Name = "Dodge Speed (lead)", Default = math.floor((Config.DodgeLead or 0.10) * 1000),
-			Minimum = 40, Maximum = 300, Precision = 0, Suffix = " ms",
-			Callback = function(v) Config.DodgeLead = v / 1000 end,
-			onInputComplete = function(v) notify("Dodge Speed", tostring(v) .. " ms lead") end,
-		}, ctx.flag("AP_DodgeLead"))
-		apL:Slider({
-			Name = "i-Frame Window", Default = math.floor((Config.IFrameDur or 0.30) * 1000),
-			Minimum = 120, Maximum = 500, Precision = 0, Suffix = " ms",
-			Callback = function(v) Config.IFrameDur = v / 1000 end,
-			onInputComplete = function(v) notify("i-Frame Window", tostring(v) .. " ms") end,
-		}, ctx.flag("AP_IFrame"))
-
-		-- Dodge & Heavy
-		apR:Header({ Name = "Dodge & Heavy" })
-		boolToggle(apR, "Dodge Heavy Attacks", "Dodge Heavy", function() return Config.DodgeHeavy end, function(v) Config.DodgeHeavy = v end)
-		apR:SubLabel({ Text = "Dodge M2 / skill lunges instead of trying to block them." })
-		boolToggle(apR, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
-		apR:Slider({
-			Name = "Heavy Trust Range", Default = Config.HeavyTrustRange or 14,
-			Minimum = 6, Maximum = 24, Precision = 0, Suffix = " studs",
-			Callback = function(v) Config.HeavyTrustRange = v end,
-			onInputComplete = function(v) notify("Heavy Trust Range", tostring(v) .. " studs") end,
-		}, ctx.flag("AP_HeavyRange"))
-
-		-- Must-Dodge attack list (Style / Heavy). These are grabs/slams that pierce
-		-- block — only an i-frame dodge (backward) saves you.
-		local STYLES = {
-			"Default","Basic","Boxing","Bulky","Dirty","Hakari","Karate","Kure",
-			"MuayThai","SkyGaoLang","Variant","Taekwondo","Wild","WingChun",
-			"Wrestling","Capoeira","Slugger",
-		}
-		local mdOptions, mdDefault = {}, {}
-		for _, s in ipairs(STYLES) do
-			mdOptions[#mdOptions + 1] = s .. " / Heavy"
-			if Config.MustDodgeStyles and Config.MustDodgeStyles[s:lower()] then
-				mdDefault[#mdDefault + 1] = s .. " / Heavy"
-			end
-		end
-		apR:Dropdown({
-			Name = "Must-Dodge Attacks", Options = mdOptions, Multi = true, Search = true,
-			Default = mdDefault,
-			Callback = function(sel)
-				local t, n = {}, 0
-				for label, on in pairs(sel) do
-					if on then
-						local st = label:gsub(" / Heavy", ""):lower()
-						t[st] = { M2 = true }; n += 1
-					end
+		-- Section 2 — Dodge & Heavy (own box, own Enabled)
+		local apDodge = AP:Section({ Side = "Right" })
+		apDodge:Header({ Name = "Dodge & Heavy" })
+		feature(apDodge, {
+			Title = "Dodge & Heavy", Flag = "AP_DodgeHeavy",
+			get = function() return Config.DodgeHeavy end,
+			set = function(v) Config.DodgeHeavy = v end,
+			Desc = "Dodge M2 / skill lunges instead of trying to block them.",
+		})
+		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
+		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
+			Min = 6, Max = 24, Suffix = " studs", Callback = function(v) Config.HeavyTrustRange = v end })
+		do
+			local STYLES = {
+				"Default","Basic","Boxing","Bulky","Dirty","Hakari","Karate","Kure",
+				"MuayThai","SkyGaoLang","Variant","Taekwondo","Wild","WingChun",
+				"Wrestling","Capoeira","Slugger",
+			}
+			local mdOptions, mdDefault = {}, {}
+			for _, s in ipairs(STYLES) do
+				mdOptions[#mdOptions + 1] = s .. " / Heavy"
+				if Config.MustDodgeStyles and Config.MustDodgeStyles[s:lower()] then
+					mdDefault[#mdDefault + 1] = s .. " / Heavy"
 				end
-				Config.MustDodgeStyles = t
-				notify("Must-Dodge", n .. " style(s) set to dodge-back")
-			end,
-		}, ctx.flag("AP_MustDodge"))
-		apR:SubLabel({ Text = "Selected styles' Heavy (M2) are unblockable grabs — dodged BACKWARD into i-frames instead of blocked." })
+			end
+			apDodge:Dropdown({
+				Name = "Must-Dodge Attacks", Options = mdOptions, Multi = true, Search = true,
+				Default = mdDefault,
+				Callback = function(sel)
+					local t, n = {}, 0
+					for label, on in pairs(sel) do
+						if on then
+							local st = label:gsub(" / Heavy", ""):lower()
+							t[st] = { M2 = true }; n += 1
+						end
+					end
+					Config.MustDodgeStyles = t
+					notify("Must-Dodge", "Selected: " .. n .. " style(s)")
+				end,
+			}, ctx.flag("AP_MustDodge"))
+			apDodge:SubLabel({ Text = "Selected styles' Heavy (M2) are unblockable grabs — dodged BACKWARD into i-frames instead of blocked." })
+		end
 
-		-- Boxing Counter
-		apR:Header({ Name = "Boxing Counter" })
-		local bc = feature(apR, {
+		-- Section 3 — Boxing Counter (own box, own Enabled)
+		local apBox = AP:Section({ Side = "Left" })
+		apBox:Header({ Name = "Boxing Counter" })
+		feature(apBox, {
 			Title = "Boxing Counter", Flag = "AP_BoxingCounter",
 			get = function() return Config.BoxingCounter end,
 			set = function(v) Config.BoxingCounter = v end,
 			Desc = "On a boxing Heavy, hard-face the enemy and counter instead of dodging.",
 		})
-		apR:Slider({
-			Name = "Pre-Face Time", Default = Config.BoxingPreFace or 0.5,
-			Minimum = 0.1, Maximum = 1.0, Precision = 2, Suffix = " s",
-			Callback = function(v) Config.BoxingPreFace = v end,
-			onInputComplete = function(v) notify("Pre-Face Time", string.format("%.2f s", v)) end,
-		}, ctx.flag("AP_PreFace"))
-		boolToggle(apR, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
+		slider(apBox, { Name = "Pre-Face Time", Flag = "AP_PreFace", Default = Config.BoxingPreFace or 0.5,
+			Min = 0.1, Max = 1.0, Precision = 2, Suffix = " s", Callback = function(v) Config.BoxingPreFace = v end })
+		boolToggle(apBox, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 
-		-- Visuals
-		local apV = AP:Section({ Side = "Left" })
-		apV:Header({ Name = "Visuals" })
-		boolToggle(apV, "Show Visuals", "Visuals", function() return Config.ShowVisuals end, function(v)
-			Config.ShowVisuals = v
-			if not v then pcall(vizHideAll) end
-		end)
-		apV:SubLabel({ Text = "Range ring + reaction cone drawn around you." })
-		apV:Colorpicker({ Name = "Ring Gradient A", Default = RING_A,
+		-- Section 4 — Visuals (own box, own Enabled)
+		local apVis = AP:Section({ Side = "Right" })
+		apVis:Header({ Name = "Visuals" })
+		feature(apVis, {
+			Title = "Visuals", Flag = "AP_ShowVisuals",
+			get = function() return Config.ShowVisuals end,
+			set = function(v)
+				Config.ShowVisuals = v
+				if not v then pcall(vizHideAll) end
+			end,
+			Desc = "Range ring + reaction cone drawn around you (only while AutoParry is on).",
+		})
+		apVis:Colorpicker({ Name = "Ring Gradient A", Default = RING_A,
 			Callback = function(c) RING_A = c end }, ctx.flag("AP_RingA"))
-		apV:Colorpicker({ Name = "Ring Gradient B", Default = RING_B,
+		apVis:Colorpicker({ Name = "Ring Gradient B", Default = RING_B,
 			Callback = function(c) RING_B = c end }, ctx.flag("AP_RingB"))
-		apV:Colorpicker({ Name = "Safe Cone", Default = CONE_SAFE,
+		apVis:Colorpicker({ Name = "Safe Cone", Default = CONE_SAFE,
 			Callback = function(c) CONE_SAFE = c end }, ctx.flag("AP_ConeSafe"))
-		apV:Colorpicker({ Name = "Hit Cone", Default = CONE_HIT,
+		apVis:Colorpicker({ Name = "Hit Cone", Default = CONE_HIT,
 			Callback = function(c) CONE_HIT = c end }, ctx.flag("AP_ConeHit"))
-		apV:Colorpicker({ Name = "Restrict Ring", Default = RESTRICT_COL,
+		apVis:Colorpicker({ Name = "Restrict Ring", Default = RESTRICT_COL,
 			Callback = function(c) RESTRICT_COL = c end }, ctx.flag("AP_Restrict"))
 
 		-- ═══════════════════ TAB: Desync ═══════════════════
 		local DS = ctx.tabs.Desync
-		local dsL = DS:Section({ Side = "Left" })
-		local dsR = DS:Section({ Side = "Right" })
 
-		-- Desync (the standalone attack-replicate spoof — old "[" test).
-		dsL:Header({ Name = "Desync" })
-		feature(dsL, {
+		-- Section 1 — Desync (standalone attack-replicate spoof, the old "[" test).
+		-- Fully independent of AutoParry and of Attack Desync.
+		local dsSelf = DS:Section({ Side = "Left" })
+		dsSelf:Header({ Name = "Desync" })
+		feature(dsSelf, {
 			Title = "Desync", Flag = "DS_Test",
 			get = function() return DesyncTest.on end,
 			set = function(v)
 				if (DesyncTest.on and true or false) ~= v then pcall(toggleDesyncTest) end
 			end,
-			Desc = "Replicates an attack animation while you actually move — enemies see you attacking, not dodging/running.",
+			Desc = "Continuously replicates an ATTACK animation while you actually move — observers see you attacking, not dodging/running.",
 		})
+		boolToggle(dsSelf, "Client Visible", "Desync Client Visible",
+			function() return Config.DesyncClientVisible end,
+			function(v) Config.DesyncClientVisible = v end)
+		dsSelf:SubLabel({ Text = "On = you also see the decoy attack on your own screen (full weight). Off = decoy is near-invisible to you but still replicates to enemies." })
 
-		-- Attack Desync (the delay/idlemask/prerun engine — old "J").
-		dsR:Header({ Name = "Attack Desync" })
-		feature(dsR, {
+		-- Section 2 — Attack Desync (delay/idlemask/prerun engine, the old "J").
+		-- Works on your swings even with AutoParry OFF.
+		local dsAtk = DS:Section({ Side = "Right" })
+		dsAtk:Header({ Name = "Attack Desync" })
+		feature(dsAtk, {
 			Title = "Attack Desync", Flag = "DS_Attack",
 			get = function() return Config.DesyncAttack end,
 			set = function(v) Config.DesyncAttack = v end,
-			Desc = "Desyncs YOUR swings so enemies mistime their parry against you.",
+			Desc = "Desyncs YOUR swings so enemies mistime their parry. Independent of AutoParry.",
 		})
-		dsR:Dropdown({
+		dsAtk:Dropdown({
 			Name = "Desync Mode", Options = { "delay", "idlemask", "prerun" },
 			Default = Config.DesyncMode or "delay",
 			Callback = function(v)
 				Config.DesyncMode = v
-				notify("Desync Mode", v)
+				pcall(function() if DZ and DZ.applyDesyncMode then DZ.applyDesyncMode() end end)
+				notify("Desync Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("DS_Mode"))
-		dsR:SubLabel({ Text = "delay = hold your swing visual behind the hit. idlemask = enemy sees IDLE while you attack. prerun = fake swing now, real hit delayed." })
-		dsR:Slider({
-			Name = "Desync Delay", Default = Config.DesyncDelayMs or 140,
-			Minimum = 40, Maximum = 400, Precision = 0, Suffix = " ms",
-			Callback = function(v) Config.DesyncDelayMs = v end,
-			onInputComplete = function(v) notify("Desync Delay", tostring(v) .. " ms") end,
-		}, ctx.flag("DS_Delay"))
-		boolToggle(dsR, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
-		boolToggle(dsR, "Apply to M2", "Desync M2", function() return Config.DesyncApplyM2 end, function(v) Config.DesyncApplyM2 = v end)
+		dsAtk:SubLabel({ Text = "delay = hold your swing visual behind the hit. idlemask = enemy sees IDLE while you attack. prerun = fake swing now, real hit delayed." })
+		slider(dsAtk, { Name = "Desync Delay", Flag = "DS_Delay", Default = Config.DesyncDelayMs or 140,
+			Min = 40, Max = 400, Suffix = " ms", Callback = function(v) Config.DesyncDelayMs = v end })
+		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
+		boolToggle(dsAtk, "Apply to M2", "Desync M2", function() return Config.DesyncApplyM2 end, function(v) Config.DesyncApplyM2 = v end)
 
 		-- ═══════════════════ TAB: Debug ═══════════════════
 		local DB = ctx.tabs.Debug
-		local dbL = DB:Section({ Side = "Left" })
-		dbL:Header({ Name = "AutoParry — Anti-Cheat & Info" })
-		dbL:SubLabel({ Text = "Block is UNDIRECTED (OmniBlock): the server's VictimHitboxService only reads Blocking / PerfectBlocking flags on hitbox overlap — it never checks which way you face." })
-		dbL:SubLabel({ Text = "Dodge = TRUE i-frames: the server suppresses ALL incoming damage during IFRAMES / Ragdoll / Downed / UltraInstinct states." })
-		dbL:SubLabel({ Text = "M2 timing is read from the authoritative CombatConfig.GetStyleM2HitboxDelay; the animation 'Hit' marker is used only as a max-safety upper bound." })
-		dbL:SubLabel({ Text = "Attack timing scales with attacker height: mult = 1.15 - clamp((h-0.983)/0.467,0,1)*0.3 (shorter = faster)." })
-		dbL:SubLabel({ Text = "Desync replicates via Roblox's built-in Animator (no attack remote exists at :Play in the dump), so it can't be flagged as a fake remote." })
 
-		local dbR = DB:Section({ Side = "Right" })
-		dbR:Header({ Name = "Status Log" })
-		local statusPara = dbR:Paragraph({ Header = "Recent", Body = "(press Refresh)" })
-		local function refreshStatus()
+		-- Section 1 — Status Log (live, newest-first, formatted)
+		local dbLog = DB:Section({ Side = "Left" })
+		dbLog:Header({ Name = "Status Log" })
+		local statusPara = dbLog:Paragraph({ Header = "Live events", Body = "—" })
+		local function renderStatus()
 			local n = #StatusLog
-			if n == 0 then statusPara:UpdateBody("(empty)"); return end
-			local from = math.max(1, n - 14)
-			local lines = {}
-			for i = from, n do lines[#lines + 1] = StatusLog[i] end
-			statusPara:UpdateBody(table.concat(lines, "\n"))
+			if n == 0 then statusPara:UpdateBody("No events yet."); return end
+			local shown = math.min(16, n)
+			local out = { ("Showing %d of %d (newest first):"):format(shown, n), "" }
+			for i = n, n - shown + 1, -1 do
+				out[#out + 1] = "• " .. tostring(StatusLog[i])
+			end
+			statusPara:UpdateBody(table.concat(out, "\n"))
 		end
-		dbR:Button({ Name = "Refresh Status", Callback = refreshStatus })
-		dbR:Button({ Name = "Clear Status", Callback = function()
-			table.clear(StatusLog); statusPara:UpdateBody("(empty)")
+		renderStatus()
+		dbLog:Button({ Name = "Refresh", Callback = renderStatus })
+		dbLog:Button({ Name = "Clear", Callback = function()
+			table.clear(StatusLog); statusPara:UpdateBody("No events yet.")
 		end })
+		-- Light auto-refresh so the log actually feels live.
+		task.spawn(function()
+			while statusPara do
+				task.wait(1.5)
+				pcall(renderStatus)
+			end
+		end)
+
+		-- Section 2 — Diagnostics (Save AutoParry diag + Copy)
+		local dbDiag = DB:Section({ Side = "Right" })
+		dbDiag:Header({ Name = "Diagnostics" })
+		local copyDiag = false
+		dbDiag:Button({
+			Name = "Save AutoParry diag",
+			Callback = function()
+				local body  = summary() .. "\n\n" .. table.concat(DiagLog, "\n") .. "\n"
+				local fname = ("autoparry_diag_%d.txt"):format(os.time() % 1000000)
+				local wrote = pcall(function() if writefile then writefile(fname, body) end end) and (writefile ~= nil)
+				if copyDiag and type(setclipboard) == "function" then
+					pcall(setclipboard, body)      -- Copy toggle: full log text → clipboard
+				end
+				if wrote then
+					notify("Diagnostics", (copyDiag and "Saved + copied: " or "Saved: ") .. fname)
+				elseif copyDiag and type(setclipboard) == "function" then
+					notify("Diagnostics", "writefile unavailable — copied log to clipboard")
+				else
+					notify("Diagnostics", "writefile/clipboard unavailable")
+				end
+			end,
+		})
+		boolToggle(dbDiag, "Copy", "Diag Copy",
+			function() return copyDiag end,
+			function(v) copyDiag = v end)
+		dbDiag:SubLabel({ Text = "Save writes the full diagnostic (summary + event log) to a file. With Copy on, the same text is also copied to your clipboard." })
 
 		-- Everything built; allow notifies now (initial element Callbacks are done).
 		task.defer(function() uiReady = true end)
