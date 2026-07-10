@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -243,7 +241,7 @@ local Config = {
 	BoxingCounterSolo = true,
 
 	-- [V62] ГИБРИД мультибоя: перфектим ближайшего, остальным держим guard
-	-- непрерывно (нулевые дыры = нулевые полные хиты). holdUntil тянется по
+	-- непрерывно (нулевые дыры = нулевые полные ��иты). holdUntil тянется по
 	-- самому дальнему угрожающему контакту в кластере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
@@ -737,7 +735,7 @@ local function willHitMe(th)
 	-- давал false ВЕСЬ путь → "never-in-hitbox" NO-PRESS, следом Ragdoll и каскад на
 	-- остальных атакующих (отсюда и «не справляется с мультиатаками»). Тяжёлые пропускать
 	-- нельзя (их не перевзвести повторным блоком): если враг в расширенном радиусе И либо
-	-- смотрит примерно на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
+	-- смотрит примерн�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
 	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
 	-- ненаправленный), а пропущенный хэви = проигранный размен.
 	if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
@@ -1581,7 +1579,7 @@ local function refreshContact(th)
 
 		-- [V66] измеряем РЕАЛЬНУЮ скорость прогресса анимации (units анимации в
 		-- секунду ре��льного времени) через EMA. У честной атаки ≈ track.Speed;
-		-- у придержанной падает к ~0. По ней и считаем реальный контакт.
+		-- у придержанной падает к ~0. По ней и считаем реал��ный контакт.
 		local lastTP    = th.lastTP or th.initTP
 		local lastClock = th.lastTPClock or th.detectClock
 		local dtReal    = now - lastClock
@@ -1905,9 +1903,12 @@ local function schedulerStep(now)
 			-- [V69] при ненаправленном блоке угроза, вошедшая в окно, покрыта поднятым
 			-- guard'ом (один блок = защита от всех). Это НЕ промах — раньше логировалось
 			-- ложным "перебит EDF". Считаем отдельно, чтобы не путать с реа��ьными потерями.
-			local coveredByGuard = Config.OmniBlock and th.enteredWindow
-				and (th.contactAbs <= (State.holdUntil or 0) + 0.05)
-			if coveredByGuard then
+			local coveredByGuard = th.coveredByHeldGuard == true
+				or (Config.OmniBlock and State.blocking and th.enteredWindow
+					and th.contactAbs <= (State.holdUntil or 0) + 0.05)
+			if th.coveredByDodge then
+				-- Explicitly serviced by the cluster iframe; not a miss and not guard coverage.
+			elseif coveredByGuard then
 				State.guardCovered = (State.guardCovered or 0) + 1
 			elseif Config.DeepDiag and not th.pressed and not th.dodged and not th.deadLogged then
 				th.deadLogged = true
@@ -2003,59 +2004,52 @@ local function schedulerStep(now)
 
 	table.sort(imminent, function(a, b) return a.contactAbs < b.contactAbs end)
 
-	local clusterN, clusterHeavy = 0, false
-	if #imminent >= 1 then
-		clusterN, clusterHeavy = 1, (imminent[1].kind == "M2")
-		local prev = imminent[1].contactAbs
-		for i = 2, #imminent do
-			if imminent[i].contactAbs - prev < Config.MinBlockSeparation then
-				clusterN = clusterN + 1
-				prev = imminent[i].contactAbs
-				if imminent[i].kind == "M2" then clusterHeavy = true end
-			else
-				break
-			end
+	-- Multi-attacker clustering is based on distinct attackers and absolute contacts.
+	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
+	local cluster = {}
+	local seenAttackers = {}
+	local clusterHeavy = false
+	for _, th in ipairs(imminent) do
+		local key = th.attackerModel or th.attackerHRP or th.name
+		if key and not seenAttackers[key] then
+			seenAttackers[key] = true
+			cluster[#cluster + 1] = th
+			if th.kind == "M2" then clusterHeavy = true end
 		end
 	end
+	local clusterN = #cluster
+	local clusterFirst = cluster[1]
+	local clusterLast = cluster[#cluster]
+	local clusterSpread = (clusterFirst and clusterLast) and (clusterLast.contactAbs - clusterFirst.contactAbs) or 0
+	local clusterStrategy = nil
+	if Config.MultiThreatGuard and clusterN >= (Config.MultiThreatMinN or 2) then
+		local iframeSpan = math.max(0, (Config.IFrameDur or 0.30) - 0.07)
+		clusterStrategy = clusterSpread <= iframeSpan and "IFRAME_CLUSTER" or "HELD_GUARD"
+		for _, th in ipairs(cluster) do
+			th.clusterStrategy = clusterStrategy
+		end
 
-	-- [V66] ЭКСТРЕННЫЙ DUAL-DODGE: два ближайших удара из РАЗНЫХ направлений, и 2-й
-	-- прилетает раньше, чем мы успеем развернуться к нему + перевзвести перфект.
-	-- Блок 2-го физически невозможен (лицо к 1-му, поворот не успеет) → доджим оба.
-	-- [V69] при ненаправленном блоке один guard прикрывает обоих атакующих незави��и��о
-	-- от их взаимного угла — поэтому "не успеем развернуться ко 2-му" больше не повод
-	-- доджить. Экстренный dual-dodge ост��вляем ТОЛЬКО когда блок реально недоступен
-	-- (стан/кд/гардбрейк). Это убирае�� расточительные доджи, которые давали LATE.
-	local omniCanBlock = Config.OmniBlock and canBlockNow()
-	if Config.EmergencyDualDodge and not omniCanBlock and dodgeReady() and canDodgeNow() and #imminent >= 2 then
-		local a, b = imminent[1], imminent[2]
-		local gap  = b.contactAbs - a.contactAbs
-		if gap <= (Config.DualDodgeMaxGap or 0.22)
-		   and a.attackerHRP and b.attackerHRP
-		   and a.attackerModel ~= b.attackerModel then
-			local myHRP = localHRP()
-			-- угол между направлениями на двух атакующих
-			local angDeg = 180
-			if myHRP then
-				local da = flatDirTo(myHRP.Position, a.attackerHRP.Position)
-				local db = flatDirTo(myHRP.Position, b.attackerHRP.Position)
-				if da and db then
-					angDeg = math.deg(math.acos(math.clamp(da:Dot(db), -1, 1)))
-				end
-			end
-			-- реальное вре��я на разворот к 2-му + запас на перевзвод перфекта
-			local turnTime = (angDeg / math.max(Config.TurnRateDegPerSec or 720, 1))
-			local needToBlockB = turnTime + (Config.RearmBudget or 0.06) + up
-			-- окно между ударами меньше, чем нужно на разворот+перевзвод → не успеем
-			-- блокнуть 2-го, и он из другого сектора (>60°). Доджим оба.
-			if gap < needToBlockB and angDeg > 60 then
-				local aDt = a.contactAbs - now
-				-- фитим так, чтобы iframe накрыл ПЕРВЫЙ удар (второй в пределах gap
-				-- тоже попадёт в 300мс окно неуязвимости).
-				if aDt <= (Config.DodgeConfirm + Config.IFrameDur - 0.04)
-				   and aDt >= (Config.DodgeConfirm - 0.05) then
-					if performDodge(now, ("dual-dodge(gap=%.0fms ang=%.0f°)"):format(gap*1000, angDeg)) then
-						return
-					end
+		local signature = ("%d:%d:%s"):format(clusterN, math.floor(clusterSpread * 1000 + 0.5), clusterStrategy)
+		if State.lastClusterSignature ~= signature or now >= (State.lastClusterLogAt or 0) + 0.5 then
+			State.lastClusterSignature = signature
+			State.lastClusterLogAt = now
+			diagPush(("CLUSTER t=%.2f n=%d spread=%.0fms strategy=%s contacts=[+%.0f,+%.0f]ms")
+				:format(now, clusterN, clusterSpread * 1000, clusterStrategy,
+					(clusterFirst.contactAbs - now) * 1000, (clusterLast.contactAbs - now) * 1000))
+		end
+
+		-- Pre-emptively fit one dodge to the first contact while every cluster contact is
+		-- inside the same real iframe interval. This is allowed even when block is available.
+		if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
+			and dodgeReady() and canDodgeNow() then
+			local firstDt = clusterFirst.contactAbs - now
+			local iframeLo = Config.DodgeConfirm - 0.03
+			local iframeHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
+			local lastDt = clusterLast.contactAbs - now
+			if firstDt >= iframeLo and firstDt <= iframeHi and lastDt <= iframeHi then
+				if performDodge(now, ("iframe-cluster(n=%d spread=%.0fms)"):format(clusterN, clusterSpread * 1000)) then
+					for _, th in ipairs(cluster) do th.coveredByDodge = true end
+					return
 				end
 			end
 		end
@@ -2065,13 +2059,17 @@ local function schedulerStep(now)
 		local a = imminent[1]
 		local soonestDt = a.contactAbs - now
 
-		-- [V89] MUST-DODGE: неблокируемая угроза (грэб/слэм) — блок бесполезен, единственная
-		-- защита это додж НАЗАД в i-frame окно. Проверяем ПЕРВЫМ, до блок-веток: даже если
-		-- блок доступен, тут он ничего не решит. Фитим так же, как обычный coverable-додж.
-		if isMustDodge(a) then
+		-- An unblockable may be second/third in a mixed cluster; search all imminent
+		-- contacts instead of checking only EDF[1]. Fit the dodge to that exact contact.
+		local mustDodgeThreat = nil
+		for _, candidate in ipairs(imminent) do
+			if isMustDodge(candidate) then mustDodgeThreat = candidate; break end
+		end
+		if mustDodgeThreat then
+			local mustDt = mustDodgeThreat.contactAbs - now
 			local mLo = Config.DodgeConfirm - 0.03
 			local mHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
-			if soonestDt >= mLo and soonestDt <= mHi then
+			if mustDt >= mLo and mustDt <= mHi then
 				if performDodge(now, "must-dodge(unblockable→back)", true) then return end
 			end
 		end
@@ -2115,10 +2113,14 @@ local function schedulerStep(now)
 		end
 		if soonestDt <= (fireLead + up) then
 			local overloaded, why = false, nil
-			if clusterN >= 2 and clusterHeavy and Config.DodgeHeavy then
-				overloaded, why = true, "heavy+multi"
-			elseif clusterN >= 3 then
-				overloaded, why = true, ("%dx-burst"):format(clusterN)
+			-- A non-coverable multi cluster owns its strategy: keep one continuous guard.
+			-- Do not let legacy heavy/burst heuristics spend a late dodge mid-cluster.
+			if clusterStrategy ~= "HELD_GUARD" then
+				if clusterN >= 2 and clusterHeavy and Config.DodgeHeavy then
+					overloaded, why = true, "heavy+multi"
+				elseif clusterN >= 3 then
+					overloaded, why = true, ("%dx-burst"):format(clusterN)
+				end
 			end
 			if a.kind == "M2" and clusterN == 1 and Config.DodgeHeavy and not overloaded then
 				local _, cornered = bestDodgeDir(now)
@@ -2218,17 +2220,26 @@ local function schedulerStep(now)
 			diagPush(("MULTI  t=%.2f  %dx threats → boxing-counter suppressed, holding guard for all")
 				:format(now, State.multiThreatN))
 		end
-		-- [V64] PER-HIT RE-ARM: свежий Activated на КАЖДЫЙ удар (даже если уже
-		-- Blocking=true). Дамп: PerfectBlocking взводится только свежим Activated;
-		-- held guard его не перевзводит. Ключ pressed — на объекте у��розы (каждый
-		-- удар комбо = свой объект), поэтому одно успешное нажатие на удар. НЕ шлём
-		-- Deactivate перед этим: повто��ный Activated перевзводит перфект и не
-		-- рискует BlockCooldown от снятия блока.
+		-- Multi-attacker held-guard mode uses exactly one Activated for the whole burst.
+		-- Re-arming each threat hits the game's block rate-limit/cooldown and cascades HITs.
+		if clusterStrategy == "HELD_GUARD" and State.blocking then
+			for _, th in ipairs(cluster) do
+				th.pressed = true
+				th.coveredByHeldGuard = true
+			end
+		end
+		-- Single-attacker path retains per-hit re-arm; multi held-guard cannot re-arm.
 		if not wantBlock.pressed then
 			local sent = fireBlock(serverNow)
 			if sent then
 				wantBlock.pressed  = true
 				wantBlock.pressDt  = wantBlock.contactAbs - now
+				if clusterStrategy == "HELD_GUARD" then
+					for _, th in ipairs(cluster) do
+						th.pressed = true
+						th.coveredByHeldGuard = true
+					end
+				end
 				wantBlock.faceDot  = faceDotTo(wantBlock.attackerHRP)
 				State.rearmCount   = (State.rearmCount or 0) + 1
 				if wantBlock.trustedHit and not wantBlock.trustCounted then
@@ -3029,7 +3040,7 @@ local function toggleDesyncTest()
 		-- снова (иначе обсервер показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
 		-- Держим трек доминирующим только пока движок сам не перебил его walk'ом. Важно:
-		-- полностью удержать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
+		-- полностью уде��жать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
 		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
 		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно пок��зывал
