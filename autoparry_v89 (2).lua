@@ -184,6 +184,14 @@ local Config = {
 	BoxingCounterLead = 0.16,
 	BoxingCounterMinGap = 0.45,
 
+	-- Skill Addons: per-style combat behaviors that plug into the parry brain.
+	-- Each maps to a REAL mechanic found in CombatConfig, not a placeholder.
+	SkillAddon        = true,
+	SA_WrestlingGrab  = true,   -- enemy Wrestling M2 = unblockable grab (M2GrantsHyperArmor) → force dodge
+	SA_DirtyGrab      = true,   -- enemy Dirty grab/M2 (GrappleDirtyHit, ImmuneToRagdollM2) → force dodge
+	SA_HakariRead     = true,   -- widen window for Hakari momentum M2 (HakariMomentumM2HitboxDelay 0.62)
+	SA_HakariWiden    = 0.05,   -- extra front/hold seconds applied to a Hakari M2
+
 	RestrictZone      = true,
 	RestrictLongOnly  = true,
 	RestrictMinWindup = 0.30,
@@ -209,6 +217,7 @@ local Config = {
 	AntiDecoy      = true,
 	AntiDecoyGap   = 0.12,       -- мин. интервал между настоящими свингами одного врага (сек)
 	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
+	DesyncSendHz      = 0,        -- Anti-AutoParry decoy re-sends per second; 0 = auto (track length)
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
 	-- НЕ активен при загрузке (в этом была причина фриза V73).
@@ -241,7 +250,7 @@ local Config = {
 	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-режим
 	-- [V62] desync flicker: НИКОГДА не переиспользовать реальные геймплейные
 	-- дорожки (walk/run/emote) как decoy — только whitelisted idle или выделенный
-	-- decoy-т����ек. Иначе flicker д����ргал твою реальную анимацию на 90Гц.
+	-- decoy-т����ек. Иначе flicker д������ргал твою реальную анимацию на 90Гц.
 	DesyncSafeDecoy   = true,
 
 	AntiCheatBypass = true,
@@ -607,7 +616,7 @@ local function hitboxGeom(th)
 	local tHit = math.clamp((th.contactAbs or now) - now, 0, 0.6)
 	local aPos = aHRP.Position
 	local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-	-- [V67] кап смещения от velocity: у стрейфящего врага полная экс��раполяция
+	-- [V67] кап смещения от velocity: у стрейфящего врага полная ��кс��раполяция
 	-- уводит центр хитбокса вбок и ломает willHitMe (ложный негатив в упор).
 	local lead = Vector3.new(aV.X * tHit, 0, aV.Z * tHit)
 	local cap  = Config.WillHitVelCap or 2.0
@@ -924,7 +933,7 @@ local function animIdOf(inst)
 end
 local BenignIds = {}
 -- [V85] id защитных анимаций (block/guard/parry/deflect/perfect). Некоторые стили имеют
--- на блок-анимации keyframe-маркеры → resolveAnimMeta ошибочно принимал их за атаку (SKILL/M2)
+-- на ��лок-анимации keyframe-маркеры → resolveAnimMeta ошибочно принимал их за атаку (SKILL/M2)
 -- и парри срабатывал на ЧУЖОЙ блок. Собираем их явно и жёстко исключаем из детекта угроз.
 local BlockIds = {}
 local function looksDefensive(nm)
@@ -1423,7 +1432,7 @@ local BOXING_BLOCK_ATTRS = {
 	"ParryAttackLockout", "BlockAttackLockout", "GrappleWinnerStun",
 }
 local function shouldBoxingCounter(th)
-	if not Config.BoxingCounter then return false end
+	if not Config.SkillAddon or not Config.BoxingCounter then return false end
 	local c = localChar()
 	if not c then return false end
 	if (styleOf and styleOf(c) or ""):lower() ~= "boxing" then return false end
@@ -1474,8 +1483,16 @@ end
 -- стилю/типу через Config.MustDodgeStyles (расширяется без правки движка) + живой сигнал по
 -- атрибуту атакующего, если игра его выставит в момент замаха.
 local function isMustDodge(th)
-	if not Config.MustDodge or not th then return false end
+	if not th then return false end
 	local st = (th.style or ""):lower()
+	-- Skill Addons force-dodge specific unblockable grabs regardless of the Must-Dodge list.
+	-- Wrestling M2 is a guaranteed grab with HyperArmor; Dirty grab ignores ragdoll immunity —
+	-- both pass through the Blocking attribute, so only i-frames (a backdodge) save you.
+	if Config.SkillAddon then
+		if Config.SA_WrestlingGrab and st == "wrestling" and th.kind == "M2" then return true end
+		if Config.SA_DirtyGrab and st == "dirty" and (th.kind == "M2" or th.kind == "SKILL") then return true end
+	end
+	if not Config.MustDodge then return false end
 	local byStyle = Config.MustDodgeStyles and Config.MustDodgeStyles[st]
 	if byStyle and (byStyle[th.kind] or byStyle.all) then return true end
 	local aModel = th.attackerModel
@@ -1589,7 +1606,7 @@ local function refreshContact(th)
 				local floor   = nominal * (Config.LiveSpeedFloor or 0.15)
 				local sp      = math.max(th.liveSpeed or nominal, floor)
 				local liveRemain = (th.hitTL - tp) / sp
-				-- берём максимум со стеночасовым: если анимация замедлена, live даёт
+				-- берём макс��мум со стеночасовым: если анимация замедлена, live даёт
 				-- больше времени; если ��с��орена — то����е уводит корректно.
 				remaining = math.max(remaining, liveRemain)
 				th.heldBy = (th.liveSpeed and th.liveSpeed < nominal * 0.6) and
@@ -1791,7 +1808,7 @@ local function bestDodgeDir(now, preferBack)
 
 	-- [V89] preferBack: для НЕБЛОКИРУЕМЫХ (грэб/слэм) додж строго НАЗАД (away от врага) —
 	-- уводит из радиуса захвата и разрывает клинч; вбок только как fallback у стены. Обычный
-	-- умный додж (perp+away) оставлен для блокируемых угроз, где важнее сойти с линии.
+	-- умный додж (perp+away) оставлен для блокируемых угроз, гд�� важнее сойти с линии.
 	local candidates
 	if preferBack then
 		candidates = {
@@ -1919,10 +1936,18 @@ local function schedulerStep(now)
 			if threatens then
 				local lead = Config.PerfectLead
 				local hold = Config.HoldAfter
-				if Config.M2WidenWindow and th.kind == "M2" then
-					lead = lead + Config.M2WidenFront
-					hold = hold + Config.M2WidenHold
-				end
+		if Config.M2WidenWindow and th.kind == "M2" then
+			lead = lead + Config.M2WidenFront
+			hold = hold + Config.M2WidenHold
+		end
+		-- Hakari addon: the momentum (double) M2 uses a slower hitbox delay (0.62 vs 0.59),
+		-- so its contact lands slightly later than a normal M2 — widen both edges a touch.
+		if Config.SkillAddon and Config.SA_HakariRead and th.kind == "M2"
+			and (th.style or ""):lower() == "hakari" then
+			local w = Config.SA_HakariWiden or 0.05
+			lead = lead + w
+			hold = hold + w
+		end
 				local pressAt = th.contactAbs - lead - up - th.velLead
 				local holdEnd = th.contactAbs + hold
 				-- [V66] диаг-трекинг: минимальный зазор до момента нажатия и факт
@@ -2195,7 +2220,7 @@ local function schedulerStep(now)
 		end
 		-- [V64] PER-HIT RE-ARM: свежий Activated на КАЖДЫЙ удар (даже если уже
 		-- Blocking=true). Дамп: PerfectBlocking взводится только свежим Activated;
-		-- held guard его не перевзводит. Ключ pressed — на объекте угрозы (каждый
+		-- held guard его не перевзводит. Ключ pressed — на объекте у��розы (каждый
 		-- удар комбо = свой объект), поэтому одно успешное нажатие на удар. НЕ шлём
 		-- Deactivate перед этим: повто��ный Activated перевзводит перфект и не
 		-- рискует BlockCooldown от снятия блока.
@@ -3007,7 +3032,7 @@ local function toggleDesyncTest()
 		-- полностью удержать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
 		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
-		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно показывал
+		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно пок��зывал
 		-- Movement/Core weight=0 и locomotion исчезала. Decoy продолжает реплицироваться
 		-- через свой Play/Stop цикл, не уничтожая реальные анимации персонажа.
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end) end
@@ -3015,16 +3040,22 @@ local function toggleDesyncTest()
 		-- трек остаётся IsPlaying=true навсегда → AnimationPlayed НЕ срабатывает повторно, и
 		-- у наблюдателя стейт "протухает" через длину анимации. По��тому раз в ~длину делаем
 		-- ЧИСТЫЙ Stop+Play → свежи�� сетевой AnimationPlayed → атака возобновляется снова и снова.
-		local replayEvery = 0.5
-		pcall(function() local L = _testTrack.Length; if type(L) == "number" and L > 0.15 then replayEvery = L * 0.92 end end)
-		local nextReplay = os.clock() + replayEvery
+		local autoEvery = 0.5
+		pcall(function() local L = _testTrack.Length; if type(L) == "number" and L > 0.15 then autoEvery = L * 0.92 end end)
+		-- Send frequency: Config.DesyncSendHz > 0 forces a fixed re-send rate (Hz), else auto.
+		local function replayInterval()
+			local hz = tonumber(Config.DesyncSendHz) or 0
+			if hz > 0 then return 1 / hz end
+			return autoEvery
+		end
+		local nextReplay = os.clock() + replayInterval()
 		DesyncTest.conn = RunService.Heartbeat:Connect(function()
 			if not DesyncTest.on or not _testTrack then return end
 			pcall(function()
 				_testTrack.Priority = topPrio
 				local nowc = os.clock()
 				if nowc >= nextReplay or not _testTrack.IsPlaying then
-					nextReplay = nowc + replayEvery
+					nextReplay = nowc + replayInterval()
 					_testTrack:Stop(0)
 					_testTrack:Play(0.05)          -- свежий AnimationPlayed → возобновляем стейт атаки
 					_testTrack:AdjustWeight(wgt, 0)
@@ -3153,7 +3184,7 @@ if type(getgenv) == "function" then getgenv().AP_DESYNC_MODE = DZ.cycleDesyncMod
 --   packet:Drop()          -- отбросить (заблокировать) пакет  (НЕ return false!)
 --   raknet.add_send_hook(fn) / raknet.remove_send_hook(fn)   -- снятие по ССЫЛКЕ на fn!
 --   raknet.add_recv_hook(fn) / raknet.remove_recv_hook(fn)
--- Старый код: (1) читал packet.id / packet.size — таких полей нет; (2) хранил "hookId"
+-- Старый код: (1) ��итал packet.id / packet.size — таких полей нет; (2) хранил "hookId"
 -- из add_send_hook и звал remove_send_hook(hookId) — передавал не-функцию в C++ →
 -- вылет. Теперь хук — ИМЕНОВАННАЯ функция, снимается по ссылке. Скан read-only:
 -- не трогает па��еты (ни Drop, ни SetData), только считает PacketId. Максимально
@@ -3983,31 +4014,26 @@ return function(_Lib, _Core)
 		apMain:SubLabel({ Text = "Low = wider reaction cone, trusts point-blank hits (safer vs feints). High = stricter facing checks, fewer wasted blocks." })
 		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
 			Min = 8, Max = 64, Callback = function(v) Config.Range = v end })
-		apMain:SubLabel({ Text = "Max distance at which enemy attacks are considered." })
 		slider(apMain, { Name = "Dodge Reaction (lead)", Flag = "AP_DodgeLead",
 			Default = math.floor((Config.DodgeLead or 0.10) * 1000), Min = 40, Max = 300,
 			Suffix = " ms", Callback = function(v) Config.DodgeLead = v / 1000 end })
 		slider(apMain, { Name = "Dodge Speed", Flag = "AP_DashSpeed", Default = Config.DashSpeed or 30,
 			Min = 10, Max = 90, Callback = function(v) Config.DashSpeed = v end })
-		apMain:SubLabel({ Text = "Movement speed of the dodge dash itself — higher = you travel farther/faster out of the hitbox." })
 		slider(apMain, { Name = "i-Frame Window", Flag = "AP_IFrame",
 			Default = math.floor((Config.IFrameDur or 0.30) * 1000), Min = 120, Max = 500,
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
 			Min = 4, Max = 40, Callback = function(v) Config.MaxHeightDiff = v end })
-		apMain:SubLabel({ Text = "Ignore attackers whose vertical offset is larger than this (players on another floor/level)." })
 		apMain:Divider()
 		-- Rotation (доворот на цель)
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 		slider(apMain, { Name = "Rotation Speed", Flag = "AP_FaceLerp",
 			Default = Config.FaceLerp or 0.80, Min = 0.10, Max = 1.00, Precision = 2,
 			Callback = function(v) Config.FaceLerp = v end })
-		apMain:SubLabel({ Text = "How aggressively you rotate toward the current threat. 1.00 = instant snap, lower = smoother tracking between attackers." })
 		boolToggle(apMain, "Hard Snap Near Contact", "Hard Snap", function() return Config.BlockFaceHard end, function(v) Config.BlockFaceHard = v end)
 		slider(apMain, { Name = "Rotation Predict Cap", Flag = "AP_RotPred",
 			Default = Config.RotPredMaxDeg or 200, Min = 60, Max = 300, Suffix = "°",
 			Callback = function(v) Config.RotPredMaxDeg = v end })
-		apMain:SubLabel({ Text = "Max predicted attacker turn per swing — higher catches fast 180° feint spins, lower is stricter." })
 
 		-- Section 2 — Dodge & Heavy (own box, own Enabled)
 		local apDodge = AP:Section({ Side = "Right" })
@@ -4069,18 +4095,29 @@ return function(_Lib, _Core)
 			apDodge:SubLabel({ Text = "Selected attacks are treated as unblockable (grabs/slams/casts) — dodged BACKWARD into i-frames instead of blocked. Pick per style: M1, M2 (Heavy) or Skill." })
 		end
 
-		-- Section 3 — Boxing Counter (own box, own Enabled)
+		-- Section 3 — Skill Addons (per-style combat behaviors, own box, own Enabled)
 		local apBox = AP:Section({ Side = "Left" })
-		apBox:Header({ Name = "Boxing Counter" })
+		apBox:Header({ Name = "Skill Addons" })
 		feature(apBox, {
-			Title = "Boxing Counter", Flag = "AP_BoxingCounter",
-			get = function() return Config.BoxingCounter end,
-			set = function(v) Config.BoxingCounter = v end,
-			Desc = "On a boxing Heavy, hard-face the enemy and counter instead of dodging.",
+			Title = "Skill Addons", Flag = "AP_SkillAddon",
+			get = function() return Config.SkillAddon end,
+			set = function(v) Config.SkillAddon = v end,
+			Desc = "Master switch for the per-style addons below.",
 		})
-		apBox:SubLabel({ Text = "Requires the Boxing style equipped — the counter sends YOUR boxing M2, so with any other style it stays inactive." })
+		boolToggle(apBox, "Boxing Counter", "AP_BoxingCounter",
+			function() return Config.BoxingCounter end, function(v) Config.BoxingCounter = v end)
+		apBox:SubLabel({ Text = "Boxing only — hard-faces the enemy and sends YOUR boxing M2 (i-frames) instead of dodging. Inactive with any other style." })
 		slider(apBox, { Name = "Pre-Face Time", Flag = "AP_PreFace", Default = Config.BoxingPreFace or 0.5,
 			Min = 0.1, Max = 1.0, Precision = 2, Suffix = " s", Callback = function(v) Config.BoxingPreFace = v end })
+		boolToggle(apBox, "Wrestling Anti-Grab", "AP_SAWrestling",
+			function() return Config.SA_WrestlingGrab end, function(v) Config.SA_WrestlingGrab = v end)
+		apBox:SubLabel({ Text = "Enemy Wrestling M2 is an unblockable HyperArmor grab — always backdodge it into i-frames." })
+		boolToggle(apBox, "Dirty Anti-Grab", "AP_SADirty",
+			function() return Config.SA_DirtyGrab end, function(v) Config.SA_DirtyGrab = v end)
+		apBox:SubLabel({ Text = "Enemy Dirty grab/M2 ignores ragdoll immunity and beats blocks — force a dodge instead." })
+		boolToggle(apBox, "Hakari Double Read", "AP_SAHakari",
+			function() return Config.SA_HakariRead end, function(v) Config.SA_HakariRead = v end)
+		apBox:SubLabel({ Text = "Hakari momentum M2 lands slightly later (0.62 hitbox delay) — widens the dodge/parry window to match." })
 
 		-- Section 4 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
@@ -4111,19 +4148,21 @@ return function(_Lib, _Core)
 		-- Section 1 — Desync (standalone attack-replicate spoof, the old "[" test).
 		-- Fully independent of AutoParry and of Attack Desync.
 		local dsSelf = DS:Section({ Side = "Left" })
-		dsSelf:Header({ Name = "Desync" })
+		dsSelf:Header({ Name = "Anti AutoParry" })
 		feature(dsSelf, {
-			Title = "Desync", Flag = "DS_Test",
+			Title = "Anti AutoParry", Flag = "DS_Test",
 			get = function() return DesyncTest.on end,
 			set = function(v)
 				if (DesyncTest.on and true or false) ~= v then pcall(toggleDesyncTest) end
 			end,
-			Desc = "Continuously replicates an ATTACK animation while you actually move — observers see you attacking, not dodging/running.",
+			Desc = "Replicates a fake ATTACK while you move, so enemy autoparry reacts to a swing that never lands.",
 		})
+		slider(dsSelf, { Name = "Send Frequency", Flag = "DS_SendHz", Default = Config.DesyncSendHz or 0,
+			Min = 0, Max = 20, Suffix = " Hz", Callback = function(v) Config.DesyncSendHz = v end })
+		dsSelf:SubLabel({ Text = "How many times per second the decoy attack is re-sent. 0 = auto (matches the animation length)." })
 		boolToggle(dsSelf, "Client Visible", "Desync Client Visible",
 			function() return Config.DesyncClientVisible end,
 			function(v) Config.DesyncClientVisible = v end)
-		dsSelf:SubLabel({ Text = "On = you also see the decoy attack on your own screen (full weight). Off = decoy is near-invisible to you but still replicates to enemies." })
 
 		-- Section 2 — Attack Desync (delay/idlemask/prerun engine, the old "J").
 		-- Works on your swings even with AutoParry OFF.
@@ -4205,7 +4244,6 @@ return function(_Lib, _Core)
 		boolToggle(dbDiag, "Copy", "Diag Copy",
 			function() return copyDiag end,
 			function(v) copyDiag = v end)
-		dbDiag:SubLabel({ Text = "Save writes the full diagnostic (summary + event log) to a file. With Copy on, the same text is also copied to your clipboard." })
 
 		-- Everything built; allow notifies now (initial element Callbacks are done).
 		task.defer(function() uiReady = true end)
@@ -4213,3 +4251,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
