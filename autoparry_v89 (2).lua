@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -239,7 +241,7 @@ local Config = {
 	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-режим
 	-- [V62] desync flicker: НИКОГДА не переиспользовать реальные геймплейные
 	-- дорожки (walk/run/emote) как decoy — только whitelisted idle или выделенный
-	-- decoy-т����ек. Иначе flicker д��ргал твою реальную анимацию на 90Гц.
+	-- decoy-т����ек. Иначе flicker д����ргал твою реальную анимацию на 90Гц.
 	DesyncSafeDecoy   = true,
 
 	AntiCheatBypass = true,
@@ -605,7 +607,7 @@ local function hitboxGeom(th)
 	local tHit = math.clamp((th.contactAbs or now) - now, 0, 0.6)
 	local aPos = aHRP.Position
 	local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-	-- [V67] кап смещения от velocity: у стрейфящего врага полная экстраполяция
+	-- [V67] кап смещения от velocity: у стрейфящего врага полная экс��раполяция
 	-- уводит центр хитбокса вбок и ломает willHitMe (ложный негатив в упор).
 	local lead = Vector3.new(aV.X * tHit, 0, aV.Z * tHit)
 	local cap  = Config.WillHitVelCap or 2.0
@@ -3004,10 +3006,10 @@ local function toggleDesyncTest()
 		-- Держим трек доминирующим только пока движок сам не перебил его walk'ом. Важно:
 		-- полностью удержать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
-		-- [V81] ФИКС "ломается при ходьбе": держим decoy доминирующим И ГЛУШИМ конкурирующие
-		-- Movement/Idle треки (walk/run/idle) на СВОЁМ аниматоре — вес реплицируется, поэтому
-		-- наблюдатель перестаёт видеть твою ходьбу и видит ТОЛЬКО decoy-атаку. Это и есть
-		-- настоящий desync-эффект: враг видит тебя атакующим, пока ты реально бегаешь.
+		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
+		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно показывал
+		-- Movement/Core weight=0 и locomotion исчезала. Decoy продолжает реплицироваться
+		-- через свой Play/Stop цикл, не уничтожая реальные анимации персонажа.
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end) end
 		-- [V82] интервал переигрывания = длина анимации атаки (fallback 0.5с). Зацикленный
 		-- трек остаётся IsPlaying=true навсегда → AnimationPlayed НЕ срабатывает повторно, и
@@ -3028,22 +3030,6 @@ local function toggleDesyncTest()
 					_testTrack:AdjustWeight(wgt, 0)
 				end
 				if _testTrack.WeightCurrent < wgt * 0.5 then _testTrack:AdjustWeight(wgt, 0.1) end
-				-- глушим все НЕ-decoy треки, конкурирующие за картинку у наблюдателя
-				local hum2 = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-				local an2 = hum2 and hum2:FindFirstChildOfClass("Animator")
-				if an2 then
-					for _, tr in ipairs(an2:GetPlayingAnimationTracks()) do
-						if tr ~= _testTrack and tr.WeightCurrent > 0.05 then
-							local p = tr.Priority
-							-- глушим движение/idle/action, но НЕ core (например дыхание не трогаем сильно)
-							if p == Enum.AnimationPriority.Movement
-								or p == Enum.AnimationPriority.Idle
-								or p == Enum.AnimationPriority.Action then
-								tr:AdjustWeight(0.01, 0.1)
-							end
-						end
-					end
-				end
 			end)
 		end)
 		aclog(("[DESYNC-TEST] ON — постоянно реплицирую АТАКУ id=%s (держится и при ходьбе). Глянь обсервер: ATTACK не переставая."):format(tostring(id)))
@@ -3051,21 +3037,6 @@ local function toggleDesyncTest()
 	else
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end); DesyncTest.conn = nil end
 		pcall(function() if _testTrack then _testTrack:Stop(0.1) end end)
-		-- [module FIX] Пока desync активен, maintenance-цикл глушит твои Movement/Idle/Action
-		-- треки до веса 0.01. Раньше при выключении они ТАК И ОСТАВАЛИСЬ заглушенными —
-		-- ходьба/бег «переставали появляться» до респавна. Возвращаем всем задушенным
-		-- трекам полный вес, чтобы картинка мгновенно становилась нормальной.
-		pcall(function()
-			local hum2 = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-			local an2 = hum2 and hum2:FindFirstChildOfClass("Animator")
-			if an2 then
-				for _, tr in ipairs(an2:GetPlayingAnimationTracks()) do
-					if tr ~= _testTrack and tr.WeightCurrent <= 0.06 then
-						tr:AdjustWeight(1, 0.1)
-					end
-				end
-			end
-		end)
 		aclog("[DESYNC-TEST] OFF")
 		desyncPush("[TEST] inverse-mode OFF")
 	end
@@ -3249,7 +3220,7 @@ end
 --     вызывает НЕ игровой скрипт, который можно "выпилить".
 --   • Краш происходит В МОМЕНТ raknet.add_send_hook (мгновенно, до первого пакета) →
 --     это native-защита клиента Roblox (Hyperion/Byfron), а не Lua. Её нельзя убрать
---     правкой игровых скриптов. Поэтому и "популярный desync-скрипт" тоже крашил на F.
+--     правкой игровых скриптов. Поэтому и "популяр��ый desync-скрипт" тоже крашил на F.
 --   • Сеть игры = Blink: бой/движение шлётся через BLINK_RELIABLE_REMOTE:FireServer(buffer,
 --     instances) раз в Heartbeat — это ОБЫЧНЫЙ RemoteEvent, а НЕ raknet. Значит desync
 --     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
@@ -4242,4 +4213,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
