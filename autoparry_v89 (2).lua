@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -241,7 +239,7 @@ local Config = {
 	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-режим
 	-- [V62] desync flicker: НИКОГДА не переиспользовать реальные геймплейные
 	-- дорожки (walk/run/emote) как decoy — только whitelisted idle или выделенный
-	-- decoy-т����ек. Иначе flicker дёргал твою реальную анимацию на 90Гц.
+	-- decoy-т����ек. Иначе flicker д��ргал твою реальную анимацию на 90Гц.
 	DesyncSafeDecoy   = true,
 
 	AntiCheatBypass = true,
@@ -281,7 +279,6 @@ local Config = {
 	OmniBlock      = true,
 
 	ShowVisuals   = true,
-	ShowAnimDebug = true,
 	Debug         = true,
 
 	Key_Toggle    = Enum.KeyCode.K,
@@ -2894,7 +2891,7 @@ local function desyncMag()
 	return ms / 1000
 end
 
--- [V63] Desync-маска идёт СВОЕЙ загруженной копией idle, НИКОГДА не захватывая
+-- [V63] Desync-маска идёт СВОЕЙ загруженной копией idle, НИК��ГДА не захватывая
 -- живые геймплейные треки. П��ошлые вер��ии брали первый не-атакующий playing-трек
 -- как decoy и дёргали ЕГО вес на 90Гц + Stop() в конце — если это был walk/emote,
 -- реальная анимация ломалась (проблема "не воспроизводит нормально при движении").
@@ -3054,6 +3051,21 @@ local function toggleDesyncTest()
 	else
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end); DesyncTest.conn = nil end
 		pcall(function() if _testTrack then _testTrack:Stop(0.1) end end)
+		-- [module FIX] Пока desync активен, maintenance-цикл глушит твои Movement/Idle/Action
+		-- треки до веса 0.01. Раньше при выключении они ТАК И ОСТАВАЛИСЬ заглушенными —
+		-- ходьба/бег «переставали появляться» до респавна. Возвращаем всем задушенным
+		-- трекам полный вес, чтобы картинка мгновенно становилась нормальной.
+		pcall(function()
+			local hum2 = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+			local an2 = hum2 and hum2:FindFirstChildOfClass("Animator")
+			if an2 then
+				for _, tr in ipairs(an2:GetPlayingAnimationTracks()) do
+					if tr ~= _testTrack and tr.WeightCurrent <= 0.06 then
+						tr:AdjustWeight(1, 0.1)
+					end
+				end
+			end
+		end)
 		aclog("[DESYNC-TEST] OFF")
 		desyncPush("[TEST] inverse-mode OFF")
 	end
@@ -3597,37 +3609,8 @@ local function summary()
 			:format(hits, stateHits, realMiss),
 		("BLOCKABLE accuracy = %.1f%%  (%d/%d attacks we were allowed to block landed as block/perfect)")
 			:format(acc, blockable - realMiss, blockable),
-		("[V63] multi-threat: engaged=%s  max-simultaneous=%d  held-frames=%d  (hybrid: perfect nearest + continuous guard for rest; boxing-counter %s in burst)")
-			:format(tostring((State.multiThreatFrames or 0) > 0), State.multiThreatMax or 0, State.multiThreatFrames or 0,
-				(Config.BoxingCounterSolo and "suppressed" or "active")),
-		("[V63] boxing-counter: fired=%d  aborted-on-M2cooldown=%d  (aborted counters fell through to block instead of wasting the input)")
-			:format(State.counterCount or 0, State.counterAbortCd or 0),
-		("[V64] per-hit re-arm: %s  fresh-activates=%d  (fresh Activated per combo hit → re-arms PerfectBlocking; fixes c3/c4 held-guard NO-PRESS misses)")
-			:format(tostring(Config.PerHitRearm ~= false), State.rearmCount or 0),
-		("[V64] combo breakdown  opener(c1-2): P=%d L=%d H=%d GB=%d | tail(c3+): P=%d L=%d H=%d GB=%d  (if tail P↑/H↓ vs prev builds, re-arm is working)")
-			:format(
-				(State.comboStat and State.comboStat.opener.PERFECT) or 0,
-				(State.comboStat and State.comboStat.opener.LATE) or 0,
-				(State.comboStat and State.comboStat.opener.HIT) or 0,
-				(State.comboStat and State.comboStat.opener.GUARDBREAK) or 0,
-				(State.comboStat and State.comboStat.tail.PERFECT) or 0,
-				(State.comboStat and State.comboStat.tail.LATE) or 0,
-				(State.comboStat and State.comboStat.tail.HIT) or 0,
-				(State.comboStat and State.comboStat.tail.GUARDBREAK) or 0),
-		("[V66] live-heavy timer: %s  |  emergency dual-dodge: %s fired=%d  |  independent MISSes logged=%d (see MISS! lines for exact cause)")
-			:format(tostring(Config.LiveHeavyTimer ~= false), tostring(Config.EmergencyDualDodge ~= false),
-				State.dualDodgeCount or 0, State.independentMiss or 0),
-		("[V67] close-melee trust: %s range=%.1f  velCap=%.1f  trusted-presses=%d  (willHitMe returns true in melee range → kills NO-PRESS false-negatives from strafing combos; was the 1v1 regression 58%%→target 85%%+)")
-			:format(tostring(Config.HitTrustRange and Config.HitTrustRange > 0),
-				Config.HitTrustRange or 0, Config.WillHitVelCap or 0, State.trustPress or 0),
-		("[V68] accuracy mode: %s  |  off-target swings rejected=%d  (Low=lenient melee trust + away-facing reject; High=rotation-predicted hitbox catches feints. Toggle key B)")
-			:format(Config.AccuracyMode or "Low", State.offTargetRej or 0),
-		("[V70] omni-block: %s  |  threats covered by held guard=%d  |  fast multi-target SNAP restored (lerp=%.2f hardDt=%.0fms)  (block is DIRECTIONLESS per dump — one guard blocks all attackers from any angle; snap whips to the earliest un-arrived attacker each frame)")
-			:format(tostring(Config.OmniBlock ~= false), State.guardCovered or 0, Config.FaceLerp or 0, (Config.BlockFaceHardDt or 0)*1000),
-		"[V70] residual calibrator REMOVED — prediction is pure-math again (a single held M2 was poisoning the EMA and pushing all M2 hitTL 600→730ms → no-window NO-PRESS).",
-		("[V71] attack-speed scaling: ON  |  hitTL now = base / attackSpeedMult(attacker).  The game divides every hitbox delay by GetAttackSpeedMultiplier(height) (short player → up to 1.15 = 15%% faster, tall → 0.85). We hardcoded 1, so fast (short) enemies like the M2 that read LATE were always over-predicted. This is systemic — one multiplier fixes M1/M2/skills of every style with no per-attack patch. See aMult=x.xx in SWING lines."),
-		"guide: trueGap = T_hit − blockStart − uplink (server judges vs [50,150]). STATE:x = block refused by game mechanic (our attack/stun/cooldown), not a timing error.",
-		"guide2: MISS! = a threat expired with no press/dodge — reason tells you if it was filtered (never-in-hitbox), off-target (Low mode rejected non-us swing), out-prioritized, or too fast. held-heavy → live timer should track it.",
+		("accuracy mode: %s  |  off-target swings rejected=%d  |  boxing-counter fired=%d")
+			:format(Config.AccuracyMode or "Low", State.offTargetRej or 0, State.counterCount or 0),
 		"=============================",
 	}, "\n")
 end
@@ -3691,44 +3674,7 @@ function TriPool:hideAll() for _, tr in ipairs(self.items) do tr.Visible = false
 
 local function vizHideAll() LinePool:hideAll(); TriPool:hideAll() end
 
-local AnimDbg = { obj = nil, ok = (Drawing ~= nil) }
-local function animDbgObj()
-	if not AnimDbg.ok then return nil end
-	if not AnimDbg.obj then
-		local created = pcall(function()
-			AnimDbg.obj = Drawing.new("Text")
-			AnimDbg.obj.Size, AnimDbg.obj.Center, AnimDbg.obj.Outline = 18, false, true
-			AnimDbg.obj.Color = Color3.fromRGB(122, 214, 255)
-		end)
-		if not created then AnimDbg.ok = false; return nil end
-	end
-	return AnimDbg.obj
-end
-local function updateAnimDebug()
-	local o = animDbgObj(); if not o then return end
-	if not Config.ShowAnimDebug then o.Visible = false; return end
-	local animator = getAnimator()
-	local dom, domW = "(none)", -1
-	if animator then
-		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-		if ok and tracks then
-			for _, tr in ipairs(tracks) do
-				local id, w = nil, 0
-				pcall(function() id = tonumber(tostring(tr.Animation.AnimationId):match("(%d+)")) end)
-				pcall(function() w = tr.WeightCurrent or 0 end)
-				if id and w > domW then
-					local entry = AttackIds[id]
-					domW = w
-					dom = ("%s id=%d w=%.2f"):format(entry and (entry.kind or "atk") or "idle/other", id, w)
-				end
-			end
-		end
-	end
-	o.Position = Vector2.new(14, 120)
-	o.Text = ("ANIM %s | desync %s x%d [%s]")
-		:format(dom, Config.DesyncAttack and "ON" or "off", State.desyncFires or 0, Config.DesyncMode or "?")
-	o.Visible = true
-end
+-- [module] AnimDbg (экранный Drawing-текст "ANIM ... | desync ...") УДАЛЁН полностью по запросу.
 
 local Viz = { t = 0 }
 
@@ -3934,7 +3880,6 @@ end
 RunService.RenderStepped:Connect(function(dt)
 	local ok = pcall(vizUpdate, dt)
 	if not ok then vizHideAll() end
-	pcall(updateAnimDebug)
 	pcall(enforceFaceLock)
 end)
 
@@ -4066,20 +4011,32 @@ return function(_Lib, _Core)
 		}, ctx.flag("AP_AccuracyMode"))
 		apMain:SubLabel({ Text = "Low = wider reaction cone, trusts point-blank hits (safer vs feints). High = stricter facing checks, fewer wasted blocks." })
 		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
-			Min = 8, Max = 64, Suffix = " studs", Callback = function(v) Config.Range = v end })
+			Min = 8, Max = 64, Callback = function(v) Config.Range = v end })
 		apMain:SubLabel({ Text = "Max distance at which enemy attacks are considered." })
 		slider(apMain, { Name = "Dodge Reaction (lead)", Flag = "AP_DodgeLead",
 			Default = math.floor((Config.DodgeLead or 0.10) * 1000), Min = 40, Max = 300,
 			Suffix = " ms", Callback = function(v) Config.DodgeLead = v / 1000 end })
 		slider(apMain, { Name = "Dodge Speed", Flag = "AP_DashSpeed", Default = Config.DashSpeed or 30,
-			Min = 10, Max = 90, Suffix = " studs/s", Callback = function(v) Config.DashSpeed = v end })
+			Min = 10, Max = 90, Callback = function(v) Config.DashSpeed = v end })
 		apMain:SubLabel({ Text = "Movement speed of the dodge dash itself — higher = you travel farther/faster out of the hitbox." })
 		slider(apMain, { Name = "i-Frame Window", Flag = "AP_IFrame",
 			Default = math.floor((Config.IFrameDur or 0.30) * 1000), Min = 120, Max = 500,
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
-			Min = 4, Max = 40, Suffix = " studs", Callback = function(v) Config.MaxHeightDiff = v end })
+			Min = 4, Max = 40, Callback = function(v) Config.MaxHeightDiff = v end })
 		apMain:SubLabel({ Text = "Ignore attackers whose vertical offset is larger than this (players on another floor/level)." })
+		apMain:Divider()
+		-- Rotation (доворот на цель)
+		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
+		slider(apMain, { Name = "Rotation Speed", Flag = "AP_FaceLerp",
+			Default = Config.FaceLerp or 0.80, Min = 0.10, Max = 1.00, Precision = 2,
+			Callback = function(v) Config.FaceLerp = v end })
+		apMain:SubLabel({ Text = "How aggressively you rotate toward the current threat. 1.00 = instant snap, lower = smoother tracking between attackers." })
+		boolToggle(apMain, "Hard Snap Near Contact", "Hard Snap", function() return Config.BlockFaceHard end, function(v) Config.BlockFaceHard = v end)
+		slider(apMain, { Name = "Rotation Predict Cap", Flag = "AP_RotPred",
+			Default = Config.RotPredMaxDeg or 200, Min = 60, Max = 300, Suffix = "°",
+			Callback = function(v) Config.RotPredMaxDeg = v end })
+		apMain:SubLabel({ Text = "Max predicted attacker turn per swing — higher catches fast 180° feint spins, lower is stricter." })
 
 		-- Section 2 — Dodge & Heavy (own box, own Enabled)
 		local apDodge = AP:Section({ Side = "Right" })
@@ -4092,18 +4049,25 @@ return function(_Lib, _Core)
 		})
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
-			Min = 6, Max = 24, Suffix = " studs", Callback = function(v) Config.HeavyTrustRange = v end })
+			Min = 6, Max = 24, Callback = function(v) Config.HeavyTrustRange = v end })
 		do
+			-- Все типы каста, которые различает движок (th.kind): M1 (обычный удар),
+			-- M2 (тяжёлый/выпад), Skill (скилл-каст с keyframe-маркерами).
 			local STYLES = {
 				"Default","Basic","Boxing","Bulky","Dirty","Hakari","Karate","Kure",
 				"MuayThai","SkyGaoLang","Variant","Taekwondo","Wild","WingChun",
 				"Wrestling","Capoeira","Slugger",
 			}
+			local KINDS = { { label = "M1", key = "M1" }, { label = "M2 (Heavy)", key = "M2" }, { label = "Skill", key = "SKILL" } }
 			local mdOptions, mdDefault = {}, {}
 			for _, s in ipairs(STYLES) do
-				mdOptions[#mdOptions + 1] = s .. " / Heavy"
-				if Config.MustDodgeStyles and Config.MustDodgeStyles[s:lower()] then
-					mdDefault[#mdDefault + 1] = s .. " / Heavy"
+				local saved = Config.MustDodgeStyles and Config.MustDodgeStyles[s:lower()]
+				for _, k in ipairs(KINDS) do
+					local opt = s .. " / " .. k.label
+					mdOptions[#mdOptions + 1] = opt
+					if saved and (saved[k.key] or saved.all) then
+						mdDefault[#mdDefault + 1] = opt
+					end
 				end
 			end
 			apDodge:Dropdown({
@@ -4113,15 +4077,25 @@ return function(_Lib, _Core)
 					local t, n = {}, 0
 					for label, on in pairs(sel) do
 						if on then
-							local st = label:gsub(" / Heavy", ""):lower()
-							t[st] = { M2 = true }; n += 1
+							local st, kindLabel = label:match("^(.-) / (.+)$")
+							if st and kindLabel then
+								local key = (kindLabel == "M1" and "M1")
+									or (kindLabel == "M2 (Heavy)" and "M2")
+									or (kindLabel == "Skill" and "SKILL")
+								if key then
+									st = st:lower()
+									t[st] = t[st] or {}
+									t[st][key] = true
+									n += 1
+								end
+							end
 						end
 					end
 					Config.MustDodgeStyles = t
-					notify("Must-Dodge", "Selected: " .. n .. " style(s)")
+					notify("Must-Dodge", "Selected: " .. n .. " attack(s)")
 				end,
 			}, ctx.flag("AP_MustDodge"))
-			apDodge:SubLabel({ Text = "Selected styles' Heavy (M2) are unblockable grabs — dodged BACKWARD into i-frames instead of blocked." })
+			apDodge:SubLabel({ Text = "Selected attacks are treated as unblockable (grabs/slams/casts) — dodged BACKWARD into i-frames instead of blocked. Pick per style: M1, M2 (Heavy) or Skill." })
 		end
 
 		-- Section 3 — Boxing Counter (own box, own Enabled)
@@ -4133,9 +4107,9 @@ return function(_Lib, _Core)
 			set = function(v) Config.BoxingCounter = v end,
 			Desc = "On a boxing Heavy, hard-face the enemy and counter instead of dodging.",
 		})
+		apBox:SubLabel({ Text = "Requires the Boxing style equipped — the counter sends YOUR boxing M2, so with any other style it stays inactive." })
 		slider(apBox, { Name = "Pre-Face Time", Flag = "AP_PreFace", Default = Config.BoxingPreFace or 0.5,
 			Min = 0.1, Max = 1.0, Precision = 2, Suffix = " s", Callback = function(v) Config.BoxingPreFace = v end })
-		boolToggle(apBox, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 
 		-- Section 4 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
