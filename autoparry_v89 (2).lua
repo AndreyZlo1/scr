@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -241,7 +243,7 @@ local Config = {
 	BoxingCounterSolo = true,
 
 	-- [V62] ГИБРИД мультибоя: перфектим ближайшего, остальным держим guard
-	-- непрерывно (нулевые дыры = нулевые полные ��иты). holdUntil тянется по
+	-- непрерывно (нулевые дыры = нулевые полные ����иты). holdUntil тянется по
 	-- самому дальнему угрожающему контакту в кластере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
@@ -686,9 +688,11 @@ local function willHitMe(th)
 	local dist  = toMeV.Magnitude
 	local mode  = Config.AccuracyMode or "Low"
 
-	-- [V69] FPS: в Low в упор всегда true — выходим до предикта ротации (CFrame.Angles
-	-- аллоцирует; в мясорубке это делалось для каждой угрозы каждый кадр впустую).
-	if mode ~= "High" then
+	-- Point-blank floor applies in BOTH modes. A hit landed in point-blank range is
+	-- physically unavoidable regardless of predicted rotation, so the strict High box
+	-- must never reject it — that was the root of High-mode misses on close M1s while
+	-- an enemy strafed (predA/box swung off us → false → NO-PRESS → LATE).
+	do
 		local trust = Config.HitTrustRange or 0
 		if trust > 0 and dist <= (Config.PointBlank or 3.0) then
 			th.trustedHit = true; return true
@@ -735,7 +739,7 @@ local function willHitMe(th)
 	-- давал false ВЕСЬ путь → "never-in-hitbox" NO-PRESS, следом Ragdoll и каскад на
 	-- остальных атакующих (отсюда и «не справляется с мультиатаками»). Тяжёлые пропускать
 	-- нельзя (их не перевзвести повторным блоком): если враг в расширенном радиусе И либо
-	-- смотрит примерн�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
+	-- смотрит приме��н�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
 	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
 	-- ненаправленный), а пропущенный хэви = проигранный размен.
 	if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
@@ -1016,7 +1020,7 @@ local function hitTimelineBase(info, combo)
 		-- ту задержку, по которой сервер наносит удар (GetScaledHitboxDelay: delay/mult).
 		-- РАНЬШЕ первым возвращался маркер "Hit" из анимации (info.hit) и он врал: в диаг
 		-- Capoeira M2 читался hitTL=327мс при реальном контакте 448мс (predErr=+163ms LATE
-		-- NO-PRESS → Ragdoll-каскад). Конфиг для той же Capoeira даёт ~441мс (ошибка 7мс).
+		-- NO-PRESS → Ragdoll-каскад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
 		-- Теперь маркер — лишь MAX-страховка поверх конфига: покрывает длинные и 2-хитовые
 		-- анимации (Boxing M2MultiHitCount=2, реальный значимый контакт ~749мс), где голый
 		-- конфиг первого удара занижает окно.
@@ -1579,7 +1583,7 @@ local function refreshContact(th)
 
 		-- [V66] измеряем РЕАЛЬНУЮ скорость прогресса анимации (units анимации в
 		-- секунду ре��льного времени) через EMA. У честной атаки ≈ track.Speed;
-		-- у придержанной падает к ~0. По ней и считаем реал��ный контакт.
+		-- у придержанной падает к ~0. По ней и считаем ��еал��ный контакт.
 		local lastTP    = th.lastTP or th.initTP
 		local lastClock = th.lastTPClock or th.detectClock
 		local dtReal    = now - lastClock
@@ -1965,7 +1969,7 @@ local function schedulerStep(now)
 					-- [V65] EDF (Earliest Deadline First) с приоритетом НЕОБСЛУЖЕННЫМ.
 					-- Баг до V65: выбирался просто минимальный contactAbs. У Boxing-комбо
 					-- быстрый M1 (contact=352ms) всегда имел contactAbs меньше медленной
-					-- M2 (contact=832ms), поэтому после перфекта M1 медленная M2 НИКОГДА
+					-- M2 (contact=832ms), поэтому п��сле перфекта M1 медленная M2 НИКОГДА
 					-- не становилась целью → NO-PRESS → полный хит (твой клип). Теперь
 					-- сначала берём угрозы без нажатия (unpressed), сред�� них — с самым
 					-- ранним дедлайном. Так после блока быстрого heavy получает своё
@@ -3204,7 +3208,7 @@ if type(getgenv) == "function" then getgenv().AP_DESYNC_MODE = DZ.cycleDesyncMod
 -- Luau VM. Luau VM однопоточный — любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
 -- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан делал
 -- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый новый pid → rehash на сетевом потоке
--- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трогает Lua-таблицы в
+-- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трога��т Lua-таблицы в
 -- хуке — только C-операции над пакетом. Поэтому он и не крашит.
 -- ФИКС: счётчики — ПРЕДВЫДЕЛЕННЫЙ массив на 256 слотов (0..255), в хуке тольк�� IN-PLACE
 -- инкремент существующего числового слота (без новых ключей, без rehash, без аллокации).
@@ -3321,7 +3325,7 @@ end
 
 -- [V75] КРОСС-КЛИЕНТНАЯ ПРОВЕРКА (отвечает на "как это видят другие игроки").
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
--- ПРОКСИ репликации, а не доказательство того, что реально приходит врагу. Единственн��й
+-- ПРОКСИ репликации, а не док��зательство того, что реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
 -- Как пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
@@ -4059,14 +4063,15 @@ return function(_Lib, _Core)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
 			Min = 6, Max = 24, Callback = function(v) Config.HeavyTrustRange = v end })
 		do
-			-- Все типы каста, которые различает движок (th.kind): M1 (обычный удар),
-			-- M2 (тяжёлый/выпад), Skill (скилл-каст с keyframe-маркерами).
+			-- В игре есть только M1 и M2 (боевые модули: M1, M2, Grapple, Evasive, Block —
+			-- отдельного Skill-каста нет). Поэтому предлагаем ровно два типа; grab/slam —
+			-- это M2 соответствующего стиля (Wrestling/Dirty).
 			local STYLES = {
 				"Default","Basic","Boxing","Bulky","Dirty","Hakari","Karate","Kure",
 				"MuayThai","SkyGaoLang","Variant","Taekwondo","Wild","WingChun",
 				"Wrestling","Capoeira","Slugger",
 			}
-			local KINDS = { { label = "M1", key = "M1" }, { label = "M2 (Heavy)", key = "M2" }, { label = "Skill", key = "SKILL" } }
+			local KINDS = { { label = "M1", key = "M1" }, { label = "M2 (Heavy)", key = "M2" } }
 			local mdOptions, mdDefault = {}, {}
 			for _, s in ipairs(STYLES) do
 				local saved = Config.MustDodgeStyles and Config.MustDodgeStyles[s:lower()]
@@ -4089,7 +4094,6 @@ return function(_Lib, _Core)
 							if st and kindLabel then
 								local key = (kindLabel == "M1" and "M1")
 									or (kindLabel == "M2 (Heavy)" and "M2")
-									or (kindLabel == "Skill" and "SKILL")
 								if key then
 									st = st:lower()
 									t[st] = t[st] or {}
@@ -4103,7 +4107,7 @@ return function(_Lib, _Core)
 					notify("Must-Dodge", "Selected: " .. n .. " attack(s)")
 				end,
 			}, ctx.flag("AP_MustDodge"))
-			apDodge:SubLabel({ Text = "Selected attacks are treated as unblockable (grabs/slams/casts) — dodged BACKWARD into i-frames instead of blocked. Pick per style: M1, M2 (Heavy) or Skill." })
+			apDodge:SubLabel({ Text = "Selected attacks are treated as unblockable (grabs/slams) — dodged BACKWARD into i-frames instead of blocked. Pick per style: M1 or M2 (Heavy)." })
 		end
 
 		-- Section 3 — Skill Addons (per-style combat behaviors, own box, own Enabled)
@@ -4262,4 +4266,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
