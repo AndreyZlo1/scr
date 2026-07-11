@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок����о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -1730,7 +1730,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- и задирал hitTL всех последующих M2 с 600→730мс → no-window NO-PRESS. База 600мс
 	-- почти идеальна против реальных ~585мс.)
 	-- [V71] множитель скорости атаки АТАКУЮЩЕГО (по его росту) — делит задержку удара.
-	-- track.Speed для чужих игроков реплицируется как 1.0, поэтому берём из роста.
+	-- track.Speed для чужих игроков ��еплицируется как 1.0, поэтому берём из роста.
 	local aMult    = attackSpeedMult(model)
 	local heightAttr, bodyHeightScale, modelHeight = heightDiag(model)
 	local hitTL    = hitTimeline(info, combo, aMult)
@@ -2214,7 +2214,7 @@ local function schedulerStep(now)
 	if turnTo and turnTo.attackerHRP then
 		local dtc = turnTo.contactAbs - now
 		-- жёсткий снап раньше и в более широком окне → успеваем повернуться даже при
-		-- быстром чередовании атакующих; иначе быстрый лерп-трекинг.
+		-- быстром чередовании атакующих; иначе быстрый лерп-тр��кинг.
 		if dtc <= (Config.BlockFaceHardDt or 0.30) and dtc >= -(Config.HoldAfter or 0.12) then
 			faceToward(turnTo.attackerHRP, true)
 		else
@@ -3170,7 +3170,7 @@ end
 -- бывший цикл "Stop(0); Play()" каждые ~длину и ломал анимации со временем (постоянные
 -- рестарты накапливали рассинхрон аниматора). Теперь: играем idle-decoy ОДИН раз, дальше в
 -- Heartbeat лишь мягко переутверждаем приоритет+вес и переиграем ТОЛЬКО если он реально
--- перестал играть. Никаких прин��дительных Stop → визуал стабилен неограниченно долго.
+-- переста�� играть. Никаких прин��дительных Stop → визуал стабилен неограниченно долго.
 local IdleMask = { conn = nil }
 local function stopIdleMask()
 	if IdleMask.conn then pcall(function() IdleMask.conn:Disconnect() end); IdleMask.conn = nil end
@@ -3296,6 +3296,7 @@ do
 		local r = rootOf()
 		if r and Inv.oldcf then pcall(function() r.CFrame = Inv.oldcf end) end
 		Inv.oldcf = nil
+		Inv.serverCF = nil
 	end
 
 	local function startInvisible()
@@ -3330,8 +3331,11 @@ do
 			local baseDrop = (hum.HipHeight or 2) + (r.Size.Y / 2) - 1
 			local drop = baseDrop + (tonumber(Config.InvisibleHeight) or 0)
 			local cf = r.CFrame - Vector3.new(0, drop, 0)
+			local serverCF = cf * CFrame.Angles(math.rad(isR15 and 180 or 90), 0, 0)
+			-- Expose the server-side root transform so Ghost can render where OTHERS see us.
+			Inv.serverCF = serverCF
 			pcall(function()
-				r.CFrame = cf * CFrame.Angles(math.rad(isR15 and 180 or 90), 0, 0)
+				r.CFrame = serverCF
 				if Inv.track then Inv.track:AdjustWeight(100) end
 			end)
 		end)
@@ -3352,6 +3356,10 @@ do
 		if Ghost.bindKey then pcall(function() RS:UnbindFromRenderStep(Ghost.bindKey) end); Ghost.bindKey = nil end
 		if Ghost.model then pcall(function() Ghost.model:Destroy() end); Ghost.model = nil end
 		Ghost.map = nil
+		-- Nuke any orphaned ghost models left behind by a respawn/rebuild race.
+		for _, m in ipairs(Workspace:GetChildren()) do
+			if m.Name == "AP_Ghost" then pcall(function() m:Destroy() end) end
+		end
 	end
 
 	local function buildGhost()
@@ -3387,13 +3395,22 @@ do
 		folder.Parent = Workspace
 		Ghost.model, Ghost.map = folder, map
 
+		local root = rootOf()
 		Ghost.bindKey = "AP_Ghost_" .. tostring(math.random(1e6, 9e6))
 		pcall(function()
+			-- Runs AFTER Invisible's priority-0 restore, so m.src.CFrame here is the real
+			-- (restored) position. We re-apply the server offset transform T so the ghost
+			-- sits where OTHERS see us (dropped + contorted), not on top of our real body.
 			RS:BindToRenderStep(Ghost.bindKey, Enum.RenderPriority.Camera.Value + 2, function()
 				if not Ghost.map then return end
+				root = root or rootOf()
+				local T = nil
+				if Inv.enabled and Inv.serverCF and Inv.oldcf then
+					T = Inv.serverCF * Inv.oldcf:Inverse()  -- world offset applied to the root
+				end
 				for _, m in ipairs(Ghost.map) do
 					if m.src and m.src.Parent then
-						m.dst.CFrame = m.src.CFrame
+						m.dst.CFrame       = T and (T * m.src.CFrame) or m.src.CFrame
 						m.dst.Color        = Config.GhostColor or m.dst.Color
 						m.dst.Transparency = Config.GhostTransparency or m.dst.Transparency
 					end
@@ -3738,7 +3755,7 @@ task.spawn(function()
 			if kind == "attack" then
 					State.selfBusyUntil = now + Config.SelfBusyDur
 					-- [V88] PRERUN: (1) СРАЗУ играем фейк-атаку (decoy как через [) — она реплицируется
-					-- раньше реальной, вражеский autoparry цепляется за неё; (2) РЕАЛЬНЫЙ FireServer
+					-- раньше реальной, вра��еский autoparry цепляется за неё; (2) РЕАЛЬНЫЙ FireServer
 					-- задерживаем на DesyncDelayMs — настоящий удар прилетает, когда его парри по
 					-- фейку уже прошёл. Возвращаем сразу (гасим немедленный вызов), реальный уходит
 					-- из task.delay.
@@ -4264,11 +4281,11 @@ return function(_Lib, _Core)
 				Config.Enabled = v
 				if not v then pcall(releaseBlock); pcall(vizHideAll) end
 			end,
-			Desc = "Auto-blocks / parries and dodges incoming attacks. Keybind works on PC and mobile.",
+			Desc = "Auto blocks and rolls hits for you. Bind works on PC + mobile.",
 		})
 		slider(apMain, { Name = "FOV", Flag = "AP_FOV", Default = Config.FOV or 360,
 			Min = 1, Max = 360, Suffix = "°", Callback = function(v) Config.FOV = v end })
-		apMain:SubLabel({ Text = "Screen-space FOV from viewport center. 360° keeps the current all-around behavior." })
+		apMain:SubLabel({ Text = "Only react to enemies inside this cone. 360 = all around you." })
 		apMain:Divider()
 		apMain:Dropdown({
 			Name = "Accuracy Mode",
@@ -4279,7 +4296,7 @@ return function(_Lib, _Core)
 				notify("Accuracy Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("AP_AccuracyMode"))
-		apMain:SubLabel({ Text = "Low = wider reaction cone, trusts point-blank hits (safer vs feints). High = stricter facing checks, fewer wasted blocks." })
+		apMain:SubLabel({ Text = "Low = chill, blocks more (safer vs feints). High = picky, wastes fewer blocks." })
 		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
 			Min = 8, Max = 64, Callback = function(v) Config.Range = v end })
 		slider(apMain, { Name = "Dodge Reaction (lead)", Flag = "AP_DodgeLead",
@@ -4310,7 +4327,7 @@ return function(_Lib, _Core)
 			Title = "Dodge & Heavy", Flag = "AP_DodgeHeavy",
 			get = function() return Config.DodgeHeavy end,
 			set = function(v) Config.DodgeHeavy = v end,
-			Desc = "Dodge M2 / skill lunges instead of trying to block them.",
+			Desc = "Roll M2s and lunges instead of trying to block them.",
 		})
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
@@ -4360,7 +4377,7 @@ return function(_Lib, _Core)
 					notify("Must-Dodge", "Selected: " .. n .. " attack(s)")
 				end,
 			}, ctx.flag("AP_MustDodge"))
-			apDodge:SubLabel({ Text = "Selected attacks are treated as unblockable (grabs/slams) — dodged BACKWARD into i-frames instead of blocked. Pick per style: M1 or M2 (Heavy)." })
+			apDodge:SubLabel({ Text = "Roll back into i-frames on these instead of blocking. Pick M1 or M2 per style." })
 		end
 
 		-- Section 3 — Skill Addons (per-style combat behaviors, own box, own Enabled)
@@ -4370,22 +4387,22 @@ return function(_Lib, _Core)
 			Title = "Skill Addons", Flag = "AP_SkillAddon",
 			get = function() return Config.SkillAddon end,
 			set = function(v) Config.SkillAddon = v end,
-			Desc = "Master switch for the per-style addons below.",
+			Desc = "Master switch for the per-style stuff below.",
 		})
 		boolToggle(apBox, "Boxing Counter", "AP_BoxingCounter",
 			function() return Config.BoxingCounter end, function(v) Config.BoxingCounter = v end)
-		apBox:SubLabel({ Text = "Boxing only — hard-faces the enemy and sends YOUR boxing M2 (i-frames) instead of dodging. Inactive with any other style." })
+		apBox:SubLabel({ Text = "Boxing only — face the enemy and throw your own M2 i-frames instead of rolling." })
 		slider(apBox, { Name = "Pre-Face Time", Flag = "AP_PreFace", Default = Config.BoxingPreFace or 0.5,
 			Min = 0.1, Max = 1.0, Precision = 2, Suffix = " s", Callback = function(v) Config.BoxingPreFace = v end })
 		boolToggle(apBox, "Wrestling Anti-Grab", "AP_SAWrestling",
 			function() return Config.SA_WrestlingGrab end, function(v) Config.SA_WrestlingGrab = v end)
-		apBox:SubLabel({ Text = "Enemy Wrestling M2 is an unblockable HyperArmor grab — always backdodge it into i-frames." })
+		apBox:SubLabel({ Text = "Wrestling M2 is an unblockable grab — always roll it." })
 		boolToggle(apBox, "Dirty Anti-Grab", "AP_SADirty",
 			function() return Config.SA_DirtyGrab end, function(v) Config.SA_DirtyGrab = v end)
-		apBox:SubLabel({ Text = "Enemy Dirty grab/M2 ignores ragdoll immunity and beats blocks — force a dodge instead." })
+		apBox:SubLabel({ Text = "Dirty grab ignores immunity and eats blocks — roll it instead." })
 		boolToggle(apBox, "Hakari Double Read", "AP_SAHakari",
 			function() return Config.SA_HakariRead end, function(v) Config.SA_HakariRead = v end)
-		apBox:SubLabel({ Text = "Hakari momentum M2 lands slightly later (0.62 hitbox delay) — widens the dodge/parry window to match." })
+		apBox:SubLabel({ Text = "Hakari's momentum M2 hits late — widens the window to match." })
 
 		-- Section 4 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
@@ -4397,7 +4414,7 @@ return function(_Lib, _Core)
 				Config.ShowVisuals = v
 				if not v then pcall(vizHideAll) end
 			end,
-			Desc = "Range ring + reaction cone drawn around you (only while AutoParry is on).",
+			Desc = "Draws ur range ring + reaction cone",
 		})
 		apVis:Colorpicker({ Name = "Ring Gradient A", Default = RING_A,
 			Callback = function(c) RING_A = c end }, ctx.flag("AP_RingA"))
@@ -4423,11 +4440,11 @@ return function(_Lib, _Core)
 			set = function(v)
 				if (DesyncTest.on and true or false) ~= v then pcall(toggleDesyncTest) end
 			end,
-			Desc = "Replicates a fake ATTACK while you move, so enemy autoparry reacts to a swing that never lands.",
+			Desc = "Fakes a swing while u move so enemy autoparry bites on nothing.",
 		})
 		slider(dsSelf, { Name = "Send Frequency", Flag = "DS_SendHz", Default = Config.DesyncSendHz or 0,
 			Min = 0, Max = 20, Suffix = " Hz", Callback = function(v) Config.DesyncSendHz = v end })
-		dsSelf:SubLabel({ Text = "How many times per second the decoy attack is re-sent. 0 = auto (matches the animation length)." })
+		dsSelf:SubLabel({ Text = "Decoy re-sends per second. 0 = auto." })
 		boolToggle(dsSelf, "Client Visible", "Desync Client Visible",
 			function() return Config.DesyncClientVisible end,
 			function(v) Config.DesyncClientVisible = v end)
@@ -4440,7 +4457,7 @@ return function(_Lib, _Core)
 			Title = "Attack Desync", Flag = "DS_Attack",
 			get = function() return Config.DesyncAttack end,
 			set = function(v) Config.DesyncAttack = v end,
-			Desc = "Desyncs YOUR swings so enemies mistime their parry. Independent of AutoParry.",
+			Desc = "Desyncs ur swings so enemies mistime the parry",
 		})
 		dsAtk:Dropdown({
 			Name = "Desync Mode", 			Options = { "delay", "firedelay", "idlemask", "prerun" },
@@ -4451,7 +4468,7 @@ return function(_Lib, _Core)
 				notify("Desync Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("DS_Mode"))
-		dsAtk:SubLabel({ Text = "delay = delay only your swing visual. firedelay = play visual now, delay only M1/M2 FireServer. idlemask = enemy sees IDLE. prerun = fake swing now, real hit delayed." })
+		dsAtk:SubLabel({ Text = "delay = lag your swing visual. firedelay = lag only the server hit. idlemask = enemies see you idle. prerun = fake swing first, real one late." })
 		slider(dsAtk, { Name = "Desync Delay", Flag = "DS_Delay", Default = Config.DesyncDelayMs or 140,
 			Min = 40, Max = 400, Suffix = " ms", Callback = function(v) Config.DesyncDelayMs = v end })
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
@@ -4464,24 +4481,20 @@ return function(_Lib, _Core)
 			Title = "Invisible", Flag = "DS_Invisible",
 			get = function() return Config.InvisibleOn end,
 			set = function(v) pcall(function() IV.setInvisible(v) end) end,
-			Desc = "Replicates a dropped/contorted root to the server so others can't see you; locally you look normal.",
+			Desc = "Drops your body underground for everyone else. You still look normal to yourself.",
 		})
 		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 0,
 			Min = 0, Max = 15, Suffix = " studs", Callback = function(v) Config.InvisibleHeight = v end })
-		dsInv:SubLabel({ Text = "Extra studs on top of the base burial. 0 = default (already hidden); raise only if teammates can still see you." })
+		dsInv:SubLabel({ Text = "Extra studs to bury deeper" })
 		boolToggle(dsInv, "Contort Anim", "Invisible Anim",
 			function() return Config.InvisibleAnim end, function(v) Config.InvisibleAnim = v end)
 
-		dsInv:Header({ Name = "Ghost" })
-		feature(dsInv, {
-			Title = "Ghost", Flag = "DS_Ghost",
-			get = function() return Config.GhostOn end,
-			set = function(v) pcall(function() IV.setGhost(v) end) end,
-			Desc = "Glass, semi-transparent clone of your body parts shown at your real position.",
-		})
+		boolToggle(dsInv, "Ghost", "Ghost",
+			function() return Config.GhostOn end,
+			function(v) pcall(function() IV.setGhost(v) end) end)
+		dsInv:SubLabel({ Text = "Glassy clone lol" })
 		slider(dsInv, { Name = "Ghost Transparency", Flag = "DS_GhostTr", Default = math.floor((Config.GhostTransparency or 0.5) * 100),
 			Min = 0, Max = 95, Suffix = " %", Callback = function(v) Config.GhostTransparency = v / 100 end })
-		dsInv:Button({ Name = "Rebuild Ghost", Callback = function() pcall(function() IV.rebuildGhost() end) end })
 
 		-- ═══════════════════ TAB: Debug ═══════════════════
 		local DB = ctx.tabs.Debug
