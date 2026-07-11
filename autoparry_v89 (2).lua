@@ -4360,7 +4360,7 @@ return function(_Lib, _Core)
 			Title = "Attack Desync", Flag = "DS_Attack",
 			get = function() return Config.DesyncAttack end,
 			set = function(v) Config.DesyncAttack = v end,
-			Desc = "Desyncs your swings so enemies mistime the parry. Works without AutoParry.",
+			Desc = "Desyncs ur swings so enemies mistime the parry. Works without AutoParry.",
 		})
 		dsAtk:Dropdown({
 			Name = "Desync Mode", 			Options = { "delay", "firedelay", "idlemask", "prerun" },
@@ -4388,7 +4388,7 @@ return function(_Lib, _Core)
 		})
 		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 0,
 			Min = 0, Max = 15, Suffix = " studs", Callback = function(v) Config.InvisibleHeight = v end })
-		dsInv:SubLabel({ Text = "Extra studs to bury deeper. 0 is usually enough." })
+		dsInv:SubLabel({ Text = "Extra studs, 2-3 is good" })
 		boolToggle(dsInv, "Contort Anim", "Invisible Anim",
 			function() return Config.InvisibleAnim end, function(v) Config.InvisibleAnim = v end)
 
