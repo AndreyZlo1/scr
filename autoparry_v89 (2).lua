@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -46,9 +48,18 @@ local Config = {
 	AccuracyMode  = "Low",
 	PointBlank    = 3.0,    -- Low: ≤ этой дист. всегда считаем удар нашим (в упор не отвертеться)
 	LowFaceMin    = -0.55,  -- Low: бракуем удар, только если predFacing·toMe < этого (шире конус ~123°: реагируем на большее, отсекаем только явно спиной)
-	RotPredMaxDeg = 200,    -- [V88] кап предсказанного доворота за свинг (было 120 — не хватало на быстрый разворот 180° в финтах)
+	RotPredMaxDeg = 200,    -- [V88] кап предсказанного доворота за свинг (Low: широкий, ловит 180° финты)
+	-- [V92] В HIGH кап доворота ЖЁСТКИЙ. При 200° предсказанный facing разворачивался на
+	-- ПОЛ-ОБОРОТА → враг, стоящий СПИНОЙ, «предсказанно смотрел на нас» → High парировал
+	-- атаки, которые физически не в нас (жалоба игрока). 55° = реальный доворот за свинг,
+	-- спиной-стоящий (rawDot<0) уже не долетает предиктом до нас.
+	RotPredMaxDegHigh = 55,
 	HighSlack     = 0.35,   -- [V90.5] High: слак бокса, студы (снижен 0.6→0.35 — меньше ложняков)
 	HeavyHighFaceMin = 0.5, -- [V90.5] High: тяжёлый лунж доверяем, только если нацелен в нас (~60° конус)
+	-- [V92] High back-facing гейт: враг сейчас смотрит от нас сильнее HighBackDot И предсказанный
+	-- facing не наводится сильнее HighFaceMin → физически не может ударить → сразу reject.
+	HighBackDot   = -0.15,  -- rawDot ниже этого = смотрит от нас
+	HighFaceMin   = 0.25,   -- предсказанный facing·toMe должен превысить это, иначе не угроза
 	-- [V90.4] High = чисто геометрический dual-box (predLook + rawL), без radius/facing-доверия
 	-- (см. willHitMe). Никаких HighFaceMin/HighReachPad больше нет — они и делали High как Low.
 	-- [V90] DRAG/SNAP-TURN детект (закрученные атаки: враг смотрит мимо, бьёт, резко
@@ -227,7 +238,7 @@ local Config = {
 	DesyncAttack   = false,
 	-- [V88] Режимы desync (цикл клавишей ]):
 	--   delay     — визуал твоего замаха задержан на DesyncDelayMs; FireServer уходит вовремя.
-	--   firedelay — визуал идёт вовремя; только M1/M2 ServerCheck уходит позже на DesyncDelayMs.
+	--   firedelay — визуал идёт ��овремя; только M1/M2 ServerCheck уходит позже на DesyncDelayMs.
 	--   idlemask  — постоянный спуф IDLE, пока ты атакуешь.
 	--   prerun    — фейк-атака (как [) СРАЗУ + реальный FireServer задержан на DesyncDelayMs.
 	DesyncMode     = "delay",
@@ -329,7 +340,7 @@ local Config = {
 	ShowVisuals   = true,   -- мастер-переключатель всех визуалов AutoParry
 	-- [V90] Настраиваемые визуалы. Каждый элемент можно включить/выключить отдельно, а у
 	-- вращающегося кольца настраиваются скорость анимации, размер и дальность прорисовки.
-	VizRing       = true,   -- вращающееся кольцо под целью
+	VizRing       = true,   -- ��ращающееся кольцо под целью
 	VizHitbox     = true,   -- бокс хитбокса цели
 	VizRestrict   = true,   -- зона ограничения (keep-out)
 	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
@@ -797,7 +808,8 @@ local function willHitMe(th)
 	rawL = Vector3.new(rawL.X, 0, rawL.Z)
 	rawL = (rawL.Magnitude > 0.05) and rawL.Unit or flatLook
 	local angY  = safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0
-	local capR  = math.rad(Config.RotPredMaxDeg or 120)
+	-- [V92] в High жёсткий кап доворота (спиной-стоящий не «долетает» предиктом до нас)
+	local capR  = math.rad((mode == "High" and (Config.RotPredMaxDegHigh or 55)) or (Config.RotPredMaxDeg or 120))
 	-- [V91] РОБАСТНЫЙ предикт ротации. Физический angY шумит и часто =0 между physics-степами
 	-- → predLook НЕ доворачивался на доворачивающегося врага → High-бокс уходил мимо (миссы
 	-- never-in-hitbox). Берём МАКС из физической и ИЗМЕРЕННОЙ (кадр-к-кадру) скорости доворота;
@@ -911,18 +923,22 @@ local function willHitMe(th)
 				local fside  = math.abs(off:Dot(Vector3.new(-look.Z, 0, look.X)))
 				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
 			end
-			-- [V91] БАГ ФИКС: тут было `aPos` (нигде не определён) → nil-index на КАЖДОЙ High-угрозе
-			-- → willHitMe падал в pcall → false весь путь → "never-in-hitbox" → High не парировал
-			-- вовсе. Текущая позиция атакующего = aHRP.Position (th.attackerHRP), её и берём.
+			-- [V92] ЖЁСТКИЙ BACK-FACING ГЕЙТ. Если враг СЕЙЧАС смотрит явно от нас (rawDot < порога)
+			-- И предсказанный facing тоже не наводится на нас (faceDotPred низкий) — он физически
+			-- НЕ может нас ударить этим свингом → выкидываем сразу. Это прямой фикс жалобы «чел
+			-- стоит спиной, а скрипт реагирует»: раньше 200°-предикт разворачивал predLook на нас.
+			if rawDot < (Config.HighBackDot or -0.15)
+			   and faceDotPred < (Config.HighFaceMin or 0.25) then
+				th.trustedHit = false
+				return false
+			end
+			-- Текущая позиция атакующего = aHRP.Position (th.attackerHRP).
+			-- Два бокса: предсказанный (predA/predLook — ловит финт-довороты в пределах жёсткого
+			-- капа) и текущий (aHRP.Position/rawL — снимает задержку на прямых). Оба — реальная
+			-- геометрия замаха; удар не в нас не проходит ни один. turningToward-обход УБРАН:
+			-- он целил бокс прямо в нас для любого «доворачивающегося» → ложняки по спине.
 			local hit = inBox(predA.X, predA.Z, predLook)
 			         or inBox(aHRP.Position.X, aHRP.Position.Z, rawL)
-			-- [V91] rotation-aware добор: враг АКТИВНО доворачивается на нас (turningToward) —
-			-- серверный хитбокс построится по его facing В МОМЕНТ удара, поэтому проверяем бокс
-			-- с look, наведённым прямо на нас. Гейт — сам inBox (реальная дальность depthF и
-			-- ширина halfW), НЕ широкий радиус → далёкие/мимо-удары по-прежнему отсекаются.
-			if not hit and turningToward then
-				hit = inBox(aHRP.Position.X, aHRP.Position.Z, toMe)
-			end
 			th.trustedHit = false
 			return hit
 		end
@@ -2424,6 +2440,15 @@ local function schedulerStep(now)
 	if multiThreat then
 		State.multiThreatMax   = math.max(State.multiThreatMax or 0, State.multiThreatN)
 		State.multiThreatFrames = (State.multiThreatFrames or 0) + 1
+		-- [V92] ЛАТЧ УДЕРЖАНИЯ КЛАСТЕРА. Баг «2-я атака проходит»: как только 1-й атакующий
+		-- отрабатывал, multiThreat падал до false (остался 1 враг) → guard отпускался по
+		-- КОРОТКОМУ одиночному holdUntil, ровно за ~20мс до удара выжившего (diag t=73.07
+		-- PERFECT → t=73.35 LATE NO-PRESS). Теперь при обнаружении кластера ЗАПОМИНАЕМ самый
+		-- поздний контакт + грейс и держим guard до него, сколько бы угроз ни осталось потом.
+		if farContact then
+			local latch = farContact + Config.HoldAfter + (Config.HoldLateGrace or 0) + 0.05
+			State.multiHoldUntil = math.max(State.multiHoldUntil or 0, latch)
+		end
 	end
 
 	if wantBlock then
@@ -2505,7 +2530,7 @@ local function schedulerStep(now)
 			end
 		end
 		local holdExtra = (wantBlock.kind == "M2" and Config.M2WidenWindow) and Config.M2WidenHold or 0
-		-- [V62] в мультибое тянем guard до САМОГО ДАЛЬНЕГО контакта кластера, а не
+		-- [V62] в муль��ибое тянем guard до САМОГО ДАЛЬНЕГО контакта кластера, а не
 		-- только б��ижайше��о — так guard не отпускается в се��едине burst и каждый
 		-- последующий удар любого врага ловится как normal-block (BLOCKABLE↑, HIT↓).
 		local base = wantBlock.contactAbs
@@ -2515,11 +2540,16 @@ local function schedulerStep(now)
 	elseif State.blocking then
 		-- [V62] пока в кластере есть незакрытые угрозы — не отпуск��ем guard даже
 		-- е��ли ближайший holdUntil истёк (иначе дыра между волнами burst).
-		local keepForCluster = multiThreat and farContact
-			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0))
+		-- [V92] guard держим пока: (а) активен мультиугрозный кластер прямо сейчас, ИЛИ
+		-- (б) не истёк ЛАТЧ кластера (State.multiHoldUntil) — даже если остался 1 атакующий,
+		-- это выживший из кластера, и его удар ещё летит. Так вторая волна больше не проходит.
+		local keepForCluster = (multiThreat and farContact
+			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0)))
+			or (State.multiHoldUntil and now < State.multiHoldUntil)
 		if not keepForCluster
 		   and (now >= State.holdUntil or (now - State.lastPress) > Config.ReleaseGap) then
 			releaseBlock()
+			State.multiHoldUntil = 0
 		end
 	end
 end
@@ -3181,7 +3211,7 @@ end
 -- [V63] Desync-маска идёт СВОЕЙ загруженной копией idle, НИК��ГДА не захватывая
 -- живые геймплейные треки. П��ошлые вер��ии брали первый не-атакующий playing-трек
 -- как decoy и дёргали ЕГО вес на 90Гц + Stop() в конце — если это был walk/emote,
--- реальная анимация ломалась (проблема "не воспроизводит нормально при движении").
+-- реальная анимация ломалась (проблема "не воспр��изводит нормально при движении").
 -- V62 форсил ст��к-idle 507766388 → чужая поза, визуальны�� снап ("переводится в idle").
 -- Ре��ение: определить НАСТОЯЩИЙ idle игры (доминирующий looped не-атака-трек, пока
 -- стоим на месте), закэшировать его id и крутить ��ашу собственную копию поверх.
