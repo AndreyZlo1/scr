@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -271,22 +271,6 @@ local Config = {
 	ServerSwingHook   = true,
 	ServerSwingDedup  = 0.35,
 
-	-- [V90] RESOLVER. Серверный хитбокс в workspace.Hitboxes = ground-truth атаки.
-	-- Дамп VictimHitboxService: жертва (мы) каждый Heartbeat сканит workspace.Hitboxes;
-	-- хитбокс-парт несёт child StringValue Owner (имя атакующего) + AttackName (M1/M2),
-	-- и атрибуты VictimSwingId (string) / VictimActionToken (number). ХИТ засчитывается
-	-- ТОЛЬКО когда этот бокс физически накрывает наше тело, и репорт шлёт сама жертва со
-	-- СВОИМ Blocking/PerfectBlocking в этот момент. Из этого следует:
-	--  1) появление бокса с Owner=враг = 100% доказательство реального удара (не финт/decoy);
-	--  2) реакция по появлению бокса ещё успевает — засчитывание идёт позже, в момент оверлапа.
-	Resolver              = false,  -- мастер-переключатель резолвера (OFF по умолчанию, NOT TESTED)
-	ResolverVetoFeint     = true,   -- не тратить boxing-counter/грант-додж на финт, пока удар не подтверждён боксом
-	ResolverPanicBlock    = true,   -- аварийный блок при появлении неотвеченного вражеского хитбокса (ловит desync врага)
-	ResolverConfirmWindow = 0.60,   -- сколько секунд подтверждение бокса считается «свежим» для угрозы
-	ResolverPanicReach    = 22,     -- радиус (студы): аварийно блочим только близкие боксы
-	ResolverFeintThreshold= 1,      -- со скольких недавних незавершённых свингов считать врага «финтёром»
-	ResolverFeintMemory   = 3.0,    -- сколько секунд помним финты врага
-
 	DodgeHorizon      = 0.34,
 	MinBlockSeparation= 0.17,
 	DodgeArmWindow    = 0.05,
@@ -393,6 +377,10 @@ local ServerRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Ser
 
 local State = {
 	blocking     = false,
+	guardUp      = false,   -- ИСТИННОЕ серверное состояние guard: true когда серверу отправлен
+	                        -- Activated и ещё не отправлен Deactivated. Отдельно от blocking
+	                        -- (внутреннее намерение), чтобы гарантированно снимать guard даже
+	                        -- если blocking сброшен в обход releaseBlock (dodge/counter/outcome).
 	holdUntil    = 0,
 	status       = "ARMED",
 	lastThreat   = nil,
@@ -849,7 +837,7 @@ end
 -- [V71] множитель скорости атаки конкретного АТАКУЮЩЕГО. Задержка удара в игре =
 -- base / mult (GetScaledHitboxDelay). mult зависит от роста персонажа: низкий → до
 -- 1.15 (бьёт на 15% быстрее), высокий → 0.85. Раньше мы всегда слали 1 → быстрые
--- враги давали LATE. Сначала пробу��м родные функции игры (future-proof при апдейтах),
+-- враги давали LATE. Сначала пр��бу��м родные функции игры (future-proof при апдейтах),
 -- потом фолбэк на задокументированную формулу от атрибута Height.
 local AttackMultCache = {}
 local function attackSpeedMult(model)
@@ -1059,7 +1047,7 @@ local function hitTimelineBase(info, combo)
 		end
 		-- [V89] КОНФИГ — авторитетный источник тайминга M2. GetStyleM2HitboxDelay даёт ровно
 		-- ту задержку, по которой сервер наносит удар (GetScaledHitboxDelay: delay/mult).
-		-- РАНЬШЕ первым возвращался маркер "Hit" из анимации (info.hit) и он врал: в диаг
+		-- РАНЬШЕ первым в��звращался маркер "Hit" из анимации (info.hit) и он врал: в диаг
 		-- Capoeira M2 читался hitTL=327мс при реальном контакте 448мс (predErr=+163ms LATE
 		-- NO-PRESS → Ragdoll-кас��ад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
 		-- Теперь маркер — лишь MAX-страховка поверх конфига: покрывает длинные и 2-хитовые
@@ -1413,17 +1401,21 @@ local function sendActivate(tsServer)
 		{ Type = "Combat", Action = "Block", Func = "Activated" },
 		tsServer
 	)
+	State.guardUp = true          -- сервер теперь держит guard
 	playBlockAnim()
 	return true
 end
 
-local function sendDeactivate()
+-- force=true — принудительное снятие guard (в обход MinDeactGap). Нужно, чтобы реальный
+-- релиз никогда не терялся из-за рейт-лимита и guard не завис поднятым.
+local function sendDeactivate(force)
 	local now = os.clock()
-	if now - State.lastDeact < Config.MinDeactGap then return false end
+	if not force and now - State.lastDeact < Config.MinDeactGap then return false end
 	State.lastDeact = now
 	local c = localChar()
 	if c then c:SetAttribute("Blocking", nil) end
 	ServerRemote:FireServer({ Type = "Combat", Action = "Block", Func = "Deactivated" })
+	State.guardUp = false         -- guard снят на сервере
 	stopBlockAnim()
 	return true
 end
@@ -1461,7 +1453,7 @@ local function sendBoxingCounter(th, keepGuard)
 	if State.blocking and not keepGuard then
 		State.blocking, State.holdUntil = false, 0
 		stopBlockAnim()
-		pcall(sendDeactivate)
+		pcall(sendDeactivate, true)   -- force: guard обязан опуститься, иначе рейт-лимит его подвесит
 	end
 	ServerRemote:FireServer({ Type = "Combat", Action = "M2", Func = "ServerCheck" })
 	State.lastCounter  = os.clock()
@@ -1590,9 +1582,9 @@ end
 
 local function releaseBlock()
 	if not State.blocking then return end
-	if not sendDeactivate() then return end
 	State.blocking  = false
 	State.holdUntil = 0
+	sendDeactivate(true)   -- принудительно: намерение уже снято, guard обязан опуститься
 end
 
 local function fireBlock(tsServer)
@@ -2041,7 +2033,7 @@ local function schedulerStep(now)
 					-- быстрый M1 (contact=352ms) всегда имел contactAbs меньше медленной
 					-- M2 (contact=832ms), поэтому п��сле перфекта M1 медленная M2 НИКОГДА
 					-- не становилась целью → NO-PRESS → полный хит (твой клип). Теперь
-					-- сначала берём угрозы без нажатия (unpressed), сред��� ��их — с самым
+					-- снача��а берём угрозы без нажатия (unpressed), сред��� ��их — с самым
 					-- ранним дедлайном. Так после блока быстрого heavy получает своё
 					-- собственное нажатие (guard держится → блок тяжёлой).
 					local take = false
@@ -2166,11 +2158,7 @@ local function schedulerStep(now)
 		-- GRANT-эскейп: бесплатный эвейд от игры при численном перевесе. Грант
 		-- держится, пока мы в меньшинстве, поэтому МОЖНО подождать и фитить строго
 		-- когда удар входит в iframe-окно (а не палить сразу и тратить впустую).
-		-- [V90] RESOLVER veto: outnumbered-escape — БЕСПЛАТНЫЙ эвейд (грант держится, пока мы в
-		-- меньшинстве). Не жжём его на i-frames против подтверждённого финтёра с неподтверждённым
-		-- ударом. Survival-доджи ниже (must-dodge/combo/exposed) НЕ вето — там жизнь важнее.
-		if Config.OutnumberEscape and evasiveGranted() and coverable
-		   and not (State.rsvVetoExpensive and State.rsvVetoExpensive(a.name)) then
+		if Config.OutnumberEscape and evasiveGranted() and coverable then
 			if performDodge(now, "outnumbered-escape") then return end
 		end
 		-- combo-эскейп: мы в стане и блок недоступен → додж единственная защита.
@@ -2263,29 +2251,12 @@ local function schedulerStep(now)
 	end
 
 	if wantBlock then
-		-- boxing-counter — только против ОДИНОЧНОЙ угрозы. В burst он шлёт нашу M2
+		-- boxing-counter — только против ОДИНОЧНОЙ угрозы. В burst он шлёт н��шу M2
 		-- (attack lockout) и роняет guard, оставляя остальных без блока.
 		-- Гибрид: в мультибое перфектим ближайшего обычным блоком, остальным
 		-- держим непрерывный guard (гарантированный normal-block, нулевые дыры).
-		local counterWorthy = shouldBoxingCounter(wantBlock)
-		-- [V90] RESOLVER: как только угроза признана достойной контры — «замечаем» её, чтобы
-		-- резолвер по факту (не)появления серверного хитбокса выучил, финтит ли этот враг.
-		if counterWorthy and not wantBlock.rsvNoted then
-			wantBlock.rsvNoted = true
-			if State.rsvNoteThreat then State.rsvNoteThreat(wantBlock.name, wantBlock.contactAbs, wantBlock.kind) end
-		end
-		-- [V90] RESOLVER veto: против врага-финтёра, чей удар ещё НЕ подтверждён свежим серверным
-		-- хитбоксом, НЕ тратим boxing-counter (он шлёт нашу M2 + роняет guard → нас наказывают за
-		-- контру по финту). Проваливаемся в обычный блок ниже — защита сохранена, впустую не жжёмся.
-		local vetoed = counterWorthy and State.rsvVetoExpensive and State.rsvVetoExpensive(wantBlock.name)
-		if vetoed and not wantBlock.rsvVetoLogged then
-			wantBlock.rsvVetoLogged = true
-			diagPush(("VETO  t=%.2f  %s %s counter withheld (feinter unconfirmed) → downgrade to block")
-				:format(now, wantBlock.name, wantBlock.kind))
-		end
-		local allowCounter = counterWorthy
+		local allowCounter = shouldBoxingCounter(wantBlock)
 			and not (Config.BoxingCounterSolo and multiThreat)
-			and not vetoed
 		if allowCounter then
 			-- [V89] РАННИЙ HARD FACE-LOCK. Проблема ротации при boxing-аддоне: раньше взгляд
 			-- на врага включался ТОЛЬКО в момент выстрела counter'а (contactAbs - BoxingCounterLead
@@ -2294,7 +2265,7 @@ local function schedulerStep(now)
 			-- нашему LookVector в момент ServerCheck, поэтому смотреть надо ТОЧНО и ЗАРАНЕЕ. Теперь
 			-- как только решили контрить и контакт в пределах BoxingPreFace (~0.5с) — жёстко
 			-- снапим лицо на врага и держим лок весь этот период (enforceFaceLock в RenderStepped
-			-- поддерживает + гасит AutoRotate). Это и есть требуемые «смотреть 0.5с на врага».
+			-- поддерживае�� + гасит AutoRotate). Это и есть требуемые «смотреть 0.5с на врага».
 			local dtc = wantBlock.contactAbs - now
 			if dtc <= (Config.BoxingPreFace or 0.5) and dtc >= -(Config.HoldAfter or 0.12) then
 				local myHRP, aHRP = localHRP(), wantBlock.attackerHRP
@@ -2481,7 +2452,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 		State.stateHits = (State.stateHits or 0) + 1
 	end
 
-	-- [V64] Замер эффективности per-hit rearm: копим результаты по позиции удара
+	-- [V64] Замер эффективности per-hit rearm: к��пим результаты по позиции удара
 	-- в ком��о. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
 	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
@@ -3271,7 +3242,7 @@ local function cycleDesyncMode()
 	Config.DesyncMode = DESYNC_CYCLE[(idx % #DESYNC_CYCLE) + 1]
 	applyDesyncMode()
 	local hint = (Config.DesyncMode == "delay" and "тормозит визуал твоего свинга, сервер вовремя")
-		or (Config.DesyncMode == "firedelay" and "визуал вовремя, M1/M2 ServerCheck уходит позже")
+		or (Config.DesyncMode == "firedelay" and "визуал вовремя, M1/M2 ServerCheck уходит п��зже")
 		or (Config.DesyncMode == "idlemask" and "враг видит IDLE, пока ты атакуешь/бежишь")
 		or "фейк-атака чуть раньше реальной — ломает тайминг парри врага"
 	aclog(("[DESYNC] mode = %s%s  (%s)"):format(
@@ -3523,7 +3494,7 @@ end
 -- ��ак пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
 -- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬНО реплицировался ему
--- от твоего главного. Свингни на главном — и в дебаге второго аккаунта увидишь, что
+-- от твоего главного. Свингни ��а главном — и в дебаге второго аккаунта увидишь, что
 -- ему пришло: реальная атака, decoy-idle, или (если raknet-rewrite заработает) только idle.
 -- Это и есть объективная проверка desync с ��очки зрения противника.
 local Observers = {}
@@ -3686,6 +3657,11 @@ task.spawn(function()
 		if self ~= ServerRemote or method ~= "FireServer" then
 			return oldNamecall(self, ...)
 		end
+		-- Наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без повторной
+		-- обработки, иначе пакет либо снова отложится (бесконечный цикл), либо потеряется.
+		if State.desyncPassthrough then
+			return oldNamecall(self, ...)
+		end
 		local a1 = (select(1, ...))
 		local ok, kind = pcall(classifyCombat, a1)
 		local action = (type(a1) == "table" and a1.Action) or "?"
@@ -3708,17 +3684,23 @@ task.spawn(function()
 							local delayS = math.max(0, (Config.DesyncDelayMs or 140) / 1000)
 							local remote = self
 							task.delay(delayS, function()
-								-- Зовём сырое значение FireServer напрямую (через __index), НЕ oldNamecall:
-								-- голый oldNamecall(self,...) теряет контекст метода namecall и сервер
-								-- получает битый вызов. Так уходит корректный отложенный пакет.
-								pcall(function()
-									local fire = remote.FireServer
-									fire(remote, table.unpack(args, 1, args.n))
+								-- Отправляем НАСТОЯЩИМ namecall remote:FireServer(...). Флаг
+								-- desyncPassthrough заставляет наш же хук пропустить этот вызов без
+								-- повторной задержки. Раньше звали сырое значение remote.FireServer —
+								-- на части экзекуторов такой вызов уходил как некорректный namecall и
+								-- сервер молча отбрасывал удар (та самая "атака не проходит").
+								State.desyncPassthrough = true
+								local ok = pcall(function()
+									remote:FireServer(table.unpack(args, 1, args.n))
 								end)
+								State.desyncPassthrough = false
+								if not ok then
+									aclog(("[SWING] firedelay RE-FIRE FAILED for %s (executor namecall issue?)"):format(tostring(action)))
+								end
 							end)
 							if (now - (State.lastSwingLog or 0)) > 0.15 then
 								State.lastSwingLog = now
-								aclog(("[SWING] %s: %s animation NOW, ServerCheck delayed +%.0fms")
+								aclog(("[SWING] %s: %s ServerCheck HELD, re-firing in +%.0fms (token in args)")
 									:format(Config.DesyncMode, tostring(action), delayS * 1000))
 							end
 							return
@@ -3787,146 +3769,6 @@ local function restrictStep(now)
 	end
 end
 
--- ============================================================================
--- [V90] RESOLVER — верификация атак по СЕРВЕРНОМУ хитбоксу (ground truth).
--- Из дампа Hidden/VictimHitboxService: сервер после ServerCheck выжидает windup
--- (M1HitboxDelay≈0.32с / M2HitboxDelay≈0.3с, зависит от стиля) и создаёт BasePart в
--- workspace.Hitboxes с child StringValue Owner (ИМЯ атакующего = plr.Name) + AttackName
--- (M1/M2) и атрибутами VictimSwingId(string)/VictimActionToken(number). Хитбокс живёт
--- всего HitboxDuration≈0.15с. Хит засчитывается ТОЛЬКО когда бокс физически накрывает наше
--- тело (жертва сама шлёт VictimHitConfirm со своим Blocking в этот момент).
---   Следствие 1: появление бокса с Owner=враг = 100% доказательство РЕАЛЬНОГО удара (не финт).
---   Следствие 2 (важно, по твоему опасению): бокс появляется ~к контакту и висит 150мс, т.е.
---     ПОЗЖЕ, чем нужно проактивной контре (она жмётся за ~160мс до контакта). Поэтому нельзя
---     «ждать бокс всегда» — это зарубит контры против честной игры. Правильно: бокс = (а) вето
---     дорогих реакций ТОЛЬКО против того, кто уже палился на финтах, и (б) реактивная сеть
---     (panic-block) для атак, чью анимацию мы не видели (вражеский desync).
--- ============================================================================
-do
-	State.rsv = { confirm = {}, feint = {}, feintAt = {}, lastPanic = 0, hits = 0, panics = 0, vetoes = 0, nextGC = 0 }
-
-	local function meName()
-		local p = Players.LocalPlayer
-		return p and p.Name or nil
-	end
-
-	local function readHitbox(part)
-		if not (typeof(part) == "Instance" and part:IsA("BasePart")) then return nil end
-		local owner = part:FindFirstChild("Owner")
-		local atk   = part:FindFirstChild("AttackName")
-		if not (owner and owner:IsA("StringValue") and atk and atk:IsA("StringValue")) then return nil end
-		local aname = atk.Value
-		if aname ~= "M1" and aname ~= "M2" then return nil end       -- дамп: u3={M1,M2}
-		local swingId = part:GetAttribute("VictimSwingId")
-		if typeof(swingId) ~= "string" or swingId == "" then return nil end
-		return owner.Value, aname, swingId, part:GetAttribute("VictimActionToken")
-	end
-
-	-- (б) аварийный блок: сервер выставил вражеский хитбокс, а мы его не отвечаем (не видели
-	-- анимацию — классический вражеский desync). Блок дёшев и без локаута → жмём реактивно.
-	local function tryPanic(oname, aname, part)
-		if not (Config.Resolver and Config.ResolverPanicBlock) then return end
-		local now = os.clock()
-		if State.blocking then return end
-		if now < (State.rsv.lastPanic or 0) + 0.20 then return end
-		local hrp = localHRP(); if not hrp then return end
-		if (part.Position - hrp.Position).Magnitude > (Config.ResolverPanicReach or 22) then return end
-		-- этого врага уже ведёт основной цикл (увидел анимацию и жмёт/держит блок)? не мешаем.
-		for _, th in ipairs(Threats) do
-			if th.name == oname and th.threatens and (th.pressed or State.blocking) then return end
-		end
-		if not canBlockNow() then return end
-		if fireBlock(Workspace:GetServerTimeNow()) then
-			State.rsv.lastPanic = now
-			State.rsv.panics = (State.rsv.panics or 0) + 1
-			State.holdUntil = math.max(State.holdUntil or 0, now + 0.15 + 0.18)  -- HitboxDuration+grace
-			diagPush(("PANIC t=%.2f  resolver blocked UNSEEN %s hitbox from %s (%.0fstud) — likely enemy desync")
-				:format(now, aname, oname, (part.Position - hrp.Position).Magnitude))
-		end
-	end
-
-	local function onConfirm(part)
-		if not Config.Resolver then return end
-		local oname, aname, swingId, token = readHitbox(part)
-		if not oname then return end
-		if oname == meName() then return end                          -- наш собственный хитбокс
-		local rsv = State.rsv
-		rsv.confirm[oname] = { t = os.clock(), attack = aname, swingId = swingId, token = token }
-		rsv.hits = (rsv.hits or 0) + 1
-		tryPanic(oname, aname, part)
-	end
-
-	-- обучение финтам: основной цикл зовёт это, когда решает, что угроза достойна дорогой
-	-- реакции. Через (windup+grace) проверяем — появился ли реальный хитбокс от врага. Нет = финт.
-	function State.rsvNoteThreat(name, contactAbs, kind)
-		if not (Config.Resolver and Config.ResolverVetoFeint) then return end
-		if type(name) ~= "string" then return end
-		local rsv = State.rsv
-		local startT = os.clock()
-		local wait = math.max(0.05, (contactAbs or startT) - startT) + 0.22
-		task.delay(wait, function()
-			local c = rsv.confirm[name]
-			local confirmed = c and c.t >= (startT - 0.05)
-			if not confirmed then
-				rsv.feint[name] = math.min((rsv.feint[name] or 0) + 1, 5)
-				rsv.feintAt[name] = os.clock()
-				diagPush(("FEINT t=%.2f  %s %s → NO server hitbox appeared (feint score=%.0f)")
-					:format(os.clock(), name, tostring(kind), rsv.feint[name]))
-			else
-				rsv.feint[name] = math.max((rsv.feint[name] or 0) - 0.5, 0)
-			end
-		end)
-	end
-
-	-- вето: true = придержать дорогую реакцию. Только против врага-финтёра (score>=порог) и
-	-- только пока его удар НЕ подтверждён свежим хитбоксом. Против честного игрока всегда false.
-	function State.rsvVetoExpensive(name)
-		if not (Config.Resolver and Config.ResolverVetoFeint) then return false end
-		if type(name) ~= "string" then return false end
-		local rsv = State.rsv
-		if (rsv.feint[name] or 0) < (Config.ResolverFeintThreshold or 1) then return false end
-		local c = rsv.confirm[name]
-		local fresh = c and (os.clock() - c.t) <= (Config.ResolverConfirmWindow or 0.6)
-		if not fresh then rsv.vetoes = (rsv.vetoes or 0) + 1 end
-		return not fresh
-	end
-
-	function State.rsvConfirmedFresh(name, within)
-		local c = State.rsv.confirm[name]
-		return (c and (os.clock() - c.t) <= (within or (Config.ResolverConfirmWindow or 0.6))) or false
-	end
-
-	local function attach()
-		local folder = Workspace:FindFirstChild("Hitboxes")
-		if not folder then return false end
-		if State.rsv.folder == folder then return true end
-		State.rsv.folder = folder
-		folder.ChildAdded:Connect(function(child)
-			task.defer(function() pcall(onConfirm, child) end)  -- Owner/атрибуты могут ставиться кадром позже
-		end)
-		return true
-	end
-
-	task.spawn(function()
-		while not attach() do task.wait(0.5) end
-		aclog("[RESOLVER] armed — watching workspace.Hitboxes for server-side attack confirmation")
-	end)
-
-	RunService.Heartbeat:Connect(function()          -- decay feint-скоров + чистка кэша ~1/с
-		if not Config.Resolver then return end
-		local now = os.clock()
-		if now < (State.rsv.nextGC or 0) then return end
-		State.rsv.nextGC = now + 1.0
-		local mem = Config.ResolverFeintMemory or 3.0
-		for nm, tAt in pairs(State.rsv.feintAt) do
-			if now - tAt > mem then State.rsv.feint[nm] = nil; State.rsv.feintAt[nm] = nil end
-		end
-		for nm, c in pairs(State.rsv.confirm) do
-			if now - c.t > 2.0 then State.rsv.confirm[nm] = nil end
-		end
-	end)
-end
-
 RunService.Heartbeat:Connect(function()
 	if not Config.Enabled then
 		if State.blocking then releaseBlock() end
@@ -3938,6 +3780,15 @@ RunService.Heartbeat:Connect(function()
 	pcall(schedulerStep, now)    -- [V68] one persistent-fn pcall guards the whole loop
 	                             -- (no per-read closures inside anymore → far less GC)
 	pcall(restrictStep, now)
+
+	-- ФИКС ЗАСТРЕВАНИЯ БЛОКА: единая реконсиляция guard. Несколько путей (dodge, boxing-
+	-- counter, onOutcome LATE/GUARDBREAK) сбрасывают State.blocking напрямую, НЕ отправляя
+	-- Deactivated → сервер продолжал держать guard до ручного нажатия. Тут гарантируем:
+	-- если серверу отправлен Activated (guardUp), но намерения блокировать больше нет —
+	-- принудительно снимаем guard. Идемпотентно и безопасно (force обходит рейт-гейт).
+	if State.guardUp and not State.blocking then
+		pcall(sendDeactivate, true)
+	end
 
 	for name, q in pairs(Pending) do
 		for i = #q, 1, -1 do
@@ -4345,7 +4196,7 @@ return function(_Lib, _Core)
 			}, ctx.flag(o.Flag))
 		end
 
-		-- ═══════════════════ TAB: AutoParry ═══════════════════
+		-- ═══════════════════ TAB: AutoParry ══════════════���════
 		local AP = ctx.tabs.AutoParry
 
 		-- Section 1 — AutoParry core (own box)
@@ -4481,30 +4332,7 @@ return function(_Lib, _Core)
 			function() return Config.SA_HakariRead end, function(v) Config.SA_HakariRead = v end)
 		apBox:SubLabel({ Text = "Hakari's momentum M2 hits late — widens the window to match." })
 
-		-- Section 4 — Resolver (own section, right side). NOT TESTED.
-		local apRes = AP:Section({ Side = "Right" })
-		apRes:Header({ Name = "Resolver" })
-		feature(apRes, {
-			Title = "Resolver", Flag = "AP_Resolver",
-			get = function() return Config.Resolver end,
-			set = function(v) Config.Resolver = v end,
-			Desc = "NOT TESTED. Verify attacks against the server hitbox in workspace.Hitboxes.",
-		})
-		boolToggle(apRes, "Veto Feints", "AP_ResolverVeto",
-			function() return Config.ResolverVetoFeint end, function(v) Config.ResolverVetoFeint = v end)
-		apRes:SubLabel({ Text = "Hold counter/free-dodge on known feinters until a real hitbox confirms." })
-		boolToggle(apRes, "Panic Block", "AP_ResolverPanic",
-			function() return Config.ResolverPanicBlock end, function(v) Config.ResolverPanicBlock = v end)
-		apRes:SubLabel({ Text = "Block when an unseen enemy hitbox spawns next to you (enemy desync)." })
-		slider(apRes, { Name = "Panic Reach", Flag = "AP_ResolverReach", Default = Config.ResolverPanicReach or 22,
-			Min = 8, Max = 40, Suffix = " stud", Callback = function(v) Config.ResolverPanicReach = v end })
-		slider(apRes, { Name = "Confirm Window", Flag = "AP_ResolverWindow",
-			Default = math.floor((Config.ResolverConfirmWindow or 0.60) * 1000), Min = 200, Max = 1200,
-			Suffix = " ms", Callback = function(v) Config.ResolverConfirmWindow = v / 1000 end })
-		slider(apRes, { Name = "Feint Threshold", Flag = "AP_ResolverFeintTh", Default = Config.ResolverFeintThreshold or 1,
-			Min = 1, Max = 5, Callback = function(v) Config.ResolverFeintThreshold = v end })
-
-		-- Section 5 — Visuals (own box, own Enabled)
+		-- Section 4 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
 		apVis:Header({ Name = "Visuals" })
 		feature(apVis, {
