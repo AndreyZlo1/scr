@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -123,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок����������������������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������������������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -268,6 +270,14 @@ local Config = {
 
 	ServerSwingHook   = true,
 	ServerSwingDedup  = 0.35,
+
+	-- [V90] Серверный хитбокс-детект. workspace.Hitboxes — серверно-авторитетная папка:
+	-- при КАЖДОМ реальном ударе сервер кладёт туда BasePart с Owner(StringValue)=имя
+	-- атакующего и AttackName(StringValue). Этот сигнал НЕЛЬЗЯ скрыть трюком с анимацией
+	-- (в отличие от AnimationPlayed), поэтому именно его слушает топовый вражеский autoparry.
+	-- Слушаем Hitboxes.ChildAdded и кормим onAttack как реактивный источник детекта.
+	HitboxDetect      = true,
+	HitboxDedup       = 0.35,       -- сек: не регать тот же VictimSwingId/владельца повторно
 
 	DodgeHorizon      = 0.34,
 	MinBlockSeparation= 0.17,
@@ -2582,6 +2592,85 @@ task.spawn(function()
 	dbg("server-swing hook active — listening " .. remote.Name)
 end)
 
+-- [V90] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ (тот же метод, что использует топовый вражеский autoparry).
+-- workspace.Hitboxes наполняется сервером при КАЖДОМ реальном ударе: BasePart с дочерними
+-- Owner(StringValue)=имя атакующего и AttackName(StringValue). Этот сигнал появляется у
+-- момента контакта и НЕ зависит от анимации — поэтому его нельзя обмануть нашим/чужим
+-- AntiAutoParry (десинк анимации). Слушаем ChildAdded и кормим onAttack как реактивный
+-- источник (contact=0 → немедленный парри), дедуп по VictimSwingId и против Pending.
+local function attackKindFromName(nm)
+	if type(nm) ~= "string" then return "M1" end
+	local low = nm:lower()
+	if low:find("m2") or low:find("heavy") or low:find("charge") or low:find("crit") then return "M2" end
+	return "M1"
+end
+
+local function registerHitbox(part)
+	if not (Config.Enabled and Config.HitboxDetect) then return end
+	if not (part and part:IsA("BasePart")) then return end
+	-- Owner/AttackName приходят как дочерние StringValue (могут появиться на кадр позже парта)
+	local owner = part:FindFirstChild("Owner")
+	local atkNm = part:FindFirstChild("AttackName")
+	if not (owner and owner:IsA("StringValue")) then
+		owner = part:WaitForChild("Owner", 0.05)
+	end
+	if not (owner and owner:IsA("StringValue")) then return end
+	if not (atkNm and atkNm:IsA("StringValue")) then
+		atkNm = part:FindFirstChild("AttackName")
+	end
+	local ownerName = owner.Value
+	if type(ownerName) ~= "string" or ownerName == "" then return end
+	if ownerName == LocalPlayer.Name then return end     -- наш собственный хитбокс — не парируем себя
+	local model = resolveSwingAttacker(ownerName)
+	if not model then return end
+	local ok, hrp = isEnemyModel(model)
+	if not ok or not hrp then return end
+
+	-- дедуп: тот же VictimSwingId не регистрируем повторно
+	local swingId = part:GetAttribute("VictimSwingId")
+	local sig = swingId ~= nil and tostring(swingId) or (ownerName .. "@" .. tostring(part))
+	State.hbSeen = State.hbSeen or {}
+	local nowC = os.clock()
+	local prev = State.hbSeen[sig]
+	if prev and (nowC - prev) < (Config.HitboxDedup or 0.35) then return end
+	State.hbSeen[sig] = nowC
+	-- периодическая чистка кэша дедупа
+	if (State.hbSeen._last or 0) < nowC - 2 then
+		State.hbSeen._last = nowC
+		for k, t in pairs(State.hbSeen) do
+			if k ~= "_last" and type(t) == "number" and t < nowC - 2 then State.hbSeen[k] = nil end
+		end
+	end
+
+	local kind = attackKindFromName(atkNm and atkNm.Value or nil)
+	-- дедуп против уже задетекченного анимацией/сервер-свингом свинга этого врага
+	local plr  = Players:GetPlayerFromCharacter(model)
+	local name = plr and plr.Name or model.Name
+	local q = Pending[name]
+	if q then
+		for i = #q, 1, -1 do
+			local r = q[i]
+			if r.type == kind and (nowC - r.clock) <= (Config.HitboxDedup or 0.35) then return end
+		end
+	end
+
+	local info = { t = kind, s = styleOf(model) or "Basic", hit = nil, combo = nil, mom = false }
+	onAttack(hrp, info, model, 0, nil)
+end
+
+task.spawn(function()
+	local hb = Workspace:WaitForChild("Hitboxes", 60)
+	if not hb then dbg("hitbox-detect: workspace.Hitboxes not found"); return end
+	hb.ChildAdded:Connect(function(child)
+		pcall(registerHitbox, child)
+	end)
+	-- уже существующие хитбоксы на момент подключения
+	for _, ch in ipairs(hb:GetChildren()) do
+		pcall(registerHitbox, ch)
+	end
+	dbg("hitbox-detect active — listening workspace.Hitboxes")
+end)
+
 local function acAvailable(name)
 	local ok, v = pcall(function()
 		if type(getgenv) == "function" then local g = getgenv()[name]; if g ~= nil then return g end end
@@ -3683,14 +3772,8 @@ task.spawn(function()
 		end
 		return nil
 	end
-	local mod = findCRC()
-	if not mod then aclog("[desync] fire-hook: CombatRemoteClient not found"); return end
-	local okReq, CRC = pcall(require, mod)
-	if not okReq or type(CRC) ~= "table" or type(CRC.Fire) ~= "function" then
-		aclog("[desync] fire-hook: require failed"); return
-	end
-
-	local origFire = CRC.Fire
+	-- строим сам хук-замену (используется и для require-, и для memory-пути)
+	local origFire
 	local function newFire(action, func, ...)
 		if Config.DesyncAttack
 		   and func == "ServerCheck" and (action == "M1" or action == "M2")
@@ -3710,17 +3793,62 @@ task.spawn(function()
 		return origFire(action, func, ...)
 	end
 
-	-- замена поля (tryM1/M2 читают .Fire при каждом вызове); если таблица заморожена —
-	-- падаем на hookfunction по самой функции.
-	local set = pcall(function() CRC.Fire = newFire end)
-	if not set or CRC.Fire ~= newFire then
-		if type(hookfunction) == "function" then
-			pcall(function() origFire = hookfunction(origFire, newFire) end)
-		else
-			aclog("[desync] fire-hook: table frozen, no hookfunction"); return
+	-- ПУТЬ 1: require по найденному ModuleScript (если Network доступен и не заморожен).
+	-- tryM1/M2 читают CombatRemoteClient.Fire при каждом свинге, поэтому подмена поля .Fire
+	-- на кэшированной таблице ловит каждую отправку.
+	local mod = findCRC()
+	if mod then
+		local okReq, CRC = pcall(require, mod)
+		if okReq and type(CRC) == "table" and type(CRC.Fire) == "function" then
+			origFire = CRC.Fire
+			local set = pcall(function() CRC.Fire = newFire end)
+			if set and CRC.Fire == newFire then
+				dbg("desync fire-hook armed (require field-swap)")
+				return
+			end
+			-- таблица заморожена → хукаем саму функцию
+			if type(hookfunction) == "function" then
+				pcall(function() origFire = hookfunction(CRC.Fire, newFire) end)
+				dbg("desync fire-hook armed (require hookfunction)")
+				return
+			end
 		end
 	end
-	dbg("desync fire-hook armed")
+
+	-- ПУТЬ 2: модуль недосягаем через require (лежит в Hidden). Ищем саму функцию Fire
+	-- В ПАМЯТИ через filtergc по её константам ("Combat"/"FireServer"/"ServerCheck"-адресату)
+	-- и хукаем через hookfunction. Это работает, даже когда ReplicatedStorage.Shared скрыт.
+	if type(filtergc) == "function" and type(hookfunction) == "function" then
+		local fn
+		local ok = pcall(function()
+			fn = filtergc("function", {
+				Name = "Fire",
+				Constants = { "Combat", "FireServer", "Action", "Func" },
+				IgnoreExecutor = true,
+			}, true)
+		end)
+		-- запасной фильтр без Name (имя функции может быть срезано обфускацией)
+		if not (ok and type(fn) == "function") then
+			pcall(function()
+				fn = filtergc("function", {
+					Constants = { "Combat", "FireServer", "Action", "Func" },
+					IgnoreExecutor = true,
+				}, true)
+			end)
+		end
+		if type(fn) == "function" then
+			origFire = fn
+			local hooked = pcall(function() origFire = hookfunction(fn, newFire) end)
+			if hooked then
+				aclog("[desync] fire-hook armed via memory (filtergc) — module was hidden")
+				return
+			end
+		end
+		aclog("[desync] fire-hook: Fire() not found in memory")
+		return
+	end
+
+	aclog("[desync] fire-hook: no require path and no filtergc/hookfunction — firedelay unavailable")
 end)
 
 local function activeRestrictZone(now)
@@ -4112,7 +4240,7 @@ task.spawn(function()
 	while true do task.wait(3); scanAnimators() end
 end)
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════���═══════════════════════════
 --  LOADER MODULE WRAPPER  (Syllinse Project integration)
 --  The loader does: local h = chunk(); if type(h)=="function" then h = h(Lib, Core) end
 --  and then calls h.start() and h.buildUI(ctx). Everything above already ran at
@@ -4234,6 +4362,9 @@ return function(_Lib, _Core)
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
 			Min = 4, Max = 40, Callback = function(v) Config.MaxHeightDiff = v end })
+		boolToggle(apMain, "Server Hitbox Detect", "AP_HitboxDetect",
+			function() return Config.HitboxDetect end, function(v) Config.HitboxDetect = v end)
+		apMain:SubLabel({ Text = "Reacts to the server's real hitbox (workspace.Hitboxes) on top of animations. Catches attacks that hide their swing animation. Keep ON." })
 		apMain:Divider()
 		-- Rotation (доворот на цель)
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
