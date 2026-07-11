@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -230,9 +230,9 @@ local Config = {
 	-- НЕ активен при загрузке (в этом была причина фриза V73).
 	DesyncScanSecs = 5,
 	DesyncRaknetWindowMs = 220,
-	-- [V74] self-verify: подписка на свой Animator.AnimationPlayed — объективно
-	-- показывает, какие треки реально стартуют (и реплицируются) при твоём свинге.
-	DesyncSelfVerify = true,
+	-- [V74] self-verify: подписка на свой Animator.AnimationPlayed.
+	-- ВЫКЛ по умолчанию — забивал диаг строками [VERIFY]/[DESYNC-VERIFY] на каждый трек.
+	DesyncSelfVerify = false,
 
 	BoxingFaceLockDur = 0.55,
 	-- [V89] за сколько до контакта начинать ЖЁСТКО смотреть на врага при boxing-counter
@@ -1072,7 +1072,7 @@ local function hitTimelineBase(info, combo)
 	return base + WINDUP_EXTRA
 end
 
--- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��вно то, что
+-- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��в��о то, что
 -- делает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
 -- база подтянется из её же ��онфига, а скорость — из роста атакующего.
@@ -1636,7 +1636,7 @@ local function refreshContact(th)
 			if Config.LiveHeavyTimer and tp < th.hitTL - 0.001 then
 				-- реальная скорость прогресса, но не ниже пола (иначе деление на ~0
 				-- даёт бесконечность, а враг может резко доиграть). Пол = доля от
-				-- номинальной скорости трека.
+				-- номин��льной скорости трека.
 				local nominal = math.max(th.initSpeed or 1, 0.05)
 				local floor   = nominal * (Config.LiveSpeedFloor or 0.15)
 				local sp      = math.max(th.liveSpeed or nominal, floor)
@@ -2209,7 +2209,7 @@ local function schedulerStep(now)
 		end
 	end
 
-	-- [V70] СНАП ВОЗВРАЩЁН (soft-face/центроид удалён — оставлял face=0.2..0.5 BACK!).
+	-- [V70] СНАП ВОЗВРАЩЁН (soft-face/центроид ��далён — оставлял face=0.2..0.5 BACK!).
 	-- Снап быстрый и мультитаргетный: цель поворота = faceTgt (ближайший по времени
 	-- ЕЩЁ не прилетевший удар среди всех атакующих), пересчитывается каждый кадр, так
 	-- что после каждого контакта мы мгновенно перекидываемся на следующего врага в
@@ -2264,7 +2264,7 @@ local function schedulerStep(now)
 			-- он «лишь доворачивал» и не докручивал до врага. Сервер строит boxing-M2 хитбокс по
 			-- нашему LookVector в момент ServerCheck, поэтому смотреть надо ТОЧНО и ЗАРАНЕЕ. Теперь
 			-- как только решили контрить и контакт в пределах BoxingPreFace (~0.5с) — жёстко
-			-- снапим лицо на врага и держим лок весь этот период (enforceFaceLock в RenderStepped
+			-- снапим лицо на врага �� держим лок весь этот период (enforceFaceLock в RenderStepped
 			-- поддерживае�� + гасит AutoRotate). Это и есть требуемые «смотреть 0.5с на врага».
 			local dtc = wantBlock.contactAbs - now
 			if dtc <= (Config.BoxingPreFace or 0.5) and dtc >= -(Config.HoldAfter or 0.12) then
@@ -3005,7 +3005,7 @@ end
 -- V62 форсил ст��к-idle 507766388 → чужая поза, визуальны�� снап ("переводится в idle").
 -- Решение: определить НАСТОЯЩИЙ idle игры (доминирующий looped не-атака-трек, пока
 -- стоим на месте), закэшировать его id и крутить нашу собственную копию поверх.
--- Живые треки не тро��аем вообще → walk/emote целы, а маска = родной idle и��ры.
+-- Живые треки не тро��аем вообще → walk/emote целы, а маска = ��одной idle и��ры.
 local _capturedIdleId
 local function captureIdleId(animator)
 	local myHRP = localHRP()
@@ -3364,7 +3364,7 @@ end
 --   raknet.add_send_hook(fn) / raknet.remove_send_hook(fn)   -- снятие по ССЫЛКЕ на fn!
 --   raknet.add_recv_hook(fn) / raknet.remove_recv_hook(fn)
 -- Старый код: (1) ��итал packet.id / packet.size — таких полей нет; (2) хранил "hookId"
--- из add_send_hook и звал remove_send_hook(hookId) — передавал не-функцию в C++ →
+-- из add_send_hook и зва�� remove_send_hook(hookId) — передавал не-функцию в C++ →
 -- вылет. Теперь хук — ИМЕНОВАННАЯ функция, снимается по ссылке. Скан read-only:
 -- не трогает па��еты (ни Drop, ни SetData), только считает PacketId. Максимально
 -- безопасно и минимально по работе на пакет — как в андетект-примере.
@@ -3546,7 +3546,7 @@ local function saveDesyncDebug()
 			:format(tostring(type(raknet) == "table"),
 				tostring(type(raknet) == "table" and type(raknet.add_send_hook) == "function"),
 				tostring(type(raknet) == "table" and type(raknet.remove_send_hook) == "function")),
-		"legend: [FIRE]=decoy played on my swing | [VERIFY]=track seen on MY animator (proxy of what I send)",
+		"legend: [SWING]=ServerCheck packet timing (SENT=immediate, HELD=delayed) | [DESYNC]=animation timing",
 		"        [OBSERVE]=track seen on ANOTHER player's animator from a 2nd client (true enemy view)",
 		"        [SCAN]=raknet outgoing-packet histogram (near=during my attacks, far=background)",
 		"how to get the enemy-view lines: run this script on a 2nd account near your main,",
@@ -3694,23 +3694,31 @@ task.spawn(function()
 									remote:FireServer(table.unpack(args, 1, args.n))
 								end)
 								State.desyncPassthrough = false
-								if not ok then
+								if ok then
+									aclog(("[SWING] %s: %s ServerCheck SENT now (was held +%.0fms; animation went on time)")
+										:format(Config.DesyncMode, tostring(action), delayS * 1000))
+								else
 									aclog(("[SWING] firedelay RE-FIRE FAILED for %s (executor namecall issue?)"):format(tostring(action)))
 								end
 							end)
 							if (now - (State.lastSwingLog or 0)) > 0.15 then
 								State.lastSwingLog = now
-								aclog(("[SWING] %s: %s ServerCheck HELD, re-firing in +%.0fms (token in args)")
+								aclog(("[SWING] %s: %s ServerCheck HELD, will send in +%.0fms (animation NOT touched)")
 									:format(Config.DesyncMode, tostring(action), delayS * 1000))
 							end
 							return
 						end
 					end
 					if (now - (State.lastSwingLog or 0)) > 0.15 then
-					State.lastSwingLog = now
-					aclog(("[SWING] your %s FireServer detected%s"):format(tostring(action),
-						Config.DesyncAttack and (" — desync ARMED (mode=" .. tostring(Config.DesyncMode) .. ")") or " (desync OFF, press J)"))
-				end
+						State.lastSwingLog = now
+						if Config.DesyncAttack and Config.DesyncMode == "delay" then
+							aclog(("[SWING] delay: %s ServerCheck SENT immediately (attack on time; only animation is held +%.0fms)")
+								:format(tostring(action), (Config.DesyncDelayMs or 0)))
+						else
+							aclog(("[SWING] your %s ServerCheck SENT%s"):format(tostring(action),
+								Config.DesyncAttack and (" (desync mode=" .. tostring(Config.DesyncMode) .. ")") or " (desync OFF, press J)"))
+						end
+					end
 			elseif kind == "dash" then
 				State.selfBusyUntil = now + Config.DashDuration
 			end
@@ -4112,8 +4120,6 @@ task.spawn(function()
 	-- own animator even while AutoParry is disabled.
 	while true do task.wait(3); scanAnimators() end
 end)
-
-task.spawn(function() pcall(installDesyncSelfVerify) end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
 --  LOADER MODULE WRAPPER  (Syllinse Project integration)
