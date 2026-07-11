@@ -234,7 +234,7 @@ local Config = {
 	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
 	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
 	InvisibleOn    = false,
-	InvisibleHeight= 0,           -- ДОП. студы поверх базового захо��онения (кастом высота); 0 = базовое
+	InvisibleHeight= 0,           -- ДОП. студы поверх базового захо����онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
@@ -2005,20 +2005,27 @@ local function schedulerStep(now)
 	local faceTgt   = nil
 	local imminent  = {}
 
-	for i = #Threats, 1, -1 do
-		local th = Threats[i]
-		local trackGone = th.track and th.track.Parent == nil
-		refreshContact(th)
-		local dt = th.contactAbs - now
+		for i = #Threats, 1, -1 do
+			local th = Threats[i]
+			local trackGone = th.track and th.track.Parent == nil
+			refreshContact(th)
+			local dt = th.contactAbs - now
+			-- [V90 FIX] Угрозы БЕЗ трека (хитбокс-детект / сетевые свинги) не могут истечь по
+			-- dt: refreshContact клампит contactAbs в now+max(remaining,0), поэтому dt застревает
+			-- на 0 и НИКОГДА не уходит ниже -0.35, а trackGone для них тоже false. Без трека угроза
+			-- становилась бессмертной → wantBlock держался вечно → guard не отпускался (баг «блок
+			-- не снимается»). Даём таким угрозам жёсткий wall-clock TTL: живут contact0 + грейс.
+			local noTrackExpired = (not th.track)
+				and (now - th.detectClock) > ((th.contact0 or 0) + 0.35)
 
-		if th.feinted then
-			if not th.feintLogged then
-				th.feintLogged = true
-				diagPush(("FEINT  t=%.2f  %s  %s  reached=%.0f%% of hitTL → ignored")
-					:format(now, th.name, th.kind, (th.maxTP or 0) / math.max(th.hitTL, 0.001) * 100))
-			end
-			table.remove(Threats, i)
-		elseif dt < -0.35 or (trackGone and (now - th.detectClock) > 0.5) then
+			if th.feinted then
+				if not th.feintLogged then
+					th.feintLogged = true
+					diagPush(("FEINT  t=%.2f  %s  %s  reached=%.0f%% of hitTL → ignored")
+						:format(now, th.name, th.kind, (th.maxTP or 0) / math.max(th.hitTL, 0.001) * 100))
+				end
+				table.remove(Threats, i)
+			elseif dt < -0.35 or noTrackExpired or (trackGone and (now - th.detectClock) > 0.5) then
 			-- [V66] POST-MORTEM: угроза уходит. Если на неё ни разу не нажали и не
 			-- задоджили — это независимый пропуск. Логируем ТОЧН��Ю причину, чтобы
 			-- закрыть "скрипт проёбывает атаку" по фактам, а не догадкам.
@@ -3804,7 +3811,7 @@ task.spawn(function()
 			local now = os.clock()
 			if kind == "attack" then
 				State.selfBusyUntil = now + Config.SelfBusyDur
-				-- FIREDELAY/PRERUN: задерживаем САМ боевой пакет (ServerCheck), анимацию не
+				-- FIREDELAY/PRERUN: задерживаем САМ боевой паке�� (ServerCheck), анимацию не
 				-- трогаем. Гейт строго по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
 				-- трогаем — иначе рассинхрон чарджа). Перехват на RemoteEvent Remotes.Server —
 				-- он доступен (в отличие от модуля CombatRemoteClient, который может лежать в Hidden).
