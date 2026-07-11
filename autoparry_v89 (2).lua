@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -125,7 +123,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок����������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -241,7 +239,7 @@ local Config = {
 	BoxingPreFace     = 0.5,
 	-- [V63] DEPRECATED. Velocity-lead прицел оказался ВРЕДНЫМ: на близкой дистанции
 	-- экстраполяция разворачивала HRP вбок (в логах face=0.51 BACK!) и counter уходил
-	-- мимо. Boxing-M2 хитбокс серверный и строится по нашему ТЕКУЩЕМУ LookVector, так
+	-- ��имо. Boxing-M2 хитбокс серверный и строится по нашему ТЕКУЩЕМУ LookVector, так
 	-- что нужен прямой снап на врага (см. sendBoxingCounter/enforceFaceLock). Поле
 	-- оставлено = 0 для обратной совместимости; НЕ используется в прицеливании.
 	BoxingAimLead     = 0,
@@ -1073,7 +1071,7 @@ local function hitTimelineBase(info, combo)
 end
 
 -- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��в��о то, что
--- делает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
+-- ��елает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
 -- база подтянется из её же ��онфига, а скорость — из роста атакующего.
 local function hitTimeline(info, combo, mult)
@@ -1719,8 +1717,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 		if prev and (nowc - prev) < (Config.AntiDecoyGap or 0.12) then
 			if (nowc - (State.lastAntiDecoyLog or 0)) > 1 then
 				State.lastAntiDecoyLog = nowc
-				aclog(("[ANTI-DECOY] ignored rapid %s from %s (%.0fms gap < %.0fms) — likely desync decoy flood")
-					:format(tostring(info.t), name, (nowc - prev) * 1000, (Config.AntiDecoyGap or 0.12) * 1000))
+				aclog(("[decoy] ignored rapid %s from %s"):format(tostring(info.t), name))
 			end
 			return
 		end
@@ -1960,7 +1957,7 @@ local function schedulerStep(now)
 			table.remove(Threats, i)
 		elseif dt < -0.35 or (trackGone and (now - th.detectClock) > 0.5) then
 			-- [V66] POST-MORTEM: угроза уходит. Если на неё ни разу не нажали и не
-			-- задоджили — это независимый пропуск. Логируем ТОЧНУЮ причину, чтобы
+			-- задоджили — это независимый пропуск. Логируем ТОЧН��Ю причину, чтобы
 			-- закрыть "скрипт проёбывает атаку" по фактам, а не догадкам.
 			-- [V69] при ненаправленном блоке угроза, вошедшая в окно, покрыта поднятым
 			-- guard'ом (один блок = защита от всех). Это НЕ промах — раньше логировалось
@@ -1983,7 +1980,7 @@ local function schedulerStep(now)
 				elseif th.enteredWindow then
 					reason = "in-window но не выбран EDF (перебит другой целью в тот же кадр)"
 				elseif th.contactPassedFast then
-					reason = ("окно не открылось: контакт прилетел быстре�� pressAt (minDtToPress=%.0fms)"):format((th.minDtToPress or 0)*1000)
+					reason = ("окно не открылось: контакт приле��ел быстре�� pressAt (minDtToPress=%.0fms)"):format((th.minDtToPress or 0)*1000)
 				else
 					reason = ("no-window (maxTP=%.0f%% hitTL, feint-grace?)"):format((th.maxTP or 0)/math.max(th.hitTL,0.001)*100)
 				end
@@ -2509,7 +2506,7 @@ local function hookAnimator(animator)
 		-- Everything past here is parry logic and requires AutoParry to be enabled.
 		if not Config.Enabled then return end
 		if not rec.enemy then return end
-		-- [V85] защитная анимация врага (блок/парри/perfect) — это НЕ входящая атака, не парируем.
+		-- [V85] защитная анимация врага (блок/парри/perfect) — это НЕ входящая атака, не парир��ем.
 		if BlockIds[id] then return end
 		if not attackEntry(id) then
 			if BenignIds[id] then return end
@@ -3005,7 +3002,7 @@ end
 -- V62 форсил ст��к-idle 507766388 → чужая поза, визуальны�� снап ("переводится в idle").
 -- Решение: определить НАСТОЯЩИЙ idle игры (доминирующий looped не-атака-трек, пока
 -- стоим на месте), закэшировать его id и крутить нашу собственную копию поверх.
--- Живые треки не тро��аем вообще → walk/emote целы, а маска = ��одной idle и��ры.
+-- Живые треки не тро��аем вообще → walk/emote целы, а маска = ��од��ой idle и��ры.
 local _capturedIdleId
 local function captureIdleId(animator)
 	local myHRP = localHRP()
@@ -3156,7 +3153,7 @@ if type(getgenv) == "function" then getgenv().AP_DESYNC_TEST = toggleDesyncTest 
 
 -- [V84] DESYNC-РЕЖИМЫ на J (переключаются клавишей ]). ВСЁ обёрнуто в do..end и вынесено
 -- в одну таблицу DZ — иначе десяток top-level локалов переполнял 200-регистровый лимит
--- главного чанка Luau ("out of local registers"). Наружу торчит только DZ.
+-- главного чанка Luau ("out of local registers"). Наружу торчит то��ько DZ.
 local DZ = {}
 do
 local function localAnimator()
@@ -3202,8 +3199,7 @@ local function startIdleMask()
 			end
 		end)
 	end)
-	aclog("[DESYNC:idlemask] ON — постоянный спуф IDLE (без Stop/Play рестартов, визуал стабилен)")
-	desyncPush("[MODE] idlemask ON: persistent looped idle spoof (no restart churn)")
+	aclog("[desync] idlemask on")
 end
 
 -- PRERUN: короткая фейк-АТАКА (decoy-анимация), которую мы реплицируем РАНЬШЕ реальной —
@@ -3225,7 +3221,6 @@ local function firePreRunDecoy()
 		task.wait(dur)
 		pcall(function() track:Stop(0.05) end)
 	end)
-	desyncPush(("[MODE] prerun: fake ATTACK id=%s replicated ahead of real swing (real hit sent normally)"):format(tostring(id)))
 end
 
 -- центральный переключатель — вызывать при вкл/выкл J и при смене режима
@@ -3241,13 +3236,7 @@ local function cycleDesyncMode()
 	for i, m in ipairs(DESYNC_CYCLE) do if m == cur then idx = i break end end
 	Config.DesyncMode = DESYNC_CYCLE[(idx % #DESYNC_CYCLE) + 1]
 	applyDesyncMode()
-	local hint = (Config.DesyncMode == "delay" and "тормозит визуал твоего свинга, сервер вовремя")
-		or (Config.DesyncMode == "firedelay" and "визуал вовремя, M1/M2 ServerCheck уходит п��зже")
-		or (Config.DesyncMode == "idlemask" and "враг видит IDLE, пока ты атакуешь/бежишь")
-		or "фейк-атака чуть раньше реальной — ломает тайминг парри врага"
-	aclog(("[DESYNC] mode = %s%s  (%s)"):format(
-		Config.DesyncMode, Config.DesyncAttack and "" or "  [desync выкл, включи J]", hint))
-	desyncPush("[MODE] switched to " .. Config.DesyncMode)
+	aclog(("[desync] mode: %s%s"):format(Config.DesyncMode, Config.DesyncAttack and "" or " (off)"))
 end
 
 -- экспорт наружу через единственный top-level локал DZ
@@ -3608,20 +3597,20 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 			track:AdjustSpeed(origSpeed > 0 and origSpeed or 1)
 		end)
 	end)
-	aclog(("[DESYNC] delay: your %s swing visual held +%.0fms (hit/FireServer on time, id=%s)")
-		:format(kind, mag * 1000, tostring(animId)))
-	desyncPush(("[FIRE] delay: my %s swing visual held +%.0fms (damage on time)"):format(kind, mag * 1000))
+	if (os.clock() - (State.lastDelayLog or 0)) > 0.15 then
+		State.lastDelayLog = os.clock()
+		aclog(("[desync] %s anim held +%dms"):format(kind, math.floor(mag * 1000)))
+	end
 end
 
 local function installAnimDesync()
-	aclog(("[DESYNC] armed=%s (event-driven via AnimationPlayed) — swing to see '[DESYNC] delayed your M1 swing …'")
-		:format(tostring(Config.DesyncAttack)))
+	aclog("[desync] ready")
 end
 
 task.spawn(function()
 	if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
 		dbg("combat hook: metamethod API unavailable — Guard/BlockKick/Desync disabled")
-		aclog("[DESYNC] metamethod API unavailable — desync disabled (executor lacks hookmetamethod?)")
+		aclog("[desync] no metamethod api")
 		return
 	end
 	local oldNamecall
@@ -3657,68 +3646,15 @@ task.spawn(function()
 		if self ~= ServerRemote or method ~= "FireServer" then
 			return oldNamecall(self, ...)
 		end
-		-- Наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без повторной
-		-- обработки, иначе пакет либо снова отложится (бесконечный цикл), либо потеряется.
-		if State.desyncPassthrough then
-			return oldNamecall(self, ...)
-		end
 		local a1 = (select(1, ...))
 		local ok, kind = pcall(classifyCombat, a1)
 		local action = (type(a1) == "table" and a1.Action) or "?"
 		if ok and kind then
 			local now = os.clock()
 			if kind == "attack" then
-					State.selfBusyUntil = now + Config.SelfBusyDur
-					-- FIREDELAY/PRERUN: анимацию НЕ трогаем (идёт вовремя), задерживаем только
-					-- сам боевой пакет. Гейтим строго по Func=="ServerCheck" — это реальный удар
-					-- (дамп: M1/M2 line ServerCheck). Hold-пакеты чарджа (HoldActivated/…) не трогаем,
-					-- иначе рассинхрон чарджа → сервер отвечает Declined.
-					local func = (type(a1) == "table" and a1.Func) or nil
-					if Config.DesyncAttack and func == "ServerCheck"
-					   and (Config.DesyncMode == "prerun" or Config.DesyncMode == "firedelay") then
-						local applyKind = (action == "M1" and Config.DesyncApplyM1)
-							or (action == "M2" and Config.DesyncApplyM2)
-						if applyKind then
-							if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
-							local args = table.pack(...)
-							local delayS = math.max(0, (Config.DesyncDelayMs or 140) / 1000)
-							local remote = self
-							task.delay(delayS, function()
-								-- Отправляем НАСТОЯЩИМ namecall remote:FireServer(...). Флаг
-								-- desyncPassthrough заставляет наш же хук пропустить этот вызов без
-								-- повторной задержки. Раньше звали сырое значение remote.FireServer —
-								-- на части экзекуторов такой вызов уходил как некорректный namecall и
-								-- сервер молча отбрасывал удар (та самая "атака не проходит").
-								State.desyncPassthrough = true
-								local ok = pcall(function()
-									remote:FireServer(table.unpack(args, 1, args.n))
-								end)
-								State.desyncPassthrough = false
-								if ok then
-									aclog(("[SWING] %s: %s ServerCheck SENT now (was held +%.0fms; animation went on time)")
-										:format(Config.DesyncMode, tostring(action), delayS * 1000))
-								else
-									aclog(("[SWING] firedelay RE-FIRE FAILED for %s (executor namecall issue?)"):format(tostring(action)))
-								end
-							end)
-							if (now - (State.lastSwingLog or 0)) > 0.15 then
-								State.lastSwingLog = now
-								aclog(("[SWING] %s: %s ServerCheck HELD, will send in +%.0fms (animation NOT touched)")
-									:format(Config.DesyncMode, tostring(action), delayS * 1000))
-							end
-							return
-						end
-					end
-					if (now - (State.lastSwingLog or 0)) > 0.15 then
-						State.lastSwingLog = now
-						if Config.DesyncAttack and Config.DesyncMode == "delay" then
-							aclog(("[SWING] delay: %s ServerCheck SENT immediately (attack on time; only animation is held +%.0fms)")
-								:format(tostring(action), (Config.DesyncDelayMs or 0)))
-						else
-							aclog(("[SWING] your %s ServerCheck SENT%s"):format(tostring(action),
-								Config.DesyncAttack and (" (desync mode=" .. tostring(Config.DesyncMode) .. ")") or " (desync OFF, press J)"))
-						end
-					end
+				-- firedelay/prerun обрабатываются в хуке CombatRemoteClient.Fire (надёжный
+				-- перехват на стороне вызова). Здесь только держим свой busy-таймер.
+				State.selfBusyUntil = now + Config.SelfBusyDur
 			elseif kind == "dash" then
 				State.selfBusyUntil = now + Config.DashDuration
 			end
@@ -3727,9 +3663,57 @@ task.spawn(function()
 	end))
 	AnimLib.desyncHooked = true
 	dbg("combat hook active")
-	aclog(("[DESYNC] armed via combat __namecall hook (desync=%s) — swing to test"):format(tostring(Config.DesyncAttack)))
+	aclog("[desync] hook ready")
 	-- [V74] raknet-скан БОЛЬШЕ НЕ стартует при загрузке (это вешало клиент). Запускай
 	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в бою.
+end)
+
+-- firedelay/prerun: перехват прямо в CombatRemoteClient.Fire — это гарантированная точка
+-- вызова боевого пакета (tryM1/tryM2 зовут CombatRemoteClient.Fire("M1"/"M2","ServerCheck",...)),
+-- в отличие от __namecall-хука, который на части экзекуторов не ловит FireServer. delay сюда
+-- не заходит — там задерживается только анимация, пакет уходит штатно.
+task.spawn(function()
+	local ok, mod = pcall(function()
+		return ReplicatedStorage:WaitForChild("Shared", 10)
+			:WaitForChild("Network", 10):WaitForChild("CombatRemoteClient", 10)
+	end)
+	if not ok or not mod then aclog("[desync] fire hook: module not found"); return end
+	local ok2, CRC = pcall(require, mod)
+	if not ok2 or type(CRC) ~= "table" or type(CRC.Fire) ~= "function" then
+		aclog("[desync] fire hook: require failed"); return
+	end
+
+	local origFire = CRC.Fire
+	local function newFire(action, func, ...)
+		if Config.DesyncAttack
+		   and (Config.DesyncMode == "firedelay" or Config.DesyncMode == "prerun")
+		   and func == "ServerCheck"
+		   and (action == "M1" or action == "M2")
+		   and desyncApplies(action) then
+			if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
+			local packed = table.pack(...)
+			local d = desyncMag()
+			task.delay(d, function()
+				pcall(origFire, action, func, table.unpack(packed, 1, packed.n))
+			end)
+			if (os.clock() - (State.lastSwingLog or 0)) > 0.15 then
+				State.lastSwingLog = os.clock()
+				aclog(("[desync] %s held +%dms"):format(tostring(action), math.floor(d * 1000)))
+			end
+			return true   -- игре сообщаем «отправлено», реальный пакет уйдёт с задержкой
+		end
+		return origFire(action, func, ...)
+	end
+
+	-- заменяем поле напрямую (tryM1/M2 читают CombatRemoteClient.Fire при каждом вызове);
+	-- если таблица заморожена — падаем на hookfunction.
+	local set = pcall(function() CRC.Fire = newFire end)
+	if not set or CRC.Fire ~= newFire then
+		if type(hookfunction) == "function" then
+			pcall(function() origFire = hookfunction(CRC.Fire, newFire) end)
+		end
+	end
+	aclog("[desync] fire hook ready")
 end)
 
 local function activeRestrictZone(now)
