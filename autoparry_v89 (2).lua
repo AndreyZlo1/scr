@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -42,11 +44,8 @@ local Config = {
 	LowFaceMin    = -0.55,  -- Low: бракуем удар, только если predFacing·toMe < этого (шире конус ~123°: реагируем на большее, отсекаем только явно спиной)
 	RotPredMaxDeg = 200,    -- [V88] кап предсказанного доворота за свинг (было 120 — не хватало на быстрый разворот 180° в финтах)
 	HighSlack     = 0.6,    -- High: слак бокса, студы
-	-- [V90] High-режим больше НЕ чисто строгий бокс. Прямые атаки (враг смотрит на нас в
-	-- радиусе) доверяем сразу, как в Low, но с более узким конусом — это убирает задержку/
-	-- миссы High на прямых M1, когда стрейф уводил predLook-бокс мимо на пару кадров.
-	HighFaceMin   = -0.15,  -- High: доверяем сразу, если predFacing·toMe ≥ этого (узкий конус ~99°)
-	HighTrustRange= 9.0,    -- High: радиус facing-доверия (студы)
+	-- [V90.4] High = чисто геометрический dual-box (predLook + rawL), без radius/facing-доверия
+	-- (см. willHitMe). Никаких HighFaceMin/HighReachPad больше нет — они и делали High как Low.
 	-- [V90] DRAG/SNAP-TURN детект (закрученные атаки: враг смотрит мимо, бьёт, резко
 	-- доворачивается к нам). Ловим по ЗНАКУ доворота (facing приближается к нам между
 	-- кадрами), а не по мгновенной angY (шумной). Работает и в High, и в Low.
@@ -232,7 +231,7 @@ local Config = {
 	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
 	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
 	InvisibleOn    = false,
-	InvisibleHeight= 0,           -- ДОП. студы поверх базового захо������онения (кастом высота); 0 = базовое
+	InvisibleHeight= 0,           -- ДОП. студы поверх базового з��хо������онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
@@ -280,19 +279,6 @@ local Config = {
 	ServerSwingHook   = true,
 	ServerSwingDedup  = 0.35,
 
-	-- [V90] Серверный хитбокс-детект. workspace.Hitboxes — серверно-авторитетная папка:
-	-- при КАЖДОМ реальном ударе сервер кладёт туда BasePart с Owner(StringValue)=имя
-	-- атакующего и AttackName(StringValue). Этот сигнал НЕЛЬЗЯ скрыть трюком с анимацией
-	-- (в отличие от AnimationPlayed), поэтому именно его слушает топовый вражеский autoparry.
-	-- Слушаем Hitboxes.ChildAdded и кормим onAttack как реактивный источник детекта.
-	HitboxDetect      = true,
-	HitboxDedup       = 0.35,       -- сек: не регать тот же VictimSwingId/владельца повторно
-	-- [V90.2] HOLD BLOCK. Когда хитбокс уже ФИЗИЧЕСКИ на нас (последний кадр, перфект-парри
-	-- не успеть) или удар прилетает быстрее нашего времени реакции — не вайфим поздний парри,
-	-- а поднимаем и ДЕРЖИМ обычный блок. Держим чуть дольше, чтобы накрыть быстрый 2-й удар серии.
-	HoldBlock         = true,
-	HoldBlockDur      = 0.45,       -- сек: сколько держать guard после реактивного подъёма
-	HoldBlockDodge    = true,       -- если блок на кулдауне/стане — уходим доджем
 	-- [V90.2] Мультитаргет: мгновенный (hard) снап лицом к следующему атакующему, когда в
 	-- замесе 2+ угрозы — без плавного лерпа, чтобы не терять кадры на перекладку между целями.
 	MultiFaceHard     = true,
@@ -796,11 +782,14 @@ local function willHitMe(th)
 		local physTurns = (math.abs(angY) > 1.2) and predTurns
 		turningToward = physTurns or measTurns or (predTurns and (th.yawRate or 0) >= dragDeg)
 	end
-	local dragRange = math.max(Config.HitTrustRange or 0, Config.DragTrustRange or 0)
-	if dragRange > 0 and dist <= dragRange and turningToward then
-		th.trustedHit = true; th.trustLatch = true; th.feintTurn = true
-		return true
-	end
+		-- [V90.4] drag/snap-turn доверие — ТОЛЬКО в Low. В High доворот, который реально
+		-- дойдёт до нас, и так ловит предсказанный бокс (predLook по yaw в момент удара);
+		-- radius-доверие в High агрилось бы на довороты, чей замах в нас не попадает.
+		local dragRange = math.max(Config.HitTrustRange or 0, Config.DragTrustRange or 0)
+		if mode ~= "High" and dragRange > 0 and dist <= dragRange and turningToward then
+			th.trustedHit = true; th.trustLatch = true; th.feintTurn = true
+			return true
+		end
 
 	-- [V89] HEAVY-ПРИОРИТЕТ (главная причина пропусков в диаг). Тяжёлые (M2) и скиллы —
 	-- это ВЫПАДЫ: атакующий закрывает дистанцию прямо в замахе. Capoeira M2 детектился на
@@ -811,44 +800,49 @@ local function willHitMe(th)
 	-- смотрит приме��н�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
 	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
 	-- ненаправленный), а пропущенный хэви = проигранный разме��.
-	if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
-		local heavyRange = Config.HeavyTrustRange or 14
-		if dist <= heavyRange then
-			local aV       = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-			local toMeUnit = (dist > 0.05) and toMe or flatLook
-			local closing  = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit) -- >0 = идёт на нас
-			if faceDotPred >= (Config.HeavyFaceMin or -0.30)
-			   or closing > (Config.HeavyClosingMin or 6) then
-				th.trustedHit = true; th.trustLatch = true
-				return true
+		if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
+			local heavyRange = Config.HeavyTrustRange or 14
+			if dist <= heavyRange then
+				local aV       = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
+				local toMeUnit = (dist > 0.05) and toMe or flatLook
+				local closing  = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit) -- >0 = идёт на нас
+				-- [V90.4] В High тяжёлые доверяем ТОЛЬКО по реальному сближению (лунж = точно
+				-- дойдёт). Широкий facing-бранч оставлен только для Low — в High он агрился на
+				-- хэви, направленные не в нас. Сам замах, если дойдёт, поймает геометрия ниже.
+				local closingOk = closing > (Config.HeavyClosingMin or 6)
+				local facingOk  = (mode ~= "High") and (faceDotPred >= (Config.HeavyFaceMin or -0.30))
+				if facingOk or closingOk then
+					th.trustedHit = true; th.trustLatch = true
+					return true
+				end
 			end
 		end
-	end
 
-	if mode == "High" then
-		-- [V90] СНАЧАЛА facing-доверие (как в Low, но УЗКИЙ конус HighFaceMin): прямая атака —
-		-- враг смотрит на нас в радиусе — прессуется СРАЗУ, без ожидания совпадения строгого
-		-- бокса. Это чинит задержку/миссы High на прямых M1, когда стрейф уводил predLook-бокс
-		-- мимо нас на пару кадров. Явно off-target удары (facing от нас) сюда не попадают и
-		-- корректно отсекаются строгим боксом ниже — точность High со��раняется.
-		local hiTrust = Config.HighTrustRange or 0
-		if hiTrust > 0 and dist <= hiTrust then
-			if dist <= (Config.PointBlank or 3.0) then th.trustedHit = true; th.trustLatch = true; return true end
-			if faceDotPred >= (Config.HighFaceMin or -0.15) then th.trustedHit = true; th.trustLatch = true; return true end
+		if mode == "High" then
+			-- [V90.4] HIGH = ЧИСТО ГЕОМЕТРИЯ, без radius/facing-доверия. Парируем ТОЛЬКО если мы
+			-- физически внутри прямоугольника замаха. Никаких «враг рядом и смотрит примерно на
+			-- нас» — это и заставляло High агриться на удары, которые в нас не попадут.
+			-- Проверяем ДВА бокса и берём ИХ объединение:
+			--   • предсказанный: origin predA, направление predLook (yaw в момент удара — ловит
+			--     финты/дораскрутку, если замах реально дойдёт до нас);
+			--   • текущий: origin aPos, направление rawL (снимает задержку на ПРЯМЫХ атаках,
+			--     когда velocity-предикт увёл predA мимо нас на пару кадров при стрейфе).
+			-- Удар, который не попадёт, не проходит НИ один бокс → No-press. Точность сохранена.
+			local slack   = Config.HighSlack or 0.6
+			local halfW   = (Config.HitHalfWidth or 4) + slack
+			local depthF  = (forward + (Config.HitboxDepth or 0)) + slack
+			local depthB  = -(Config.HitboxDepthBack or 0) - slack
+			local function inBox(originX, originZ, look)
+				local ox, oz = myHRP.Position.X - originX, myHRP.Position.Z - originZ
+				local off    = Vector3.new(ox, 0, oz)
+				local fdepth = off:Dot(look)
+				local fside  = math.abs(off:Dot(Vector3.new(-look.Z, 0, look.X)))
+				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
+			end
+			local hit = inBox(predA.X, predA.Z, predLook) or inBox(aPos.X, aPos.Z, rawL)
+			th.trustedHit = false
+			return hit
 		end
-		-- HIGH strict: точный бокс по предсказанной ротации. Попадаем ли МЫ в прямоугольник
-		-- атаки, построенный вдоль predLook из позиции predA.
-		local off    = Vector3.new(myHRP.Position.X - predA.X, 0, myHRP.Position.Z - predA.Z)
-		local fdepth = off:Dot(predLook)
-		local fside  = math.abs(off:Dot(Vector3.new(-predLook.Z, 0, predLook.X)))
-		local slack  = Config.HighSlack or 0.6
-		local inFwd  = fdepth >= -(Config.HitboxDepthBack or 0) - slack
-		            and fdepth <= (forward + (Config.HitboxDepth or 0)) + slack
-		local inLat  = fside <= (Config.HitHalfWidth or 4) + slack
-		local hit    = inFwd and inLat
-		th.trustedHit = false
-		return hit
-	end
 
 	-- LOW: щедрое доверие ближнему бою (как V67), НО отбраковываем удары, явно
 	-- направленные не в нас (predFacing смотрит от нас и мы не в упор) — чтобы не
@@ -1141,9 +1135,9 @@ local function hitTimelineBase(info, combo)
 end
 
 -- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��в����о то, что
--- ��елает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
+-- ��елает игра (GetScaledHitboxDelay: delay/mult). ��дин общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
--- база подтянется из её же ��онфига, а скорость — из роста атакующего.
+-- б��за подтянется из её же ��онфига, а скорость — из роста атакующего.
 local function hitTimeline(info, combo, mult)
 	local base = hitTimelineBase(info, combo)
 	local m = (type(mult) == "number" and mult > 0.05) and mult or 1
@@ -2661,108 +2655,9 @@ task.spawn(function()
 	dbg("server-swing hook active — listening " .. remote.Name)
 end)
 
--- [V90.2] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ — переписан ТОЧНО по игровому VictimHitboxService.
--- Игра (VictimHitboxServiceClient._scanHitboxes) каждый Heartbeat сканирует workspace.Hitboxes
--- и засчитывает парт как удар по нам ТОЛЬКО когда он ФИЗИЧЕСКИ пересекает НАШ чар:
---   #workspace:GetPartBoundsInBox(part.CFrame, part.Size, overlapParams(наш Character)) > 0
--- Прежний детект (V90) регистрировал ЛЮБОЙ хитбокс в папке (чужие бои, наши же атаки) →
--- постоянные фантомные угрозы без трека → guard не отпускался. Теперь зеркалим игру:
--- overlap-против-нас + подавление (IFRAMES/Ragdoll/Downed/UltraInstinct) + дедуп по swing-key.
--- Срабатывание = «нас бьют ПРЯМО СЕЙЧАС» → реактивный Hold Block (последний рубеж защиты).
--- Весь блок обёрнут в do..end: помощники (HB, hbReact, …) НЕ занимают регистры главного
--- чанка (лимит Luau 200 локалов на функцию) — наружу выносим только scanVictimHitboxes.
-local scanVictimHitboxes
-do
-local HB = { folder = nil, op = OverlapParams.new(), seen = {}, char = nil }
-HB.op.FilterType = Enum.RaycastFilterType.Include
-HB.op.MaxParts   = 50
-local HB_KINDS    = { M1 = true, M2 = true }
-local HB_SUPPRESS = { "IFRAMES", "Ragdoll", "Downed", "UltraInstinct" }
-
-local function hbSetChar(c)
-	HB.char = c
-	if c then HB.op.FilterDescendantsInstances = { c } end
-	table.clear(HB.seen)
-end
-
-local function hbSuppressed(c)
-	for _, a in ipairs(HB_SUPPRESS) do
-		if c:GetAttribute(a) == true then return true end
-	end
-	return false
-end
-
--- Реактивная защита при подтверждённом попадании хитбокса на нас. Удар уже на теле —
--- перфект-парри не успеть, поэтому поднимаем и ДЕРЖИМ обычный блок (мержится с общей
--- guard-машиной через State.holdUntil). Держим HoldBlockDur, чтобы накрыть быстрый 2-й удар.
-local function hbReact(now, ownerName, kind)
-	if canBlockNow() then
-		if not State.blocking then fireBlock(Workspace:GetServerTimeNow()) end
-		State.holdUntil = math.max(State.holdUntil or 0, now + (Config.HoldBlockDur or 0.45))
-		State.status    = "PARRY"
-		return true, "hold-block"
-	end
-	if Config.HoldBlockDodge and dodgeReady() and canDodgeNow() then
-		if performDodge(now, "hitbox-react-dodge") then return true, "dodge" end
-	end
-	return false
-end
-
--- Вызывается из главного Heartbeat ПЕРЕД schedulerStep (чтобы guard, поднятый реактивно,
--- держался тем же кадром). Ничего не кормит в Threats — никаких track-less фантомов.
-function scanVictimHitboxes(now)
-	if not (Config.Enabled and Config.HitboxDetect and Config.HoldBlock) then return end
-	local folder = HB.folder
-	if not folder then return end
-	local c = localChar()
-	if not c then return end
-	if c ~= HB.char then hbSetChar(c) end
-	local hum   = c:FindFirstChildOfClass("Humanoid")
-	local myHRP = c:FindFirstChild("HumanoidRootPart")
-	if not hum or hum.Health <= 0 or not myHRP then return end
-	if hbSuppressed(c) then return end     -- мы неуязвимы (iframes/ragdoll/downed) — блок не нужен
-
-	local myName = c.Name
-	for _, child in ipairs(folder:GetChildren()) do
-		if child:IsA("BasePart") then
-			local Owner = child:FindFirstChild("Owner")
-			local AttackName = child:FindFirstChild("AttackName")
-			if Owner and Owner:IsA("StringValue") and AttackName and AttackName:IsA("StringValue") then
-				local ownerName = Owner.Value
-				local atkName   = AttackName.Value
-				local swingId   = child:GetAttribute("VictimSwingId")
-				if ownerName ~= myName and HB_KINDS[atkName]
-				   and type(swingId) == "string" and swingId ~= "" then
-					local key = ownerName .. "\1" .. atkName .. "\1" .. swingId
-					if not HB.seen[key] then
-						-- КРИТИЧЕСКИЙ ГЕЙТ (был пропущен в V90): парт реально пересекает наш чар?
-						local hits = Workspace:GetPartBoundsInBox(child.CFrame, child.Size, HB.op)
-						if #hits > 0 then
-							HB.seen[key] = now
-							local ok, how = hbReact(now, ownerName, atkName)
-							if ok then
-								diagPush(("HITBOX t=%.2f  %s  %s  overlap→%s"):format(now, ownerName, atkName, how))
-							end
-						end
-					end
-				end
-			end
-		end
-	end
-	-- чистка дедупа (5с, как в игре)
-	local cut = now - 5
-	for k, t in pairs(HB.seen) do
-		if t < cut then HB.seen[k] = nil end
-	end
-end
-
-task.spawn(function()
-	local hb = Workspace:WaitForChild("Hitboxes", 60)
-		if not hb then dbg("hitbox-detect: workspace.Hitboxes not found"); return end
-		HB.folder = hb
-		dbg("hitbox-detect active — overlap-gated scan of workspace.Hitboxes")
-	end)
-end   -- do (hitbox-detect scope) — регистры помощников освобождены
+-- [V90.4] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ / HOLD BLOCK удалены по запросу: детект срабатывал по
+-- уже-приземлившемуся удару (реактивно), из-за чего мог держать guard и мешать. Парри теперь
+-- полностью предиктивный (willHitMe по анимации/сервер-свингам), как и раньше.
 
 local function acAvailable(name)
 	local ok, v = pcall(function()
@@ -3747,14 +3642,14 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	local busy = _desyncBusyUntil[track]
 	if busy and now < busy then return end
 
-	-- [V74] если идёт скан-��ессия — метим следующие ~220мс как "окно атаки" (near).
+	-- [V74] если идёт скан-��ессия — метим следующие ~220мс ��ак "окно атаки" (near).
 	if RaknetScan.active then
 		RaknetScan.window = now + (Config.DesyncRaknetWindowMs or 220) / 1000
 	end
 
 	-- [V88] сюда доходит ТОЛЬКО delay: idlemask держится своим циклом, prerun — на FireServer.
 	if (Config.DesyncMode or "delay") ~= "delay" then return end
-	-- [V88] ФИКС "delay ломал [": [ и idlemask крутят СВОИ decoy-треки, у которых тоже
+	-- [V88] ФИКС "delay ломал [": [ и idlemask крутят СВОИ decoy-треки, у к��торых тоже
 	-- срабатывает AnimationPlayed. Раньше delay-хук хватал их и делал Stop/replay → decoy
 	-- дёргался. Пропускаем наши собственные decoy-треки — трогаем только реальные атаки.
 	if track == _testTrack or track == _decoyTrack then return end
@@ -3766,7 +3661,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	pcall(function() local s = track.Speed; if type(s) == "number" and s > 0.05 then origSpeed = s end end)
 	State.desyncFires = (State.desyncFires or 0) + 1
 
-	-- DELAY: анимацию замаха скрываем сразу и переигрываем через mag мс (визуал стартует
+	-- DELAY: анимацию замаха скрываем сразу и переигры��аем через mag мс (визуал стартует
 	-- позже). FireServer/урон НЕ трогаем — они уходят вовремя (отдельный __namecall-хук).
 	local animId = id
 	local mag = desyncMag()
@@ -3937,7 +3832,6 @@ RunService.Heartbeat:Connect(function()
 	end
 	local now = os.clock()
 	FrameId = FrameId + 1        -- [V68] invalidates per-frame HRP cache
-	pcall(scanVictimHitboxes, now)   -- [V90.2] реактивный Hold Block ДО планировщика (тот же кадр)
 	pcall(schedulerStep, now)    -- [V68] one persistent-fn pcall guards the whole loop
 	                             -- (no per-read closures inside anymore → far less GC)
 	pcall(restrictStep, now)
@@ -4399,19 +4293,7 @@ return function(_Lib, _Core)
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
 			Min = 4, Max = 40, Callback = function(v) Config.MaxHeightDiff = v end })
-		boolToggle(apMain, "Server Hitbox Detect", "Server Hitbox Detect",
-			function() return Config.HitboxDetect end, function(v) Config.HitboxDetect = v end)
-		apMain:SubLabel({ Text = "Reads the server's real hitbox (workspace.Hitboxes) and only fires when it physically overlaps YOU — same check the game uses. Catches attacks with hidden swing animations. Keep ON." })
-		boolToggle(apMain, "Hold Block (last resort)", "Hold Block",
-			function() return Config.HoldBlock end, function(v) Config.HoldBlock = v end)
-		apMain:SubLabel({ Text = "When a hit is already on you (too late to perfect-parry), raise and HOLD guard to eat it safely and cover a fast 2nd hit. Needs Server Hitbox Detect." })
-		slider(apMain, { Name = "Hold Duration", Flag = "AP_HoldBlockDur",
-			Default = math.floor((Config.HoldBlockDur or 0.45) * 1000), Min = 150, Max = 900, Suffix = " ms",
-			Callback = function(v) Config.HoldBlockDur = v / 1000 end })
-		boolToggle(apMain, "Hold Block → Dodge if on CD", "Hold Block Dodge",
-			function() return Config.HoldBlockDodge end, function(v) Config.HoldBlockDodge = v end)
-		apMain:SubLabel({ Text = "If block is on cooldown when the 2nd hit lands (e.g. right after a parry), dodge it instead of eating it." })
-		apMain:Divider()
+			apMain:Divider()
 		-- Rotation (доворот на цель)
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 		boolToggle(apMain, "Instant Multi-Target Snap", "Multi Snap",
