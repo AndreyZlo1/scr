@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -125,7 +123,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок����������������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -1072,7 +1070,7 @@ local function hitTimelineBase(info, combo)
 	return base + WINDUP_EXTRA
 end
 
--- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��в��о то, что
+-- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��в����о то, что
 -- ��елает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
 -- база подтянется из её же ��онфига, а скорость — из роста атакующего.
@@ -1636,7 +1634,7 @@ local function refreshContact(th)
 			if Config.LiveHeavyTimer and tp < th.hitTL - 0.001 then
 				-- реальная скорость прогресса, но не ниже пола (иначе деление на ~0
 				-- даёт бесконечность, а враг может резко доиграть). Пол = доля от
-				-- номи����л��ной скорости трека.
+				-- н��ми����л��ной скорости трека.
 				local nominal = math.max(th.initSpeed or 1, 0.05)
 				local floor   = nominal * (Config.LiveSpeedFloor or 0.15)
 				local sp      = math.max(th.liveSpeed or nominal, floor)
@@ -2190,6 +2188,8 @@ local function schedulerStep(now)
 					overloaded, why = true, ("%dx-burst"):format(clusterN)
 				end
 			end
+			-- "Dodge All Heavies": блэнкет-додж КАЖДОЙ одиночной M2. Это отдельно от Must-Dodge
+			-- (тот доджит только выбранные стили) — поведение намеренное, отражено в описании галки.
 			if a.kind == "M2" and clusterN == 1 and Config.DodgeHeavy and not overloaded then
 				local _, cornered = bestDodgeDir(now)
 				if cornered and canBlockNow() then
@@ -2209,7 +2209,7 @@ local function schedulerStep(now)
 	end
 
 	-- [V70] СНАП ВОЗВРАЩЁН (soft-face/центроид ��далён — оставлял face=0.2..0.5 BACK!).
-	-- Снап быстрый и мультитар��етный: ��ель поворота = faceTgt (ближайший по времени
+	-- Снап быстрый и муль��итар��етный: ��ель поворота = faceTgt (ближайший по времени
 	-- ЕЩЁ не прилетевший удар среди всех атакующих), пересчитывается каждый кадр, так
 	-- что после каждого контакта мы мгновенно перекидываемся на следующего врага в
 	-- замесе. Быстрый лерп на подлёте + жёсткий снап у самого контакта.
@@ -2336,7 +2336,7 @@ local function schedulerStep(now)
 		State.holdUntil = math.max(State.holdUntil,
 			base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra)
 	elseif State.blocking then
-		-- [V62] пока в кластере есть незакрытые угрозы — не отпускаем guard даже
+		-- [V62] пока в кластере есть незакрытые угрозы — не отпуск��ем guard даже
 		-- е��ли ближайший holdUntil истёк (иначе дыра между волнами burst).
 		local keepForCluster = multiThreat and farContact
 			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0))
@@ -3165,7 +3165,7 @@ local function topPriority()
 	return p
 end
 -- [V87] IDLEMASK — постоянный спуф на IDLE-анимацию во время атаки. КРИТИЧНО: idle зациклен
--- (Looped=true), поэтому его НЕ НУЖНО перезапускать через Stop/Play — он крутится сам. Именно
+-- (Looped=true), поэтому его НЕ НУЖНО перезапускать через Stop/Play — он крути��ся сам. Именно
 -- бывший цикл "Stop(0); Play()" каждые ~длину и ломал анимации со временем (постоянные
 -- рестарты накапливали рассинхрон аниматора). Теперь: играем idle-decoy ОДИН раз, дальше в
 -- Heartbeat лишь мягко переутверждаем приоритет+вес и переиграем ТОЛЬКО если он реально
@@ -4245,14 +4245,14 @@ return function(_Lib, _Core)
 			Default = Config.RotPredMaxDeg or 200, Min = 60, Max = 300, Suffix = "°",
 			Callback = function(v) Config.RotPredMaxDeg = v end })
 
-		-- Section 2 — Dodge & Heavy (own box, own Enabled)
+		-- Section 2 — Dodge (own box, own Enabled)
 		local apDodge = AP:Section({ Side = "Right" })
-		apDodge:Header({ Name = "Dodge & Heavy" })
+		apDodge:Header({ Name = "Dodge" })
 		feature(apDodge, {
-			Title = "Dodge & Heavy", Flag = "AP_DodgeHeavy",
+			Title = "Dodge All Heavies", Flag = "AP_DodgeHeavy",
 			get = function() return Config.DodgeHeavy end,
 			set = function(v) Config.DodgeHeavy = v end,
-			Desc = "Roll M2s and lunges instead of trying to block them.",
+			Desc = "Auto-roll EVERY heavy (M2) instead of blocking it. Separate from Must-Dodge below: this dodges all heavies, Must-Dodge only the styles you pick. Leave OFF to dodge only Must-Dodge picks.",
 		})
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
