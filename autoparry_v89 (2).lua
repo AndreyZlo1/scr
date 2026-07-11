@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -103,7 +101,7 @@ local Config = {
 	-- [V64] жёсткий доворот на атакующего у самого контакта. В логе часть LATE шла
 	-- при face=0.27 BACK! / 0.66 — блок вовремя, но лицом не туда, сервер не
 	-- засчитывал. Плавный лерп (FaceLerp) не успевал против стрейфа. Ниже дистанции
-	-- по времени до контакта �� прямой снап лицом на цель блока.
+	-- по времени до контакта ��� прямой снап лицом на цель блока.
 	BlockFaceHard   = true,
 	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при быстром чередовании
 
@@ -626,7 +624,7 @@ local function faceToward(targetHRP, hard)
 	-- [V62] face-lock (boxing-counter) имеет приоритет и дела��т hard lookAt в
 	-- RenderStepped. Плавный лерп здесь боролся бы с ним (особенно в мультибое,
 	-- где targetHRP = wantBlock, а lock смотрит на того, кого мы бьём) и тянул
-	-- HRP прочь от цели удара. Пока lock активен — не вмешиваемся.
+	-- HRP прочь от цели удара. Пока lock активен — не вме��иваемся.
 	if State.faceLockUntil and os.clock() < State.faceLockUntil then return end
 	local myHRP = localHRP()
 	if not myHRP or not targetHRP or not targetHRP.Parent then return end
@@ -812,7 +810,7 @@ local function willHitMe(th)
 	-- нельзя (их не перевзвести повторным блоком): если враг в расширенном радиусе И либо
 	-- смотрит приме��н�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
 	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
-	-- ненаправленный), а пропущенный хэви = проигранный размен.
+	-- ненаправленный), а пропущенный хэви = проигранный разме��.
 	if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
 		local heavyRange = Config.HeavyTrustRange or 14
 		if dist <= heavyRange then
@@ -1117,7 +1115,7 @@ local function hitTimelineBase(info, combo)
 		end
 		-- [V89] КОНФИГ — авторитетный источник тайминга M2. GetStyleM2HitboxDelay даёт ровно
 		-- ту задержку, по которой сервер наносит удар (GetScaledHitboxDelay: delay/mult).
-		-- РАНЬШЕ первым в��звращался маркер "Hit" из анимации (info.hit) и он врал: в диаг
+		-- РАНЬШЕ первым в��звращался маркер "Hit" из анимации (info.hit) и он вра��: в диаг
 		-- Capoeira M2 читался hitTL=327мс при реальном контакте 448мс (predErr=+163ms LATE
 		-- NO-PRESS → Ragdoll-кас��ад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
 		-- Теперь маркер — лишь MAX-страховка поверх конфига: покрывает длинные и 2-хитовые
@@ -2671,6 +2669,10 @@ end)
 -- постоянные фантомные угрозы без трека → guard не отпускался. Теперь зеркалим игру:
 -- overlap-против-нас + подавление (IFRAMES/Ragdoll/Downed/UltraInstinct) + дедуп по swing-key.
 -- Срабатывание = «нас бьют ПРЯМО СЕЙЧАС» → реактивный Hold Block (последний рубеж защиты).
+-- Весь блок обёрнут в do..end: помощники (HB, hbReact, …) НЕ занимают регистры главного
+-- чанка (лимит Luau 200 локалов на функцию) — наружу выносим только scanVictimHitboxes.
+local scanVictimHitboxes
+do
 local HB = { folder = nil, op = OverlapParams.new(), seen = {}, char = nil }
 HB.op.FilterType = Enum.RaycastFilterType.Include
 HB.op.MaxParts   = 50
@@ -2708,7 +2710,7 @@ end
 
 -- Вызывается из главного Heartbeat ПЕРЕД schedulerStep (чтобы guard, поднятый реактивно,
 -- держался тем же кадром). Ничего не кормит в Threats — никаких track-less фантомов.
-local function scanVictimHitboxes(now)
+function scanVictimHitboxes(now)
 	if not (Config.Enabled and Config.HitboxDetect and Config.HoldBlock) then return end
 	local folder = HB.folder
 	if not folder then return end
@@ -2756,10 +2758,11 @@ end
 
 task.spawn(function()
 	local hb = Workspace:WaitForChild("Hitboxes", 60)
-	if not hb then dbg("hitbox-detect: workspace.Hitboxes not found"); return end
-	HB.folder = hb
-	dbg("hitbox-detect active — overlap-gated scan of workspace.Hitboxes")
-end)
+		if not hb then dbg("hitbox-detect: workspace.Hitboxes not found"); return end
+		HB.folder = hb
+		dbg("hitbox-detect active — overlap-gated scan of workspace.Hitboxes")
+	end)
+end   -- do (hitbox-detect scope) — регистры помощников освобождены
 
 local function acAvailable(name)
 	local ok, v = pcall(function()
