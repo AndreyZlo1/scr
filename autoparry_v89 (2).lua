@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -279,7 +279,7 @@ local Config = {
 	-- СВОИМ Blocking/PerfectBlocking в этот момент. Из этого следует:
 	--  1) появление бокса с Owner=враг = 100% доказательство реального удара (не финт/decoy);
 	--  2) реакция по появлению бокса ещё успевает — засчитывание идёт позже, в момент оверлапа.
-	Resolver              = true,   -- мастер-переключатель резолвера
+	Resolver              = false,  -- мастер-переключатель резолвера (OFF по умолчанию, NOT TESTED)
 	ResolverVetoFeint     = true,   -- не тратить boxing-counter/грант-додж на финт, пока удар не подтверждён боксом
 	ResolverPanicBlock    = true,   -- аварийный блок при появлении неотвеченного вражеского хитбокса (ловит desync врага)
 	ResolverConfirmWindow = 0.60,   -- сколько секунд подтверждение бокса считается «свежим» для угрозы
@@ -1523,7 +1523,7 @@ end
 -- Wrestling M2 (гарантированный захват, см. M2GrabTargetForwardOffset в CombatConfig). Их
 -- нельзя блокнуть, спасает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
 -- ._isSuppressed гасит урон при IFRAMES/Ragdoll/Downed/UltraInstinct). Список собираем по
--- стилю/типу через Config.MustDodgeStyles (расширяется без правки движка) + живой сигнал по
+-- стилю/типу через Config.MustDodgeStyles (расширяется ��ез правки движка) + живой сигнал по
 -- атрибуту атакующего, если игра его выставит в момент замаха.
 local function isMustDodge(th)
 	if not th then return false end
@@ -1876,7 +1876,7 @@ local function bestDodgeDir(now, preferBack)
 
 	-- [V89] preferBack: для НЕБЛОКИРУЕМЫХ (грэб/слэм) додж строго НАЗАД (away от врага) —
 	-- уводит из радиуса захвата и разрывает клинч; вбок только как fallback у стены. Обычный
-	-- умный додж (perp+away) оставлен для блокируемых угроз, гд�� важнее со��ти с линии.
+	-- умный додж (perp+away) оставлен для блокируемых угроз, гд�� важнее с����ти с линии.
 	local candidates
 	if preferBack then
 		candidates = {
@@ -2041,7 +2041,7 @@ local function schedulerStep(now)
 					-- быстрый M1 (contact=352ms) всегда имел contactAbs меньше медленной
 					-- M2 (contact=832ms), поэтому п��сле перфекта M1 медленная M2 НИКОГДА
 					-- не становилась целью → NO-PRESS → полный хит (твой клип). Теперь
-					-- сначала берём угрозы без нажатия (unpressed), сред�� ��их — с самым
+					-- сначала берём угрозы без нажатия (unpressed), сред��� ��их — с самым
 					-- ранним дедлайном. Так после блока быстрого heavy получает своё
 					-- собственное нажатие (guard держится → блок тяжёлой).
 					local take = false
@@ -2482,7 +2482,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	end
 
 	-- [V64] Замер эффективности per-hit rearm: копим результаты по позиции удара
-	-- в комбо. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
+	-- в ком��о. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
 	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
 	do
@@ -3520,7 +3520,7 @@ end
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
 -- ПРОКСИ репликации, а не док��зательство тог��, что реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
--- Как пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
+-- ��ак пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
 -- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬНО реплицировался ему
 -- от твоего главного. Свингни на главном — и в дебаге второго аккаунта увидишь, что
@@ -3626,39 +3626,20 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	pcall(function() local s = track.Speed; if type(s) == "number" and s > 0.05 then origSpeed = s end end)
 	State.desyncFires = (State.desyncFires or 0) + 1
 
-	-- DELAY: [V90] ПЕРЕПИСАНО. Старый код делал track:Stop(0) + task.delay→track:Play(0)
-	-- — это РЕСТАРТ трека. Между реальным Play (в M1/M2 модуле игры) и нашим Stop проходит
-	-- кадр, за который Roblox уже реплицирует старт замаха врагу; затем Stop/replay даёт
-	-- у наблюдателя ДЁРГАНЬЕ ("анимация задержалась, а потом атака"), а не чистый сдвиг.
-	-- ФИКС: не рестартим трек, а ЗАМОРАЖИВАЕМ его продвижение — AdjustSpeed(0) удерживает
-	-- TimePosition на месте (замах «залипает» в текущем кадре), потом отпускаем на origSpeed.
-	-- Трек ни разу не Stop-ается → нет рестарта/дёрга, реплицируется ровно один непрерывный
-	-- замах, просто визуально сдвинутый позже относительно урона (FireServer уходит вовремя,
-	-- он в отдельном __namecall-хуке и здесь не трогается).
-	-- Re-assert каждый Heartbeat: боевой модуль игры может вернуть Speed=1 своим кодом —
-	-- пока окно активно, мы держим 0.
+	-- DELAY: анимацию замаха скрываем сразу и переигрываем через mag мс (визуал стартует
+	-- позже). FireServer/урон НЕ трогаем — они уходят вовремя (отдельный __namecall-хук).
 	local animId = id
 	local mag = desyncMag()
-	pcall(function() track:AdjustSpeed(0) end)
-	local frozenUntil = now + mag
-	local hbConn
-	hbConn = RunService.Heartbeat:Connect(function()
-		if not track or os.clock() >= frozenUntil then
-			if hbConn then hbConn:Disconnect(); hbConn = nil end
-			pcall(function()
-				if track and track.IsPlaying then track:AdjustSpeed(origSpeed > 0 and origSpeed or 1) end
-			end)
-			return
-		end
+	pcall(function() track:Stop(0) end)
+	task.delay(mag, function()
 		pcall(function()
-			-- держим заморозку, только пока трек ещё жив/играет; если игра его сама
-			-- завершила (короткий замах) — просто ждём истечения окна и выходим.
-			if track.IsPlaying and (track.Speed or 0) > 0.01 then track:AdjustSpeed(0) end
+			track:Play(0)
+			track:AdjustSpeed(origSpeed > 0 and origSpeed or 1)
 		end)
 	end)
-	aclog(("[DESYNC] delay: froze your %s swing visual +%.0fms (speed=0 hold, no restart; hit/FireServer on time, id=%s)")
+	aclog(("[DESYNC] delay: your %s swing visual held +%.0fms (hit/FireServer on time, id=%s)")
 		:format(kind, mag * 1000, tostring(animId)))
-	desyncPush(("[FIRE] delay: my %s swing visual held +%.0fms via speed-freeze (damage on time)"):format(kind, mag * 1000))
+	desyncPush(("[FIRE] delay: my %s swing visual held +%.0fms (damage on time)"):format(kind, mag * 1000))
 end
 
 local function installAnimDesync()
@@ -3712,40 +3693,24 @@ task.spawn(function()
 			local now = os.clock()
 			if kind == "attack" then
 					State.selfBusyUntil = now + Config.SelfBusyDur
-					-- [V90] FIREDELAY/PRERUN — ПЕРЕПИСАНО.
-					-- Баг №1: старый код гнал в задержку ЛЮБОЙ M1/M2-пакет — classifyCombat
-					-- смотрит только Action, не Func. Но боевой модуль игры (дамп M1_ModuleScript)
-					-- с Action="M1" шлёт ещё HoldActivated/HoldDeactivated (чардж), а РЕАЛЬНЫЙ удар —
-					-- только Func="ServerCheck" (M1 line 451 со swing-id u24; M2 line 998).
-					-- Задержка Hold-пакетов рассинхронит конечный автомат чарджа → сервер отвечает
-					-- Declined и замах рвётся. ФИКС: трогаем СТРОГО Func=="ServerCheck".
+					-- FIREDELAY/PRERUN: анимацию НЕ трогаем (идёт вовремя), задерживаем только
+					-- сам боевой пакет. Гейтим строго по Func=="ServerCheck" — это реальный удар
+					-- (дамп: M1/M2 line ServerCheck). Hold-пакеты чарджа (HoldActivated/…) не трогаем,
+					-- иначе рассинхрон чарджа → сервер отвечает Declined.
 					local func = (type(a1) == "table" and a1.Func) or nil
 					if Config.DesyncAttack and func == "ServerCheck"
 					   and (Config.DesyncMode == "prerun" or Config.DesyncMode == "firedelay") then
 						local applyKind = (action == "M1" and Config.DesyncApplyM1)
 							or (action == "M2" and Config.DesyncApplyM2)
 						if applyKind then
-							-- PRERUN: decoy-замах играется СРАЗУ (реплицируется раньше реального,
-							-- вражеский autoparry цепляется за него), реальный ServerCheck уходит позже.
 							if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
 							local args = table.pack(...)
 							local delayS = math.max(0, (Config.DesyncDelayMs or 140) / 1000)
 							local remote = self
-							-- Баг №2: сервер держит ServerMinInterval (M1=0.08, M2=0.15) и burst-окно
-							-- (CombatRemoteLimits из дампа). Если отложенный ServerCheck ляжет впритык
-							-- к следующему свингу — сервер его ДРОПНЕТ (та самая "атака не проходит").
-							-- Гоним отложенные удары через FIFO-очередь по каждому Action, разнося их
-							-- не ближе minGap → порядок u24 сохранён, серверный спейсинг соблюдён.
-							local minGap = (action == "M2") and 0.16 or 0.09
-							State.fireQ = State.fireQ or {}
-							local q = State.fireQ[action]
-							if not q then q = { nextSlot = 0 }; State.fireQ[action] = q end
-							local fireAt = math.max(now + delayS, q.nextSlot)
-							q.nextSlot = fireAt + minGap
-							task.delay(fireAt - now, function()
-								-- Зовём сырое значение FireServer напрямую (через __index), НЕ oldNamecall —
-								-- голый oldNamecall(self,...) теряет контекст метода namecall ("FireServer"),
-								-- сервер получал битый вызов и удар молча пропадал. Так уходит корректный пакет.
+							task.delay(delayS, function()
+								-- Зовём сырое значение FireServer напрямую (через __index), НЕ oldNamecall:
+								-- голый oldNamecall(self,...) теряет контекст метода namecall и сервер
+								-- получает битый вызов. Так уходит корректный отложенный пакет.
 								pcall(function()
 									local fire = remote.FireServer
 									fire(remote, table.unpack(args, 1, args.n))
@@ -3753,8 +3718,8 @@ task.spawn(function()
 							end)
 							if (now - (State.lastSwingLog or 0)) > 0.15 then
 								State.lastSwingLog = now
-								aclog(("[SWING] %s: %s animation NOW, ServerCheck sent +%.0fms (ordered, gap>=%.0fms)")
-									:format(Config.DesyncMode, tostring(action), (fireAt - now) * 1000, minGap * 1000))
+								aclog(("[SWING] %s: %s animation NOW, ServerCheck delayed +%.0fms")
+									:format(Config.DesyncMode, tostring(action), delayS * 1000))
 							end
 							return
 						end
@@ -4516,29 +4481,30 @@ return function(_Lib, _Core)
 			function() return Config.SA_HakariRead end, function(v) Config.SA_HakariRead = v end)
 		apBox:SubLabel({ Text = "Hakari's momentum M2 hits late — widens the window to match." })
 
-		-- [V90] RESOLVER — verify attacks against the server-side hitbox (workspace.Hitboxes).
-		apBox:Divider()
-		feature(apBox, {
+		-- Section 4 — Resolver (own section, right side). NOT TESTED.
+		local apRes = AP:Section({ Side = "Right" })
+		apRes:Header({ Name = "Resolver" })
+		feature(apRes, {
 			Title = "Resolver", Flag = "AP_Resolver",
 			get = function() return Config.Resolver end,
 			set = function(v) Config.Resolver = v end,
-			Desc = "Verify attacks by the SERVER hitbox (workspace.Hitboxes: Owner+AttackName+VictimSwingId). A hitbox = the attack is 100% real, not a feint.",
+			Desc = "NOT TESTED. Verify attacks against the server hitbox in workspace.Hitboxes.",
 		})
-		boolToggle(apBox, "Veto Feints", "AP_ResolverVeto",
+		boolToggle(apRes, "Veto Feints", "AP_ResolverVeto",
 			function() return Config.ResolverVetoFeint end, function(v) Config.ResolverVetoFeint = v end)
-		apBox:SubLabel({ Text = "Learns per-enemy who feints (swing with no server hitbox). Against a proven feinter, holds the boxing-counter / free-dodge until a real hitbox confirms — then downgrades to a normal block instead of wasting them. Honest players are never gated." })
-		boolToggle(apBox, "Panic Block", "AP_ResolverPanic",
+		apRes:SubLabel({ Text = "Hold counter/free-dodge on known feinters until a real hitbox confirms." })
+		boolToggle(apRes, "Panic Block", "AP_ResolverPanic",
 			function() return Config.ResolverPanicBlock end, function(v) Config.ResolverPanicBlock = v end)
-		apBox:SubLabel({ Text = "Reactive net: if an enemy hitbox spawns near you that the animation-detector never saw (enemy desync), block instantly. Note the ceiling — the server spawns the box ~0.3s after the enemy's ServerCheck and it lives only 0.15s, so this is a safety layer, not the primary proactive parry." })
-		slider(apBox, { Name = "Panic Reach", Flag = "AP_ResolverReach", Default = Config.ResolverPanicReach or 22,
+		apRes:SubLabel({ Text = "Block when an unseen enemy hitbox spawns next to you (enemy desync)." })
+		slider(apRes, { Name = "Panic Reach", Flag = "AP_ResolverReach", Default = Config.ResolverPanicReach or 22,
 			Min = 8, Max = 40, Suffix = " stud", Callback = function(v) Config.ResolverPanicReach = v end })
-		slider(apBox, { Name = "Confirm Window", Flag = "AP_ResolverWindow",
+		slider(apRes, { Name = "Confirm Window", Flag = "AP_ResolverWindow",
 			Default = math.floor((Config.ResolverConfirmWindow or 0.60) * 1000), Min = 200, Max = 1200,
 			Suffix = " ms", Callback = function(v) Config.ResolverConfirmWindow = v / 1000 end })
-		slider(apBox, { Name = "Feint Threshold", Flag = "AP_ResolverFeintTh", Default = Config.ResolverFeintThreshold or 1,
+		slider(apRes, { Name = "Feint Threshold", Flag = "AP_ResolverFeintTh", Default = Config.ResolverFeintThreshold or 1,
 			Min = 1, Max = 5, Callback = function(v) Config.ResolverFeintThreshold = v end })
 
-		-- Section 4 — Visuals (own box, own Enabled)
+		-- Section 5 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
 		apVis:Header({ Name = "Visuals" })
 		feature(apVis, {
@@ -4602,8 +4568,7 @@ return function(_Lib, _Core)
 				notify("Desync Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("DS_Mode"))
-		dsAtk:SubLabel({ Text = "delay = freeze your swing visual (speed=0 hold, no restart) so it lands later than the damage. firedelay = delay ONLY the M1/M2 ServerCheck packet (ordered FIFO, respects server 0.08s/0.15s spacing so it isn't dropped). idlemask = enemies see you idle. prerun = fake swing first, real one late." })
-		dsAtk:SubLabel({ Text = "Honest ceiling: hits are victim-authoritative (the target confirms on hitbox overlap) and the server times the hitbox from YOUR ServerCheck (windup ~0.3s, box lives 0.15s). Roblox also auto-replicates the swing animation. So desync shifts the VISUAL vs the damage window to beat a human/animation-reading parry — it cannot make the server hit register outside its own windup. Biggest effect is vs animation-based autoparry, least vs a target holding block." })
+		dsAtk:SubLabel({ Text = "delay = lag your swing visual. firedelay = lag only the server hit. idlemask = enemies see you idle. prerun = fake swing first, real one late." })
 		slider(dsAtk, { Name = "Desync Delay", Flag = "DS_Delay", Default = Config.DesyncDelayMs or 140,
 			Min = 40, Max = 400, Suffix = " ms", Callback = function(v) Config.DesyncDelayMs = v end })
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
@@ -4686,3 +4651,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
