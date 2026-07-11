@@ -44,6 +44,17 @@ local Config = {
 	LowFaceMin    = -0.55,  -- Low: бракуем удар, только если predFacing·toMe < этого (шире конус ~123°: реагируем на большее, отсекаем только явно спиной)
 	RotPredMaxDeg = 200,    -- [V88] кап предсказанного доворота за свинг (было 120 — не хватало на быстрый разворот 180° в финтах)
 	HighSlack     = 0.6,    -- High: слак бокса, студы
+	-- [V90] High-режим больше НЕ чисто строгий бокс. Прямые атаки (враг смотрит на нас в
+	-- радиусе) доверяем сразу, как в Low, но с более узким конусом — это убирает задержку/
+	-- миссы High на прямых M1, когда стрейф уводил predLook-бокс мимо на пару кадров.
+	HighFaceMin   = -0.15,  -- High: доверяем сразу, если predFacing·toMe ≥ этого (узкий конус ~99°)
+	HighTrustRange= 9.0,    -- High: радиус facing-доверия (студы)
+	-- [V90] DRAG/SNAP-TURN детект (закрученные атаки: враг смотрит мимо, бьёт, резко
+	-- доворачивается к нам). Ловим по ЗНАКУ доворота (facing приближается к нам между
+	-- кадрами), а не по мгновенной angY (шумной). Работает и в High, и в Low.
+	DragDetect    = true,
+	DragTurnMinDeg= 35,     -- град/с: доворот выше этого + приближение facing к нам = drag-угроза
+	DragTrustRange= 13,     -- радиус (студы), где drag-довороту даём доверие
 	Key_Accuracy  = Enum.KeyCode.B,
 
 	-- [V89] HEAVY-ПРИОРИТЕТ. Тяжёлые (M2) и скиллы — выпады, атакующий закрывает дистанцию в
@@ -125,7 +136,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������������������������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -223,7 +234,7 @@ local Config = {
 	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
 	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
 	InvisibleOn    = false,
-	InvisibleHeight= 0,           -- ДОП. студы поверх базового захоронения (кастом высота); 0 = базовое
+	InvisibleHeight= 0,           -- ДОП. студы поверх базового захо��онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
@@ -304,7 +315,15 @@ local Config = {
 	-- SoftFace удалён в V70 — вернули быстрый жёсткий снап.
 	OmniBlock      = true,
 
-	ShowVisuals   = true,
+	ShowVisuals   = true,   -- мастер-переключатель всех визуалов AutoParry
+	-- [V90] Настраиваемые визуалы. Каждый элемент можно включить/выключить отдельно, а у
+	-- вращающегося кольца настраиваются скорость анимации, размер и дальность прорисовки.
+	VizRing       = true,   -- вращающееся кольцо под целью
+	VizHitbox     = true,   -- бокс хитбокса цели
+	VizRestrict   = true,   -- зона ограничения (keep-out)
+	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
+	VizRingScale  = 1.0,    -- множитель радиуса кольца (0.4–2.5)
+	VizRange      = 100,    -- дальность (студы), на которой ищется/рисуется цель
 	Debug         = true,
 
 	Key_Toggle    = Enum.KeyCode.K,
@@ -617,15 +636,18 @@ local function attackerYawRate(aHRP, flatLook)
 	local now = os.clock()
 	local rec = FaceTrack[aHRP]
 	local rate = 0
+	local prevLook = nil
 	if rec then
 		local dtr = now - rec.t
 		if dtr > 1e-3 and dtr < 0.5 then
 			local dAng = math.deg(math.acos(math.clamp(rec.look:Dot(flatLook), -1, 1)))
 			rate = dAng / dtr
+			prevLook = rec.look
 		end
 	end
 	FaceTrack[aHRP] = { look = flatLook, t = now }
-	return rate
+	-- prevLook = facing атакующего на ПРОШЛОМ кадре (для детекта знака доворота к нам)
+	return rate, prevLook
 end
 
 local function hitboxGeom(th)
@@ -649,7 +671,10 @@ local function hitboxGeom(th)
 	local forward = (styleForward and styleForward(th.style, th.kind))
 	                or ((th.kind == "M2") and Config.M2Forward or Config.M1Forward)
 
-	local trackedRate = attackerYawRate(aHRP, flatLook)
+	local trackedRate, prevLook = attackerYawRate(aHRP, flatLook)
+	-- стэшим на th для drag-детекта в willHitMe (знак доворота = prevLook vs текущий facing)
+	th.yawRate  = trackedRate
+	th.prevLook = prevLook
 
 	if Config.TurnWindow then
 		local me = localHRP()
@@ -745,9 +770,27 @@ local function willHitMe(th)
 	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
 	-- текущий (rawDot) → он поворачивается в нашу сторону. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
-	local turningToward = (math.abs(angY) > 1.2) and (faceDotPred > rawDot + 0.05)
-	local trustRange = Config.HitTrustRange or 0
-	if trustRange > 0 and dist <= trustRange and turningToward then
+	-- [V90] DRAG/SNAP-TURN — ловим по ЗНАКУ доворота (facing приближается к нам между кадрами),
+	-- а не по мгновенной angY (она шумная и часто 0 между physics-степами → старый детект
+	-- пропускал «закрученные» атаки). Два независимых источника доворота, любого достаточно:
+	--   • physics-предикт: predLook уже развёрнут к нам сильнее текущего (faceDotPred > rawDot)
+	--   • измеренный доворот за прошлый кадр: facing реально стал ближе к нам (prevLook→rawL)
+	-- Порог скорости — DragTurnMinDeg (ниже прежних ~69°/с, ловим снап раньше). Дальность —
+	-- DragTrustRange (шире обычного trust: drag часто начинают со средней дистанции).
+	local turningToward = false
+	if Config.DragDetect then
+		local dragDeg   = Config.DragTurnMinDeg or 35
+		local predTurns = (faceDotPred > rawDot + 0.03)
+		local measTurns = false
+		if th.prevLook then
+			local prevDot = th.prevLook:Dot(toMe)
+			measTurns = (rawDot > prevDot + 0.02) and ((th.yawRate or 0) >= dragDeg)
+		end
+		local physTurns = (math.abs(angY) > 1.2) and predTurns
+		turningToward = physTurns or measTurns or (predTurns and (th.yawRate or 0) >= dragDeg)
+	end
+	local dragRange = math.max(Config.HitTrustRange or 0, Config.DragTrustRange or 0)
+	if dragRange > 0 and dist <= dragRange and turningToward then
 		th.trustedHit = true; th.trustLatch = true; th.feintTurn = true
 		return true
 	end
@@ -776,8 +819,18 @@ local function willHitMe(th)
 	end
 
 	if mode == "High" then
-		-- HIGH: точный бокс по предсказанной рота��ии, бе�� слепого ��о��ер���я. Попадаем
-		-- ли МЫ в прямоугольник атаки, построенный вдоль predLook из позиции predA.
+		-- [V90] СНАЧАЛА facing-доверие (как в Low, но УЗКИЙ конус HighFaceMin): прямая атака —
+		-- враг смотрит на нас в радиусе — прессуется СРАЗУ, без ожидания совпадения строгого
+		-- бокса. Это чинит задержку/миссы High на прямых M1, когда стрейф уводил predLook-бокс
+		-- мимо нас на пару кадров. Явно off-target удары (facing от нас) сюда не попадают и
+		-- корректно отсекаются строгим боксом ниже — точность High сохраняется.
+		local hiTrust = Config.HighTrustRange or 0
+		if hiTrust > 0 and dist <= hiTrust then
+			if dist <= (Config.PointBlank or 3.0) then th.trustedHit = true; th.trustLatch = true; return true end
+			if faceDotPred >= (Config.HighFaceMin or -0.15) then th.trustedHit = true; th.trustLatch = true; return true end
+		end
+		-- HIGH strict: точный бокс по предсказанной ротации. Попадаем ли МЫ в прямоугольник
+		-- атаки, построенный вдоль predLook из позиции predA.
 		local off    = Vector3.new(myHRP.Position.X - predA.X, 0, myHRP.Position.Z - predA.Z)
 		local fdepth = off:Dot(predLook)
 		local fside  = math.abs(off:Dot(Vector3.new(-predLook.Z, 0, predLook.X)))
@@ -2263,7 +2316,7 @@ local function schedulerStep(now)
 		-- boxing-counter — только против ОДИНОЧНОЙ угрозы. В burst он шлёт н��шу M2
 		-- (attack lockout) и роняет guard, оставляя остальных без блока.
 		-- Гибрид: в мультибое перфектим ближайшего обычным блоком, остальным
-		-- держим непрерывный guard (гарантированный normal-block, нулевые дыры).
+		-- держим непрерывный guard (гарантированн��й normal-block, нулевые дыры).
 		local allowCounter = shouldBoxingCounter(wantBlock)
 			and not (Config.BoxingCounterSolo and multiThreat)
 		if allowCounter then
@@ -2593,7 +2646,7 @@ task.spawn(function()
 end)
 
 -- [V90] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ (тот же метод, что использует топовый вражеский autoparry).
--- workspace.Hitboxes наполняется сервером при КАЖДОМ реальном ударе: BasePart с дочерними
+-- workspace.Hitboxes наполняется сер��ером при КАЖДОМ реальном ударе: BasePart с дочерними
 -- Owner(StringValue)=имя атакующего и AttackName(StringValue). Этот сигнал появляется у
 -- момента контакта и НЕ зависит от анимации — поэтому его нельзя обмануть нашим/чужим
 -- AntiAutoParry (десинк анимации). Слушаем ChildAdded и кормим onAttack как реактивный
@@ -3446,7 +3499,7 @@ end
 -- безопасно и минимально по работе на пакет — как в андетект-примере.
 -- [V79] КОРЕНЬ КРАША НАЙДЕН: send-хук исполняется на СЕТЕВОМ потоке игры, а НЕ на потоке
 -- Luau VM. Luau VM однопоточный — любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
--- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан делал
+-- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан дел��л
 -- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый новый pid → rehash на сетевом потоке
 -- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трога��т Lua-таблицы в
 -- хуке — только C-операции над пакетом. Поэтому он и не крашит.
@@ -3733,15 +3786,45 @@ task.spawn(function()
 		if method ~= "FireServer" then
 			return oldNamecall(self, ...)
 		end
-		-- только отслеживаем свой busy-таймер по боевым пакетам; firedelay обрабатывается
-		-- отдельным хуком на CombatRemoteClient.Fire (см. ниже) — надёжнее, чем __namecall,
-		-- который на этом экзекуторе не ловит игровой FireServer.
+		-- наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без обработки,
+		-- иначе он снова отложится (бесконечный цикл) или потеряется.
+		if State.desyncPassthrough then return oldNamecall(self, ...) end
+
 		local a1 = (select(1, ...))
 		local ok, kind = pcall(classifyCombat, a1)
 		if ok and kind then
+			-- разовый confirm: доказывает, что __namecall ЛОВИТ игровой боевой FireServer.
+			-- Если этой строки нет в диаге после свинга — хук не перехватывает FireServer
+			-- (тогда идём в raknet/replicatesignal), а не «firedelay сломан».
+			if not State.combatFireSeen then
+				State.combatFireSeen = true
+				aclog(("[desync] combat FireServer intercepted (%s/%s) — hook OK")
+					:format(tostring(a1.Action), tostring(a1.Func)))
+			end
 			local now = os.clock()
 			if kind == "attack" then
 				State.selfBusyUntil = now + Config.SelfBusyDur
+				-- FIREDELAY/PRERUN: задерживаем САМ боевой пакет (ServerCheck), анимацию не
+				-- трогаем. Гейт строго по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
+				-- трогаем — иначе рассинхрон чарджа). Перехват на RemoteEvent Remotes.Server —
+				-- он доступен (в отличие от модуля CombatRemoteClient, который может лежать в Hidden).
+				local func = a1.Func
+				if Config.DesyncAttack and func == "ServerCheck"
+				   and (Config.DesyncMode == "firedelay" or Config.DesyncMode == "prerun")
+				   and desyncApplies(a1.Action) then
+					if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
+					local remote, packed, d = self, table.pack(...), desyncMag()
+					task.delay(d, function()
+						State.desyncPassthrough = true
+						pcall(function() remote:FireServer(table.unpack(packed, 1, packed.n)) end)
+						State.desyncPassthrough = false
+					end)
+					if (now - (State.lastSwingLog or 0)) > 0.15 then
+						State.lastSwingLog = now
+						aclog(("[desync] %s send held +%dms"):format(tostring(a1.Action), math.floor(d * 1000)))
+					end
+					return   -- глотаем немедленную отправку, реальный пакет уйдёт из task.delay
+				end
 			elseif kind == "dash" then
 				State.selfBusyUntil = now + Config.DashDuration
 			end
@@ -3754,102 +3837,12 @@ task.spawn(function()
 	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в бою.
 end)
 
--- firedelay/prerun: перехват прямо в CombatRemoteClient.Fire. tryM1/tryM2 зовут
--- CombatRemoteClient.Fire("M1"/"M2","ServerCheck", ...) полем при каждом свинге, а модуль
--- кэшируется require'ом → замена поля .Fire детерминированно ловит КАЖДУЮ отправку, не
--- завися от __namecall-хука (который на этом экзекуторе не ловит игровой FireServer).
--- delay сюда не заходит — там задерживается только анимация, пакет уходит штатно.
-task.spawn(function()
-	-- ищем модуль: сперва прямым путём, затем поиском по имени (пути могут быть обфусцированы)
-	local function findCRC()
-		local ok, m = pcall(function()
-			return ReplicatedStorage:WaitForChild("Shared", 15)
-				:WaitForChild("Network", 15):WaitForChild("CombatRemoteClient", 15)
-		end)
-		if ok and m then return m end
-		for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-			if d:IsA("ModuleScript") and d.Name == "CombatRemoteClient" then return d end
-		end
-		return nil
-	end
-	-- строим сам хук-замену (используется и для require-, и для memory-пути)
-	local origFire
-	local function newFire(action, func, ...)
-		if Config.DesyncAttack
-		   and func == "ServerCheck" and (action == "M1" or action == "M2")
-		   and (Config.DesyncMode == "firedelay" or Config.DesyncMode == "prerun")
-		   and desyncApplies(action) then
-			if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
-			local d, packed = desyncMag(), table.pack(...)
-			task.delay(d, function()
-				pcall(origFire, action, func, table.unpack(packed, 1, packed.n))
-			end)
-			if (os.clock() - (State.lastSwingLog or 0)) > 0.15 then
-				State.lastSwingLog = os.clock()
-				aclog(("[desync] %s send held +%dms"):format(tostring(action), math.floor(d * 1000)))
-			end
-			return true   -- игре сообщаем «отправлено», реальный пакет уйдёт позже
-		end
-		return origFire(action, func, ...)
-	end
-
-	-- ПУТЬ 1: require по найденному ModuleScript (если Network доступен и не заморожен).
-	-- tryM1/M2 читают CombatRemoteClient.Fire при каждом свинге, поэтому подмена поля .Fire
-	-- на кэшированной таблице ловит каждую отправку.
-	local mod = findCRC()
-	if mod then
-		local okReq, CRC = pcall(require, mod)
-		if okReq and type(CRC) == "table" and type(CRC.Fire) == "function" then
-			origFire = CRC.Fire
-			local set = pcall(function() CRC.Fire = newFire end)
-			if set and CRC.Fire == newFire then
-				dbg("desync fire-hook armed (require field-swap)")
-				return
-			end
-			-- таблица заморожена → хукаем саму функцию
-			if type(hookfunction) == "function" then
-				pcall(function() origFire = hookfunction(CRC.Fire, newFire) end)
-				dbg("desync fire-hook armed (require hookfunction)")
-				return
-			end
-		end
-	end
-
-	-- ПУТЬ 2: модуль недосягаем через require (лежит в Hidden). Ищем саму функцию Fire
-	-- В ПАМЯТИ через filtergc по её константам ("Combat"/"FireServer"/"ServerCheck"-адресату)
-	-- и хукаем через hookfunction. Это работает, даже когда ReplicatedStorage.Shared скрыт.
-	if type(filtergc) == "function" and type(hookfunction) == "function" then
-		local fn
-		local ok = pcall(function()
-			fn = filtergc("function", {
-				Name = "Fire",
-				Constants = { "Combat", "FireServer", "Action", "Func" },
-				IgnoreExecutor = true,
-			}, true)
-		end)
-		-- запасной фильтр без Name (имя функции может быть срезано обфускацией)
-		if not (ok and type(fn) == "function") then
-			pcall(function()
-				fn = filtergc("function", {
-					Constants = { "Combat", "FireServer", "Action", "Func" },
-					IgnoreExecutor = true,
-				}, true)
-			end)
-		end
-		if type(fn) == "function" then
-			origFire = fn
-			local hooked = pcall(function() origFire = hookfunction(fn, newFire) end)
-			if hooked then
-				aclog("[desync] fire-hook armed via memory (filtergc) — module was hidden")
-				return
-			end
-		end
-		aclog("[desync] fire-hook: Fire() not found in memory")
-		return
-	end
-
-	aclog("[desync] fire-hook: no require path and no filtergc/hookfunction — firedelay unavailable")
-end)
+-- [V90] firedelay/prerun теперь обрабатываются ЕДИНСТВЕННЫМ владельцем — __namecall-хуком
+-- на Remotes.Server:FireServer (выше). Отдельный хук на CombatRemoteClient.Fire УДАЛЁН: он
+-- (а) патчил таблицу по пути ReplicatedStorage.Shared.Network, которая может быть декоем, пока
+-- реальный модуль лежит в Hidden, и (б) при работающем namecall-хуке давал ДВОЙНУЮ задержку
+-- (модуль держал → origFire → Server:FireServer → namecall держал снова). RemoteEvent
+-- Remotes.Server реплицируется и всегда достижим, поэтому перехват на нём надёжнее модульного.
 
 local function activeRestrictZone(now)
 	if not Config.RestrictZone then return nil end
@@ -4050,7 +4043,7 @@ local function pickTarget()
 		return vt.model, vt.hrp
 	end
 	local me = localHRP(); if not me then return nil end
-	local best, bestHrp, bestD = nil, nil, VIEW_DIST
+	local best, bestHrp, bestD = nil, nil, (Config.VizRange or VIEW_DIST)
 	for _, p in ipairs(Players:GetPlayers()) do
 		local ch = p.Character
 		if ch then
@@ -4072,18 +4065,21 @@ local function drawFlatRing(cam, model, hrp, hot)
 		footY  = c.Y - s.Y * 0.5 + 0.08
 		radius = math.clamp(math.max(s.X, s.Z) * 0.75, 2.4, 6)
 	end)
+	radius = radius * (Config.VizRingScale or 1.0)   -- [V90] пользовательский размер кольца
+	local spd = Config.VizRingSpeed or 1.0           -- [V90] пользовательская скорость анимации
+	local t = Viz.t * spd
 	local cx, cz = hrp.Position.X, hrp.Position.Z
-	local pulse = 1 + math.sin(Viz.t * 3.0) * 0.05
+	local pulse = 1 + math.sin(t * 3.0) * 0.05
 	local wpts = {}
 	for i = 0, RING_SEG - 1 do
 		local a = i / RING_SEG * math.pi * 2
-		local r = radius * pulse * (1 + math.sin(a * 4 + Viz.t * 5) * 0.03)
+		local r = radius * pulse * (1 + math.sin(a * 4 + t * 5) * 0.03)
 		wpts[i] = Vector3.new(cx + math.cos(a) * r, footY, cz + math.sin(a) * r)
 	end
 	local thick = hot and 4 or 2.5
 	for i = 0, RING_SEG - 1 do
 		local j = (i + 1) % RING_SEG
-		local f = 0.5 + 0.5 * math.sin(i / RING_SEG * math.pi * 2 + Viz.t * 2.2)
+		local f = 0.5 + 0.5 * math.sin(i / RING_SEG * math.pi * 2 + t * 2.2)
 		drawWorldSeg(cam, wpts[i], wpts[j], RING_A:Lerp(RING_B, f), thick)
 	end
 end
@@ -4193,10 +4189,10 @@ local function vizUpdate(dt)
 	local model, hrp = pickTarget()
 	if model and hrp then
 		local hot = (State.status == "PARRY" or State.status == "DODGE")
-		drawTargetHitbox(cam, model, hrp)
-		drawFlatRing(cam, model, hrp, hot)
+		if Config.VizHitbox ~= false then drawTargetHitbox(cam, model, hrp) end
+		if Config.VizRing ~= false then drawFlatRing(cam, model, hrp, hot) end
 	end
-	drawRestrictZone(cam)
+	if Config.VizRestrict ~= false then drawRestrictZone(cam) end
 	LinePool:finish(); TriPool:finish()
 end
 
@@ -4362,7 +4358,7 @@ return function(_Lib, _Core)
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
 			Min = 4, Max = 40, Callback = function(v) Config.MaxHeightDiff = v end })
-		boolToggle(apMain, "Server Hitbox Detect", "AP_HitboxDetect",
+		boolToggle(apMain, "Server Hitbox Detect", "Server Hitbox Detect",
 			function() return Config.HitboxDetect end, function(v) Config.HitboxDetect = v end)
 		apMain:SubLabel({ Text = "Reacts to the server's real hitbox (workspace.Hitboxes) on top of animations. Catches attacks that hide their swing animation. Keep ON." })
 		apMain:Divider()
@@ -4470,9 +4466,28 @@ return function(_Lib, _Core)
 				Config.ShowVisuals = v
 				if not v then pcall(vizHideAll) end
 			end,
-			Desc = "Draws your range ring + reaction cone. Only shows when AutoParry's on.",
-		})
-		apVis:Colorpicker({ Name = "Ring Gradient A", Default = RING_A,
+			Desc = "Master switch for all AutoParry visuals. Only shows when AutoParry's on.",
+			})
+			boolToggle(apVis, "Rotating Ring", "Rotating Ring",
+				function() return Config.VizRing end,
+				function(v) Config.VizRing = v; if not v then pcall(vizHideAll) end end)
+			boolToggle(apVis, "Target Hitbox", "Target Hitbox",
+				function() return Config.VizHitbox end,
+				function(v) Config.VizHitbox = v; if not v then pcall(vizHideAll) end end)
+			boolToggle(apVis, "Restrict Zone", "Restrict Zone",
+				function() return Config.VizRestrict end,
+				function(v) Config.VizRestrict = v; if not v then pcall(vizHideAll) end end)
+			slider(apVis, { Name = "Ring Speed", Flag = "AP_VizRingSpeed",
+				Default = math.floor((Config.VizRingSpeed or 1) * 100), Min = 10, Max = 300, Suffix = "%",
+				Callback = function(v) Config.VizRingSpeed = v / 100 end })
+			slider(apVis, { Name = "Ring Size", Flag = "AP_VizRingScale",
+				Default = math.floor((Config.VizRingScale or 1) * 100), Min = 40, Max = 250, Suffix = "%",
+				Callback = function(v) Config.VizRingScale = v / 100 end })
+			slider(apVis, { Name = "Render Distance", Flag = "AP_VizRange",
+				Default = Config.VizRange or 100, Min = 20, Max = 250, Suffix = " studs",
+				Callback = function(v) Config.VizRange = v end })
+			apVis:Divider()
+			apVis:Colorpicker({ Name = "Ring Gradient A", Default = RING_A,
 			Callback = function(c) RING_A = c end }, ctx.flag("AP_RingA"))
 		apVis:Colorpicker({ Name = "Ring Gradient B", Default = RING_B,
 			Callback = function(c) RING_B = c end }, ctx.flag("AP_RingB"))
