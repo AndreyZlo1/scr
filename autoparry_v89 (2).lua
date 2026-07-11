@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок����о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -223,7 +223,7 @@ local Config = {
 	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
 	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
 	InvisibleOn    = false,
-	InvisibleHeight= 4,           -- на сколько студов ронять корень для сервера (кастом высота)
+	InvisibleHeight= 0,           -- ДОП. студы поверх базового захоронения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
 	-- Ghost: полупрозрачная стеклянная копия твоих частей тела на твоей реальной позиции.
 	GhostOn        = false,
@@ -240,7 +240,7 @@ local Config = {
 
 	BoxingFaceLockDur = 0.55,
 	-- [V89] за сколько до контакта начинать ЖЁСТКО смотреть на врага при boxing-counter
-	-- (раньше взгляд включался лишь за BoxingCounterLead=160мс → «лишь доворачивал»). 0.5с =
+	-- (раньше взгляд включался лишь за BoxingCounterLead=160мс → «лишь доворачивал��). 0.5с =
 	-- требуемое «смотреть 0.5 секунд на врага» перед тяжёлой контратакой вместо доджа.
 	BoxingPreFace     = 0.5,
 	-- [V63] DEPRECATED. Velocity-lead прицел оказался ВРЕДНЫМ: на близкой дистанции
@@ -1075,7 +1075,7 @@ end
 -- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��вно то, что
 -- делает игра (GetScaledHitboxDelay: delay/mult). Один общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
--- база подтянется из её же конфига, а скорость — из роста атакующего.
+-- база подтянется из её же ��онфига, а скорость — из роста атакующего.
 local function hitTimeline(info, combo, mult)
 	local base = hitTimelineBase(info, combo)
 	local m = (type(mult) == "number" and mult > 0.05) and mult or 1
@@ -2451,7 +2451,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	-- [V64] Замер эффективности per-hit rearm: копим результаты по позиции удара
 	-- в комбо. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
-	-- rearm работает и сервер перевзводит перфект от свежего Activated.
+	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
 	do
 		State.comboStat = State.comboStat or { opener = {}, tail = {} }
 		local bucket = ((rec.combo or 0) >= 3) and State.comboStat.tail or State.comboStat.opener
@@ -3050,7 +3050,7 @@ end
 local SelfVerify = { conn = nil, lastLog = {}, decoyId = nil }
 
 -- [V76] ТЕСТ-РЕЖИМ "наоборот": пока ты стоишь в idle, ПОСТОЯННО проигрываем АТАКУ как
--- decoy (низкий локальный вес, тебе почти незаметно). Смысл: на обсервере (твоя мобила)
+-- decoy (низкий локальный ��ес, тебе почти незаметно). Смысл: на обсервере (твоя мобила)
 -- должно НЕПРЕРЫВНО показывать ATTACK, хотя ты ничего не жмёшь. Если показывает —
 -- значит decoy реально уходит в репликацию и хук подмены рабочий. Тумблер по клавише.
 local _testAnim, _testTrack, _testId
@@ -3170,7 +3170,7 @@ end
 -- бывший цикл "Stop(0); Play()" каждые ~длину и ломал анимации со временем (постоянные
 -- рестарты накапливали рассинхрон аниматора). Теперь: играем idle-decoy ОДИН раз, дальше в
 -- Heartbeat лишь мягко переутверждаем приоритет+вес и переиграем ТОЛЬКО если он реально
--- перестал играть. Никаких принудительных Stop → визуал стабилен неограниченно долго.
+-- перестал играть. Никаких прин��дительных Stop → визуал стабилен неограниченно долго.
 local IdleMask = { conn = nil }
 local function stopIdleMask()
 	if IdleMask.conn then pcall(function() IdleMask.conn:Disconnect() end); IdleMask.conn = nil end
@@ -3304,10 +3304,12 @@ do
 		Inv.oldcf = nil
 		playContort()
 
-		-- RenderStep: локально возвращаем корень на реальную позицию → ТЫ видишь себя нормально.
+		-- RenderStep at priority 0 — MUST run BEFORE the camera update so the camera reads
+		-- the RESTORED real position. Using Camera+1 (my earlier bug) ran after the camera
+		-- had already framed the dropped root → camera dived underground. Priority 0 = fixed.
 		Inv.bindKey = "AP_Invisible_" .. tostring(math.random(1e6, 9e6))
 		pcall(function()
-			RS:BindToRenderStep(Inv.bindKey, Enum.RenderPriority.Camera.Value + 1, function()
+			RS:BindToRenderStep(Inv.bindKey, 0, function()
 				local r = rootOf()
 				if r and Inv.oldcf then
 					r.CFrame = Inv.oldcf
@@ -3323,7 +3325,10 @@ do
 			if not r or not hum then return end
 			Inv.oldcf = r.CFrame
 			local isR15 = hum.RigType == Enum.HumanoidRigType.R15
-			local drop  = tonumber(Config.InvisibleHeight) or 4
+			-- Working-script drop: sink the root exactly one body below ground so the parts
+			-- are buried. Custom Invisible Height is added on top for deeper burial.
+			local baseDrop = (hum.HipHeight or 2) + (r.Size.Y / 2) - 1
+			local drop = baseDrop + (tonumber(Config.InvisibleHeight) or 0)
 			local cf = r.CFrame - Vector3.new(0, drop, 0)
 			pcall(function()
 				r.CFrame = cf * CFrame.Angles(math.rad(isR15 and 180 or 90), 0, 0)
@@ -4461,9 +4466,9 @@ return function(_Lib, _Core)
 			set = function(v) pcall(function() IV.setInvisible(v) end) end,
 			Desc = "Replicates a dropped/contorted root to the server so others can't see you; locally you look normal.",
 		})
-		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 4,
+		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 0,
 			Min = 0, Max = 15, Suffix = " studs", Callback = function(v) Config.InvisibleHeight = v end })
-		dsInv:SubLabel({ Text = "How far the root is dropped for the server view. Higher = buried deeper / harder to see." })
+		dsInv:SubLabel({ Text = "Extra studs on top of the base burial. 0 = default (already hidden); raise only if teammates can still see you." })
 		boolToggle(dsInv, "Contort Anim", "Invisible Anim",
 			function() return Config.InvisibleAnim end, function(v) Config.InvisibleAnim = v end)
 
@@ -4540,3 +4545,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
