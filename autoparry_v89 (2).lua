@@ -103,7 +103,7 @@ local Config = {
 	-- засчитывал. Плавный лерп (FaceLerp) не успевал против стрейфа. Ниже дистанции
 	-- по времени до контакта ��� прямой снап лицом на цель блока.
 	BlockFaceHard   = true,
-	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при быстром чередовании
+	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при ��ыстром чередовании
 
 	M2WidenWindow = false,
 	M2WidenFront  = 0.22,
@@ -201,6 +201,14 @@ local Config = {
 	SA_DirtyGrab      = true,   -- enemy Dirty grab/M2 (GrappleDirtyHit, ImmuneToRagdollM2) → force dodge
 	SA_HakariRead     = true,   -- widen window for Hakari momentum M2 (HakariMomentumM2HitboxDelay 0.62)
 	SA_HakariWiden    = 0.05,   -- extra front/hold seconds applied to a Hakari M2
+	-- [V91] BLATANT force-dodge. Игра НЕ даёт додж, когда мы застряли в собственной атаке
+	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
+	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот прилетит, а мы залочены
+	-- софт-состоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
+	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физически ничего не даёт.
+	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
+	SA_BlatantDodge   = false,
+	SA_BlatantWindow  = 0.32,   -- сек до контакта: в этом окне срабатывает форс-додж
 
 	RestrictZone      = true,
 	RestrictLongOnly  = true,
@@ -233,7 +241,7 @@ local Config = {
 	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
 	InvisibleOn    = false,
 	InvisibleHeight= 0,           -- ДОП. студы поверх базового з��хо������онения (кастом высота); 0 = базовое
-	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
+	InvisibleAnim  = true,        -- дополнительная контортящая ани��ация для лучшего скрытия
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
 	-- НЕ активен при загрузке (в этом была причина фриза V73).
@@ -1120,7 +1128,7 @@ local function hitTimelineBase(info, combo)
 		-- РАНЬШЕ первым в��звращался маркер "Hit" из анимации (info.hit) и он вра��: в диаг
 		-- Capoeira M2 читался hitTL=327мс при реальном контакте 448мс (predErr=+163ms LATE
 		-- NO-PRESS → Ragdoll-кас��ад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
-		-- Теперь маркер — лишь MAX-страховка поверх конфига: покрывает длинные и 2-хитовые
+		-- Теперь маркер — лишь MAX-страховка поверх конфига: покрывает дли��ные и 2-хитовые
 		-- анимации (Boxing M2MultiHitCount=2, реальный значимый контакт ~749мс), где голый
 		-- конфиг первого удара занижает окно.
 		if info.hit and info.hit > 0 then
@@ -1630,14 +1638,16 @@ local function dodgeReady()
 	return (os.clock() - State.lastDodge) >= Config.DodgeCooldown
 end
 
-local function canDodgeNow()
+-- force=true (blatant override): пропускаем ТОЛЬКО софт-состояния (Stunned/CantAnything),
+-- которые сервер всё равно позволяет обойти дэш-инпутом. Жёсткие состояния и смерть — нет.
+local function canDodgeNow(force)
 	local c = localChar()
 	if not c then return false, "no-char" end
 	if c:GetAttribute("Equip") == false then return false, "Unequipped" end
 	for _, attr in ipairs(Config.DodgeHardStates) do
 		if c:GetAttribute(attr) == true then return false, attr end
 	end
-	if not evasiveGranted() and Config.NoDodgeWhileStunned
+	if not force and not evasiveGranted() and Config.NoDodgeWhileStunned
 	   and (c:GetAttribute("Stunned") == true or c:GetAttribute("CantAnything") == true) then
 		return false, "Stunned"
 	end
@@ -1966,8 +1976,8 @@ local function bestDodgeDir(now, preferBack)
 	return nil, true
 end
 
-local function performDodge(now, reason, preferBack)
-	local can, why = canDodgeNow()
+local function performDodge(now, reason, preferBack, force)
+	local can, why = canDodgeNow(force)
 	if not can then
 		if State.lastDodgeRefuse ~= why then
 			State.lastDodgeRefuse = why
@@ -2215,6 +2225,25 @@ local function schedulerStep(now)
 		end
 	end
 
+	-- [V91] BLATANT force-dodge — ОТДЕЛЬНАЯ ветка, потому что блок ниже требует
+	-- canDodgeNow()==true, а это ровно то, что ложно, когда мы залочены (в своей атаке /
+	-- софт-стане). Срабатывает только если: нормальный додж запрещён софт-состоянием
+	-- (canDodgeNow(false)=false), но форс бы прошёл (canDodgeNow(true)=true), мы не можем
+	-- блокнуть, и удар входит в окно. Тогда форсим дэш-инпут поверх игровой блокировки.
+	if Config.SkillAddon and Config.SA_BlatantDodge and dodgeReady() and #imminent >= 1 then
+		local a  = imminent[1]
+		local dt = a.contactAbs - now
+		local normalOk = canDodgeNow(false)
+		local forceOk  = canDodgeNow(true)
+		local locked   = (State.selfBusyUntil or 0) > now or (not canBlockNow())
+		local coverLo  = Config.DodgeConfirm - 0.03
+		local coverHi  = Config.DodgeConfirm + Config.IFrameDur - 0.04
+		if (not normalOk) and forceOk and locked
+		   and dt >= (coverLo - 0.06) and dt <= math.max(coverHi, Config.SA_BlatantWindow or 0.32) then
+			if performDodge(now, "blatant-override(locked)", true, true) then return end
+		end
+	end
+
 	if dodgeReady() and canDodgeNow() and #imminent >= 1 then
 		local a = imminent[1]
 		local soonestDt = a.contactAbs - now
@@ -2343,7 +2372,7 @@ local function schedulerStep(now)
 			-- = ~160мс до контакта), а до этого работал мягкий faceToward-лерп (FaceLerp=0.8) —
 			-- он «лишь доворачивал» и не докручивал до врага. Сервер строит boxing-M2 хитбокс по
 			-- нашему LookVector в момент ServerCheck, поэтому смотреть надо ТОЧНО и ЗАРАНЕЕ. Теперь
-			-- как только решили контрить и контакт в пределах BoxingPreFace (~0.5с) — жёстко
+			-- как только решили контрить и контакт в пределах BoxingPreFace (~0.5с) — жёс��ко
 			-- снапим лицо на врага �� держим лок весь этот период (enforceFaceLock в RenderStepped
 			-- поддерживае�� + гасит AutoRotate). Это и есть требуемые «смотреть 0.5с на врага».
 			local dtc = wantBlock.contactAbs - now
@@ -2410,7 +2439,7 @@ local function schedulerStep(now)
 		end
 		local holdExtra = (wantBlock.kind == "M2" and Config.M2WidenWindow) and Config.M2WidenHold or 0
 		-- [V62] в мультибое тянем guard до САМОГО ДАЛЬНЕГО контакта кластера, а не
-		-- только б��ижайше��о — так guard не отпускается в середине burst и каждый
+		-- только б��ижайше��о — так guard не отпускается в се��едине burst и каждый
 		-- последующий удар любого врага ловится как normal-block (BLOCKABLE↑, HIT↓).
 		local base = wantBlock.contactAbs
 		if multiThreat and farContact and farContact > base then base = farContact end
@@ -3087,7 +3116,7 @@ end
 -- как decoy и дёргали ЕГО вес на 90Гц + Stop() в конце — если это был walk/emote,
 -- реальная анимация ломалась (проблема "не воспроизводит нормально при движении").
 -- V62 форсил ст��к-idle 507766388 → чужая поза, визуальны�� снап ("переводится в idle").
--- Решение: определить НАСТОЯЩИЙ idle игры (доминирующий looped не-атака-трек, пока
+-- Ре��ение: определить НАСТОЯЩИЙ idle игры (доминирующий looped не-атака-трек, пока
 -- стоим на месте), закэшировать его id и крутить нашу собственную копию поверх.
 -- Живые треки не тро��аем вообще → walk/emote целы, а маска = ��од��ой idle и��ры.
 local _capturedIdleId
@@ -3776,7 +3805,7 @@ task.spawn(function()
 	end))
 	AnimLib.desyncHooked = true
 	dbg("combat hook active")
-	-- [V74] raknet-скан БОЛЬШЕ НЕ стартует при загрузке (это вешало клиент). Запускай
+	-- [V74] raknet-скан БОЛЬШЕ НЕ стартует при загрузке (это в��шало клиент). Запускай
 	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в бою.
 end)
 
@@ -4273,11 +4302,11 @@ return function(_Lib, _Core)
 				Config.Enabled = v
 				if not v then pcall(releaseBlock); pcall(vizHideAll) end
 			end,
-			Desc = "Auto blocks and rolls hits for you. Bind works on PC + mobile.",
+			Desc = "auto blocks n rolls hits for u\nbind works on PC + mobile",
 		})
 		slider(apMain, { Name = "FOV", Flag = "AP_FOV", Default = Config.FOV or 360,
 			Min = 1, Max = 360, Suffix = "°", Callback = function(v) Config.FOV = v end })
-		apMain:SubLabel({ Text = "Only react to enemies inside this cone. 360 = all around you." })
+		apMain:SubLabel({ Text = "only reacts to enemies in this cone\n360 = all around u" })
 		apMain:Divider()
 		apMain:Dropdown({
 			Name = "Accuracy Mode",
@@ -4288,7 +4317,7 @@ return function(_Lib, _Core)
 				notify("Accuracy Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("AP_AccuracyMode"))
-		apMain:SubLabel({ Text = "Low = chill, blocks more (safer vs feints). High = picky, wastes fewer blocks." })
+		apMain:SubLabel({ Text = "Low - easy hit check, blocks more (safer vs feints)\nHigh - angle math, more accurate but with a delay" })
 		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
 			Min = 8, Max = 64, Callback = function(v) Config.Range = v end })
 		slider(apMain, { Name = "Dodge Reaction (lead)", Flag = "AP_DodgeLead",
@@ -4306,7 +4335,7 @@ return function(_Lib, _Core)
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 		boolToggle(apMain, "Instant Multi-Target Snap", "Multi Snap",
 			function() return Config.MultiFaceHard end, function(v) Config.MultiFaceHard = v end)
-		apMain:SubLabel({ Text = "In a group fight (2+ attackers) snap instantly to the next attacker instead of a smooth turn — faster target switching." })
+		apMain:SubLabel({ Text = "in a group fight (2+ attackers) snap instantly to the next one\nfaster target switching" })
 		slider(apMain, { Name = "Rotation Speed", Flag = "AP_FaceLerp",
 			Default = Config.FaceLerp or 0.80, Min = 0.10, Max = 1.00, Precision = 2,
 			Callback = function(v) Config.FaceLerp = v end })
@@ -4322,7 +4351,7 @@ return function(_Lib, _Core)
 			Title = "Dodge All Heavies", Flag = "AP_DodgeHeavy",
 			get = function() return Config.DodgeHeavy end,
 			set = function(v) Config.DodgeHeavy = v end,
-			Desc = "Auto-roll EVERY heavy (M2) instead of blocking it. Separate from Must-Dodge below: this dodges all heavies, Must-Dodge only the styles you pick. Leave OFF to dodge only Must-Dodge picks.",
+			Desc = "auto-roll EVERY heavy (M2) instead of blocking it\nMust-Dodge below only rolls the styles u pick\nleave OFF to roll only ur Must-Dodge picks",
 		})
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
@@ -4372,7 +4401,7 @@ return function(_Lib, _Core)
 					notify("Must-Dodge", "Selected: " .. n .. " attack(s)")
 				end,
 			}, ctx.flag("AP_MustDodge"))
-			apDodge:SubLabel({ Text = "Roll back into i-frames on these instead of blocking. Pick M1 or M2 per style." })
+			apDodge:SubLabel({ Text = "roll into i-frames on these instead of blocking\npick M1 or M2 per style" })
 		end
 
 		-- Section 3 — Skill Addons (per-style combat behaviors, own box, own Enabled)
@@ -4382,22 +4411,29 @@ return function(_Lib, _Core)
 			Title = "Skill Addons", Flag = "AP_SkillAddon",
 			get = function() return Config.SkillAddon end,
 			set = function(v) Config.SkillAddon = v end,
-			Desc = "Master switch for the per-style stuff below.",
+			Desc = "master switch for the per-style stuff below",
 		})
 		boolToggle(apBox, "Boxing Counter", "AP_BoxingCounter",
 			function() return Config.BoxingCounter end, function(v) Config.BoxingCounter = v end)
-		apBox:SubLabel({ Text = "Boxing only — face the enemy and throw your own M2 i-frames instead of rolling." })
+		apBox:SubLabel({ Text = "boxing only\nface the enemy n throw ur own M2 i-frames instead of rolling" })
 		slider(apBox, { Name = "Pre-Face Time", Flag = "AP_PreFace", Default = Config.BoxingPreFace or 0.5,
 			Min = 0.1, Max = 1.0, Precision = 2, Suffix = " s", Callback = function(v) Config.BoxingPreFace = v end })
 		boolToggle(apBox, "Wrestling Anti-Grab", "AP_SAWrestling",
 			function() return Config.SA_WrestlingGrab end, function(v) Config.SA_WrestlingGrab = v end)
-		apBox:SubLabel({ Text = "Wrestling M2 is an unblockable grab — always roll it." })
+		apBox:SubLabel({ Text = "wrestling M2 is an unblockable grab\nalways roll it" })
 		boolToggle(apBox, "Dirty Anti-Grab", "AP_SADirty",
 			function() return Config.SA_DirtyGrab end, function(v) Config.SA_DirtyGrab = v end)
-		apBox:SubLabel({ Text = "Dirty grab ignores immunity and eats blocks — roll it instead." })
+		apBox:SubLabel({ Text = "dirty grab ignores immunity n eats blocks\nroll it instead" })
 		boolToggle(apBox, "Hakari Double Read", "AP_SAHakari",
 			function() return Config.SA_HakariRead end, function(v) Config.SA_HakariRead = v end)
-		apBox:SubLabel({ Text = "Hakari's momentum M2 hits late — widens the window to match." })
+		apBox:SubLabel({ Text = "hakari momentum M2 hits late\nwidens the window to match" })
+		apBox:Divider()
+		boolToggle(apBox, "Blatant Force-Dodge", "AP_SABlatant",
+			function() return Config.SA_BlatantDodge end, function(v) Config.SA_BlatantDodge = v end)
+		apBox:SubLabel({ Text = "dodges even when the game wont let u\nif u attack at a bad time n get locked, it forces the roll so u dont eat the hit\nBLATANT - a legit player cant do this" })
+		slider(apBox, { Name = "Force-Dodge Window", Flag = "AP_SABlatantWin",
+			Default = math.floor((Config.SA_BlatantWindow or 0.32) * 1000), Min = 150, Max = 500, Suffix = " ms",
+			Callback = function(v) Config.SA_BlatantWindow = v / 1000 end })
 
 		-- Section 4 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
@@ -4409,7 +4445,7 @@ return function(_Lib, _Core)
 				Config.ShowVisuals = v
 				if not v then pcall(vizHideAll) end
 			end,
-			Desc = "Master switch for all AutoParry visuals. Only shows when AutoParry's on.",
+			Desc = "master switch for all AutoParry visuals\nonly shows when AutoParry is on",
 			})
 			boolToggle(apVis, "Rotating Ring", "Rotating Ring",
 				function() return Config.VizRing end,
@@ -4454,11 +4490,11 @@ return function(_Lib, _Core)
 			set = function(v)
 				if (DesyncTest.on and true or false) ~= v then pcall(toggleDesyncTest) end
 			end,
-			Desc = "Fakes a swing while you move so enemy autoparry bites on nothing.",
+			Desc = "fakes a swing while u move\nenemy autoparry bites on nothing",
 		})
 		slider(dsSelf, { Name = "Send Frequency", Flag = "DS_SendHz", Default = Config.DesyncSendHz or 0,
 			Min = 0, Max = 20, Suffix = " Hz", Callback = function(v) Config.DesyncSendHz = v end })
-		dsSelf:SubLabel({ Text = "Decoy re-sends per second. 0 = auto." })
+		dsSelf:SubLabel({ Text = "decoy re-sends per second\n0 = auto" })
 		boolToggle(dsSelf, "Client Visible", "Desync Client Visible",
 			function() return Config.DesyncClientVisible end,
 			function(v) Config.DesyncClientVisible = v end)
@@ -4471,7 +4507,7 @@ return function(_Lib, _Core)
 			Title = "Attack Desync", Flag = "DS_Attack",
 			get = function() return Config.DesyncAttack end,
 			set = function(v) Config.DesyncAttack = v end,
-			Desc = "Desyncs ur swings so enemies mistime the parry. Works without AutoParry.",
+			Desc = "desyncs ur swings so enemies mistime the parry\nworks without AutoParry",
 		})
 		dsAtk:Dropdown({
 			Name = "Desync Mode", 			Options = { "delay", "firedelay", "idlemask", "prerun" },
@@ -4482,7 +4518,7 @@ return function(_Lib, _Core)
 				notify("Desync Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("DS_Mode"))
-		dsAtk:SubLabel({ Text = "delay = lag your swing visual. firedelay = lag only the server hit. idlemask = enemies see you idle. prerun = fake swing first, real one late." })
+		dsAtk:SubLabel({ Text = "delay - lags ur swing visual\nfiredelay - lags only the server hit\nidlemask - enemies see u idle\nprerun - fake swing first, real one late" })
 		slider(dsAtk, { Name = "Desync Delay", Flag = "DS_Delay", Default = Config.DesyncDelayMs or 140,
 			Min = 40, Max = 400, Suffix = " ms", Callback = function(v) Config.DesyncDelayMs = v end })
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
@@ -4495,11 +4531,11 @@ return function(_Lib, _Core)
 			Title = "Invisible", Flag = "DS_Invisible",
 			get = function() return Config.InvisibleOn end,
 			set = function(v) pcall(function() IV.setInvisible(v) end) end,
-			Desc = "Drops your body underground for everyone else. You still look normal to yourself.",
+			Desc = "drops ur body underground for everyone else\nu still look normal to urself",
 		})
 		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 0,
 			Min = 0, Max = 15, Suffix = " studs", Callback = function(v) Config.InvisibleHeight = v end })
-		dsInv:SubLabel({ Text = "Extra studs, 2-3 is good" })
+		dsInv:SubLabel({ Text = "extra studs\n2-3 is good" })
 		boolToggle(dsInv, "Contort Anim", "Invisible Anim",
 			function() return Config.InvisibleAnim end, function(v) Config.InvisibleAnim = v end)
 
