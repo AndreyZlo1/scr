@@ -103,7 +103,7 @@ local Config = {
 	-- [V64] жёсткий доворот на атакующего у самого контакта. В логе часть LATE шла
 	-- при face=0.27 BACK! / 0.66 — блок вовремя, но лицом не туда, сервер не
 	-- засчитывал. Плавный лерп (FaceLerp) не успевал против стрейфа. Ниже дистанции
-	-- по времени до контакта — прямой снап лицом на цель блока.
+	-- по времени до контакта �� прямой снап лицом на цель блока.
 	BlockFaceHard   = true,
 	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при быстром чередовании
 
@@ -234,7 +234,7 @@ local Config = {
 	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
 	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
 	InvisibleOn    = false,
-	InvisibleHeight= 0,           -- ДОП. студы поверх базового захо����онения (кастом высота); 0 = базовое
+	InvisibleHeight= 0,           -- ДОП. студы поверх базового захо������онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
@@ -289,6 +289,15 @@ local Config = {
 	-- Слушаем Hitboxes.ChildAdded и кормим onAttack как реактивный источник детекта.
 	HitboxDetect      = true,
 	HitboxDedup       = 0.35,       -- сек: не регать тот же VictimSwingId/владельца повторно
+	-- [V90.2] HOLD BLOCK. Когда хитбокс уже ФИЗИЧЕСКИ на нас (последний кадр, перфект-парри
+	-- не успеть) или удар прилетает быстрее нашего времени реакции — не вайфим поздний парри,
+	-- а поднимаем и ДЕРЖИМ обычный блок. Держим чуть дольше, чтобы накрыть быстрый 2-й удар серии.
+	HoldBlock         = true,
+	HoldBlockDur      = 0.45,       -- сек: сколько держать guard после реактивного подъёма
+	HoldBlockDodge    = true,       -- если блок на кулдауне/стане — уходим доджем
+	-- [V90.2] Мультитаргет: мгновенный (hard) снап лицом к следующему атакующему, когда в
+	-- замесе 2+ угрозы — без плавного лерпа, чтобы не терять кадры на перекладку между целями.
+	MultiFaceHard     = true,
 
 	DodgeHorizon      = 0.34,
 	MinBlockSeparation= 0.17,
@@ -823,7 +832,7 @@ local function willHitMe(th)
 		-- враг смотрит на нас в радиусе — прессуется СРАЗУ, без ожидания совпадения строгого
 		-- бокса. Это чинит задержку/миссы High на прямых M1, когда стрейф уводил predLook-бокс
 		-- мимо нас на пару кадров. Явно off-target удары (facing от нас) сюда не попадают и
-		-- корректно отсекаются строгим боксом ниже — точность High сохраняется.
+		-- корректно отсекаются строгим боксом ниже — точность High со��раняется.
 		local hiTrust = Config.HighTrustRange or 0
 		if hiTrust > 0 and dist <= hiTrust then
 			if dist <= (Config.PointBlank or 3.0) then th.trustedHit = true; th.trustLatch = true; return true end
@@ -2224,7 +2233,7 @@ local function schedulerStep(now)
 
 		-- GRANT-эскейп: бесплатный эвейд от игры при численном перевесе. Грант
 		-- держится, пока мы в меньшинстве, поэтому МОЖНО подождать и фитить строго
-		-- когда удар входит в iframe-окно (а не палить сразу и тратить впустую).
+		-- когда удар входит в iframe-окно (а не палить сразу �� тратить впустую).
 		if Config.OutnumberEscape and evasiveGranted() and coverable then
 			if performDodge(now, "outnumbered-escape") then return end
 		end
@@ -2286,9 +2295,11 @@ local function schedulerStep(now)
 	local turnTo = faceTgt or wantBlock
 	if turnTo and turnTo.attackerHRP then
 		local dtc = turnTo.contactAbs - now
-		-- жёсткий снап раньше и в более широком окне → успеваем повернуться даже при
-		-- быстром чередовании атакующих; иначе быстрый лерп-тр��кинг.
-		if dtc <= (Config.BlockFaceHardDt or 0.30) and dtc >= -(Config.HoldAfter or 0.12) then
+		-- [V90.2] В МУЛЬТИБОЕ (2+ угрозы) — всегда мгновенный hard-снап к следующему атакующему:
+		-- плавный лерп терял кадры на перекладку между целями и не докручивал вовремя. Иначе
+		-- (одиночная цель) hard-снап только у контакта, дальше плавный трекинг.
+		local multiSnap = Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2)
+		if multiSnap or (dtc <= (Config.BlockFaceHardDt or 0.30) and dtc >= -(Config.HoldAfter or 0.12)) then
 			faceToward(turnTo.attackerHRP, true)
 		else
 			faceToward(turnTo.attackerHRP)
@@ -2521,7 +2532,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 		State.stateHits = (State.stateHits or 0) + 1
 	end
 
-	-- [V64] Замер эффективности per-hit rearm: к��пим результаты по позиции удара
+	-- [V64] Замер эффективности per-hit rearm: к��пим ре��ультаты по позиции удара
 	-- в ком��о. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
 	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
@@ -2652,83 +2663,102 @@ task.spawn(function()
 	dbg("server-swing hook active — listening " .. remote.Name)
 end)
 
--- [V90] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ (тот же метод, что использует топовый вражеский autoparry).
--- workspace.Hitboxes наполняется сер��ером при КАЖДОМ реальном ударе: BasePart с дочерними
--- Owner(StringValue)=имя атакующего и AttackName(StringValue). Этот сигнал появляется у
--- момента контакта и НЕ зависит от анимации — поэтому его нельзя обмануть нашим/чужим
--- AntiAutoParry (десинк анимации). Слушаем ChildAdded и кормим onAttack как реактивный
--- источник (contact=0 → немедленный парри), дедуп по VictimSwingId и против Pending.
-local function attackKindFromName(nm)
-	if type(nm) ~= "string" then return "M1" end
-	local low = nm:lower()
-	if low:find("m2") or low:find("heavy") or low:find("charge") or low:find("crit") then return "M2" end
-	return "M1"
+-- [V90.2] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ — переписан ТОЧНО по игровому VictimHitboxService.
+-- Игра (VictimHitboxServiceClient._scanHitboxes) каждый Heartbeat сканирует workspace.Hitboxes
+-- и засчитывает парт как удар по нам ТОЛЬКО когда он ФИЗИЧЕСКИ пересекает НАШ чар:
+--   #workspace:GetPartBoundsInBox(part.CFrame, part.Size, overlapParams(наш Character)) > 0
+-- Прежний детект (V90) регистрировал ЛЮБОЙ хитбокс в папке (чужие бои, наши же атаки) →
+-- постоянные фантомные угрозы без трека → guard не отпускался. Теперь зеркалим игру:
+-- overlap-против-нас + подавление (IFRAMES/Ragdoll/Downed/UltraInstinct) + дедуп по swing-key.
+-- Срабатывание = «нас бьют ПРЯМО СЕЙЧАС» → реактивный Hold Block (последний рубеж защиты).
+local HB = { folder = nil, op = OverlapParams.new(), seen = {}, char = nil }
+HB.op.FilterType = Enum.RaycastFilterType.Include
+HB.op.MaxParts   = 50
+local HB_KINDS    = { M1 = true, M2 = true }
+local HB_SUPPRESS = { "IFRAMES", "Ragdoll", "Downed", "UltraInstinct" }
+
+local function hbSetChar(c)
+	HB.char = c
+	if c then HB.op.FilterDescendantsInstances = { c } end
+	table.clear(HB.seen)
 end
 
-local function registerHitbox(part)
-	if not (Config.Enabled and Config.HitboxDetect) then return end
-	if not (part and part:IsA("BasePart")) then return end
-	-- Owner/AttackName приходят как дочерние StringValue (могут появиться на кадр позже парта)
-	local owner = part:FindFirstChild("Owner")
-	local atkNm = part:FindFirstChild("AttackName")
-	if not (owner and owner:IsA("StringValue")) then
-		owner = part:WaitForChild("Owner", 0.05)
+local function hbSuppressed(c)
+	for _, a in ipairs(HB_SUPPRESS) do
+		if c:GetAttribute(a) == true then return true end
 	end
-	if not (owner and owner:IsA("StringValue")) then return end
-	if not (atkNm and atkNm:IsA("StringValue")) then
-		atkNm = part:FindFirstChild("AttackName")
-	end
-	local ownerName = owner.Value
-	if type(ownerName) ~= "string" or ownerName == "" then return end
-	if ownerName == LocalPlayer.Name then return end     -- наш собственный хитбокс — не парируем себя
-	local model = resolveSwingAttacker(ownerName)
-	if not model then return end
-	local ok, hrp = isEnemyModel(model)
-	if not ok or not hrp then return end
+	return false
+end
 
-	-- дедуп: тот же VictimSwingId не регистрируем повторно
-	local swingId = part:GetAttribute("VictimSwingId")
-	local sig = swingId ~= nil and tostring(swingId) or (ownerName .. "@" .. tostring(part))
-	State.hbSeen = State.hbSeen or {}
-	local nowC = os.clock()
-	local prev = State.hbSeen[sig]
-	if prev and (nowC - prev) < (Config.HitboxDedup or 0.35) then return end
-	State.hbSeen[sig] = nowC
-	-- периодическая чистка кэша дедупа
-	if (State.hbSeen._last or 0) < nowC - 2 then
-		State.hbSeen._last = nowC
-		for k, t in pairs(State.hbSeen) do
-			if k ~= "_last" and type(t) == "number" and t < nowC - 2 then State.hbSeen[k] = nil end
+-- Реактивная защита при подтверждённом попадании хитбокса на нас. Удар уже на теле —
+-- перфект-парри не успеть, поэтому поднимаем и ДЕРЖИМ обычный блок (мержится с общей
+-- guard-машиной через State.holdUntil). Держим HoldBlockDur, чтобы накрыть быстрый 2-й удар.
+local function hbReact(now, ownerName, kind)
+	if canBlockNow() then
+		if not State.blocking then fireBlock(Workspace:GetServerTimeNow()) end
+		State.holdUntil = math.max(State.holdUntil or 0, now + (Config.HoldBlockDur or 0.45))
+		State.status    = "PARRY"
+		return true, "hold-block"
+	end
+	if Config.HoldBlockDodge and dodgeReady() and canDodgeNow() then
+		if performDodge(now, "hitbox-react-dodge") then return true, "dodge" end
+	end
+	return false
+end
+
+-- Вызывается из главного Heartbeat ПЕРЕД schedulerStep (чтобы guard, поднятый реактивно,
+-- держался тем же кадром). Ничего не кормит в Threats — никаких track-less фантомов.
+local function scanVictimHitboxes(now)
+	if not (Config.Enabled and Config.HitboxDetect and Config.HoldBlock) then return end
+	local folder = HB.folder
+	if not folder then return end
+	local c = localChar()
+	if not c then return end
+	if c ~= HB.char then hbSetChar(c) end
+	local hum   = c:FindFirstChildOfClass("Humanoid")
+	local myHRP = c:FindFirstChild("HumanoidRootPart")
+	if not hum or hum.Health <= 0 or not myHRP then return end
+	if hbSuppressed(c) then return end     -- мы неуязвимы (iframes/ragdoll/downed) — блок не нужен
+
+	local myName = c.Name
+	for _, child in ipairs(folder:GetChildren()) do
+		if child:IsA("BasePart") then
+			local Owner = child:FindFirstChild("Owner")
+			local AttackName = child:FindFirstChild("AttackName")
+			if Owner and Owner:IsA("StringValue") and AttackName and AttackName:IsA("StringValue") then
+				local ownerName = Owner.Value
+				local atkName   = AttackName.Value
+				local swingId   = child:GetAttribute("VictimSwingId")
+				if ownerName ~= myName and HB_KINDS[atkName]
+				   and type(swingId) == "string" and swingId ~= "" then
+					local key = ownerName .. "\1" .. atkName .. "\1" .. swingId
+					if not HB.seen[key] then
+						-- КРИТИЧЕСКИЙ ГЕЙТ (был пропущен в V90): парт реально пересекает наш чар?
+						local hits = Workspace:GetPartBoundsInBox(child.CFrame, child.Size, HB.op)
+						if #hits > 0 then
+							HB.seen[key] = now
+							local ok, how = hbReact(now, ownerName, atkName)
+							if ok then
+								diagPush(("HITBOX t=%.2f  %s  %s  overlap→%s"):format(now, ownerName, atkName, how))
+							end
+						end
+					end
+				end
+			end
 		end
 	end
-
-	local kind = attackKindFromName(atkNm and atkNm.Value or nil)
-	-- дедуп против уже задетекченного анимацией/сервер-свингом свинга этого врага
-	local plr  = Players:GetPlayerFromCharacter(model)
-	local name = plr and plr.Name or model.Name
-	local q = Pending[name]
-	if q then
-		for i = #q, 1, -1 do
-			local r = q[i]
-			if r.type == kind and (nowC - r.clock) <= (Config.HitboxDedup or 0.35) then return end
-		end
+	-- чистка дедупа (5с, как в игре)
+	local cut = now - 5
+	for k, t in pairs(HB.seen) do
+		if t < cut then HB.seen[k] = nil end
 	end
-
-	local info = { t = kind, s = styleOf(model) or "Basic", hit = nil, combo = nil, mom = false }
-	onAttack(hrp, info, model, 0, nil)
 end
 
 task.spawn(function()
 	local hb = Workspace:WaitForChild("Hitboxes", 60)
 	if not hb then dbg("hitbox-detect: workspace.Hitboxes not found"); return end
-	hb.ChildAdded:Connect(function(child)
-		pcall(registerHitbox, child)
-	end)
-	-- уже существующие хитбоксы на момент подключения
-	for _, ch in ipairs(hb:GetChildren()) do
-		pcall(registerHitbox, ch)
-	end
-	dbg("hitbox-detect active — listening workspace.Hitboxes")
+	HB.folder = hb
+	dbg("hitbox-detect active — overlap-gated scan of workspace.Hitboxes")
 end)
 
 local function acAvailable(name)
@@ -3256,7 +3286,7 @@ local function toggleDesyncTest()
 		-- держим её постоянно доминирующей и заставляем AnimationPlayed по ней срабатывать
 		-- снова (иначе обсервер показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
-		-- Держим трек доминирующим только пока движок сам не перебил его walk'ом. Важно:
+		-- Держим трек доминирующим только пока движок ��ам не перебил его walk'ом. Важно:
 		-- полностью уде��жать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
 		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
@@ -3904,6 +3934,7 @@ RunService.Heartbeat:Connect(function()
 	end
 	local now = os.clock()
 	FrameId = FrameId + 1        -- [V68] invalidates per-frame HRP cache
+	pcall(scanVictimHitboxes, now)   -- [V90.2] реактивный Hold Block ДО планировщика (тот же кадр)
 	pcall(schedulerStep, now)    -- [V68] one persistent-fn pcall guards the whole loop
 	                             -- (no per-read closures inside anymore → far less GC)
 	pcall(restrictStep, now)
@@ -4367,10 +4398,22 @@ return function(_Lib, _Core)
 			Min = 4, Max = 40, Callback = function(v) Config.MaxHeightDiff = v end })
 		boolToggle(apMain, "Server Hitbox Detect", "Server Hitbox Detect",
 			function() return Config.HitboxDetect end, function(v) Config.HitboxDetect = v end)
-		apMain:SubLabel({ Text = "Reacts to the server's real hitbox (workspace.Hitboxes) on top of animations. Catches attacks that hide their swing animation. Keep ON." })
+		apMain:SubLabel({ Text = "Reads the server's real hitbox (workspace.Hitboxes) and only fires when it physically overlaps YOU — same check the game uses. Catches attacks with hidden swing animations. Keep ON." })
+		boolToggle(apMain, "Hold Block (last resort)", "Hold Block",
+			function() return Config.HoldBlock end, function(v) Config.HoldBlock = v end)
+		apMain:SubLabel({ Text = "When a hit is already on you (too late to perfect-parry), raise and HOLD guard to eat it safely and cover a fast 2nd hit. Needs Server Hitbox Detect." })
+		slider(apMain, { Name = "Hold Duration", Flag = "AP_HoldBlockDur",
+			Default = math.floor((Config.HoldBlockDur or 0.45) * 1000), Min = 150, Max = 900, Suffix = " ms",
+			Callback = function(v) Config.HoldBlockDur = v / 1000 end })
+		boolToggle(apMain, "Hold Block → Dodge if on CD", "Hold Block Dodge",
+			function() return Config.HoldBlockDodge end, function(v) Config.HoldBlockDodge = v end)
+		apMain:SubLabel({ Text = "If block is on cooldown when the 2nd hit lands (e.g. right after a parry), dodge it instead of eating it." })
 		apMain:Divider()
 		-- Rotation (доворот на цель)
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
+		boolToggle(apMain, "Instant Multi-Target Snap", "Multi Snap",
+			function() return Config.MultiFaceHard end, function(v) Config.MultiFaceHard = v end)
+		apMain:SubLabel({ Text = "In a group fight (2+ attackers) snap instantly to the next attacker instead of a smooth turn — faster target switching." })
 		slider(apMain, { Name = "Rotation Speed", Flag = "AP_FaceLerp",
 			Default = Config.FaceLerp or 0.80, Min = 0.10, Max = 1.00, Precision = 2,
 			Callback = function(v) Config.FaceLerp = v end })
