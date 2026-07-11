@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -30,6 +28,12 @@ local Config = {
 	-- [V67] кап на velocity-экстраполяцию predA: у стрейфящего врага aV*tHit за
 	-- ~0.35с даёт 5+ студов смещения и уводит центр хитбокса. Ограничиваем.
 	WillHitVelCap = 2.0,
+	-- [V91] РАЗДЕЛЬНЫЙ кап предикта predA. Раньше единый WillHitVelCap душил и сближение,
+	-- и strafe → лунж/наскок с dist=10+ отсекался как «far» (High-миссы never-in-hitbox).
+	-- Теперь: сближение (toward us) ведём щедрее (реальный наскок закрывает дистанцию),
+	-- боковую (strafe) компоненту жёстко капим (иначе центр бокса уезжает вбок).
+	WillHitCloseCap = 4.5,  -- студы: макс. предикт в сторону сближения
+	WillHitLatCap   = 1.5,  -- студы: макс. предикт боковой (strafe) составляющей
 
 	-- [V68] ДВА РЕЖИМА ТОЧНОСТИ (переключение клавишей B).
 	-- Low  = как в V67: щедрое доверие ближнему бою, НО с отбраковкой ударов,
@@ -103,7 +107,7 @@ local Config = {
 	-- засчитывал. Плавный лерп (FaceLerp) не успевал против стрейфа. Ниже дистанции
 	-- по времени до контакта ��� прямой снап лицом на цель блока.
 	BlockFaceHard   = true,
-	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при ����ыстром чередовании
+	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при ������ыстром чередовании
 
 	M2WidenWindow = false,
 	M2WidenFront  = 0.22,
@@ -302,6 +306,11 @@ local Config = {
 	FaceLerp      = 0.80,   -- [V70] быстрее трекинг между атакующими в замесе
 	FaceLeadWindow= 0.30,
 	FaceGoodDot   = 0.55,
+	-- [V91] ПРЕДИКТ РОТАЦИИ автофейса: целимся чуть НАПЕРЁД движения врага (ведём его
+	-- позицию по скорости на FaceLead сек), чтобы facing не отставал от стрейфа/забегания
+	-- за спину. Держим предикт малым (иначе перелёт при резкой смене направления).
+	FaceLead      = 0.07,   -- сек упреждения по скорости врага
+	FaceLeadMax   = 4,      -- студы: кап упреждения
 
 	-- [V69] БЛОК НЕНАПРАВЛЕННЫЙ (доказано дампом: attacker M1 проверяет только
 	-- атрибут Blocking жертвы; Block-модуль — только PerfectBlocking; VictimHitbox —
@@ -623,7 +632,19 @@ local function faceToward(targetHRP, hard)
 	if State.faceLockUntil and os.clock() < State.faceLockUntil then return end
 	local myHRP = localHRP()
 	if not myHRP or not targetHRP or not targetHRP.Parent then return end
-	local dir = flatDirTo(myHRP.Position, targetHRP.Position)
+	-- [V91] упреждаем движение врага: целимся в его БУДУЩУЮ позицию (pos + vel*FaceLead),
+	-- чтобы наш facing шёл чуть наперёд стрейфа, а не догонял его. Кап FaceLeadMax гасит
+	-- перелёт при резких сменах направления.
+	local aimPos = targetHRP.Position
+	local fLead  = Config.FaceLead or 0
+	if fLead > 0 then
+		local v = safeGet(targetHRP, "AssemblyLinearVelocity", nil) or safeGet(targetHRP, "Velocity", Vector3.zero)
+		local ld = Vector3.new(v.X, 0, v.Z) * fLead
+		local mx = Config.FaceLeadMax or 4
+		if ld.Magnitude > mx then ld = ld.Unit * mx end
+		aimPos = aimPos + ld
+	end
+	local dir = flatDirTo(myHRP.Position, aimPos)
 	if not dir then return end
 	local goal = CFrame.lookAt(myHRP.Position, myHRP.Position + dir)
 	-- [V64] hard=true → прямой снап лицом на цель (у контакта), иначе плавный лерп
@@ -662,8 +683,28 @@ local function hitboxGeom(th)
 	-- [V67] кап смещения от velocity: у стрейфящего врага полная ��кс��раполяция
 	-- уводит центр хитбокса вбок и ломает willHitMe (ложный негатив в упор).
 	local lead = Vector3.new(aV.X * tHit, 0, aV.Z * tHit)
-	local cap  = Config.WillHitVelCap or 2.0
-	if lead.Magnitude > cap then lead = lead.Unit * cap end
+	-- [V91] РАЗДЕЛЬНЫЙ кап: сближение (toward us) ведём до WillHitCloseCap (лунж/наскок реально
+	-- закрывает дистанцию — иначе бокс отсекал их как far → High-миссы), strafe — до
+	-- WillHitLatCap (узко, иначе центр бокса уезжает вбок → ложный негатив в упор).
+	local meG = localHRP()
+	if meG then
+		local toMeG = Vector3.new(meG.Position.X - aPos.X, 0, meG.Position.Z - aPos.Z)
+		if toMeG.Magnitude > 0.05 then
+			toMeG = toMeG.Unit
+			local closeAmt = lead:Dot(toMeG)               -- >0 = идёт на нас
+			local latVec   = lead - toMeG * closeAmt        -- боковая составляющая
+			local latCap   = Config.WillHitLatCap or 1.5
+			if latVec.Magnitude > latCap then latVec = latVec.Unit * latCap end
+			closeAmt = math.clamp(closeAmt, 0, Config.WillHitCloseCap or 4.5)
+			lead = toMeG * closeAmt + latVec
+		else
+			local cap = Config.WillHitVelCap or 2.0
+			if lead.Magnitude > cap then lead = lead.Unit * cap end
+		end
+	else
+		local cap = Config.WillHitVelCap or 2.0
+		if lead.Magnitude > cap then lead = lead.Unit * cap end
+	end
 	local predA = Vector3.new(aPos.X + lead.X, 0, aPos.Z + lead.Z)
 	local look = aHRP.CFrame.LookVector
 	local flatLook = Vector3.new(look.X, 0, look.Z)
@@ -757,7 +798,22 @@ local function willHitMe(th)
 	rawL = (rawL.Magnitude > 0.05) and rawL.Unit or flatLook
 	local angY  = safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0
 	local capR  = math.rad(Config.RotPredMaxDeg or 120)
-	local dyaw  = math.clamp(angY * tHit, -capR, capR)
+	-- [V91] РОБАСТНЫЙ предикт ротации. Физический angY шумит и часто =0 между physics-степами
+	-- → predLook НЕ доворачивался на доворачивающегося врага → High-бокс уходил мимо (миссы
+	-- never-in-hitbox). Берём МАКС из физической и ИЗМЕРЕННОЙ (кадр-к-кадру) скорости доворота;
+	-- знак измеренной — из наблюдённого поворота prevLook→rawL (θ = -(px·rz − pz·rx)).
+	-- Это точнее наводит бокс по facing В МОМЕНТ удара — как строит серверный хитбокс.
+	local rotRate = math.abs(angY)
+	local rotSign = (angY >= 0) and 1 or -1
+	if th.prevLook then
+		local measR = math.rad(th.yawRate or 0)
+		if measR > rotRate then
+			rotRate = measR
+			local cz = th.prevLook.X * rawL.Z - th.prevLook.Z * rawL.X
+			rotSign = (cz <= 0) and 1 or -1
+		end
+	end
+	local dyaw  = math.clamp(rotSign * rotRate * tHit, -capR, capR)
 	-- [V89] поворот rawL вокруг Y БЕЗ аллокации CFrame. CFrame.Angles(0,dyaw,0)*rawL
 	-- создавал временный CFrame НА КАЖДУЮ угрозу КАЖДЫЙ кадр — в мясорубке (2+ атакующих
 	-- по нескольку треков) это давило GC и роняло FPS scheduler'а → он «переставал
@@ -860,6 +916,13 @@ local function willHitMe(th)
 			-- вовсе. Текущая позиция атакующего = aHRP.Position (th.attackerHRP), её и берём.
 			local hit = inBox(predA.X, predA.Z, predLook)
 			         or inBox(aHRP.Position.X, aHRP.Position.Z, rawL)
+			-- [V91] rotation-aware добор: враг АКТИВНО доворачивается на нас (turningToward) —
+			-- серверный хитбокс построится по его facing В МОМЕНТ удара, поэтому проверяем бокс
+			-- с look, наведённым прямо на нас. Гейт — сам inBox (реальная дальность depthF и
+			-- ширина halfW), НЕ широкий радиус → далёкие/мимо-удары по-прежнему отсекаются.
+			if not hit and turningToward then
+				hit = inBox(aHRP.Position.X, aHRP.Position.Z, toMe)
+			end
 			th.trustedHit = false
 			return hit
 		end
@@ -3121,7 +3184,7 @@ end
 -- реальная анимация ломалась (проблема "не воспроизводит нормально при движении").
 -- V62 форсил ст��к-idle 507766388 → чужая поза, визуальны�� снап ("переводится в idle").
 -- Ре��ение: определить НАСТОЯЩИЙ idle игры (доминирующий looped не-атака-трек, пока
--- стоим на месте), закэшировать его id и крутить нашу собственную копию поверх.
+-- стоим на месте), закэшировать его id и крутить ��ашу собственную копию поверх.
 -- Живые треки не тро��аем вообще → walk/emote целы, а маска = ��од��ой idle и��ры.
 local _capturedIdleId
 local function captureIdleId(animator)
@@ -3813,7 +3876,7 @@ task.spawn(function()
 	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в бою.
 end)
 
--- [V90] firedelay/prerun теперь обрабатываются ЕДИНСТВЕННЫМ владельцем — __namecall-хуком
+-- [V90] firedelay/prerun теперь обрабатываю��ся ЕДИНСТВЕННЫМ владельцем — __namecall-хуком
 -- на Remotes.Server:FireServer (выше). Отдельный хук на CombatRemoteClient.Fire УДАЛЁН: он
 -- (а) патчил таблицу по пути ReplicatedStorage.Shared.Network, которая может ��ыть декоем, пока
 -- реальный модуль лежит в Hidden, и (б) при работающем namecall-хуке давал ДВОЙНУЮ задержку
