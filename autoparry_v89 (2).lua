@@ -43,7 +43,8 @@ local Config = {
 	PointBlank    = 3.0,    -- Low: ≤ этой дист. всегда считаем удар нашим (в упор не отвертеться)
 	LowFaceMin    = -0.55,  -- Low: бракуем удар, только если predFacing·toMe < этого (шире конус ~123°: реагируем на большее, отсекаем только явно спиной)
 	RotPredMaxDeg = 200,    -- [V88] кап предсказанного доворота за свинг (было 120 — не хватало на быстрый разворот 180° в финтах)
-	HighSlack     = 0.6,    -- High: слак бокса, студы
+	HighSlack     = 0.35,   -- [V90.5] High: слак бокса, студы (снижен 0.6→0.35 — меньше ложняков)
+	HeavyHighFaceMin = 0.5, -- [V90.5] High: тяжёлый лунж доверяем, только если нацелен в нас (~60° конус)
 	-- [V90.4] High = чисто геометрический dual-box (predLook + rawL), без radius/facing-доверия
 	-- (см. willHitMe). Никаких HighFaceMin/HighReachPad больше нет — они и делали High как Low.
 	-- [V90] DRAG/SNAP-TURN детект (закрученные атаки: враг смотрит мимо, бьёт, резко
@@ -806,12 +807,19 @@ local function willHitMe(th)
 				local aV       = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
 				local toMeUnit = (dist > 0.05) and toMe or flatLook
 				local closing  = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit) -- >0 = идёт на нас
-				-- [V90.4] В High тяжёлые доверяем ТОЛЬКО по реальному сближению (лунж = точно
-				-- дойдёт). Широкий facing-бранч оставлен только для Low — в High он агрился на
-				-- хэви, направленные не в нас. Сам замах, если дойдёт, поймает геометрия ниже.
+				-- [V90.5] Low: доверяем по сближению ИЛИ грубому facing (щедро).
+				-- High: тяжёлый лунж доверяем ТОЛЬКО если он И сближается, И реально нацелен в нас
+				-- (predFacing в узком конусе HeavyHighFaceMin). Прежде в High хватало одного
+				-- closing → парри на любой хэви, летящий мимо в нашу сторону (ложняки). Теперь
+				-- лунж, направленный не в нас, в High не проходит — ловится только геометрией.
 				local closingOk = closing > (Config.HeavyClosingMin or 6)
-				local facingOk  = (mode ~= "High") and (faceDotPred >= (Config.HeavyFaceMin or -0.30))
-				if facingOk or closingOk then
+				local trustHeavy
+				if mode == "High" then
+					trustHeavy = closingOk and (faceDotPred >= (Config.HeavyHighFaceMin or 0.5))
+				else
+					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyFaceMin or -0.30))
+				end
+				if trustHeavy then
 					th.trustedHit = true; th.trustLatch = true
 					return true
 				end
@@ -3440,7 +3448,7 @@ end
 -- хуке — только C-операции над пакетом. Поэтому он и не крашит.
 -- ФИКС: счётчики — ПРЕДВЫДЕЛЕННЫЙ массив на 256 слотов (0..255), в хуке тольк�� IN-PLACE
 -- инкремент существующего числового слота (без новых ключей, без rehash, без аллокации).
--- Это безопасно даже с чужого потока (максимум — безобидная гонка значения счётчика).
+-- Это безопасно даже с чужого потока (максимум — безобидная гонка знач��ния счётчика).
 local RAK_SLOTS = 256
 local function newCounterArray()
 	local t = table.create and table.create(RAK_SLOTS, 0) or {}
@@ -3502,7 +3510,7 @@ end
 _ = raknetScanSendHook  -- функция сохранена в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
 _ = reportRaknetScan
 local function runRaknetScanSession()
-	aclog("[DESYNC-SCAN] ОТКЛЮЧЕНО: raknet-хук крашит native-защиту клиента (Hyperion), это не Lua-AC и не уби��ается правкой игры. Desync-путь через Blink RemoteEvent (__namecall) — по запросу.")
+	aclog("[DESYNC-SCAN] ОТКЛЮЧЕНО: raknet-хук крашит native-защиту клиента (Hyperion), это не Lua-AC и не уби��ается правкой игры. Desync-путь чер��з Blink RemoteEvent (__namecall) — по запросу.")
 	desyncPush("[SCAN] raknet path disabled (native anti-tamper crash). Use Blink __namecall path instead.")
 end
 if type(getgenv) == "function" then getgenv().AP_RAKNET_SCAN = runRaknetScanSession end
@@ -3774,7 +3782,7 @@ end)
 
 -- [V90] firedelay/prerun теперь обрабатываются ЕДИНСТВЕННЫМ владельцем — __namecall-хуком
 -- на Remotes.Server:FireServer (выше). Отдельный хук на CombatRemoteClient.Fire УДАЛЁН: он
--- (а) патчил таблицу по пути ReplicatedStorage.Shared.Network, которая может быть декоем, пока
+-- (а) патчил таблицу по пути ReplicatedStorage.Shared.Network, которая может ��ыть декоем, пока
 -- реальный модуль лежит в Hidden, и (б) при работающем namecall-хуке давал ДВОЙНУЮ задержку
 -- (модуль держал → origFire → Server:FireServer → namecall держал снова). RemoteEvent
 -- Remotes.Server реплицируется и всегда достижим, поэтому перехват на нём надёжнее модульного.
