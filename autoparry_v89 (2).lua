@@ -123,7 +123,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок����������������������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -732,7 +732,7 @@ local function willHitMe(th)
 
 	-- [V88] SNAP-TURN FEINT: враг закоммитил свинг и АКТИВНО доворачивается на нас. Серверный
 	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спиной» = реальная
-	-- угроза, хотя сейчас смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
+	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
 	-- текущий (rawDot) → он поворачивается в нашу сторону. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
 	local turningToward = (math.abs(angY) > 1.2) and (faceDotPred > rawDot + 0.05)
@@ -1634,7 +1634,7 @@ local function refreshContact(th)
 			if Config.LiveHeavyTimer and tp < th.hitTL - 0.001 then
 				-- реальная скорость прогресса, но не ниже пола (иначе деление на ~0
 				-- даёт бесконечность, а враг может резко доиграть). Пол = доля от
-				-- номин��льной скорости трека.
+				-- номин��л��ной скорости трека.
 				local nominal = math.max(th.initSpeed or 1, 0.05)
 				local floor   = nominal * (Config.LiveSpeedFloor or 0.15)
 				local sp      = math.max(th.liveSpeed or nominal, floor)
@@ -2207,7 +2207,7 @@ local function schedulerStep(now)
 	end
 
 	-- [V70] СНАП ВОЗВРАЩЁН (soft-face/центроид ��далён — оставлял face=0.2..0.5 BACK!).
-	-- Снап быстрый и мультитаргетный: цель поворота = faceTgt (ближайший по времени
+	-- Снап быстрый и мультитаргетный: ��ель поворота = faceTgt (ближайший по времени
 	-- ЕЩЁ не прилетевший удар среди всех атакующих), пересчитывается каждый кадр, так
 	-- что после каждого контакта мы мгновенно перекидываемся на следующего врага в
 	-- замесе. Быстрый лерп на подлёте + жёсткий снап у самого контакта.
@@ -2335,7 +2335,7 @@ local function schedulerStep(now)
 			base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra)
 	elseif State.blocking then
 		-- [V62] пока в кластере есть незакрытые угрозы — не отпускаем guard даже
-		-- если ближайший holdUntil истёк (иначе дыра между волнами burst).
+		-- е��ли ближайший holdUntil истёк (иначе дыра между волнами burst).
 		local keepForCluster = multiThreat and farContact
 			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0))
 		if not keepForCluster
@@ -3643,21 +3643,62 @@ task.spawn(function()
 			end
 		end
 
-		if self ~= ServerRemote or method ~= "FireServer" then
+		-- наш собственный отложенный re-fire — пропускаем без обработки
+		if State.desyncPassthrough then return oldNamecall(self, ...) end
+		if method ~= "FireServer" then
 			return oldNamecall(self, ...)
 		end
 		local a1 = (select(1, ...))
 		local ok, kind = pcall(classifyCombat, a1)
-		local action = (type(a1) == "table" and a1.Action) or "?"
-		if ok and kind then
-			local now = os.clock()
-			if kind == "attack" then
-				-- firedelay/prerun обрабатываются в хуке CombatRemoteClient.Fire (надёжный
-				-- перехват на стороне вызова). Здесь только держим свой busy-таймер.
-				State.selfBusyUntil = now + Config.SelfBusyDur
-			elseif kind == "dash" then
-				State.selfBusyUntil = now + Config.DashDuration
+		if not (ok and kind) then
+			-- discovery: пока идёт отладка (DesyncAttack вкл), один раз логируем форму КАЖДОГО
+			-- нераспознанного table-пакета FireServer — чтобы найти реальный боевой пакет,
+			-- если его shape отличается от {Type="Combat"}. Капим, чтобы не спамить.
+			if Config.DesyncAttack and type(a1) == "table" and (State.discN or 0) < 10 then
+				local sig = tostring(a1.Type) .. "/" .. tostring(a1.Action) .. "/" .. tostring(a1.Func)
+				State.discSeen = State.discSeen or {}
+				if not State.discSeen[sig] then
+					State.discSeen[sig] = true
+					State.discN = (State.discN or 0) + 1
+					local nm = "?"; pcall(function() nm = self:GetFullName() end)
+					aclog(("[disc] FireServer %s  payload=%s"):format(nm, sig))
+				end
 			end
+			return oldNamecall(self, ...)
+		end
+		-- матчим боевой пакет ПО СОДЕРЖИМОМУ на ЛЮБОМ remote (дампы Network устарели/скрыты,
+		-- реальный remote может отличаться от Remotes.Server — старый гейт self~=ServerRemote
+		-- глушил firedelay). Один раз печатаем реальный путь remote для подтверждения.
+		if not State.combatRemoteLogged then
+			State.combatRemoteLogged = true
+			local nm = "?"; pcall(function() nm = self:GetFullName() end)
+			aclog(("[desync] combat remote: %s"):format(nm))
+		end
+		local now = os.clock()
+		local action = (type(a1) == "table" and a1.Action) or "?"
+		local func   = (type(a1) == "table" and a1.Func) or nil
+		if kind == "attack" then
+			State.selfBusyUntil = now + Config.SelfBusyDur
+			-- firedelay/prerun: глотаем немедленную отправку ServerCheck и повторяем её через
+			-- задержку. Анимацию НЕ трогаем (идёт вовремя), задерживается только сам пакет.
+			if Config.DesyncAttack and func == "ServerCheck"
+			   and (Config.DesyncMode == "firedelay" or Config.DesyncMode == "prerun")
+			   and desyncApplies(action) then
+				if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
+				local remote, args, d = self, table.pack(...), desyncMag()
+				task.delay(d, function()
+					State.desyncPassthrough = true
+					pcall(function() remote:FireServer(table.unpack(args, 1, args.n)) end)
+					State.desyncPassthrough = false
+				end)
+				if (now - (State.lastSwingLog or 0)) > 0.15 then
+					State.lastSwingLog = now
+					aclog(("[desync] %s held +%dms"):format(tostring(action), math.floor(d * 1000)))
+				end
+				return   -- глотаем немедленную отправку
+			end
+		elseif kind == "dash" then
+			State.selfBusyUntil = now + Config.DashDuration
 		end
 		return oldNamecall(self, ...)
 	end))
@@ -3666,54 +3707,6 @@ task.spawn(function()
 	aclog("[desync] hook ready")
 	-- [V74] raknet-скан БОЛЬШЕ НЕ стартует при загрузке (это вешало клиент). Запускай
 	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в бою.
-end)
-
--- firedelay/prerun: перехват прямо в CombatRemoteClient.Fire — это гарантированная точка
--- вызова боевого пакета (tryM1/tryM2 зовут CombatRemoteClient.Fire("M1"/"M2","ServerCheck",...)),
--- в отличие от __namecall-хука, который на части экзекуторов не ловит FireServer. delay сюда
--- не заходит — там задерживается только анимация, пакет уходит штатно.
-task.spawn(function()
-	local ok, mod = pcall(function()
-		return ReplicatedStorage:WaitForChild("Shared", 10)
-			:WaitForChild("Network", 10):WaitForChild("CombatRemoteClient", 10)
-	end)
-	if not ok or not mod then aclog("[desync] fire hook: module not found"); return end
-	local ok2, CRC = pcall(require, mod)
-	if not ok2 or type(CRC) ~= "table" or type(CRC.Fire) ~= "function" then
-		aclog("[desync] fire hook: require failed"); return
-	end
-
-	local origFire = CRC.Fire
-	local function newFire(action, func, ...)
-		if Config.DesyncAttack
-		   and (Config.DesyncMode == "firedelay" or Config.DesyncMode == "prerun")
-		   and func == "ServerCheck"
-		   and (action == "M1" or action == "M2")
-		   and desyncApplies(action) then
-			if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
-			local packed = table.pack(...)
-			local d = desyncMag()
-			task.delay(d, function()
-				pcall(origFire, action, func, table.unpack(packed, 1, packed.n))
-			end)
-			if (os.clock() - (State.lastSwingLog or 0)) > 0.15 then
-				State.lastSwingLog = os.clock()
-				aclog(("[desync] %s held +%dms"):format(tostring(action), math.floor(d * 1000)))
-			end
-			return true   -- игре сообщаем «отправлено», реальный пакет уйдёт с задержкой
-		end
-		return origFire(action, func, ...)
-	end
-
-	-- заменяем поле напрямую (tryM1/M2 читают CombatRemoteClient.Fire при каждом вызове);
-	-- если таблица заморожена — падаем на hookfunction.
-	local set = pcall(function() CRC.Fire = newFire end)
-	if not set or CRC.Fire ~= newFire then
-		if type(hookfunction) == "function" then
-			pcall(function() origFire = hookfunction(CRC.Fire, newFire) end)
-		end
-	end
-	aclog("[desync] fire hook ready")
 end)
 
 local function activeRestrictZone(now)
@@ -4345,7 +4338,7 @@ return function(_Lib, _Core)
 		apVis:Colorpicker({ Name = "Restrict Ring", Default = RESTRICT_COL,
 			Callback = function(c) RESTRICT_COL = c end }, ctx.flag("AP_Restrict"))
 
-		-- ═══════════════════ TAB: Desync ═══════════════════
+		-- ═══════════════════ TAB: Desync ══════════════════��
 		local DS = ctx.tabs.Desync
 
 		-- Section 1 — Desync (standalone attack-replicate spoof, the old "[" test).
