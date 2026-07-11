@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок������о вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -225,10 +225,6 @@ local Config = {
 	InvisibleOn    = false,
 	InvisibleHeight= 0,           -- ДОП. студы поверх базового захоронения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
-	-- Ghost: полупрозрачная стеклянная копия твоих частей тела на твоей реальной позиции.
-	GhostOn        = false,
-	GhostColor     = Color3.fromRGB(90, 170, 255),
-	GhostTransparency = 0.5,
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
 	-- НЕ активен при загрузке (в этом была причина фриза V73).
@@ -587,7 +583,7 @@ end
 
 local function faceToward(targetHRP, hard)
 	if not Config.AutoFace then return end
-	-- [V62] face-lock (boxing-counter) имеет приоритет и делает hard lookAt в
+	-- [V62] face-lock (boxing-counter) имеет приоритет и дела��т hard lookAt в
 	-- RenderStepped. Плавный лерп здесь боролся бы с ним (особенно в мультибое,
 	-- где targetHRP = wantBlock, а lock смотрит на того, кого мы бьём) и тянул
 	-- HRP прочь от цели удара. Пока lock активен — не вмешиваемся.
@@ -3296,7 +3292,6 @@ do
 		local r = rootOf()
 		if r and Inv.oldcf then pcall(function() r.CFrame = Inv.oldcf end) end
 		Inv.oldcf = nil
-		Inv.serverCF = nil
 	end
 
 	local function startInvisible()
@@ -3331,11 +3326,8 @@ do
 			local baseDrop = (hum.HipHeight or 2) + (r.Size.Y / 2) - 1
 			local drop = baseDrop + (tonumber(Config.InvisibleHeight) or 0)
 			local cf = r.CFrame - Vector3.new(0, drop, 0)
-			local serverCF = cf * CFrame.Angles(math.rad(isR15 and 180 or 90), 0, 0)
-			-- Expose the server-side root transform so Ghost can render where OTHERS see us.
-			Inv.serverCF = serverCF
 			pcall(function()
-				r.CFrame = serverCF
+				r.CFrame = cf * CFrame.Angles(math.rad(isR15 and 180 or 90), 0, 0)
 				if Inv.track then Inv.track:AdjustWeight(100) end
 			end)
 		end)
@@ -3349,99 +3341,10 @@ do
 		end)
 	end
 
-	-- ---- GHOST ----
-	local Ghost = { model = nil, map = nil, bindKey = nil, resp = nil }
-
-	local function destroyGhost()
-		if Ghost.bindKey then pcall(function() RS:UnbindFromRenderStep(Ghost.bindKey) end); Ghost.bindKey = nil end
-		if Ghost.model then pcall(function() Ghost.model:Destroy() end); Ghost.model = nil end
-		Ghost.map = nil
-		-- Nuke any orphaned ghost models left behind by a respawn/rebuild race.
-		for _, m in ipairs(Workspace:GetChildren()) do
-			if m.Name == "AP_Ghost" then pcall(function() m:Destroy() end) end
-		end
-	end
-
-	local function buildGhost()
-		destroyGhost()
-		local c = char(); if not c then return end
-		local folder = Instance.new("Model"); folder.Name = "AP_Ghost"
-		local map = {}
-		for _, p in ipairs(c:GetDescendants()) do
-			if p:IsA("BasePart") and p.Transparency < 1 then
-				local ok, clone = pcall(function() return p:Clone() end)
-				if ok and clone then
-					-- оставляем только визуальные меши, убираем скрипты/декали/сочленения
-					for _, ch in ipairs(clone:GetChildren()) do
-						if not (ch:IsA("SpecialMesh") or ch:IsA("BlockMesh") or ch:IsA("CylinderMesh")) then
-							pcall(function() ch:Destroy() end)
-						end
-					end
-					clone.Anchored   = true
-					clone.CanCollide = false
-					clone.CanQuery   = false
-					clone.CanTouch   = false
-					clone.Massless   = true
-					clone.CastShadow = false
-					clone.Material   = Enum.Material.Glass
-					clone.Color        = Config.GhostColor or Color3.fromRGB(90, 170, 255)
-					clone.Transparency = Config.GhostTransparency or 0.5
-					clone.Reflectance  = 0.2
-					clone.Parent = folder
-					map[#map + 1] = { src = p, dst = clone }
-				end
-			end
-		end
-		folder.Parent = Workspace
-		Ghost.model, Ghost.map = folder, map
-
-		local root = rootOf()
-		Ghost.bindKey = "AP_Ghost_" .. tostring(math.random(1e6, 9e6))
-		pcall(function()
-			-- Runs AFTER Invisible's priority-0 restore, so m.src.CFrame here is the real
-			-- (restored) position. We re-apply the server offset transform T so the ghost
-			-- sits where OTHERS see us (dropped + contorted), not on top of our real body.
-			RS:BindToRenderStep(Ghost.bindKey, Enum.RenderPriority.Camera.Value + 2, function()
-				if not Ghost.map then return end
-				root = root or rootOf()
-				local T = nil
-				if Inv.enabled and Inv.serverCF and Inv.oldcf then
-					T = Inv.serverCF * Inv.oldcf:Inverse()  -- world offset applied to the root
-				end
-				for _, m in ipairs(Ghost.map) do
-					if m.src and m.src.Parent then
-						m.dst.CFrame       = T and (T * m.src.CFrame) or m.src.CFrame
-						m.dst.Color        = Config.GhostColor or m.dst.Color
-						m.dst.Transparency = Config.GhostTransparency or m.dst.Transparency
-					end
-				end
-			end)
-		end)
-	end
-
-	local function startGhost()
-		buildGhost()
-		if Ghost.resp then pcall(function() Ghost.resp:Disconnect() end) end
-		Ghost.resp = LocalPlayer.CharacterAdded:Connect(function()
-			if not Config.GhostOn then return end
-			task.wait(0.8)
-			if Config.GhostOn then buildGhost() end
-		end)
-	end
-	local function stopGhost()
-		if Ghost.resp then pcall(function() Ghost.resp:Disconnect() end); Ghost.resp = nil end
-		destroyGhost()
-	end
-
 	function IV.setInvisible(on)
 		Config.InvisibleOn = on and true or false
 		if Config.InvisibleOn then startInvisible() else stopInvisible() end
 	end
-	function IV.setGhost(on)
-		Config.GhostOn = on and true or false
-		if Config.GhostOn then startGhost() else stopGhost() end
-	end
-	function IV.rebuildGhost() if Config.GhostOn then buildGhost() end end
 end
 
 -- [V77] RAKNET DISCOVERY — ПЕРЕПИСАНО НА РЕАЛЬНЫЙ Potassium API (фикс крашей).
@@ -3578,14 +3481,14 @@ end
 
 -- [V75] КРОСС-КЛИЕНТНАЯ ПРОВЕРКА (отвечает на "как это видят другие игроки").
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
--- ПРОКСИ репликации, а не док��зательство того, что реально приходит врагу. Единственн��й
+-- ПРОКСИ репликации, а не док��зательство тог��, что реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
 -- Как пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
 -- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬНО реплицировался ему
 -- от твоего главного. Свингни на главном — и в дебаге второго аккаунта увидишь, что
 -- ему пришло: реальная атака, decoy-idle, или (если raknet-rewrite заработает) только idle.
--- Это и есть объективная проверка desync с точки зрения противника.
+-- Это и есть объективная проверка desync с ��очки зрения противника.
 local Observers = {}
 local function observeOtherPlayer(name)
 	local target = Players:FindFirstChild(name)
@@ -4414,7 +4317,7 @@ return function(_Lib, _Core)
 				Config.ShowVisuals = v
 				if not v then pcall(vizHideAll) end
 			end,
-			Desc = "Draws ur range ring + reaction cone",
+			Desc = "Draws your range ring + reaction cone. Only shows when AutoParry's on.",
 		})
 		apVis:Colorpicker({ Name = "Ring Gradient A", Default = RING_A,
 			Callback = function(c) RING_A = c end }, ctx.flag("AP_RingA"))
@@ -4440,7 +4343,7 @@ return function(_Lib, _Core)
 			set = function(v)
 				if (DesyncTest.on and true or false) ~= v then pcall(toggleDesyncTest) end
 			end,
-			Desc = "Fakes a swing while u move so enemy autoparry bites on nothing.",
+			Desc = "Fakes a swing while you move so enemy autoparry bites on nothing.",
 		})
 		slider(dsSelf, { Name = "Send Frequency", Flag = "DS_SendHz", Default = Config.DesyncSendHz or 0,
 			Min = 0, Max = 20, Suffix = " Hz", Callback = function(v) Config.DesyncSendHz = v end })
@@ -4457,7 +4360,7 @@ return function(_Lib, _Core)
 			Title = "Attack Desync", Flag = "DS_Attack",
 			get = function() return Config.DesyncAttack end,
 			set = function(v) Config.DesyncAttack = v end,
-			Desc = "Desyncs ur swings so enemies mistime the parry",
+			Desc = "Desyncs your swings so enemies mistime the parry. Works without AutoParry.",
 		})
 		dsAtk:Dropdown({
 			Name = "Desync Mode", 			Options = { "delay", "firedelay", "idlemask", "prerun" },
@@ -4474,7 +4377,7 @@ return function(_Lib, _Core)
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
 		boolToggle(dsAtk, "Apply to M2", "Desync M2", function() return Config.DesyncApplyM2 end, function(v) Config.DesyncApplyM2 = v end)
 
-		-- Section 3 — Invisible + Ghost.
+		-- Section 3 — Invisible.
 		local dsInv = DS:Section({ Side = "Left" })
 		dsInv:Header({ Name = "Invisible" })
 		feature(dsInv, {
@@ -4485,16 +4388,9 @@ return function(_Lib, _Core)
 		})
 		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 0,
 			Min = 0, Max = 15, Suffix = " studs", Callback = function(v) Config.InvisibleHeight = v end })
-		dsInv:SubLabel({ Text = "Extra studs to bury deeper" })
+		dsInv:SubLabel({ Text = "Extra studs to bury deeper. 0 is usually enough." })
 		boolToggle(dsInv, "Contort Anim", "Invisible Anim",
 			function() return Config.InvisibleAnim end, function(v) Config.InvisibleAnim = v end)
-
-		boolToggle(dsInv, "Ghost", "Ghost",
-			function() return Config.GhostOn end,
-			function(v) pcall(function() IV.setGhost(v) end) end)
-		dsInv:SubLabel({ Text = "Glassy clone lol" })
-		slider(dsInv, { Name = "Ghost Transparency", Flag = "DS_GhostTr", Default = math.floor((Config.GhostTransparency or 0.5) * 100),
-			Min = 0, Max = 95, Suffix = " %", Callback = function(v) Config.GhostTransparency = v / 100 end })
 
 		-- ═══════════════════ TAB: Debug ═══════════════════
 		local DB = ctx.tabs.Debug
