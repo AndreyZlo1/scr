@@ -120,6 +120,7 @@ local Config = {
 	MatchWindow   = 1.30,
 
 	DodgeHeavy    = true,
+	FOV           = 360,   -- screen-space angular FOV; 360 preserves current omnidirectional behavior
 
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
@@ -204,11 +205,12 @@ local Config = {
 
 	DesyncAttack   = false,
 	-- [V88] Режимы desync (цикл клавишей ]):
-	--   delay    — визуал твоего замаха задержан на DesyncDelayMs; урон/FireServer уходят вовремя.
-	--   idlemask — постоянный спуф IDLE, пока ты атакуешь.
-	--   prerun   — фейк-атака (как [) СРАЗУ + реальный FireServer задержан на DesyncDelayMs.
+	--   delay     — визуал твоего замаха задержан на DesyncDelayMs; FireServer уходит вовремя.
+	--   firedelay — визуал идёт вовремя; только M1/M2 ServerCheck уходит позже на DesyncDelayMs.
+	--   idlemask  — постоянный спуф IDLE, пока ты атакуешь.
+	--   prerun    — фейк-атака (как [) СРАЗУ + реальный FireServer задержан на DesyncDelayMs.
 	DesyncMode     = "delay",
-	DesyncDelayMs  = 140,          -- [V88] ЕДИНАЯ задержка для delay и prerun (мс)
+	DesyncDelayMs  = 140,          -- единая задержка delay/firedelay/prerun (мс)
 	DesyncDecoyId  = 507766388,
 	DesyncApplyM1  = true,
 	DesyncApplyM2  = true,
@@ -243,7 +245,7 @@ local Config = {
 	BoxingCounterSolo = true,
 
 	-- [V62] ГИБРИД мультибоя: перфектим ближайшего, остальным держим guard
-	-- непрерывно (нулевые дыры = нулевые полные ����иты). holdUntil тянется по
+	-- непрерывно (нулевые дыры = нулевые полные ������иты). holdUntil тянется по
 	-- самому дальнему угрожающему контакту в кластере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
@@ -304,7 +306,7 @@ local Config = {
 	Key_DesyncSave = Enum.KeyCode.Semicolon,     -- [V75] ; → сохранить desync-дебаг в файл
 	Key_DesyncScan = Enum.KeyCode.Quote,         -- [V75] ' → запустить raknet скан-сессию
 	Key_DesyncTest = Enum.KeyCode.LeftBracket,   -- [V76] [ → тест-режим: постоянно реплицировать АТАКУ пока стоишь
-	Key_DesyncMode = Enum.KeyCode.RightBracket,  -- [V83] ] → циклить режим desync: delay → idlemask → prerun
+	Key_DesyncMode = Enum.KeyCode.RightBracket,  -- ] → циклить: delay → firedelay → idlemask → prerun
 	AutoScanAC    = false,
 	Key_Panel     = Enum.KeyCode.RightShift,
 }
@@ -846,8 +848,13 @@ local function attackSpeedMult(model)
 		-- фолбэк: атрибут Height + формула из дампа CombatUtils
 		local h
 		pcall(function()
-			local pd = model:FindFirstChild("PlayerData")
-			if pd then h = pd:GetAttribute("Height") end
+		local pd = model:FindFirstChild("PlayerData")
+		if pd then h = tonumber(pd:GetAttribute("CurrentHeight")) or tonumber(pd:GetAttribute("Height")) end
+		if type(h) ~= "number" then
+			local hum = model:FindFirstChildOfClass("Humanoid")
+			local scale = hum and hum:FindFirstChild("BodyHeightScale")
+			if scale and scale:IsA("NumberValue") then h = scale.Value end
+		end
 		end)
 		if type(h) == "number" then
 			mult = 1.15 - math.clamp((h - 0.983) / 0.467, 0, 1) * 0.3
@@ -855,6 +862,19 @@ local function attackSpeedMult(model)
 	end
 	AttackMultCache[model] = { m = mult, t = os.clock() }
 	return mult
+end
+
+local function heightDiag(model)
+	local attrHeight, bodyScale, modelHeight = nil, nil, nil
+	pcall(function()
+		local pd = model and model:FindFirstChild("PlayerData")
+		if pd then attrHeight = tonumber(pd:GetAttribute("CurrentHeight")) or tonumber(pd:GetAttribute("Height")) end
+		local hum = model and model:FindFirstChildOfClass("Humanoid")
+		local scale = hum and hum:FindFirstChild("BodyHeightScale")
+		if scale and scale:IsA("NumberValue") then bodyScale = scale.Value end
+		if model then modelHeight = model:GetExtentsSize().Y end
+	end)
+	return attrHeight, bodyScale, modelHeight
 end
 
 local function styleOf(model)
@@ -1020,7 +1040,7 @@ local function hitTimelineBase(info, combo)
 		-- ту задержку, по которой сервер наносит удар (GetScaledHitboxDelay: delay/mult).
 		-- РАНЬШЕ первым возвращался маркер "Hit" из анимации (info.hit) и он врал: в диаг
 		-- Capoeira M2 читался hitTL=327мс при реальном контакте 448мс (predErr=+163ms LATE
-		-- NO-PRESS → Ragdoll-каскад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
+		-- NO-PRESS → Ragdoll-кас��ад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
 		-- Теперь маркер — лишь MAX-страховка поверх конфига: покрывает длинные и 2-хитовые
 		-- анимации (Boxing M2MultiHitCount=2, реальный значимый контакт ~749мс), где голый
 		-- конфиг первого удара занижает окно.
@@ -1415,7 +1435,7 @@ local function sendBoxingCounter(th, keepGuard)
 		State.faceLockHRP   = aHRP
 		State.faceLockUntil = os.clock() + (Config.BoxingFaceLockDur or 0.55)
 	end
-	-- [V62] в мультибое НЕ роняем guard: держим Blocking для остальных угроз,
+	-- [V62] в мультибое НЕ роняем guard: держим Blocking для ��стальных угроз,
 	-- иначе deactivate создаёт дыру + BlockCooldown при повторном нажатии.
 	if State.blocking and not keepGuard then
 		State.blocking, State.holdUntil = false, 0
@@ -1635,9 +1655,27 @@ local function refreshContact(th)
 	return remaining
 end
 
+local function insideAutoFOV(attackerHRP)
+	local fov = math.clamp(tonumber(Config.FOV) or 360, 1, 360)
+	if fov >= 359.5 then return true end
+	local cam = Workspace.CurrentCamera
+	if not cam or not attackerHRP then return true end
+	local ok, point, visible = pcall(function()
+		local p, onScreen = cam:WorldToViewportPoint(attackerHRP.Position)
+		return p, onScreen
+	end)
+	if not ok or not point or point.Z <= 0 or not visible then return false end
+	local vp = cam.ViewportSize
+	local dx, dy = point.X - vp.X * 0.5, point.Y - vp.Y * 0.5
+	local focal = math.max(vp.Y * 0.5, 1)
+	local angle = math.deg(math.atan(math.sqrt(dx * dx + dy * dy) / focal))
+	return angle <= fov * 0.5
+end
+
 local function onAttack(attackerHRP, info, model, id, track)
 	local myHRP = localHRP()
 	if not myHRP then return end
+	if not insideAutoFOV(attackerHRP) then return end
 	local dist = (attackerHRP.Position - myHRP.Position).Magnitude
 	if dist > Config.Range then
 		local closingSpeed = 0
@@ -1685,6 +1723,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- [V71] множитель скорости атаки АТАКУЮЩЕГО (по его росту) — делит задержку удара.
 	-- track.Speed для чужих игроков реплицируется как 1.0, поэтому берём из роста.
 	local aMult    = attackSpeedMult(model)
+	local heightAttr, bodyHeightScale, modelHeight = heightDiag(model)
 	local hitTL    = hitTimeline(info, combo, aMult)
 	local speed    = 1
 	local already  = 0
@@ -1706,6 +1745,8 @@ local function onAttack(attackerHRP, info, model, id, track)
 		detectClock = nowClock, detectServer = nowServer, contact0 = remaining0,
 		contactAbs = nowClock + remaining0, velLead = vlead,
 		attackerHRP = attackerHRP, attackerModel = model,
+		heightAttr = heightAttr, bodyHeightScale = bodyHeightScale, modelHeight = modelHeight,
+		attackMult = aMult,
 		pressed = false, dodged = false,
 		pressDt = nil,
 		faceDot = nil,
@@ -1726,8 +1767,12 @@ local function onAttack(attackerHRP, info, model, id, track)
 
 	local pRaw  = getPingRaw()
 	local pMult = hitTL / (hitTL + math.clamp(pRaw * 0.5, 0, 0.35))
-	diagPush(("SWING  t=%.2f  %s  %s(%s)  combo=%d  dist=%.0f  contact=%.0fms  spd=%.2f  aMult=%.2f  pingMult=%.2f  hitTL=%.0fms  vlead=%.0fms  ping=%.0f")
-		:format(os.clock(), name, info.t, info.s, combo, dist, remaining0*1000, speed, aMult, pMult, hitTL*1000, vlead*1000, pRaw*1000))
+	diagPush(("SWING  t=%.2f  %s  %s(%s)  combo=%d  dist=%.0f  contact=%.0fms  spd=%.2f  aMult=%.2f  height=%s  bodyScale=%s  modelY=%s  pingMult=%.2f  hitTL=%.0fms  vlead=%.0fms  ping=%.0f")
+		:format(os.clock(), name, info.t, info.s, combo, dist, remaining0*1000, speed, aMult,
+			heightAttr and ("%.3f"):format(heightAttr) or "?",
+			bodyHeightScale and ("%.3f"):format(bodyHeightScale) or "?",
+			modelHeight and ("%.2f"):format(modelHeight) or "?",
+			pMult, hitTL*1000, vlead*1000, pRaw*1000))
 end
 
 local function resolveSwingAttacker(arg)
@@ -1929,8 +1974,12 @@ local function schedulerStep(now)
 				else
 					reason = ("no-window (maxTP=%.0f%% hitTL, feint-grace?)"):format((th.maxTP or 0)/math.max(th.hitTL,0.001)*100)
 				end
-				diagPush(("MISS!  t=%.2f  %s  %s(%s)  contact0=%.0fms  → %s")
-					:format(now, th.name, th.kind, th.style or "?", (th.contact0 or 0)*1000, reason))
+				diagPush(("MISS!  t=%.2f  %s  %s(%s)  contact0=%.0fms  height=%s bodyScale=%s modelY=%s aMult=%.2f  → %s")
+					:format(now, th.name, th.kind, th.style or "?", (th.contact0 or 0)*1000,
+						th.heightAttr and ("%.3f"):format(th.heightAttr) or "?",
+						th.bodyHeightScale and ("%.3f"):format(th.bodyHeightScale) or "?",
+						th.modelHeight and ("%.2f"):format(th.modelHeight) or "?",
+						th.attackMult or 1, reason))
 				State.independentMiss = (State.independentMiss or 0) + 1
 			end
 			table.remove(Threats, i)
@@ -2059,30 +2108,33 @@ local function schedulerStep(now)
 		end
 	end
 
+	-- MustDodge is its own protection path, independent of DodgeHeavy and cluster policy.
+	-- Scan all live imminent threats before any legacy heavy/escape decision.
+	local mustDodgeThreat = nil
+	for _, candidate in ipairs(imminent) do
+		if isMustDodge(candidate) then mustDodgeThreat = candidate; break end
+	end
+	if mustDodgeThreat and dodgeReady() and canDodgeNow() then
+		local mustDt = mustDodgeThreat.contactAbs - now
+		local mLo = Config.DodgeConfirm - 0.03
+		local mHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
+		if mustDt >= mLo and mustDt <= mHi then
+			if performDodge(now, "must-dodge(unblockable→back)", true) then
+				mustDodgeThreat.coveredByDodge = true
+				return
+			end
+		end
+	end
+
 	if dodgeReady() and canDodgeNow() and #imminent >= 1 then
 		local a = imminent[1]
 		local soonestDt = a.contactAbs - now
-
-		-- An unblockable may be second/third in a mixed cluster; search all imminent
-		-- contacts instead of checking only EDF[1]. Fit the dodge to that exact contact.
-		local mustDodgeThreat = nil
-		for _, candidate in ipairs(imminent) do
-			if isMustDodge(candidate) then mustDodgeThreat = candidate; break end
-		end
-		if mustDodgeThreat then
-			local mustDt = mustDodgeThreat.contactAbs - now
-			local mLo = Config.DodgeConfirm - 0.03
-			local mHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
-			if mustDt >= mLo and mustDt <= mHi then
-				if performDodge(now, "must-dodge(unblockable→back)", true) then return end
-			end
-		end
 
 		-- [V65] iframe-окно доджа фиксированное: [fire+DodgeConfirm, fire+DodgeConfirm
 		-- +IFrameDur] = [+180,+480]мс. Удар «покрываем», только если его контакт
 		-- попадает в это ��кно (с малым за��асом п�� кр��ям). В логе оба мистайминга
 		-- (TOO EARLY/TOO LATE) были у GRANT-доджей (outnumbered-escape), которые
-		-- жглись по факту выдачи эвейда, а не по удару: если удар ближе 180мс —
+		-- жглись по факту выдачи эв��йда, а не по удару: если удар ближе 180мс —
 		-- iframes не успевали (hit before window), если фитил�� заранее — окно
 		-- закрывалось за 1мс до удара. Теперь escape-доджи привязаны к контакту.
 		local coverLo = Config.DodgeConfirm - 0.03
@@ -3038,7 +3090,7 @@ local function toggleDesyncTest()
 			track:AdjustWeight(wgt, 0)
 		end)
 		-- [V76.1] maintenance-цикл: при ходьбе игра запускает walk-анимацию и перебивает
-		-- нашу по весу/событию AnimationPlayed → обсервер сваливался на WALK. Тут мы каждые
+		-- нашу по весу/событию AnimationPlayed → обсервер свалив��лся на WALK. Тут мы каждые
 		-- ~0.35с ПЕРЕУТВЕРЖДАЕМ атаку: если её вырубили/понизили вес — перезапускаем, чем
 		-- держим её постоянно доминирующей и заставляем AnimationPlayed по ней срабатывать
 		-- снова (иначе обсервер показал бы последнюю walk-анимацию).
@@ -3170,13 +3222,14 @@ local function applyDesyncMode()
 		startIdleMask()
 	end
 end
-local DESYNC_CYCLE = { "delay", "idlemask", "prerun" }
+local DESYNC_CYCLE = { "delay", "firedelay", "idlemask", "prerun" }
 local function cycleDesyncMode()
 	local cur, idx = Config.DesyncMode or "delay", 1
 	for i, m in ipairs(DESYNC_CYCLE) do if m == cur then idx = i break end end
 	Config.DesyncMode = DESYNC_CYCLE[(idx % #DESYNC_CYCLE) + 1]
 	applyDesyncMode()
-	local hint = (Config.DesyncMode == "delay" and "тормозит твой свинг позади удара")
+	local hint = (Config.DesyncMode == "delay" and "тормозит визуал твоего свинга, сервер вовремя")
+		or (Config.DesyncMode == "firedelay" and "визуал вовремя, M1/M2 ServerCheck уходит позже")
 		or (Config.DesyncMode == "idlemask" and "враг видит IDLE, пока ты атакуешь/бежишь")
 		or "фейк-атака чуть раньше реальной — ломает тайминг парри врага"
 	aclog(("[DESYNC] mode = %s%s  (%s)"):format(
@@ -3270,7 +3323,7 @@ end
 --   • Сеть игры = Blink: бой/движение шлётся через BLINK_RELIABLE_REMOTE:FireServer(buffer,
 --     instances) раз в Heartbeat — это ОБЫЧНЫЙ RemoteEvent, а НЕ raknet. Значит desync
 --     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
---     эта игра его не детектит, и он НЕ крашит). Это отдельная фича — включим по запросу.
+--     эта игра его не де��ектит, и он НЕ крашит). Это отдельная фича — включим по запросу.
 _ = raknetScanSendHook  -- функция сохранена в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
 _ = reportRaknetScan
 local function runRaknetScanSession()
@@ -3506,19 +3559,25 @@ task.spawn(function()
 					-- задерживаем на DesyncDelayMs — настоящий удар прилетает, когда его парри по
 					-- фейку уже прошёл. Возвращаем сразу (гасим немедленный вызов), реальный уходит
 					-- из task.delay.
-					if Config.DesyncAttack and Config.DesyncMode == "prerun" then
-						pcall(DZ.firePreRunDecoy)                         -- фейк-замах сейчас
-						local args   = table.pack(...)
-						local delayS = (Config.DesyncDelayMs or 140) / 1000
-						task.delay(delayS, function()
-							pcall(function() oldNamecall(self, table.unpack(args, 1, args.n)) end)  -- реальный удар позже
-						end)
-						if (now - (State.lastSwingLog or 0)) > 0.15 then
-							State.lastSwingLog = now
-							aclog(("[SWING] prerun: fake %s decoy NOW, real hit delayed +%.0fms")
-								:format(tostring(action), delayS * 1000))
+					if Config.DesyncAttack and (Config.DesyncMode == "prerun" or Config.DesyncMode == "firedelay") then
+						local applyKind = (action == "M1" and Config.DesyncApplyM1)
+							or (action == "M2" and Config.DesyncApplyM2)
+						-- classifyCombat already restricts this branch to local Combat M1/M2 packets;
+						-- block, dodge and VictimHitConfirm never enter it.
+						if applyKind then
+							if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
+							local args = table.pack(...)
+							local delayS = math.max(0, (Config.DesyncDelayMs or 140) / 1000)
+							task.delay(delayS, function()
+								pcall(function() oldNamecall(self, table.unpack(args, 1, args.n)) end)
+							end)
+							if (now - (State.lastSwingLog or 0)) > 0.15 then
+								State.lastSwingLog = now
+								aclog(("[SWING] %s: %s animation NOW, ServerCheck delayed +%.0fms")
+									:format(Config.DesyncMode, tostring(action), delayS * 1000))
+							end
+							return
 						end
-						return
 					end
 					if (now - (State.lastSwingLog or 0)) > 0.15 then
 					State.lastSwingLog = now
@@ -4016,6 +4075,9 @@ return function(_Lib, _Core)
 			end,
 			Desc = "Auto-blocks / parries and dodges incoming attacks. Keybind works on PC and mobile.",
 		})
+		slider(apMain, { Name = "FOV", Flag = "AP_FOV", Default = Config.FOV or 360,
+			Min = 1, Max = 360, Suffix = "°", Callback = function(v) Config.FOV = v end })
+		apMain:SubLabel({ Text = "Screen-space FOV from viewport center. 360° keeps the current all-around behavior." })
 		apMain:Divider()
 		apMain:Dropdown({
 			Name = "Accuracy Mode",
@@ -4190,7 +4252,7 @@ return function(_Lib, _Core)
 			Desc = "Desyncs YOUR swings so enemies mistime their parry. Independent of AutoParry.",
 		})
 		dsAtk:Dropdown({
-			Name = "Desync Mode", Options = { "delay", "idlemask", "prerun" },
+			Name = "Desync Mode", 			Options = { "delay", "firedelay", "idlemask", "prerun" },
 			Default = Config.DesyncMode or "delay",
 			Callback = function(v)
 				Config.DesyncMode = v
@@ -4198,7 +4260,7 @@ return function(_Lib, _Core)
 				notify("Desync Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("DS_Mode"))
-		dsAtk:SubLabel({ Text = "delay = hold your swing visual behind the hit. idlemask = enemy sees IDLE while you attack. prerun = fake swing now, real hit delayed." })
+		dsAtk:SubLabel({ Text = "delay = delay only your swing visual. firedelay = play visual now, delay only M1/M2 FireServer. idlemask = enemy sees IDLE. prerun = fake swing now, real hit delayed." })
 		slider(dsAtk, { Name = "Desync Delay", Flag = "DS_Delay", Default = Config.DesyncDelayMs or 140,
 			Min = 40, Max = 400, Suffix = " ms", Callback = function(v) Config.DesyncDelayMs = v end })
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
@@ -4266,3 +4328,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
