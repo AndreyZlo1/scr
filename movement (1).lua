@@ -8,23 +8,26 @@
 --    • ctx gives: tabs (keyed by Tab.Key), flag(name), keybind(section,opts),
 --      notify(title,desc). We build everything into ctx.tabs.Movement.
 --
---  EVERYTHING here is derived from the game's OWN decompiled client, not guessed:
---    • MovementServiceUtils.WALK_SPEED         = 12   (base)
---    • MovementServiceUtils.GetSprintSpeed(h)  = 25 - clamp((h-.983)/.467,0,1)*6
---      → default height 0.983  → sprint speed = 25 studs
---    • MOVE_SPEED_ANTICHEAT_TOLERANCE ≈ 1.35   → server rejects WalkSpeed above
---      ~ (sprint 25 + 1.35) ≈ 26.35. THAT is why raw WalkSpeed hacks get you
---      flagged, and why Speed here is CFrame-based (position), like the vape ref.
---    • Sprint is driven by MovementServiceClient._sprintInputDesired; the client
---      auto-resumes sprint via _tryResumeSprintFromInput whenever _wantsSprintInput
---      is true → AutoSprint = keep that flag true (health must be ≥ 10).
+--  Speed & Fly are ported 1:1 from the vape reference you sent (SpeedMethods +
+--  PreSimulation + Humanoid.MoveDirection). vape's entitylib/SpeedMethods are
+--  reimplemented standalone here since we don't have that library.
+--
+--  Everything else is derived from the game's OWN decompiled client:
+--    • MovementServiceUtils.WALK_SPEED = 12 (base); GetSprintSpeed → 25 studs.
+--    • Sprint = MovementServiceClient singleton: SetSprintInputDesired(true) +
+--      StartSprint(); StopSprint() to end it. AutoSprint OFF now truly stops.
 --    • Attack/Block slowdown = M2 windup & root-locks writing WalkSpeed=0 each
 --      Heartbeat; ParryStun drops you to speed 4 via StateHandler.SetStun.
 --    • M1 combo gate (CombatSystemClient.Combat.Base.M1 → scheduleM1SwingTimers):
---      task.delay((combo==4 and FinisherCooldown(1.25) or AttackDuration(0.45))
---      / animSpeed) re-arms the local canAttack flag. The 4th-hit FinisherCooldown
---      is the ONLY purely-client pause we can shrink. tryM1 ALSO checks the
---      SERVER attribute "M1Cooldown", which we cannot remove client-side.
+--        u21 = false                              -- locks attacking
+--        u22 = task.delay((combo==4 and FinisherCooldown(1.25)
+--                           or AttackDuration(0.45)) / animSpeed, ()->u21=true)
+--        u20 = task.delay(ComboResetTime(1.55)/animSpeed, resetCombo)
+--      tryM1 returns early `if not u21`. THAT boolean is the wait before the next
+--      hit / new combo. NoComboWait shrinks BOTH delay constants AND force-holds
+--      u21 = true each frame → the pause is gone. tryM1 still honours the SERVER
+--      "M1Cooldown" attribute, so this speeds the chain to the server limit, it
+--      does not enable impossible 0ms spam.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 return function(Lib, Core)
@@ -41,35 +44,39 @@ return function(Lib, Core)
     local _iscclosure = iscclosure
     local _hasDebug   = (debug and debug.getupvalues and debug.setupvalue and debug.getupvalue) and true or false
 
-    -- PreSimulation runs BEFORE the physics step (successor to RunService.Stepped),
-    -- exactly what the vape reference uses — our CFrame writes win the frame.
+    -- PreSimulation runs BEFORE the physics step (what the vape reference uses),
+    -- so our CFrame / velocity writes win the frame.
     local PreStep = RunService.PreSimulation or RunService.Stepped
 
     -- ── Runtime state (MacLib restores flags through the config manager) ─────
     local Config = {
-        -- CFrame speedhack
+        -- Speed (vape-style, method-based)
         Speed_On     = false,
-        Speed_Value  = 45,      -- studs/sec added to horizontal movement
+        Speed_Mode   = "CFrame",   -- CFrame | Velocity | TP
+        Speed_Value  = 45,         -- studs/sec
 
-        -- Fly (CFrame based)
+        -- Fly (vape-style, method-based)
         Fly_On       = false,
-        Fly_Value    = 60,      -- horizontal studs/sec
-        Fly_Vertical = 60,      -- vertical studs/sec
-        Fly_Face     = true,    -- PlatformStand + face the camera
+        Fly_Mode     = "CFrame",   -- CFrame | Velocity
+        Fly_Value    = 60,         -- horizontal studs/sec
+        Fly_Vertical = 60,         -- vertical studs/sec
+        Fly_Face     = true,       -- PlatformStand + face the camera
 
         -- No Slowdown (master + per-type)
         NS_On     = false,
-        NS_Attack = true,       -- M2 windup / style root-locks that pin WalkSpeed to 0
-        NS_Block  = true,       -- movement penalty while Blocking
-        NS_Stun   = false,      -- Stunned / ParryStun (BLATANT — server fights it)
-        NS_Force  = 0,          -- 0 = restore to game base (12); capped at ~25 to stay legit
+        NS_Attack = true,
+        NS_Block  = true,
+        NS_Stun   = false,
+        NS_Force  = 0,             -- 0 = restore to game base (12); capped ~25
 
         -- No Combo Wait
         NCW_On   = false,
-        NCW_Keep = 0,           -- % of the finisher pause to keep (0 = normal M1 spacing)
+        NCW_Keep = 0,              -- % of the pause to keep (0 = instant)
 
         -- Sprint / jump extras
         Sprint_Always = false,
+        BunnyHop      = false,
+        BunnyPower    = 0,         -- 0 = use game jump; >0 = custom Y velocity
         InfJump       = false,
         JumpPower_On  = false,
         JumpPower_Value = 50,
@@ -85,17 +92,13 @@ return function(Lib, Core)
         local c = LocalPlayer.Character
         return c and c:FindFirstChild("HumanoidRootPart") or nil
     end
-    -- Some rigs drive speed through Humanoid.ControllerManager.GroundSpeed, which
-    -- overrides WalkSpeed — write BOTH when we force a speed.
     local function setSpeed(hum, v)
         if not hum then return end
         hum.WalkSpeed = v
         local cm = hum:FindFirstChildOfClass("ControllerManager")
         if cm then cm.GroundSpeed = v end
     end
-    local function gameBaseSpeed()
-        return 12   -- MovementServiceUtils.WALK_SPEED
-    end
+    local function gameBaseSpeed() return 12 end   -- MovementServiceUtils.WALK_SPEED
 
     -- Slowdown attribute groups (straight from the decompiled combat client).
     local ATTACK_ATTRS = { "CombatAttacking", "M1", "M2", "M1Hold", "PendingM1", "PendingM2", "CantAnything" }
@@ -108,63 +111,90 @@ return function(Lib, Core)
     end
 
     -- ═══════════════════════════════════════════════════════════════════════
-    --  Mobile jump detection — the game's touch UI JumpButton flips its
+    --  Mobile jump detection — the touch UI JumpButton flips its
     --  ImageRectOffset.X to 146 while held (same trick the vape reference uses).
-    --  We watch it so Fly "ascend" works on phones with no keyboard.
     -- ═══════════════════════════════════════════════════════════════════════
     local mobileJumpHeld = false
     task.spawn(function()
         if not UserInputService.TouchEnabled then return end
-        while true do
+        for _ = 1, 15 do
             local ok = pcall(function()
-                local btn = LocalPlayer:WaitForChild("PlayerGui")
-                    :WaitForChild("TouchGui"):WaitForChild("TouchControlFrame")
-                    :WaitForChild("JumpButton")
+                local btn = LocalPlayer:WaitForChild("PlayerGui", 9)
+                    :WaitForChild("TouchGui", 9):WaitForChild("TouchControlFrame", 9)
+                    :WaitForChild("JumpButton", 9)
                 btn:GetPropertyChangedSignal("ImageRectOffset"):Connect(function()
                     mobileJumpHeld = btn.ImageRectOffset.X == 146
                 end)
             end)
             if ok then break end
-            task.wait(2)   -- TouchGui may not exist yet; retry a few times, then give up
+            task.wait(2)
         end
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
-    --  CFrame SPEED  (matches the vape reference's "CFrame" method)
-    --  Translate the root each frame by the camera-relative move vector. We take
-    --  Humanoid.MoveDirection, which is filled by BOTH keyboard AND the mobile
-    --  thumbstick → zero extra buttons on phones. Vertical velocity (gravity) is
-    --  preserved so you still fall/step normally.
+    --  SpeedMethods — reimplementation of vape's table. Each takes
+    --  (moveVec, speed, dt). moveVec = Humanoid.MoveDirection (camera-relative,
+    --  filled by WASD AND the mobile thumbstick), so no extra buttons on phones.
     -- ═══════════════════════════════════════════════════════════════════════
+    local rayParams = RaycastParams.new()
+    rayParams.RespectCanCollide = true
+
+    local tpAccrue = 0
+    local SpeedMethods = {
+        -- Smooth physics-based: overwrite horizontal velocity, keep gravity Y.
+        Velocity = function(hrp, move, speed, dt)
+            if move.Magnitude < 0.05 then return end
+            local flat = Vector3.new(move.X, 0, move.Z).Unit
+            hrp.AssemblyLinearVelocity = Vector3.new(
+                flat.X * speed, hrp.AssemblyLinearVelocity.Y, flat.Z * speed)
+        end,
+        -- Positional: shift the root each frame (dodges WalkSpeed anticheat).
+        CFrame = function(hrp, move, speed, dt)
+            if move.Magnitude < 0.05 then return end
+            local flat = Vector3.new(move.X, 0, move.Z).Unit
+            local delta = flat * speed * dt
+            rayParams.FilterDescendantsInstances = { LocalPlayer.Character }
+            local hit = Workspace:Raycast(hrp.Position, delta, rayParams)
+            if hit then delta = (hit.Position - hrp.Position) end
+            hrp.CFrame = hrp.CFrame + delta
+        end,
+        -- Large teleports at ~0.08s intervals — snappier but blockier.
+        TP = function(hrp, move, speed, dt)
+            if move.Magnitude < 0.05 then return end
+            tpAccrue = tpAccrue + dt
+            if tpAccrue < 0.08 then return end
+            local flat = Vector3.new(move.X, 0, move.Z).Unit
+            hrp.CFrame = hrp.CFrame + flat * speed * tpAccrue
+            tpAccrue = 0
+        end,
+    }
+
+    -- ── Speed loop ────────────────────────────────────────────────────────
     PreStep:Connect(function(dt)
         if not Config.Speed_On or Config.Fly_On then return end
         local hum, hrp = getHum(), getHRP()
         if not (hum and hrp) or hum.Health <= 0 or hum.Sit then return end
-        -- Climbing / non-grounded states: skip so we don't fling off ladders.
-        local st = hum:GetState()
-        if st == Enum.HumanoidStateType.Climbing then return end
-        local move = hum.MoveDirection
-        if move.Magnitude > 0.05 then
-            local flat = Vector3.new(move.X, 0, move.Z)
-            hrp.CFrame = hrp.CFrame + (flat.Unit * Config.Speed_Value * dt)
-        end
+        if hum:GetState() == Enum.HumanoidStateType.Climbing then return end
+        local fn = SpeedMethods[Config.Speed_Mode] or SpeedMethods.CFrame
+        fn(hrp, hum.MoveDirection, Config.Speed_Value, dt)
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
-    --  CFrame FLY  (matches the vape reference's CFrame float)
-    --  No BodyMovers: we move the root by CFrame every frame and zero its
-    --  vertical velocity so there is no gravity fight → no rubberbanding.
-    --  Horizontal follows MoveDirection (camera-relative, PC + mobile).
-    --  Vertical: PC Space/Ctrl-Shift, mobile Jump button (ascend).
+    --  FLY — ported from the vape reference (CFrame float + PlatformStand look).
+    --  YLevel tracks the target height; vertical velocity is zeroed so gravity
+    --  never fights us (no rubberband). Horizontal reuses SpeedMethods.
     -- ═══════════════════════════════════════════════════════════════════════
+    local flyYLevel = nil
     local function stopFly()
+        flyYLevel = nil
         local hum = getHum()
-        if hum and Config.Fly_Face then hum.PlatformStand = false end
+        if hum then pcall(function() hum.PlatformStand = false end) end
     end
+
     PreStep:Connect(function(dt)
-        if not Config.Fly_On then return end
+        if not Config.Fly_On then flyYLevel = nil return end
         local hum, hrp = getHum(), getHRP()
-        if not (hum and hrp) or hum.Health <= 0 then return end
+        if not (hum and hrp) or hum.Health <= 0 then flyYLevel = nil return end
         local cam = Workspace.CurrentCamera
 
         if Config.Fly_Face and cam then
@@ -173,62 +203,65 @@ return function(Lib, Core)
             hrp.CFrame = CFrame.lookAlong(hrp.Position, cam.CFrame.LookVector)
         end
 
-        -- Horizontal (camera-relative move vector).
-        local move = hum.MoveDirection
-        local flat = Vector3.new(move.X, 0, move.Z)
-
-        -- Vertical intent: +1 up, -1 down.
-        local vert = 0
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) or mobileJumpHeld then vert += 1 end
+        -- Vertical intent (+up / -down): PC keys + mobile jump = up.
+        local up, down = 0, 0
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) or mobileJumpHeld then up = 1 end
         if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-           or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then vert -= 1 end
+           or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then down = -1 end
 
-        -- Kill gravity, then translate by CFrame.
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        local delta = (flat.Unit.Magnitude == flat.Unit.Magnitude and flat.Magnitude > 0.05
-                        and flat.Unit * Config.Fly_Value * dt or Vector3.zero)
-                    + Vector3.new(0, vert * Config.Fly_Vertical * dt, 0)
-        hrp.CFrame = hrp.CFrame + delta
+        if not flyYLevel then flyYLevel = hrp.Position.Y end
+        flyYLevel = flyYLevel + ((up + down) * Config.Fly_Vertical * dt)
+
+        -- Kill assembly vertical velocity so gravity can't pull us.
+        hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+
+        local move = hum.MoveDirection
+        if Config.Fly_Mode == "Velocity" then
+            -- Physics fly: horizontal velocity + vertical velocity toward YLevel.
+            local flat = (move.Magnitude > 0.05) and Vector3.new(move.X, 0, move.Z).Unit or Vector3.zero
+            local vy = (flyYLevel - hrp.Position.Y) / math.max(dt, 1/240)
+            hrp.AssemblyLinearVelocity = Vector3.new(
+                flat.X * Config.Fly_Value, math.clamp(vy, -120, 120), flat.Z * Config.Fly_Value)
+        else
+            -- CFrame fly (default): translate the root directly.
+            local delta = Vector3.new(0, flyYLevel - hrp.Position.Y, 0)
+            if move.Magnitude > 0.05 then
+                delta = delta + Vector3.new(move.X, 0, move.Z).Unit * Config.Fly_Value * dt
+            end
+            hrp.CFrame = hrp.CFrame + delta
+        end
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
-    --  No Slowdown (per-type).  Written on PreSimulation (before physics) so our
-    --  value beats the WalkSpeed=0 the combat client stamped on the previous
-    --  Heartbeat. We cap the target at 25 (the game's own sprint speed) so we
-    --  restore movement WITHOUT tripping the move-speed anticheat.
+    --  No Slowdown (per-type). Written on PreSimulation so our value beats the
+    --  WalkSpeed=0 the combat client stamped on the previous Heartbeat. Capped at
+    --  25 (the game's sprint speed) to stay under the move-speed anticheat.
     -- ═══════════════════════════════════════════════════════════════════════
     PreStep:Connect(function()
         if not Config.NS_On then return end
         local c, hum = getChar(), getHum()
         if not (c and hum) or hum.Health <= 0 then return end
         local slowed = false
-        if Config.NS_Attack and anyAttr(c, ATTACK_ATTRS)      then slowed = true end
+        if Config.NS_Attack and anyAttr(c, ATTACK_ATTRS)          then slowed = true end
         if Config.NS_Block  and c:GetAttribute("Blocking") == true then slowed = true end
-        if Config.NS_Stun   and anyAttr(c, STUN_ATTRS)        then slowed = true end
+        if Config.NS_Stun   and anyAttr(c, STUN_ATTRS)            then slowed = true end
         if slowed then
             local target = (Config.NS_Force > 0) and Config.NS_Force or gameBaseSpeed()
-            target = math.min(target, 25)   -- stay at/under the game's sprint cap
-            setSpeed(hum, target)
+            setSpeed(hum, math.min(target, 25))
         end
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
-    --  Sprint tweaks + Infinite Jump + JumpPower (all cheap, no gc scans).
-    --  AutoSprint drives the game's OWN sprint: we cache the MovementServiceClient
-    --  singleton once and keep _sprintInputDesired = true. The client's update
-    --  loop (_tryResumeSprintFromInput) then re-starts sprint after every combat
-    --  cancel exactly as if you were holding Shift.
+    --  Sprint singleton (MovementServiceClient). Cached once (no gc loops).
     -- ═══════════════════════════════════════════════════════════════════════
-    local moveSvc          -- cached singleton
-    local moveSvcSearched = false
+    local moveSvc, moveSvcSearched = nil, false
     local function findMoveService()
         if moveSvc or moveSvcSearched then return moveSvc end
         moveSvcSearched = true
-        -- Prefer filtergc (fast + precise), fall back to a single getgc pass.
-        local ok = pcall(function()
+        pcall(function()
             if _filtergc then
                 moveSvc = _filtergc("table",
-                    { Keys = { "_sprintInputDesired", "_combatSprintLockUntil" } }, true)
+                    { Keys = { "_sprintInputDesired" } }, true)
             end
         end)
         if (not moveSvc) and _getgc then
@@ -237,21 +270,29 @@ return function(Lib, Core)
                     if type(o) == "table"
                        and rawget(o, "_sprintInputDesired") ~= nil
                        and rawget(o, "_combatSprintLockUntil") ~= nil then
-                        moveSvc = o
-                        break
+                        moveSvc = o break
                     end
                 end
             end)
         end
         return moveSvc
     end
+    local function svcCall(svc, method, ...)
+        if not svc then return end
+        pcall(function(...) svc[method](svc, ...) end, ...)
+    end
 
+    -- AutoSprint: keep the game's OWN sprint input held; the client auto-resumes
+    -- sprint after each combat cancel. OFF → clear the flag AND StopSprint.
     RunService.Heartbeat:Connect(function()
         local hum = getHum()
         if not hum or hum.Health <= 0 then return end
         if Config.Sprint_Always then
             local svc = moveSvc or findMoveService()
-            if svc then svc._sprintInputDesired = true end
+            if svc then
+                svc._sprintInputDesired = true
+                if svc._isSprinting == false then svcCall(svc, "StartSprint") end
+            end
         end
         if Config.JumpPower_On then
             pcall(function()
@@ -260,33 +301,58 @@ return function(Lib, Core)
             end)
         end
     end)
+
+    local function setAutoSprint(on)
+        Config.Sprint_Always = on
+        local svc = findMoveService()
+        if not svc then return end
+        if on then
+            svc._sprintInputDesired = true
+            svcCall(svc, "StartSprint")
+        else
+            svc._sprintInputDesired = false
+            svcCall(svc, "SetSprintInputDesired", false)
+            svcCall(svc, "StopSprint")   -- <-- the fix: actually end the sprint
+        end
+    end
+
+    -- Infinite Jump + BunnyHop.
     UserInputService.JumpRequest:Connect(function()
         if not Config.InfJump then return end
         local hum = getHum()
-        if hum and hum.Health > 0 then
+        if hum and hum.Health > 0 then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end)
+    RunService.Heartbeat:Connect(function()
+        if not Config.BunnyHop then return end
+        local hum, hrp = getHum(), getHRP()
+        if not (hum and hrp) or hum.Health <= 0 then return end
+        if hum.MoveDirection.Magnitude < 0.05 then return end
+        if hum.FloorMaterial == Enum.Material.Air then return end
+        if Config.BunnyPower > 0 then
+            local v = hrp.AssemblyLinearVelocity
+            hrp.AssemblyLinearVelocity = Vector3.new(v.X, Config.BunnyPower, v.Z)
+        else
             hum:ChangeState(Enum.HumanoidStateType.Jumping)
         end
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
-    --  No Combo Wait — shrink ONLY the client-side finisher pause.
-    --  scheduleM1SwingTimers captures FinisherCooldown(1.25), AttackDuration(0.45)
-    --  and ComboResetTime(1.55) as upvalues; that triple uniquely identifies the
-    --  closure. We scan getgc EXACTLY ONCE (cached) — the old per-3s rescan was
-    --  what froze the game — and lower FinisherCooldown toward AttackDuration so
-    --  the 4th-hit pause matches normal M1 spacing.
-    --  NOTE: tryM1 also checks the SERVER attribute "M1Cooldown", so a full
-    --  0-delay chain is not possible client-side; this removes the extra
-    --  finisher stall only.
+    --  No Combo Wait — the real fix.
+    --  Locate scheduleM1SwingTimers ONCE (unique upvalue triple 1.25/0.45/1.55).
+    --  Then: (a) shrink FinisherCooldown + AttackDuration so future scheduled
+    --  re-arms are ~instant, and (b) force-hold the shared u21 boolean = true
+    --  every frame (cheap, cached closure) so the CURRENTLY pending pause — the
+    --  stall you feel before the next hit / new combo — is cleared immediately.
+    --  Server "M1Cooldown" still gates real damage, so this caps at the server
+    --  rate, it can't do impossible instant spam.
     -- ═══════════════════════════════════════════════════════════════════════
     local FIN, ATK, CMB = 1.25, 0.45, 1.55
-    local comboFn          -- cached scheduleM1SwingTimers closure
-    local comboFinIdx      -- upvalue index of FinisherCooldown inside it
+    local comboFn                    -- scheduleM1SwingTimers closure
+    local idxFin, idxAtk, idxBool    -- upvalue indices (FinisherCooldown / AttackDuration / u21)
 
     local function locateComboClosure()
-        if comboFn then return true end
+        if comboFn then return idxBool ~= nil end
         if not (_hasDebug and (_getgc or _filtergc)) then return false end
-        -- Try filtergc first (single targeted pass).
         if _filtergc then
             pcall(function()
                 local f = _filtergc("function",
@@ -294,12 +360,10 @@ return function(Lib, Core)
                 if type(f) == "function" then comboFn = f end
             end)
         end
-        -- Fallback: one getgc sweep.
         if not comboFn and _getgc then
             pcall(function()
                 for _, fn in pairs(_getgc(true)) do
-                    if type(fn) == "function"
-                       and not (_iscclosure and _iscclosure(fn)) then
+                    if type(fn) == "function" and not (_iscclosure and _iscclosure(fn)) then
                         local ok, ups = pcall(debug.getupvalues, fn)
                         if ok and type(ups) == "table" then
                             local hFin, hAtk, hCmb = false, false, false
@@ -314,27 +378,44 @@ return function(Lib, Core)
                 end
             end)
         end
-        -- Resolve the FinisherCooldown upvalue index once.
         if comboFn then
             pcall(function()
-                local ups = debug.getupvalues(comboFn)
-                for i, v in pairs(ups) do
-                    if v == FIN then comboFinIdx = i break end
+                for i, v in pairs(debug.getupvalues(comboFn)) do
+                    if v == FIN then idxFin = i
+                    elseif v == ATK then idxAtk = i
+                    elseif type(v) == "boolean" then idxBool = i end
                 end
             end)
-            return comboFinIdx ~= nil
         end
-        return false
+        return idxBool ~= nil
     end
 
-    -- keepFraction 0 → finisher pause == normal M1 spacing (AttackDuration);
-    -- 1 → original 1.25s. We never touch AttackDuration/ComboResetTime (doing so
-    -- desyncs animations and trips the move anticheat).
-    local function applyComboWait(keepFraction)
-        if not locateComboClosure() then return false, 0 end
-        local target = ATK + (FIN - ATK) * math.clamp(keepFraction, 0, 1)
-        local ok = pcall(debug.setupvalue, comboFn, comboFinIdx, target)
-        return ok, ok and target or 0
+    -- Push the shrunk constants. keepFraction 0 → ~instant, 1 → original.
+    local function pushComboConstants(keepFraction)
+        if not comboFn then return false end
+        local k = math.clamp(keepFraction, 0, 1)
+        local okA = idxFin and pcall(debug.setupvalue, comboFn, idxFin, math.max(FIN * k, 0.03))
+        local okB = idxAtk and pcall(debug.setupvalue, comboFn, idxAtk, math.max(ATK * k, 0.03))
+        return okA or okB
+    end
+
+    -- Bound loop that holds u21 = true (only alive while NCW is on).
+    local ncwConn
+    local function startComboForce()
+        if ncwConn then return end
+        ncwConn = RunService.Heartbeat:Connect(function()
+            if not Config.NCW_On or not comboFn or not idxBool then return end
+            pcall(debug.setupvalue, comboFn, idxBool, true)
+        end)
+    end
+    local function stopComboForce()
+        if ncwConn then ncwConn:Disconnect() ncwConn = nil end
+    end
+    local function restoreComboConstants()
+        if comboFn then
+            if idxFin then pcall(debug.setupvalue, comboFn, idxFin, FIN) end
+            if idxAtk then pcall(debug.setupvalue, comboFn, idxAtk, ATK) end
+        end
     end
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -345,8 +426,15 @@ return function(Lib, Core)
     function M.start()
         LocalPlayer.CharacterAdded:Connect(function()
             mobileJumpHeld = false
-            -- A respawn rebuilds combat closures → let the next enable re-locate.
-            comboFn, comboFinIdx = nil, nil
+            flyYLevel = nil
+            comboFn, idxFin, idxAtk, idxBool = nil, nil, nil, nil   -- closures rebuild on respawn
+            if Config.NCW_On then
+                task.delay(1.2, function()
+                    if Config.NCW_On and locateComboClosure() then
+                        pushComboConstants(math.clamp(Config.NCW_Keep, 0, 100) / 100)
+                    end
+                end)
+            end
         end)
     end
 
@@ -402,18 +490,28 @@ return function(Lib, Core)
             }, ctx.flag(o.Flag))
         end
 
+        local function dropdown(section, o)
+            section:Dropdown({
+                Name = o.Name, Options = o.Options, Default = o.Default,
+                Callback = o.Callback,
+            }, ctx.flag(o.Flag))
+        end
+
         -- ═══════════════════ Section 1 — Speed (Left) ═══════════════════
         local secSpeed = MV:Section({ Side = "Left" })
-        secSpeed:Header({ Name = "CFrame Speed" })
+        secSpeed:Header({ Name = "Speed" })
         feature(secSpeed, {
-            Title = "CFrame Speed", Flag = "MV_Speed",
+            Title = "Speed", Flag = "MV_Speed",
             get = function() return Config.Speed_On end,
             set = function(v) Config.Speed_On = v end,
-            Desc = "moves ur root by CFrame each frame (no WalkSpeed)\nfollows ur stick/WASD - works on mobile\nbind works on PC + mobile FAB",
+            Desc = "vape-style speed on ur move vector (WASD + mobile stick)\nbind works on PC + mobile FAB",
         })
+        dropdown(secSpeed, { Name = "Method", Flag = "MV_SpeedMode",
+            Options = { "CFrame", "Velocity", "TP" }, Default = Config.Speed_Mode,
+            Callback = function(v) Config.Speed_Mode = v end })
         slider(secSpeed, { Name = "Speed", Flag = "MV_SpeedVal", Default = Config.Speed_Value,
             Min = 10, Max = 250, Suffix = " studs/s", Callback = function(v) Config.Speed_Value = v end })
-        secSpeed:SubLabel({ Text = "CFrame method dodges the WalkSpeed anticheat\n(game caps authorized WalkSpeed ~26). high values\ncan still trip position checks - tune it down if u ping-lag" })
+        secSpeed:SubLabel({ Text = "CFrame = positional, dodges the WalkSpeed anticheat (best)\nVelocity = smooth physics\nTP = snappy teleports\ngame caps authorized WalkSpeed ~26, so keep it sane" })
 
         -- ═══════════════════ Section 2 — Fly (Right) ═══════════════════
         local secFly = MV:Section({ Side = "Right" })
@@ -421,12 +519,12 @@ return function(Lib, Core)
         feature(secFly, {
             Title = "Fly", Flag = "MV_Fly",
             get = function() return Config.Fly_On end,
-            set = function(v)
-                Config.Fly_On = v
-                if not v then stopFly() end
-            end,
-            Desc = "CFrame fly, no rubberband\nPC: WASD + Space (up) / Shift (down)\nMobile: stick to move, hold Jump to rise",
+            set = function(v) Config.Fly_On = v if not v then stopFly() end end,
+            Desc = "vape CFrame fly, no rubberband\nPC: WASD + Space (up) / Shift (down)\nMobile: stick to move, hold Jump to rise",
         })
+        dropdown(secFly, { Name = "Method", Flag = "MV_FlyMode",
+            Options = { "CFrame", "Velocity" }, Default = Config.Fly_Mode,
+            Callback = function(v) Config.Fly_Mode = v end })
         slider(secFly, { Name = "Fly Speed", Flag = "MV_FlyVal", Default = Config.Fly_Value,
             Min = 10, Max = 250, Suffix = " studs/s", Callback = function(v) Config.Fly_Value = v end })
         slider(secFly, { Name = "Vertical Speed", Flag = "MV_FlyVert", Default = Config.Fly_Vertical,
@@ -434,12 +532,17 @@ return function(Lib, Core)
         boolToggle(secFly, "Face Camera", "Fly Face Camera",
             function() return Config.Fly_Face end,
             function(v) Config.Fly_Face = v end,
-            function(v) if not v then local h = getHum(); if h then h.PlatformStand = false end end end)
-        secFly:SubLabel({ Text = "Face Camera = PlatformStand + aim ur body where u look\nturn off to keep upright" })
+            function(v) if not v then local h = getHum(); if h then pcall(function() h.PlatformStand = false end) end end end)
+        secFly:SubLabel({ Text = "Face Camera = PlatformStand + aim body where u look\nturn off to stay upright" })
         secFly:Divider()
         secFly:Header({ Name = "Jump" })
         boolToggle(secFly, "Infinite Jump", "Infinite Jump",
             function() return Config.InfJump end, function(v) Config.InfJump = v end)
+        boolToggle(secFly, "Bunny Hop", "Bunny Hop",
+            function() return Config.BunnyHop end, function(v) Config.BunnyHop = v end)
+        secFly:SubLabel({ Text = "auto-jumps while u move on the ground" })
+        slider(secFly, { Name = "Hop Power (0 = normal)", Flag = "MV_Bunny", Default = Config.BunnyPower,
+            Min = 0, Max = 120, Callback = function(v) Config.BunnyPower = v end })
         boolToggle(secFly, "Override JumpPower", "JumpPower Override",
             function() return Config.JumpPower_On end, function(v) Config.JumpPower_On = v end)
         slider(secFly, { Name = "JumpPower", Flag = "MV_JumpPow", Default = Config.JumpPower_Value,
@@ -456,17 +559,17 @@ return function(Lib, Core)
         })
         boolToggle(secNS, "Attack Slowdown", "No Attack Slow",
             function() return Config.NS_Attack end, function(v) Config.NS_Attack = v end)
-        secNS:SubLabel({ Text = "M2 windup + style root-locks pin ur speed to 0\nthis keeps u moving through swings" })
+        secNS:SubLabel({ Text = "M2 windup + style root-locks pin ur speed to 0" })
         boolToggle(secNS, "Block Slowdown", "No Block Slow",
             function() return Config.NS_Block end, function(v) Config.NS_Block = v end)
         secNS:SubLabel({ Text = "move at full speed while holding block" })
         boolToggle(secNS, "Stun / Parry Slowdown", "No Stun Slow",
             function() return Config.NS_Stun end, function(v) Config.NS_Stun = v end)
-        secNS:SubLabel({ Text = "when parried/stunned the game drops u to speed 4\nBLATANT - server may correct u, use carefully" })
+        secNS:SubLabel({ Text = "parry/stun drops u to speed 4 - BLATANT, server may correct u" })
         secNS:Divider()
-        slider(secNS, { Name = "Force Speed (0 = game base 12)", Flag = "MV_NSForce", Default = Config.NS_Force,
+        slider(secNS, { Name = "Force Speed (0 = base 12)", Flag = "MV_NSForce", Default = Config.NS_Force,
             Min = 0, Max = 25, Callback = function(v) Config.NS_Force = v end })
-        secNS:SubLabel({ Text = "0 = restore ur normal 12\ncapped at 25 (the game's sprint speed) to stay legit" })
+        secNS:SubLabel({ Text = "0 = restore ur normal 12\ncapped at 25 (sprint speed) to stay legit" })
 
         -- ═══════════════════ Section 4 — Combat / Sprint (Right) ═══════════════════
         local secCombat = MV:Section({ Side = "Right" })
@@ -479,44 +582,52 @@ return function(Lib, Core)
                 if v then
                     if not (_hasDebug and (_getgc or _filtergc)) then
                         notify("No Combo Wait", "Executor lacks getgc/debug - unsupported")
+                        Config.NCW_On = false
                         return
                     end
-                    local ok = applyComboWait(math.clamp(Config.NCW_Keep, 0, 100) / 100)
-                    notify("No Combo Wait", ok and "Finisher pause shortened" or "Combat not loaded yet - use Re-apply")
+                    if locateComboClosure() then
+                        pushComboConstants(math.clamp(Config.NCW_Keep, 0, 100) / 100)
+                        startComboForce()
+                        notify("No Combo Wait", "Active - combo pause removed")
+                    else
+                        startComboForce()   -- will kick in once M1 loads / after a swing
+                        notify("No Combo Wait", "M1 not loaded yet - throw a hit or use Re-apply")
+                    end
                 else
-                    -- Restore the original finisher pause when disabled.
-                    if comboFn and comboFinIdx then pcall(debug.setupvalue, comboFn, comboFinIdx, FIN) end
+                    stopComboForce()
+                    restoreComboConstants()
                 end
             end,
-            Desc = "kills the extra pause after a full M1 combo (finisher)\nrestarts the chain at normal M1 speed",
+            Desc = "kills the pause before the next hit / new combo\n(incl. the 4th-hit finisher stall)",
         })
         slider(secCombat, { Name = "Keep Pause", Flag = "MV_NCWKeep", Default = Config.NCW_Keep,
             Min = 0, Max = 100, Suffix = " %", Callback = function(v)
                 Config.NCW_Keep = v
-                if Config.NCW_On then applyComboWait(math.clamp(v, 0, 100) / 100) end
+                if Config.NCW_On and comboFn then pushComboConstants(math.clamp(v, 0, 100) / 100) end
             end })
-        secCombat:SubLabel({ Text = "0% = finisher pause gone (normal M1 spacing)\n100% = original 1.25s\nNOTE: server 'M1Cooldown' still applies - full 0-delay\nspam isn't possible client-side" })
+        secCombat:SubLabel({ Text = "0% = instant chain, 100% = original timing\nNOTE: server 'M1Cooldown' still applies - this speeds\nthe chain to the server limit, not to literal 0ms" })
         secCombat:Button({ Name = "Re-apply Patch", Callback = function()
             if not (_hasDebug and (_getgc or _filtergc)) then
                 notify("No Combo Wait", "Executor lacks getgc/debug - unsupported")
                 return
             end
-            comboFn, comboFinIdx = nil, nil   -- force a fresh single scan
-            local ok = applyComboWait(math.clamp(Config.NCW_Keep, 0, 100) / 100)
-            notify("No Combo Wait", ok and "Re-applied" or "M1 closure not found yet")
+            comboFn, idxFin, idxAtk, idxBool = nil, nil, nil, nil
+            local ok = locateComboClosure()
+            if ok then pushComboConstants(math.clamp(Config.NCW_Keep, 0, 100) / 100) end
+            notify("No Combo Wait", ok and "Re-applied" or "M1 closure not found - swing once then retry")
         end })
         secCombat:Divider()
         secCombat:Header({ Name = "Sprint" })
         boolToggle(secCombat, "Always Sprint", "Always Sprint",
             function() return Config.Sprint_Always end,
-            function(v) Config.Sprint_Always = v end,
+            function(v) setAutoSprint(v) end,
             function(v)
                 if v then
                     local svc = findMoveService()
-                    notify("Always Sprint", svc and "Driving the game's own sprint" or "Movement service not found yet")
+                    if not svc then notify("Always Sprint", "Movement service not found yet") end
                 end
             end)
-        secCombat:SubLabel({ Text = "holds the game's sprint input for u (speed 25)\nauto-resumes after combat cancels it\nneeds HP >= 10, uses the legit sprint path" })
+        secCombat:SubLabel({ Text = "holds the game's sprint (speed 25), auto-resumes after\ncombat cancels. OFF now actually stops sprinting.\nneeds HP >= 10 - uses the legit sprint path" })
 
         task.defer(function() uiReady = true end)
     end
