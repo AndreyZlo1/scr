@@ -242,19 +242,18 @@ return function(Lib, Core)
     -- ═══════════════════ HOOK-BASED FEATURES (installed lazily) ══════════════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
     -- when the production bytecode ships with stripped function debug-names, which
-    -- is exactly why the old {Name=...} lookups silently returned nil (→ "nothing
-    -- worked"). Constants survive optimisation, so this is the stable fingerprint.
+    -- is exactly why the old {Name=...} lookups silently returned nil.
+    -- PERF: ALWAYS filterOne = true. The old fallback filtergc(...,false) collected
+    -- EVERY matching object on the heap into a table on every call — that full-heap
+    -- sweep + allocation was the 10-second freeze. filterOne stops at the first
+    -- match, so with a correct fingerprint it returns almost immediately.
     local function findFn(constants, upvals)
         if not _filtergc then return nil end
         local opts = { IgnoreExecutor = true }
         if constants then opts.Constants = constants end
         if upvals   then opts.Upvalues  = upvals   end
-        local ok, res = pcall(_filtergc, "function", opts, true)  -- filterOne = true
+        local ok, res = pcall(_filtergc, "function", opts, true)  -- filterOne = true, no fallback
         if ok and type(res) == "function" then return res end
-        local ok2, res2 = pcall(_filtergc, "function", opts, false)
-        if ok2 and type(res2) == "table" and type(res2[1]) == "function" then
-            return res2[1]
-        end
         return nil
     end
 
@@ -374,11 +373,41 @@ return function(Lib, Core)
         return true
     end
 
-    -- Any of NoSlowdown / NoStun / GetHit / Sprint-Bypass need the IsLocked hook.
+    -- ---- Background bootstrap ----------------------------------------------
+    -- All the heavy work (the filtergc heap scans) runs ONCE here, spread across
+    -- frames with task.wait() so no single frame does two scans back-to-back. The
+    -- hooks are installed while every Config flag is still false, so they are inert
+    -- passthroughs until the user flips a toggle. Toggles then only set a boolean —
+    -- zero scanning on click, so no more freeze when enabling a feature.
+    local bootstrapStarted, bootstrapDone = false, false
+    local function bootstrapHooks()
+        if bootstrapStarted then return end
+        bootstrapStarted = true
+        task.spawn(function()
+            installIsLockedHook(); task.wait()
+            installNCW();          task.wait()
+            installPing();         task.wait()
+            getSprint()  -- cache the movement singleton too
+            bootstrapDone = true
+            if notifyFn and not isLockedHooked and _hasHookFn then
+                notifyFn("Combat hooks", "IsLocked not found - update fingerprint")
+            end
+        end)
+    end
+
+    -- Non-blocking gate for toggles: the hook is already installed (or will be very
+    -- shortly) by the background bootstrap, so we never scan on the click itself.
     local function ensureCombatHook(label)
-        if installIsLockedHook() then return true end
-        if notifyFn then notifyFn(label, "failed - need filtergc + hookfunction") end
-        return false
+        bootstrapHooks()
+        if not _hasHookFn then
+            if notifyFn then notifyFn(label, "needs hookfunction + filtergc") end
+            return false
+        end
+        if bootstrapDone and not isLockedHooked then
+            if notifyFn then notifyFn(label, "failed - IsLocked hook unavailable") end
+            return false
+        end
+        return true  -- hook active or arriving from the background bootstrap
     end
 
     -- ══════════════════════════ AUTO SPRINT ═════════════════════════════════
@@ -386,16 +415,13 @@ return function(Lib, Core)
     local function getSprint()
         if sprintSingleton then return sprintSingleton end
         if not _filtergc then return nil end
-        local ok, res = pcall(_filtergc, "table", { Keys = { "_sprintInputDesired" } }, false)
-        if ok and type(res) == "table" then
-            for _, t in ipairs(res) do
-                if type(t) == "table" and rawget(t, "_sprintInputDesired") ~= nil then
-                    sprintSingleton = t
-                    return t
-                end
-            end
+        -- filterOne = true: grab the first table carrying _sprintInputDesired instead
+        -- of collecting every matching table on the heap (the old full sweep froze).
+        local ok, res = pcall(_filtergc, "table", { Keys = { "_sprintInputDesired" } }, true)
+        if ok and type(res) == "table" and rawget(res, "_sprintInputDesired") ~= nil then
+            sprintSingleton = res
         end
-        return nil
+        return sprintSingleton
     end
     local function setSprint(on)
         local s = getSprint(); if not s then return false end
@@ -448,6 +474,9 @@ return function(Lib, Core)
         Config.Speed_On, Config.Fly_On = false, false
         Config.NS_On, Config.NCW_On, Config.NoStun_On, Config.Ping_On = false, false, false, false
         Config.Sprint_On, Config.Sprint_Bypass = false, false
+        -- Warm up the hooks in the background now, so toggling a feature later never
+        -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
+        bootstrapHooks()
     end
 
     function M.buildUI(ctx)
@@ -568,9 +597,15 @@ return function(Lib, Core)
             get = function() return Config.NCW_On end,
             set = function(v)
                 Config.NCW_On = v
-                if v and not installNCW() then
-                    notify("No Combo Wait", "failed - need filtergc + hookfunction")
-                    Config.NCW_On = false
+                if v then
+                    bootstrapHooks()  -- non-blocking; hook installs in the background
+                    if not _hasHookFn then
+                        notify("No Combo Wait", "needs hookfunction + filtergc")
+                        Config.NCW_On = false
+                    elseif bootstrapDone and not ncwHooked then
+                        notify("No Combo Wait", "failed - scheduler hook unavailable")
+                        Config.NCW_On = false
+                    end
                 end
             end,
             Desc = "removes the finisher pause after the 4th hit so\na new combo starts with no extra delay",
@@ -597,9 +632,12 @@ return function(Lib, Core)
             get = function() return Config.Ping_On end,
             set = function(v)
                 Config.Ping_On = v
-                if v and not installPing() then
-                    notify("Ping Spoof", "failed - need hookmetamethod")
-                    Config.Ping_On = false
+                if v then
+                    bootstrapHooks()  -- non-blocking; namecall hook installs in the background
+                    if not _hasHookMeta then
+                        notify("Ping Spoof", "needs hookmetamethod + getnamecallmethod")
+                        Config.Ping_On = false
+                    end
                 end
             end,
             Desc = "spoofs GetNetworkPing (client-side). low ping =\nno anim slowdown from ping compensation",
