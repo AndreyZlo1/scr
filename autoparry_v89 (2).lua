@@ -125,7 +125,7 @@ local Config = {
 	-- [V89] MUST-DODGE (неблокируемые). В дампе нет флага Unblockable — всё в теории
 	-- блокируется, поэтому список собираем производно по стилю/типу. Сквозь атрибут Blocking
 	-- реально проходят только грэбы/слэмы. Ключ таблицы = стиль (lower), значение = {[kind]=true}
-	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame окно вместо бесполезного
+	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
 	MustDodgeStyles = {
@@ -220,6 +220,15 @@ local Config = {
 	AntiDecoyGap   = 0.12,       -- мин. интервал между настоящими свингами одного врага (сек)
 	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
 	DesyncSendHz      = 0,        -- Anti-AutoParry decoy re-sends per second; 0 = auto (track length)
+	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
+	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
+	InvisibleOn    = false,
+	InvisibleHeight= 4,           -- на сколько студов ронять корень для сервера (кастом высота)
+	InvisibleAnim  = true,        -- дополнительная контортящая анимация для лучшего скрытия
+	-- Ghost: полупрозрачная стеклянная копия твоих частей тела на твоей реальной позиции.
+	GhostOn        = false,
+	GhostColor     = Color3.fromRGB(90, 170, 255),
+	GhostTransparency = 0.5,
 	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
 	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
 	-- НЕ активен при загрузке (в этом была причина фриза V73).
@@ -1020,7 +1029,7 @@ local function resolveInfo(id, model)
 	}
 end
 
--- базовая задержка удара в "speed-1" секундах (без множителя скорости атаки).
+-- базовая задержка удара в "speed-1" секундах (без м��ожителя скорости атаки).
 local function hitTimelineBase(info, combo)
 	if info.t == "SKILL" then
 		if info.hit and info.hit > 0 then return info.hit end
@@ -3244,6 +3253,175 @@ DZ.cycleDesyncMode = cycleDesyncMode
 end  -- do (DESYNC-РЕЖИМЫ)
 if type(getgenv) == "function" then getgenv().AP_DESYNC_MODE = DZ.cycleDesyncMode end
 
+-- ═══════════════════ INVISIBLE + GHOST ═══════════════════
+-- Единственный top-level локал IV (как DZ) — чтобы не упереться в лимит регистров.
+local IV = {}
+do
+	local RS = RunService
+	local function char()      return LocalPlayer.Character end
+	local function humanoid()  local c = char(); return c and c:FindFirstChildOfClass("Humanoid") end
+	local function rootOf()
+		local c = char()
+		return c and (c:FindFirstChild("HumanoidRootPart") or (humanoid() and humanoid().RootPart))
+	end
+
+	-- ---- INVISIBLE ----
+	local Inv = { enabled = false, bindKey = nil, hb = nil, resp = nil, track = nil, oldcf = nil }
+
+	local function playContort()
+		if not Config.InvisibleAnim then return end
+		local hum = humanoid(); if not hum then return end
+		local animator = hum:FindFirstChildOfClass("Animator"); if not animator then return end
+		local isR15 = hum.RigType == Enum.HumanoidRigType.R15
+		local anim = Instance.new("Animation")
+		anim.AnimationId = "rbxassetid://" .. (isR15 and "18537363391" or "215384594")
+		local ok, tr = pcall(function() return animator:LoadAnimation(anim) end)
+		pcall(function() anim:Destroy() end)
+		if ok and tr then
+			Inv.track = tr
+			pcall(function()
+				tr.Priority = Enum.AnimationPriority.Action4
+				tr:Play(0, 0.001, 0)
+			end)
+			task.delay(0, function() pcall(function() tr.TimePosition = isR15 and 0.77 or 0.38 end) end)
+		end
+	end
+
+	local function stopInvisible()
+		Inv.enabled = false
+		if Inv.bindKey then pcall(function() RS:UnbindFromRenderStep(Inv.bindKey) end); Inv.bindKey = nil end
+		if Inv.hb   then pcall(function() Inv.hb:Disconnect()   end); Inv.hb   = nil end
+		if Inv.resp then pcall(function() Inv.resp:Disconnect() end); Inv.resp = nil end
+		if Inv.track then pcall(function() Inv.track:Stop(); Inv.track:Destroy() end); Inv.track = nil end
+		local r = rootOf()
+		if r and Inv.oldcf then pcall(function() r.CFrame = Inv.oldcf end) end
+		Inv.oldcf = nil
+	end
+
+	local function startInvisible()
+		if Inv.enabled then return end
+		Inv.enabled = true
+		Inv.oldcf = nil
+		playContort()
+
+		-- RenderStep: локально возвращаем корень на реальную позицию → ТЫ видишь себя нормально.
+		Inv.bindKey = "AP_Invisible_" .. tostring(math.random(1e6, 9e6))
+		pcall(function()
+			RS:BindToRenderStep(Inv.bindKey, Enum.RenderPriority.Camera.Value + 1, function()
+				local r = rootOf()
+				if r and Inv.oldcf then
+					r.CFrame = Inv.oldcf
+					if Inv.track then pcall(function() Inv.track:AdjustWeight(0.001) end) end
+				end
+			end)
+		end)
+
+		-- Heartbeat: смещаем корень вниз+разворот → ЭТО реплицируется другим (они тебя не видят).
+		Inv.hb = RS.Heartbeat:Connect(function()
+			if not Inv.enabled then return end
+			local r = rootOf(); local hum = humanoid()
+			if not r or not hum then return end
+			Inv.oldcf = r.CFrame
+			local isR15 = hum.RigType == Enum.HumanoidRigType.R15
+			local drop  = tonumber(Config.InvisibleHeight) or 4
+			local cf = r.CFrame - Vector3.new(0, drop, 0)
+			pcall(function()
+				r.CFrame = cf * CFrame.Angles(math.rad(isR15 and 180 or 90), 0, 0)
+				if Inv.track then Inv.track:AdjustWeight(100) end
+			end)
+		end)
+
+		-- Респавн: перезапустить, чтобы связи не отвалились после смерти.
+		Inv.resp = LocalPlayer.CharacterAdded:Connect(function()
+			if not Config.InvisibleOn then return end
+			task.wait(0.6)
+			stopInvisible()
+			if Config.InvisibleOn then startInvisible() end
+		end)
+	end
+
+	-- ---- GHOST ----
+	local Ghost = { model = nil, map = nil, bindKey = nil, resp = nil }
+
+	local function destroyGhost()
+		if Ghost.bindKey then pcall(function() RS:UnbindFromRenderStep(Ghost.bindKey) end); Ghost.bindKey = nil end
+		if Ghost.model then pcall(function() Ghost.model:Destroy() end); Ghost.model = nil end
+		Ghost.map = nil
+	end
+
+	local function buildGhost()
+		destroyGhost()
+		local c = char(); if not c then return end
+		local folder = Instance.new("Model"); folder.Name = "AP_Ghost"
+		local map = {}
+		for _, p in ipairs(c:GetDescendants()) do
+			if p:IsA("BasePart") and p.Transparency < 1 then
+				local ok, clone = pcall(function() return p:Clone() end)
+				if ok and clone then
+					-- оставляем только визуальные меши, убираем скрипты/декали/сочленения
+					for _, ch in ipairs(clone:GetChildren()) do
+						if not (ch:IsA("SpecialMesh") or ch:IsA("BlockMesh") or ch:IsA("CylinderMesh")) then
+							pcall(function() ch:Destroy() end)
+						end
+					end
+					clone.Anchored   = true
+					clone.CanCollide = false
+					clone.CanQuery   = false
+					clone.CanTouch   = false
+					clone.Massless   = true
+					clone.CastShadow = false
+					clone.Material   = Enum.Material.Glass
+					clone.Color        = Config.GhostColor or Color3.fromRGB(90, 170, 255)
+					clone.Transparency = Config.GhostTransparency or 0.5
+					clone.Reflectance  = 0.2
+					clone.Parent = folder
+					map[#map + 1] = { src = p, dst = clone }
+				end
+			end
+		end
+		folder.Parent = Workspace
+		Ghost.model, Ghost.map = folder, map
+
+		Ghost.bindKey = "AP_Ghost_" .. tostring(math.random(1e6, 9e6))
+		pcall(function()
+			RS:BindToRenderStep(Ghost.bindKey, Enum.RenderPriority.Camera.Value + 2, function()
+				if not Ghost.map then return end
+				for _, m in ipairs(Ghost.map) do
+					if m.src and m.src.Parent then
+						m.dst.CFrame = m.src.CFrame
+						m.dst.Color        = Config.GhostColor or m.dst.Color
+						m.dst.Transparency = Config.GhostTransparency or m.dst.Transparency
+					end
+				end
+			end)
+		end)
+	end
+
+	local function startGhost()
+		buildGhost()
+		if Ghost.resp then pcall(function() Ghost.resp:Disconnect() end) end
+		Ghost.resp = LocalPlayer.CharacterAdded:Connect(function()
+			if not Config.GhostOn then return end
+			task.wait(0.8)
+			if Config.GhostOn then buildGhost() end
+		end)
+	end
+	local function stopGhost()
+		if Ghost.resp then pcall(function() Ghost.resp:Disconnect() end); Ghost.resp = nil end
+		destroyGhost()
+	end
+
+	function IV.setInvisible(on)
+		Config.InvisibleOn = on and true or false
+		if Config.InvisibleOn then startInvisible() else stopInvisible() end
+	end
+	function IV.setGhost(on)
+		Config.GhostOn = on and true or false
+		if Config.GhostOn then startGhost() else stopGhost() end
+	end
+	function IV.rebuildGhost() if Config.GhostOn then buildGhost() end end
+end
+
 -- [V77] RAKNET DISCOVERY — ПЕРЕПИСАНО НА РЕАЛЬНЫЙ Potassium API (фикс крашей).
 -- КОРЕНЬ КРАША: старый код использовал НЕВЕРНЫЙ API (docs устарели). Реальный API,
 -- подтверждён рабочим андетект-примером юзера:
@@ -3568,8 +3746,16 @@ task.spawn(function()
 							if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
 							local args = table.pack(...)
 							local delayS = math.max(0, (Config.DesyncDelayMs or 140) / 1000)
+							local remote = self
 							task.delay(delayS, function()
-								pcall(function() oldNamecall(self, table.unpack(args, 1, args.n)) end)
+								-- Call the raw FireServer function value directly (fetched via __index),
+								-- NOT oldNamecall — a bare oldNamecall(self, ...) loses the namecall method
+								-- context ("FireServer"), so the server received a malformed call and the
+								-- attack silently did nothing. This delivers a real, well-formed packet.
+								pcall(function()
+									local fire = remote.FireServer
+									fire(remote, table.unpack(args, 1, args.n))
+								end)
 							end)
 							if (now - (State.lastSwingLog or 0)) > 0.15 then
 								State.lastSwingLog = now
@@ -3948,7 +4134,7 @@ local function enforceFaceLock()
 	local c = localChar()
 	local hum = c and c:FindFirstChildOfClass("Humanoid")
 	if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceLockHum = hum end
-	-- [V63] держим HRP точно на текущей позиции цели (прямой с��ап, без lead)
+	-- [V63] держим HRP точно на текущей позиции цели (прямо�� с��ап, без lead)
 	local d = flatDirTo(myHRP.Position, aHRP.Position)
 	if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
 end
@@ -4266,6 +4452,32 @@ return function(_Lib, _Core)
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
 		boolToggle(dsAtk, "Apply to M2", "Desync M2", function() return Config.DesyncApplyM2 end, function(v) Config.DesyncApplyM2 = v end)
 
+		-- Section 3 — Invisible + Ghost.
+		local dsInv = DS:Section({ Side = "Left" })
+		dsInv:Header({ Name = "Invisible" })
+		feature(dsInv, {
+			Title = "Invisible", Flag = "DS_Invisible",
+			get = function() return Config.InvisibleOn end,
+			set = function(v) pcall(function() IV.setInvisible(v) end) end,
+			Desc = "Replicates a dropped/contorted root to the server so others can't see you; locally you look normal.",
+		})
+		slider(dsInv, { Name = "Invisible Height", Flag = "DS_InvHeight", Default = Config.InvisibleHeight or 4,
+			Min = 0, Max = 15, Suffix = " studs", Callback = function(v) Config.InvisibleHeight = v end })
+		dsInv:SubLabel({ Text = "How far the root is dropped for the server view. Higher = buried deeper / harder to see." })
+		boolToggle(dsInv, "Contort Anim", "Invisible Anim",
+			function() return Config.InvisibleAnim end, function(v) Config.InvisibleAnim = v end)
+
+		dsInv:Header({ Name = "Ghost" })
+		feature(dsInv, {
+			Title = "Ghost", Flag = "DS_Ghost",
+			get = function() return Config.GhostOn end,
+			set = function(v) pcall(function() IV.setGhost(v) end) end,
+			Desc = "Glass, semi-transparent clone of your body parts shown at your real position.",
+		})
+		slider(dsInv, { Name = "Ghost Transparency", Flag = "DS_GhostTr", Default = math.floor((Config.GhostTransparency or 0.5) * 100),
+			Min = 0, Max = 95, Suffix = " %", Callback = function(v) Config.GhostTransparency = v / 100 end })
+		dsInv:Button({ Name = "Rebuild Ghost", Callback = function() pcall(function() IV.rebuildGhost() end) end })
+
 		-- ═══════════════════ TAB: Debug ═══════════════════
 		local DB = ctx.tabs.Debug
 
@@ -4328,4 +4540,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
