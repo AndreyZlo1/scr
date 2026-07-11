@@ -103,7 +103,7 @@ local Config = {
 	-- засчитывал. Плавный лерп (FaceLerp) не успевал против стрейфа. Ниже дистанции
 	-- по времени до контакта ��� прямой снап лицом на цель блока.
 	BlockFaceHard   = true,
-	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при ��ыстром чередовании
+	BlockFaceHardDt = 0.30,   -- [V70] снап раньше → успеваем при ����ыстром чередовании
 
 	M2WidenWindow = false,
 	M2WidenFront  = 0.22,
@@ -232,7 +232,7 @@ local Config = {
 	DesyncApplyM1  = true,
 	DesyncApplyM2  = true,
 	-- [V83] анти-decoy: игнорить неестественно быстрые повторы атак от одного врага
-	-- (флуд decoy/фейк-атак вроде наших prerun/idlemask), чтобы не сбивали наш парри.
+	-- (флуд decoy/фейк-атак вроде наших prerun/idlemask), чтобы не сбивали ��аш парри.
 	AntiDecoy      = true,
 	AntiDecoyGap   = 0.12,       -- мин. интервал между настоящими свингами одного врага (сек)
 	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
@@ -855,7 +855,11 @@ local function willHitMe(th)
 				local fside  = math.abs(off:Dot(Vector3.new(-look.Z, 0, look.X)))
 				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
 			end
-			local hit = inBox(predA.X, predA.Z, predLook) or inBox(aPos.X, aPos.Z, rawL)
+			-- [V91] БАГ ФИКС: тут было `aPos` (нигде не определён) → nil-index на КАЖДОЙ High-угрозе
+			-- → willHitMe падал в pcall → false весь путь → "never-in-hitbox" → High не парировал
+			-- вовсе. Текущая позиция атакующего = aHRP.Position (th.attackerHRP), её и берём.
+			local hit = inBox(predA.X, predA.Z, predLook)
+			         or inBox(aHRP.Position.X, aHRP.Position.Z, rawL)
 			th.trustedHit = false
 			return hit
 		end
@@ -1556,7 +1560,7 @@ local function shouldBoxingCounter(th)
 	if c:GetAttribute("CantAnything") and not c:GetAttribute("CombatRecovery") then return false end
 	if c:GetAttribute("Equip") == false then return false end
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
-	-- [V63] ГЛАВНЫЙ ФИКС: counter реально доступен только когда M2 НЕ на cooldown.
+	-- [V63] ГЛА��НЫЙ ФИКС: counter реально доступен только когда M2 НЕ на cooldown.
 	-- Дамп (CombatConfig.M2): RecoveryLockout=0.5, Cooldown=7 (base); boxing даёт
 	-- iframes ТОЛЬКО при успешном запуске M2. Раньше проверя��ся лишь клиентский
 	-- таймер BoxingCounterMinGap=0.45 — он врал: скрипт слал M2 когда сервер ещё
@@ -2262,7 +2266,7 @@ local function schedulerStep(now)
 
 		-- GRANT-эскейп: бесплатный эвейд от игры при численном перевесе. Грант
 		-- держится, пока мы в меньшинстве, поэтому МОЖНО подождать и фитить строго
-		-- когда удар входит в iframe-окно (а не палить сразу �� тратить впустую).
+		-- когда удар входит в iframe-окно (а не палить сра��у �� тратить впустую).
 		if Config.OutnumberEscape and evasiveGranted() and coverable then
 			if performDodge(now, "outnumbered-escape") then return end
 		end
@@ -2336,7 +2340,7 @@ local function schedulerStep(now)
 	end
 	State.vizTarget = turnTo and { hrp = turnTo.attackerHRP, model = turnTo.attackerModel } or nil
 
-	-- [V62] Оценка мультиугрозы: считаем РАЗНЫХ атакующих среди imminent и самый
+	-- [V62] Оценка ��ультиугрозы: считаем РАЗНЫХ атакующих среди imminent и самый
 	-- дальний угрожающий контакт кластера. В логе провалы (NO-PRESS NOT-BLOCKED,
 	-- BlockCooldown) и����ут именно когда 2+ врага бьют внахлёст: guard роняется
 	-- между их ударами (boxing-counter/deactivate/release) → re-press ловит
@@ -3351,7 +3355,7 @@ local function cycleDesyncMode()
 	aclog(("[desync] mode: %s%s"):format(Config.DesyncMode, Config.DesyncAttack and "" or " (off)"))
 end
 
--- экспорт наружу через единственный top-level локал DZ
+-- экспорт наружу через единстве��ный top-level локал DZ
 DZ.firePreRunDecoy = firePreRunDecoy
 DZ.applyDesyncMode = applyDesyncMode
 DZ.cycleDesyncMode = cycleDesyncMode
@@ -3758,7 +3762,7 @@ task.spawn(function()
 		if method ~= "FireServer" then
 			return oldNamecall(self, ...)
 		end
-		-- наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без обработки,
+		-- наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без обраб��тки,
 		-- иначе он снова отложится (бесконечный цикл) или потеряется.
 		if State.desyncPassthrough then return oldNamecall(self, ...) end
 
