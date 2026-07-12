@@ -23,10 +23,12 @@
 --        u22 = task.delay((combo==4 and 1.25 or 0.45)/animSpeed, ()->u21=true) -- chain gate
 --        u20 = task.delay(ComboResetTime/animSpeed, resetCombo)                -- INDEPENDENT of combo
 --      Speeding animSpeed shrinks the RESET window too → the chain drops and prints
---      "combo reset" (the symptom you saw). Instead we HOOK scheduleM1SwingTimers
---      and lie about `combo`: pass 1 when it is 4, so the 1.25s finisher cooldown
---      collapses to the normal 0.45s cadence while the reset timer stays intact.
---      Nothing here is server-visible; the server M1 rate still caps real hits.
+--      "combo reset". Instead we HOOK scheduleM1SwingTimers with TWO edits: (1) lie
+--      about `combo`, passing 1 when it is 4 so the 1.25s finisher cooldown collapses
+--      to the 0.45s cadence; (2) right after the original runs (it just set u21=false)
+--      force the shared u21 gate upvalue back to true via debug.setupvalue, so tryM1's
+--      `if not u21` never blocks → the 0.45s inter-hit wait is gone too. Reset timer is
+--      left intact. Nothing server-visible; the server M1 rate still caps real hits.
 --
 --    • No Stun — hookfunction on StateHandler.SetStun(char, apply, dur, speed),
 --      found via filtergc {Name="SetStun"}. When it tries to APPLY a stun to us we
@@ -98,11 +100,12 @@ return function(Lib, Core)
         NS_Attack = true,         -- M1/M2/windup movement lock
         NS_Block  = true,         -- Blocking / GuardBroken
         NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
+        NS_Speed  = 0,            -- restore target: 0 = game base (12 walk / 25 sprint), 1..25 = force exactly this
 
-        -- No Combo Wait (hold the u21 combo gate open via debug.setupvalue)
+        -- No Combo Wait (hook scheduleM1SwingTimers → combo 4→1 + hold the u21 gate open)
         NCW_On   = false,
 
-        -- Ping Spoof (spoof GetNetworkPing namecall → no ping anim slowdown)
+        -- Ping Spoof (hook GetPingAnimSpeedMultiplier → no ping anim slowdown)
         Ping_On    = false,
         Ping_Value = 0,           -- spoofed ping in ms
 
@@ -288,7 +291,12 @@ return function(Lib, Core)
         return nil
     end
     local function desiredBaseSpeed()
-        -- what we WANT our speed to be when a slowdown is suppressed
+        -- what we WANT our speed to be when a slowdown is suppressed.
+        -- NS_Speed > 0 forces an exact value (capped at the anti-cheat ceiling);
+        -- 0 = the game's natural base (sprint 25 if sprinting, else walk 12).
+        if Config.NS_Speed and Config.NS_Speed > 0 then
+            return math.clamp(Config.NS_Speed, 1, SPEED_CAP)
+        end
         if Config.Sprint_On then return SPRINT_WALK end
         return BASE_WALK
     end
@@ -331,60 +339,100 @@ return function(Lib, Core)
         return true
     end
 
-    -- ---- No Combo Wait: hold the u21 gate open on scheduleM1SwingTimers ----------
-    -- In M1.tryM1 the combo gate is `if not u21 then return false end`. u21 is an
-    -- upvalue set false at the start of a swing and flipped back to true after
-    -- task.delay((combo==4 and FinisherCooldown(1.25) or AttackDuration(0.45))/animSpeed).
-    -- THAT delay (not the anim, not combo index) is the wait before the next hit /
-    -- new combo. The previous combo→1 swap only touched the 4th-hit case, so the
-    -- 0.45s pause between every hit stayed → felt like "not working".
-    -- Correct fix: find scheduleM1SwingTimers (its FIRST upvalue is the u21 boolean
-    -- gate) and, while NCW is on, force that upvalue back to `true` every frame via
-    -- debug.setupvalue. The combo-RESET timer is a separate delay we never touch, so
-    -- the chain keeps flowing without printing "combo reset". Pure upvalue write on a
-    -- LOCAL client function — nothing is sent to the server (server M1 rate still caps).
+    -- ---- No Combo Wait: hook M1.scheduleM1SwingTimers(combo, animSpeed) ----------
+    -- Full read of M1.lua (not guessing this time):
+    --   tryM1 gate  : `if not u21 then return false end`  (u21 = shared upvalue gate)
+    --   scheduleM1SwingTimers(p47 combo, p48 animSpeed):
+    --       u21 = false
+    --       u22 = task.delay((p47==4 and FinisherCooldown(1.25) or AttackDuration(0.45))/p48, ()->u21=true)
+    --       u20 = task.delay(ComboResetTime(1.55)/p48, resetCombo)   -- separate reset timer
+    -- So the felt wait between hits IS that u21=false window. Two fixes, together:
+    --   1) combo 4 → 1  (your request): the 4th hit stops using FinisherCooldown, so
+    --      no 1.25s finisher stall — it uses the normal 0.45s branch.
+    --   2) right AFTER the original runs (it just set u21=false), force u21 back to
+    --      true via debug.setupvalue on the ORIGINAL closure. u21 is a shared cell, so
+    --      tryM1 now reads true immediately → zero inter-hit wait. The reset timer (u20)
+    --      is left untouched, so the chain never prematurely prints "combo reset".
+    -- All local/client-side — no remotes, no attribute writes. Server M1 rate still caps.
     local ncwFn, ncwGateIdx
     local ncwHooked = false
     local function installNCW()
         if ncwHooked then return true end
-        if not (_hasUpval and _filtergc) then return false end
-        -- fingerprint by the three ClientPredict timers baked in as upvalue numbers
-        local fn = findFn(nil, { 1.25, 0.45, 1.55 })
-        if not fn then
-            fn = findFn({ "M1AttackCooldownTask", "M1ComboResetTask" })
-        end
+        if not _hasHookFn then return false end
+        -- constants are the Janitor task keys → unique + survive name-stripping;
+        -- fall back to the 3 ClientPredict timer numbers as upvalue fingerprint.
+        local fn = findFn({ "M1AttackCooldownTask", "M1ComboResetTask" })
+                or findFn(nil, { 1.25, 0.45, 1.55 })
         if not fn then return false end
-        -- locate the boolean upvalue that is the combo gate (u21)
-        local ok, ups = pcall(_getupvalues, fn)
-        if ok and type(ups) == "table" then
-            for i, v in pairs(ups) do
-                if type(v) == "boolean" then ncwGateIdx = i; break end
+        local orig
+        orig = _hookfunction(fn, function(combo, animSpeed, ...)
+            if not Config.NCW_On then return orig(combo, animSpeed, ...) end
+            if combo == 4 then combo = 1 end          -- (1) no finisher cooldown
+            local r = orig(combo, animSpeed, ...)      -- runs original (sets u21=false, schedules reset)
+            if _hasUpval and ncwGateIdx then
+                pcall(_setupvalue, orig, ncwGateIdx, true)  -- (2) reopen the gate now
+            end
+            return r
+        end)
+        -- find the boolean gate (u21) index on the ORIGINAL closure (shared cell)
+        if _hasUpval then
+            local ok, ups = pcall(_getupvalues, orig)
+            if ok and type(ups) == "table" then
+                for i = 1, 16 do
+                    if type(ups[i]) == "boolean" then ncwGateIdx = i; break end
+                end
             end
         end
-        ncwFn = fn
-        ncwHooked = ncwGateIdx ~= nil
-        return ncwHooked
+        ncwFn = orig
+        ncwHooked = true
+        return true
     end
 
-    -- ---- Ping Spoof: hook __namecall for GetNetworkPing -------------------------
-    -- CombatPingAnimUtils.GetPingAnimSpeedMultiplier does `plr:GetNetworkPing()`
-    -- (a namecall) and returns multiplier 1 (no slowdown) when the ping <= 0. So a
-    -- 0 ms spoof kills the ping-based combat-anim slowdown at the source. We deceive
-    -- the game's own read instead of writing any value. Plain hookmetamethod per the
-    -- executor API; executor-origin calls pass through via checkcaller.
+    -- ---- Ping Spoof: hook CombatPingAnimUtils.GetPingAnimSpeedMultiplier ---------
+    -- The old namecall-on-GetNetworkPing hook was unreliable (and did nothing when
+    -- your real ping was already low). The ACTUAL combat effect of ping is this one
+    -- function: getFinalM1AnimSpeed / M2 multiply their anim speed by
+    -- GetPingAnimSpeedMultiplier(delay, LocalPlayer), which returns
+    --   delay / (delay + clamp(ping*0.5, 0, 0.35))   → a value <= 1 (slowdown).
+    -- We hook it directly and recompute using the SPOOFED ping instead of the real
+    -- one, so a low spoof forces the multiplier to ~1 (full-speed combat anims, which
+    -- also shortens the attack cooldown since animSpeed is the cooldown divisor).
+    -- Reliable Lua-function hook, found by its unique constant. We still install the
+    -- namecall spoof too so any OTHER GetNetworkPing reader sees the spoof.
     local pingHooked = false
     local function installPing()
         if pingHooked then return true end
-        if not _hasHookMeta then return false end
-        local ncOld
-        ncOld = _hookmeta(game, "__namecall", function(self, ...)
-            if Config.Ping_On and not _checkcaller() and _namecall() == "GetNetworkPing" then
-                return Config.Ping_Value / 1000  -- GetNetworkPing() returns seconds
+        local installedAny = false
+        -- primary: direct function hook (deterministic)
+        if _hasHookFn then
+            local fn = findFn({ "NetworkAnimPingCompensation", "MaxEstimatedOneWaySeconds" })
+            if fn then
+                local orig
+                orig = _hookfunction(fn, function(delay, plr, ...)
+                    if Config.Ping_On and type(delay) == "number" and delay > 0 then
+                        local pingSec = math.max(0, (Config.Ping_Value or 0) / 1000)
+                        if pingSec <= 0 then return 1 end
+                        local comp = math.clamp(pingSec * 0.5, 0, 0.35)
+                        return delay / (delay + comp)
+                    end
+                    return orig(delay, plr, ...)
+                end)
+                installedAny = true
             end
-            return ncOld(self, ...)
-        end)
-        pingHooked = true
-        return true
+        end
+        -- secondary: namecall spoof for any other GetNetworkPing consumer
+        if _hasHookMeta then
+            local ncOld
+            ncOld = _hookmeta(game, "__namecall", function(self, ...)
+                if Config.Ping_On and not _checkcaller() and _namecall() == "GetNetworkPing" then
+                    return math.max(0, (Config.Ping_Value or 0) / 1000)  -- seconds
+                end
+                return ncOld(self, ...)
+            end)
+            installedAny = true
+        end
+        pingHooked = installedAny
+        return installedAny
     end
 
     -- ---- Background bootstrap ---------------------------------------------------
@@ -433,13 +481,12 @@ return function(Lib, Core)
         return true
     end
 
-    -- ---- No Combo Wait driver: force the u21 gate open every frame --------------
-    -- While NCW is on we keep scheduleM1SwingTimers' boolean gate upvalue = true, so
-    -- tryM1's `if not u21 then return false end` never blocks the next swing. We do
-    -- it in the loop (not once) because the game flips it false at the start of each
-    -- swing; re-asserting it true immediately removes the inter-hit / finisher wait.
+    -- ---- No Combo Wait safety re-assert -----------------------------------------
+    -- The scheduleM1SwingTimers hook already forces u21=true synchronously right after
+    -- each swing schedules, which is what removes the wait. This per-frame re-assert is
+    -- a cheap backup for any other path that might flip the gate closed between swings.
     local function driveNCW()
-        if not (Config.NCW_On and ncwHooked and ncwFn and ncwGateIdx) then return end
+        if not (Config.NCW_On and ncwHooked and ncwFn and ncwGateIdx and _hasUpval) then return end
         pcall(_setupvalue, ncwFn, ncwGateIdx, true)
     end
 
@@ -600,9 +647,11 @@ return function(Lib, Core)
             function() return Config.NS_Block end, function(v) Config.NS_Block = v end)
         boolToggle(sNS, "Get Hit", "NoSlow GetHit",
             function() return Config.NS_GetHit end, function(v) Config.NS_GetHit = v end)
-        sNS:SubLabel({ Text = "Attack = M1/M2 windup + root locks · Block = blocking/guard-broken\nGet Hit = the slow applied when you take a hit (CantAnything / Stunned).\nWe only raise speed back to your base - the anti-cheat is skipped while locked." })
+        slider(sNS, { Name = "Restore Speed", Flag = "MV_NSSpeed", Default = Config.NS_Speed,
+            Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
+        sNS:SubLabel({ Text = "Attack = M1/M2 windup + root locks · Block = blocking/guard-broken\nGet Hit = the slow applied when you take a hit (CantAnything / Stunned).\nRestore Speed 0 = your default base (12 walk / 25 sprint); 1-25 forces that\nexact speed whenever a slowdown is suppressed. Anti-cheat is skipped while locked." })
 
-        -- ─────────────── Section 4: Combat exploits (Right) ───────────────
+        -- ────────��────── Section 4: Combat exploits (Right) ───────────────
         local sCbt = MV:Section({ Side = "Right" })
         sCbt:Header({ Name = "No Combo Wait" })
         feature(sCbt, {
@@ -612,18 +661,18 @@ return function(Lib, Core)
                 Config.NCW_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not (_hasUpval and _filtergc) then
-                        notify("No Combo Wait", "needs debug.setupvalue + filtergc")
+                    if not (_hasHookFn and _filtergc) then
+                        notify("No Combo Wait", "needs hookfunction + filtergc")
                         Config.NCW_On = false
                     elseif bootstrapDone and not ncwHooked then
-                        notify("No Combo Wait", "failed - combo gate not found")
+                        notify("No Combo Wait", "failed - scheduleM1SwingTimers not found")
                         Config.NCW_On = false
                     end
                 end
             end,
-            Desc = "holds the M1 combo gate (u21) open so there is no\nwait between hits or before the next combo",
+            Desc = "hooks scheduleM1SwingTimers: 4th hit -> combo 1 (no\nfinisher stall) and reopens the u21 gate, so no wait between hits",
         })
-        sCbt:SubLabel({ Text = "finds scheduleM1SwingTimers and forces its combo-gate upvalue back to\ntrue every frame via debug.setupvalue, collapsing the 0.45s / 1.25s waits.\nThe combo-reset timer is untouched, so no more 'combo reset'." })
+        sCbt:SubLabel({ Text = "The 4th combo hit is remapped to the 1st so the 1.25s finisher cooldown\nnever fires, and the u21 combo gate is forced back open right after each\nswing - collapsing the 0.45s inter-hit wait. Reset timer untouched." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
@@ -633,14 +682,14 @@ return function(Lib, Core)
             set = function(v)
                 Config.Ping_On = v
                 if v then
-                    bootstrapHooks()  -- non-blocking; namecall hook installs in the background
-                    if not _hasHookMeta then
-                        notify("Ping Spoof", "needs hookmetamethod + getnamecallmethod")
+                    bootstrapHooks()  -- non-blocking; hooks install in the background
+                    if not (_hasHookFn or _hasHookMeta) then
+                        notify("Ping Spoof", "needs hookfunction or hookmetamethod")
                         Config.Ping_On = false
                     end
                 end
             end,
-            Desc = "spoofs GetNetworkPing (client-side). low ping =\nno anim slowdown from ping compensation",
+            Desc = "hooks GetPingAnimSpeedMultiplier + GetNetworkPing.\nlow ping = no anim slowdown from ping compensation",
         })
         slider(sCbt, { Name = "Spoofed Ping", Flag = "MV_PingVal", Default = Config.Ping_Value,
             Min = 0, Max = 1000, Suffix = " ms", Callback = function(v) Config.Ping_Value = v end })
