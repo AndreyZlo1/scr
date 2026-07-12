@@ -641,14 +641,14 @@ return function(Lib, Core)
             Title = "Speed", Flag = "MV_Speed",
             get = function() return Config.Speed_On end,
             set = function(v) Config.Speed_On = v end,
-            Desc = "cframe/velocity speedhack\ndriven by your move input (PC + mobile)",
+            Desc = "cframe/velocity speedhack\ndriven by ur move input",
         })
         sSpeed:Dropdown({
             Name = "Method", Options = { "CFrame", "Velocity" },
             Default = Config.Speed_Mode,
             Callback = function(v) Config.Speed_Mode = v; notify("Speed Method", v) end,
         }, ctx.flag("MV_SpeedMode"))
-        sSpeed:SubLabel({ Text = "CFrame bypasses anti-cheat · Velocity is smoother." })
+        sSpeed:SubLabel({ Text = "CFrame uhhhh · Velocity is smoother." })
         slider(sSpeed, { Name = "Speed", Flag = "MV_SpeedVal", Default = Config.Speed_Value,
             Min = 16, Max = 150, Suffix = " studs", Callback = function(v) Config.Speed_Value = v end })
 
@@ -659,7 +659,7 @@ return function(Lib, Core)
             Title = "Fly", Flag = "MV_Fly",
             get = function() return Config.Fly_On end,
             set = function(v) Config.Fly_On = v end,
-            Desc = "space = up, left ctrl = down (no shiftlock clash)\nmobile: jump button = up, camera + stick = full 3D",
+            Desc = "space = up, left ctrl = down (no shiftlock clash)\nmobile: jump button = up",
         })
         sFly:Dropdown({
             Name = "Method", Options = { "CFrame", "Velocity" },
@@ -687,7 +687,7 @@ return function(Lib, Core)
                     Config.NS_On = false
                 end
             end,
-            Desc = "hooks MovementServiceUtils.SetSpeed - combat scripts\nno longer force your WalkSpeed down during actions",
+            Desc = "hooks slowdowns \nno longer force ur WalkSpeed down during actions",
         })
         boolToggle(sNS, "Attack", "NoSlow Attack",
             function() return Config.NS_Attack end, function(v) Config.NS_Attack = v end)
@@ -697,7 +697,7 @@ return function(Lib, Core)
             function() return Config.NS_GetHit end, function(v) Config.NS_GetHit = v end)
         slider(sNS, { Name = "Restore Speed", Flag = "MV_NSSpeed", Default = Config.NS_Speed,
             Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
-        sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default." })
+        sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default (12)" })
 
         -- ────────��────── Section 4: Combat exploits (Right) ───────────────
         local sCbt = MV:Section({ Side = "Right" })
@@ -718,13 +718,13 @@ return function(Lib, Core)
                     notify("No Delay", "Disabled")
                 end
             end,
-            Desc = "removes EVERY combat cooldown/reset wait by hooking task.delay directly\nand collapsing the M1 cooldown timers (0.45/1.25/1.55s) to zero",
+            Desc = "removes EVERY combat cooldown/reset wai\nand collapsing the M1 cooldown timers (0.45/1.25/1.55s) to zero",
         })
         boolToggle(sCbt, "Clear Gate Attributes", "NoDelay Attrs",
             function() return Config.NoDelay_Attrs end, function(v) Config.NoDelay_Attrs = v end)
         slider(sCbt, { Name = "Anim Speed (visual)", Flag = "MV_NoDelayAnim", Default = Config.NoDelay_Anim,
             Min = 1, Max = 10, Suffix = "x", Callback = function(v) Config.NoDelay_Anim = v end })
-        sCbt:SubLabel({ Text = "Server still caps real damage - this removes the client-side wait/feel." })
+        sCbt:SubLabel({ Text = "ServerSided caps real damage - this removes the client-side wait/feel" })
 
         -- ─────────────── Section 5: Sprint (Right) ───��───────────
         local sSpr = MV:Section({ Side = "Right" })
@@ -738,18 +738,18 @@ return function(Lib, Core)
                     notify("Auto Sprint", "sprint controller not found yet")
                 end
             end,
-            Desc = "holds sprint on (25 studs). needs HP ≥ 10.\nturning off truly stops sprinting",
+            Desc = "holds sprint on. needs HP ≥ 10.\nturning off truly stops sprinting",
         })
         boolToggle(sSpr, "Bypass Restrictions", "Sprint Bypass",
             function() return Config.Sprint_Bypass end,
             function(v)
                 Config.Sprint_Bypass = v
                 if v and not combatHooksReady() then
-                    notify("Sprint Bypass", "needs hookfunction + filtergc")
+                    notify("Sprint Bypass", "applied?")
                     Config.Sprint_Bypass = false
                 end
             end)
-        sSpr:SubLabel({ Text = "Keeps sprint speed through combat locks." })
+        sSpr:SubLabel({ Text = "Keeps sprint speed through combat locks" })
 
         uiReady = true
     end
