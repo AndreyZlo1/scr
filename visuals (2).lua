@@ -1388,7 +1388,7 @@ return function(Lib, Core)
             Title = "ESP", Flag = "VIS_ESP",
             get = function() return Config.ESP_On end,
             set = function(v) Config.ESP_On = v end,
-            Desc = "Draws players through the world: box, name, distance, health, combat state & style.",
+            Desc = "If u fr dont know wtf is that - kys",
         })
         boolToggle(sEsp, "Box",      "ESP Box",      function() return Config.ESP_Box end,      function(v) Config.ESP_Box = v end)
         boolToggle(sEsp, "Name",     "ESP Name",     function() return Config.ESP_Name end,     function(v) Config.ESP_Name = v end)
@@ -1415,7 +1415,7 @@ return function(Lib, Core)
             Title = "Indicators", Flag = "VIS_IND",
             get = function() return Config.Ind_On end,
             set = function(v) Config.Ind_On = v end,
-            Desc = "Animated HUD stack of your own combat data - slides in when relevant, out when not.",
+            Desc = "Animated HUD",
         })
         -- per-style setting elements (their visibility is driven by the Style dropdown)
         local styleEls = {}   -- element -> { style1, style2, ... } (nil/"*" = always visible)
@@ -1439,7 +1439,7 @@ return function(Lib, Core)
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Panel = chip HUD | Free = draggable text stack | Player = on your character | Simple = centered stack." })
+        sInd:SubLabel({ Text = "Panel = HUD | Free = draggable text stack | Player = on your character | Simple = centered stack." })
 
         boolToggle(sInd, "Health",       "Ind Health",  function() return Config.Ind_Health end,  function(v) Config.Ind_Health = v end)
         boolToggle(sInd, "Stamina",      "Ind Stamina", function() return Config.Ind_Stamina end, function(v) Config.Ind_Stamina = v end)
@@ -1456,7 +1456,7 @@ return function(Lib, Core)
         local dragToggle = boolToggle(sInd, "Drag", "Ind Drag",
             function() return Config.Ind_Drag end, function(v) Config.Ind_Drag = v end)
         styleEls[dragToggle] = { "Panel", "Free" }
-        local dragHint = sInd:SubLabel({ Text = "Grab the HUD to move it (position saved automatically). Turn Drag off to lock it." })
+        local dragHint = sInd:SubLabel({ Text = "Grab the HUD to move it. Turn Drag off to lock it" })
         styleEls[dragHint] = { "Panel", "Free" }
 
         -- Player: which side of the character the stack sits on.
@@ -1492,7 +1492,7 @@ return function(Lib, Core)
         styleEls[scaleSlider] = { "Panel", "Free", "Player", "Simple" }
 
         applyStyleVis()
-        sInd:SubLabel({ Text = "Cooldowns are predicted client-side from the game's own combat data, so they tick down accurately." })
+        sInd:SubLabel({ Text = "Cooldowns" })
 
         -- ─────────────── Section 3: Hit Direction (Right) ────���──────────
         local sHit = V:Section({ Side = "Right" })
@@ -1501,7 +1501,7 @@ return function(Lib, Core)
             Title = "Hit Direction", Flag = "VIS_HITDIR",
             get = function() return Config.HitDir_On end,
             set = function(v) Config.HitDir_On = v end,
-            Desc = "Fading arrows around the crosshair pointing at whoever is hitting you.",
+            Desc = "Fading arrows around the crosshair",
         })
         colorpick(sHit, "Arrow Color", "VIS_HIT_Col", Config.HitDir_Color, function(c) Config.HitDir_Color = c end)
         slider(sHit, {
