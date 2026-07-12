@@ -29,9 +29,6 @@
 --      set gate attributes (M1Cooldown/M1/CantAnything/…) locally each frame. The server
 --      M1 rate still caps REAL damage — this removes the client-side stall/feel only.
 --
---    • Finisher First — hookfunction(getM1Animations) so every combo index resolves to
---      4thM1 → every M1 plays the finisher swing (visual). Damage stays server-decided.
---
 --    • No Stun — hookfunction on StateHandler.SetStun(char, apply, dur, speed),
 --      found via filtergc {Name="SetStun"}. When it tries to APPLY a stun to us we
 --      never call the original, so it never writes our WalkSpeed/GroundSpeed down.
@@ -147,7 +144,6 @@ return function(Lib, Core)
         NoDelay_On    = false,
         NoDelay_Attrs = true,     -- also clear server gate attributes (M1Cooldown/M1/…) each frame
         NoDelay_Anim  = 1,        -- OPTIONAL visual: multiply M1 swing anim playback speed (1 = off)
-        FF_On         = false,    -- Finisher First: every M1 plays the 4th (finisher) animation
 
         -- Sprint
         Sprint_On     = false,    -- AutoSprint (hold sprint on)
@@ -563,71 +559,26 @@ return function(Lib, Core)
         end
     end
 
-    -- ── Finisher First: hookfunction(getM1Animations) → every swing = 4th anim ──
-    -- getM1Animations is a MODULE-LOCAL (not a global), so it must be located via
-    -- filtergc by its unique string constants "1stM1".."4thM1". Once found we hook it
-    -- DIRECTLY with hookfunction: the wrapper runs the original then, while FF is on,
-    -- returns {t4,t4,t4,t4} so any combo index resolves to the finisher animation, for
-    -- ANY combat style, no cache races. Damage stays server-decided (visual only).
-    local _ffHooked, _ffFound = false, false
-    local _origGetAnims = nil
-    local function installFinisherFirst()
-        if _ffHooked then return true end
-        if type(hookfunction) ~= "function" or type(_filtergc) ~= "function" then
-            dbg("FF: needs hookfunction + filtergc"); return false
-        end
-        local target
-        local ok, res = pcall(_filtergc, "function",
-            { Constants = { "1stM1", "2ndM1", "3rdM1", "4thM1" } }, false)
-        if ok and type(res) == "table" then
-            for _, fn in ipairs(res) do
-                if type(fn) == "function" then
-                    local okc, tbl = pcall(fn)
-                    if okc and type(tbl) == "table" and tbl[4] ~= nil then target = fn; break end
-                    target = target or fn   -- fallback to first candidate
-                end
-            end
-        end
-        if not target then dbg("FF: getM1Animations not found"); return false end
-        _ffFound = true
-        local okh = pcall(function()
-            _origGetAnims = hookfunction(target, function(...)
-                local t = _origGetAnims(...)
-                if Config.FF_On and type(t) == "table" and t[4] ~= nil then
-                    local f = t[4]
-                    return { f, f, f, f }
-                end
-                return t
-            end)
-        end)
-        if not (okh and _origGetAnims) then dbg("FF: hookfunction(getM1Animations) FAILED"); return false end
-        _ffHooked = true
-        dbg("FF: hooked getM1Animations (every swing -> finisher anim)")
-        return true
-    end
-
     local _charConnDone = false
     local function installAnimHook()
         if animHookInstalled then return true end
-        dbg("=== install No Delay (task.delay hook) + Finisher First + optional anim speed ===")
+        dbg("=== install No Delay (task.delay hook) + optional anim speed ===")
         buildM1Ids()
         local okAnim  = hookAnimator()
         local okDelay = installNoDelayHook()
-        local okFF    = installFinisherFirst()
         if not _charConnDone then
             _charConnDone = true
             LocalPlayer.CharacterAdded:Connect(function()
                 task.wait(0.5)
                 buildM1Ids()          -- style/anim ids may differ after respawn
                 hookAnimator()
-                -- task.delay + getM1Animations hooks are global/module-cached (survive
-                -- respawn) and inert unless their Config flags are on → nothing to re-apply.
+                -- task.delay hook is global (survives respawn) and inert unless
+                -- Config.NoDelay_On → nothing to re-apply.
             end)
         end
         animHookInstalled = true
         dbg("combat hooks installed (animator=" .. tostring(okAnim) ..
-            ", task.delay=" .. tostring(okDelay) .. ", finisherFirst=" .. tostring(okFF) ..
-            ", m1Ids=" .. _m1Count .. ")")
+            ", task.delay=" .. tostring(okDelay) .. ", m1Ids=" .. _m1Count .. ")")
         return true
     end
 
@@ -717,7 +668,7 @@ return function(Lib, Core)
 
     function M.start()
         Config.Speed_On, Config.Fly_On = false, false
-        Config.NS_On, Config.NoDelay_On, Config.FF_On = false, false, false
+        Config.NS_On, Config.NoDelay_On = false, false
         Config.Sprint_On, Config.Sprint_Bypass = false, false
         -- Warm up the hooks in the background now, so toggling a feature later never
         -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
@@ -731,8 +682,6 @@ return function(Lib, Core)
                 dbg("--- No Delay (task.delay hook) ---")
                 dbg("delayHooked=", _delayHooked, "| NoDelay_On=", Config.NoDelay_On,
                     "| combat delays collapsed=", _delayHits, "| clearAttrs=", Config.NoDelay_Attrs)
-                dbg("--- Finisher First ---")
-                dbg("ffHooked=", _ffHooked, "getM1AnimsFound=", _ffFound, "| FF_On=", Config.FF_On)
                 dbg("--- anim / general ---")
                 dbg("animHook=", animHookInstalled, "animatorHooked=", _apInstalled, "M1 idSet=", _m1Count)
                 dbg("AnimationPlayed total=", _apPlays, "M1 matched=", _apM1, "speed applied=", _apApply)
@@ -814,7 +763,7 @@ return function(Lib, Core)
             Default = Config.Speed_Mode,
             Callback = function(v) Config.Speed_Mode = v; notify("Speed Method", v) end,
         }, ctx.flag("MV_SpeedMode"))
-        sSpeed:SubLabel({ Text = "CFrame - positional, bypasses the WalkSpeed anti-cheat\nVelocity - smooth physics, keeps gravity" })
+        sSpeed:SubLabel({ Text = "CFrame bypasses anti-cheat · Velocity is smoother." })
         slider(sSpeed, { Name = "Speed", Flag = "MV_SpeedVal", Default = Config.Speed_Value,
             Min = 16, Max = 150, Suffix = " studs", Callback = function(v) Config.Speed_Value = v end })
 
@@ -834,7 +783,7 @@ return function(Lib, Core)
         }, ctx.flag("MV_FlyMode"))
         boolToggle(sFly, "Face Camera", "Fly Face Camera",
             function() return Config.Fly_Face end, function(v) Config.Fly_Face = v end)
-        sFly:SubLabel({ Text = "Face Camera - body follows the camera; aim + move stick to climb/dive" })
+        sFly:SubLabel({ Text = "Face Camera makes the body follow your aim." })
         slider(sFly, { Name = "Horizontal Speed", Flag = "MV_FlyVal", Default = Config.Fly_Value,
             Min = 10, Max = 250, Suffix = " studs", Callback = function(v) Config.Fly_Value = v end })
         slider(sFly, { Name = "Vertical Speed", Flag = "MV_FlyVert", Default = Config.Fly_Vertical,
@@ -863,7 +812,7 @@ return function(Lib, Core)
             function() return Config.NS_GetHit end, function(v) Config.NS_GetHit = v end)
         slider(sNS, { Name = "Restore Speed", Flag = "MV_NSSpeed", Default = Config.NS_Speed,
             Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
-        sNS:SubLabel({ Text = "Attack = M1/M2 windup + root locks · Block = blocking/guard-broken\nGet Hit = the slow applied when you take a hit (CantAnything / Stunned).\nRestore Speed 0 = your default base (12 walk / 25 sprint); 1-25 forces that\nexact speed whenever a slowdown is suppressed. Anti-cheat is skipped while locked." })
+        sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default." })
 
         -- ────────��────── Section 4: Combat exploits (Right) ───────────────
         local sCbt = MV:Section({ Side = "Right" })
@@ -890,25 +839,7 @@ return function(Lib, Core)
             function() return Config.NoDelay_Attrs end, function(v) Config.NoDelay_Attrs = v end)
         slider(sCbt, { Name = "Anim Speed (visual)", Flag = "MV_NoDelayAnim", Default = Config.NoDelay_Anim,
             Min = 1, Max = 10, Suffix = "x", Callback = function(v) Config.NoDelay_Anim = v end })
-        feature(sCbt, {
-            Title = "Finisher First (4th->1st)", Flag = "MV_FF",
-            get = function() return Config.FF_On end,
-            set = function(v)
-                Config.FF_On = v
-                if v then
-                    bootstrapHooks()
-                    task.spawn(function()
-                        for _ = 1, 8 do if _ffHooked then break end task.wait(0.4) end
-                        notify("Finisher First", _ffHooked and "ON (every M1 = finisher anim)"
-                            or "getM1Animations not found")
-                    end)
-                else
-                    notify("Finisher First", "Disabled")
-                end
-            end,
-            Desc = "every M1 plays the 4th (finisher) swing animation by hooking\ngetM1Animations. Finisher DAMAGE stays server-decided (visual/feel only).",
-        })
-        sCbt:SubLabel({ Text = "No Delay hooks task.delay (a direct hookfunction call, no upvalue hunting) and\nzeroes the M1 cooldown timers so the swing gate re-opens instantly; gate attributes\n(M1Cooldown/M1/…) are also cleared each frame. Finisher First hooks getM1Animations\nso any combo index returns the 4th swing. The server still caps REAL damage." })
+        sCbt:SubLabel({ Text = "Server still caps real damage - this removes the client-side wait/feel." })
 
         -- ─────────────── Section 5: Sprint (Right) ───��───────────
         local sSpr = MV:Section({ Side = "Right" })
@@ -933,7 +864,7 @@ return function(Lib, Core)
                     Config.Sprint_Bypass = false
                 end
             end)
-        sSpr:SubLabel({ Text = "keeps your sprint speed through combat locks via the SetSpeed hook -\nany forced slowdown gets raised back to 25 studs while this is on." })
+        sSpr:SubLabel({ Text = "Keeps sprint speed through combat locks." })
 
         uiReady = true
     end
