@@ -52,62 +52,6 @@ return function(Lib, Core)
 
     local LocalPlayer = Players.LocalPlayer
 
-    -- ── Executor globals (guarded — never hard-crash on a weak executor) ─────
-    local _filtergc     = rawget(getfenv(0), "filtergc")      or (getgenv and getgenv().filtergc)
-    local _getgc        = rawget(getfenv(0), "getgc")          or (getgenv and getgenv().getgc)
-    local _hookfunction = rawget(getfenv(0), "hookfunction")  or (getgenv and getgenv().hookfunction)
-    local _hookmeta     = rawget(getfenv(0), "hookmetamethod") or (getgenv and getgenv().hookmetamethod)
-    local _namecall     = rawget(getfenv(0), "getnamecallmethod") or (getgenv and getgenv().getnamecallmethod)
-    local _checkcaller  = rawget(getfenv(0), "checkcaller")   or (getgenv and getgenv().checkcaller) or function() return false end
-    local _getupvalues  = (debug and rawget(debug, "getupvalues")) or rawget(getfenv(0), "getupvalues")
-    local _setupvalue   = (debug and rawget(debug, "setupvalue"))  or rawget(getfenv(0), "setupvalue")
-    local _hasHookFn    = type(_hookfunction) == "function"
-    local _hasHookMeta  = type(_hookmeta) == "function" and type(_namecall) == "function"
-    local _hasUpval     = type(_getupvalues) == "function" and type(_setupvalue) == "function"
-    local _writefile    = rawget(getfenv(0), "writefile")  or (getgenv and getgenv().writefile)
-    local _getconstants = (debug and rawget(debug, "getconstants")) or rawget(getfenv(0), "getconstants")
-    local _getinfo      = (debug and rawget(debug, "getinfo"))      or rawget(getfenv(0), "getinfo")
-    local _getloadedmodules = rawget(getfenv(0), "getloadedmodules") or (getgenv and getgenv().getloadedmodules)
-
-    -- ── Debug logger ─────────────────────────────────────────────────────────
-    -- Every dbg() line is printed to the executor console AND appended to a buffer.
-    -- Press K in-game to flush the buffer to  Syllinse_Movement_Log.txt  (workspace
-    -- folder of your executor) so it can be shared. Also mirrors to setclipboard.
-    local _logBuf = {}
-    local _logStart = os.clock()
-    local function dbg(...)
-        local parts = {}
-        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-        local line = string.format("[%.2fs] ", os.clock() - _logStart) .. table.concat(parts, " ")
-        _logBuf[#_logBuf + 1] = line
-        print("[Movement] " .. line)
-    end
-    local function dbgEnv()
-        dbg("=== ENV CAPABILITIES ===")
-        dbg("filtergc:", _filtergc ~= nil, "| hookfunction:", _hasHookFn,
-            "| hookmeta:", _hasHookMeta, "| getupvalues/setupvalue:", _hasUpval)
-        dbg("getconstants:", _getconstants ~= nil, "| getinfo:", _getinfo ~= nil,
-            "| writefile:", _writefile ~= nil)
-        dbg("executor:", (identifyexecutor and select(1, identifyexecutor())) or "unknown")
-    end
-    local function saveLog()
-        local body = "Syllinse Movement debug log\n"
-            .. "generated: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n"
-            .. string.rep("-", 60) .. "\n"
-            .. table.concat(_logBuf, "\n") .. "\n"
-        if _writefile then
-            local ok, err = pcall(_writefile, "Syllinse_Movement_Log.txt", body)
-            if ok then
-                dbg(">>> LOG SAVED to Syllinse_Movement_Log.txt (" .. #_logBuf .. " lines)")
-            else
-                dbg(">>> writefile FAILED:", err)
-            end
-        else
-            dbg(">>> no writefile in this executor")
-        end
-        if setclipboard then pcall(setclipboard, body); dbg(">>> log copied to clipboard") end
-    end
-
     -- PreSimulation runs BEFORE physics (what the vape reference uses), so our
     -- CFrame / velocity writes win the frame. Heartbeat runs AFTER the game's
     -- combat WalkSpeed writes, so NoSlowdown re-asserts there and wins.
@@ -278,7 +222,7 @@ return function(Lib, Core)
         end
     end
 
-    -- ═══════════════════ HOOK-BASED FEATURES ════════════════════════════════
+    -- ═══════════════════ HOOK-BASED FEATURES ══════════════════════════��═════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
     -- when the production bytecode ships with stripped function debug-names, which
     -- is why {Name=...} lookups silently returned nil before.
@@ -286,11 +230,11 @@ return function(Lib, Core)
     -- EVERY matching object on the heap into a table on every call — that full-heap
     -- sweep was the 10-second freeze. filterOne stops at the first match.
     local function findFn(constants, upvals)
-        if not _filtergc then return nil end
+        if type(filtergc) ~= "function" then return nil end
         local opts = { IgnoreExecutor = true }
         if constants then opts.Constants = constants end
         if upvals   then opts.Upvalues  = upvals   end
-        local ok, res = pcall(_filtergc, "function", opts, true)  -- filterOne = true
+        local ok, res = pcall(filtergc, "function", opts, true)  -- filterOne = true
         if ok and type(res) == "function" then return res end
         return nil
     end
@@ -337,11 +281,11 @@ return function(Lib, Core)
     local setSpeedHooked = false
     local function installSetSpeedHook()
         if setSpeedHooked then return true end
-        if not _hasHookFn then return false end
+        if type(hookfunction) ~= "function" then return false end
         local fn = findFn({ "GroundSpeed", "WalkSpeed" })
         if not fn then return false end
         local orig
-        orig = _hookfunction(fn, function(inst, speed, ...)
+        orig = hookfunction(fn, function(inst, speed, ...)
             -- FIX: only ever act while an actual combat-lock STATE is active on us, so
             -- the Restore Speed value can NEVER leak into normal walking. When idle we
             -- do nothing and the game's own speed writes pass straight through.
@@ -401,12 +345,7 @@ return function(Lib, Core)
     -- Honest ceiling: the server M1 rate still caps REAL damage; this removes the client
     -- stall/feel and lets the animation chain freely.
     local animHookInstalled = false
-
-    -- diagnostics
-    local _apPlays, _apM1, _apApply = 0, 0, 0
-    local _playedIds = {}        -- id -> { name, count, m1 }
-    local _m1Ids, _m1Count = {}, 0
-    local _apInstalled = false
+    local _m1Ids = {}            -- set of live M1 animation ids (for the optional anim-speed visual)
 
     -- known M1 combat cooldown/reset durations (CombatConfig.ClientPredict.M1)
     local COMBAT_DELAYS = { 0.45, 1.25, 1.55 }   -- AttackDuration, FinisherCooldown, ComboResetTime
@@ -441,53 +380,34 @@ return function(Lib, Core)
     -- live. NOTE: NO AnimationRemap — that module is used only by Seats.lua (seat/emote
     -- anims), never by combat; the earlier remap theory was wrong. Rebuild on respawn.
     local function buildM1Ids()
-        _m1Ids, _m1Count = {}, 0
-        local function addId(x)
-            if x and not _m1Ids[x] then _m1Ids[x] = true; _m1Count = _m1Count + 1 end
-        end
+        _m1Ids = {}
         local anims  = ReplicatedStorage:FindFirstChild("Animations")
         local combat = anims and anims:FindFirstChild("Combat")
-        if not combat then dbg("buildM1Ids: no ReplicatedStorage.Animations.Combat"); return 0 end
+        if not combat then return end
         for _, styleFolder in ipairs(combat:GetChildren()) do
             if styleFolder:IsA("Folder") then
                 for _, nm in ipairs({ "1stM1", "2ndM1", "3rdM1", "4thM1" }) do
                     local a = styleFolder:FindFirstChild(nm)
-                    if a and a:IsA("Animation") then addId(extractId(a.AnimationId)) end
+                    if a and a:IsA("Animation") then
+                        local x = extractId(a.AnimationId)
+                        if x then _m1Ids[x] = true end
+                    end
                 end
             end
         end
-        dbg("buildM1Ids: collected", _m1Count, "M1 ids from live style folders")
-        return _m1Count
     end
 
-    -- called for every track the local Humanoid plays
+    -- called for every track the local Humanoid plays (optional M1 anim-speed visual)
     local function onAnimPlayed(track)
-        _apPlays = _apPlays + 1
-        local okA, anim = pcall(function() return track.Animation end)
-        local id  = (okA and anim) and extractId(anim.AnimationId) or nil
-        local nm  = (okA and anim) and anim.Name or "?"
-        if id then
-            local rec = _playedIds[id]
-            if not rec then
-                rec = { name = nm, count = 0, m1 = (_m1Ids[id] == true) }
-                _playedIds[id] = rec
-                dbg("AnimPlayed NEW id=" .. id .. " name='" .. tostring(nm) .. "' M1=" .. tostring(rec.m1))
-            end
-            rec.count = rec.count + 1
-        end
         if not Config.NoDelay_On then return end
-        if not (id and _m1Ids[id]) then return end
-        _apM1 = _apM1 + 1
         local mul = animSpeedMul()
         if mul == 1 then return end
+        local okA, anim = pcall(function() return track.Animation end)
+        local id = (okA and anim) and extractId(anim.AnimationId) or nil
+        if not (id and _m1Ids[id]) then return end
         local okS, base = pcall(function() return track.Speed end)
         if not okS or type(base) ~= "number" or base <= 0 then base = 1 end
         local target = base * mul
-        _apApply = _apApply + 1
-        if _apApply <= 10 or _apApply % 15 == 0 then
-            dbg("M1 speed x" .. string.format("%.1f", mul) .. " id=" .. id ..
-                " base=" .. string.format("%.2f", base) .. " -> " .. string.format("%.2f", target))
-        end
         -- re-assert for a short window so the game's own AdjustSpeed can't override us
         task.spawn(function()
             local t0 = os.clock()
@@ -515,8 +435,6 @@ return function(Lib, Core)
         _animConn = animator.AnimationPlayed:Connect(function(track)
             pcall(onAnimPlayed, track)
         end)
-        _apInstalled = true
-        dbg("AnimationPlayed connected on", (pcall(function() return animator:GetFullName() end)) and animator:GetFullName() or "Animator")
         return true
     end
 
@@ -526,23 +444,21 @@ return function(Lib, Core)
     -- user asked for) and, while No Delay is on, collapse the combat-cooldown durations
     -- (0.45/1.25/1.55) to ~0 so the "can attack" gate re-opens instantly. Other game
     -- timers are matched by value and left alone. Installed once; a flag toggles it.
-    local _delayHooked, _delayHits = false, 0
+    local _delayHooked = false
     local _origDelay = nil
     local function installNoDelayHook()
         if _delayHooked then return true end
-        if type(hookfunction) ~= "function" then dbg("No Delay: hookfunction unavailable"); return false end
+        if type(hookfunction) ~= "function" then return false end
         local ok = pcall(function()
             _origDelay = hookfunction(task.delay, function(t, fn, ...)
                 if Config.NoDelay_On and type(t) == "number" and isCombatDelay(t) then
-                    _delayHits = _delayHits + 1
                     t = 0
                 end
                 return _origDelay(t, fn, ...)
             end)
         end)
-        if not (ok and _origDelay) then dbg("No Delay: hookfunction(task.delay) FAILED"); return false end
+        if not (ok and _origDelay) then return false end
         _delayHooked = true
-        dbg("No Delay: hooked task.delay (combat cooldowns -> 0 while enabled)")
         return true
     end
 
@@ -562,10 +478,9 @@ return function(Lib, Core)
     local _charConnDone = false
     local function installAnimHook()
         if animHookInstalled then return true end
-        dbg("=== install No Delay (task.delay hook) + optional anim speed ===")
         buildM1Ids()
-        local okAnim  = hookAnimator()
-        local okDelay = installNoDelayHook()
+        hookAnimator()
+        installNoDelayHook()
         if not _charConnDone then
             _charConnDone = true
             LocalPlayer.CharacterAdded:Connect(function()
@@ -577,8 +492,6 @@ return function(Lib, Core)
             end)
         end
         animHookInstalled = true
-        dbg("combat hooks installed (animator=" .. tostring(okAnim) ..
-            ", task.delay=" .. tostring(okDelay) .. ", m1Ids=" .. _m1Count .. ")")
         return true
     end
 
@@ -586,18 +499,14 @@ return function(Lib, Core)
     -- All heavy scans run ONCE here, spread across frames with task.wait(), while
     -- every Config flag is still false (hooks are inert passthroughs). Toggles then
     -- only set a boolean → zero scanning on click → no freeze.
-    local bootstrapStarted, bootstrapDone = false, false
+    local bootstrapStarted = false
     local function bootstrapHooks()
         if bootstrapStarted then return end
         bootstrapStarted = true
         task.spawn(function()
-            dbg("bootstrap: starting hook installs")
-            dbgEnv()
-            local a = installSetSpeedHook(); dbg("installSetSpeedHook ->", a); task.wait()
-            local b = installAnimHook();     dbg("installAnimHook ->", b)
-            bootstrapDone = true
-            dbg("bootstrap: DONE  (SetSpeed=" .. tostring(a) .. " combat=" .. tostring(b) .. ")")
-            dbg("Press K in-game to save this log to a file you can send.")
+            installSetSpeedHook()
+            task.wait()
+            installAnimHook()
         end)
     end
     local function combatHooksReady()
@@ -609,10 +518,10 @@ return function(Lib, Core)
     local sprintSingleton
     local function getSprint()
         if sprintSingleton then return sprintSingleton end
-        if not _filtergc then return nil end
+        if type(filtergc) ~= "function" then return nil end
         -- filterOne = true: grab the first table carrying _sprintInputDesired instead
         -- of collecting every matching table on the heap (the old full sweep froze).
-        local ok, res = pcall(_filtergc, "table", { Keys = { "_sprintInputDesired" } }, true)
+        local ok, res = pcall(filtergc, "table", { Keys = { "_sprintInputDesired" } }, true)
         if ok and type(res) == "table" and rawget(res, "_sprintInputDesired") ~= nil then
             sprintSingleton = res
         end
@@ -673,30 +582,6 @@ return function(Lib, Core)
         -- Warm up the hooks in the background now, so toggling a feature later never
         -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
         bootstrapHooks()
-
-        -- DEBUG: press K to dump the debug log to a file (and clipboard) to share.
-        UserInputService.InputBegan:Connect(function(input, gpe)
-            if gpe then return end
-            if input.KeyCode == Enum.KeyCode.K then
-                dbg("=== K pressed: current status ===")
-                dbg("--- No Delay (task.delay hook) ---")
-                dbg("delayHooked=", _delayHooked, "| NoDelay_On=", Config.NoDelay_On,
-                    "| combat delays collapsed=", _delayHits, "| clearAttrs=", Config.NoDelay_Attrs)
-                dbg("--- anim / general ---")
-                dbg("animHook=", animHookInstalled, "animatorHooked=", _apInstalled, "M1 idSet=", _m1Count)
-                dbg("AnimationPlayed total=", _apPlays, "M1 matched=", _apM1, "speed applied=", _apApply)
-                dbg("NoDelay_Anim=", Config.NoDelay_Anim, "| NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
-                -- every played track id + whether it matched the M1 set (spot mismatches)
-                dbg("--- played tracks (id / name / M1? / count) ---")
-                local anyN = false
-                for pid, rec in pairs(_playedIds) do
-                    anyN = true
-                    dbg("   id=" .. pid .. " '" .. tostring(rec.name) .. "' M1=" .. tostring(rec.m1) .. " x" .. rec.count)
-                end
-                if not anyN then dbg("   (none - AnimationPlayed never fired; animator not hooked?)") end
-                saveLog()
-            end
-        end)
     end
 
     function M.buildUI(ctx)
