@@ -146,9 +146,10 @@ return function(Lib, Core)
         NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
         NS_Speed  = 0,            -- restore target used ONLY during those states: 0 = game base (12/25), 1..25 = exact
 
-        -- No Combo Wait (AnimationPlayed: match M1 id -> AdjustSpeed x NCW_Speed)
+        -- No Combo Wait (force u21=true gate + shrink FinisherCooldown via setupvalue)
         NCW_On    = false,
         NCW_Speed = 20,           -- animSpeed multiplier fed to the scheduler (higher = shorter waits)
+        FF_On     = false,        -- Finisher First: pin combo counter so every swing = 4th (finisher) anim
 
         -- Ping Spoof (hook the REAL CombatPingAnimUtils.GetPingAnimSpeedMultiplier)
         Ping_On    = false,
@@ -571,220 +572,133 @@ return function(Lib, Core)
     --   scheduleM1SwingTimers straight out of v1.OnHoldSwing's upvalues (OnHoldSwing
     --   captures it directly — unambiguous). (2) Fallback: filtergc by string
     --   Constants (always matchable) then disambiguate by upvalue signature.
-    local _schedFn = nil
-    local _cd = { attackIdx = nil, finIdx = nil, comboIdx = nil,
-                  origAttack = nil, origFin = nil, origCombo = nil }
+    -- Anchor everything on v1.OnHoldSwing (verified upvalue layout):
+    --   { LocalPlayer(Instance), u19(number = COMBO COUNTER, shared ref),
+    --     Evasive(table), MovementServiceClient(table), scheduleM1SwingTimers(function) }
+    --   → u19 is the ONLY number upvalue, schedFn the ONLY function upvalue. No guessing.
+    -- scheduleM1SwingTimers upvalues:
+    --   { u21(bool GATE), u22(nil), u31(table), FinisherCooldown~1.25, AttackDuration~0.45,
+    --     u20(nil), ComboResetTime~1.55, resetCombo(fn) }
+    --   → u21 is the ONLY boolean; fin/atk/combo identified by value.
+    -- tryM1(): u19 = u19%4+1 ; anim = getM1Animations()[u19] ; scheduleM1SwingTimers(u19).
+    --   At u19==4 the gate stays closed for FinisherCooldown (1.25s) = the post-combo delay.
+    --   First gate in tryM1: `if not u21 then return`. (Server attr M1Cooldown is separate.)
+    -- LEVERS: (a) force u21=true every frame → the swing-cooldown gate never blocks input;
+    --   (b) hold u19=3 so u19%4+1==4 every swing → 4th (finisher) animation each hit.
+    --   Finisher DAMAGE is server-decided (client only sends a sequence #), so (b) forces
+    --   the client-side finisher animation/state, not guaranteed server damage.
+    local _ohs, _schedFn = nil, nil
+    local _u19idx, _u21idx = nil, nil
+    local _cd = { finIdx = nil, atkIdx = nil, cmbIdx = nil,
+                  origFin = nil, origAtk = nil, origCmb = nil }
     local _cdPatched, _cdMapped = false, false
     local _cdStatus = "not run"
+    local function near(a, b) return type(a) == "number" and math.abs(a - b) <= 0.2 end
 
-    -- Verified from M1.lua bytecode. scheduleM1SwingTimers upvalue layout:
-    --   #1 u21(bool) #2 u22(nil) #3 u31(Janitor) #4 FinisherCooldown=1.25
-    --   #5 AttackDuration=0.45 #6 u20(nil) #7 ComboResetTime=1.55 #8 resetCombo(fn)
-    -- CombatConfig.ClientPredict.M1 confirmed: 1.25 / 0.45 / 1.55.
-    -- IMPORTANT: DO NOT verify via debug.getconstants — on Potassium it proved
-    -- unreliable here (rejected the real fn, accepted resetLocalCombatState which also
-    -- carries the "M1AttackCooldownTask"/"M1ComboResetTask" strings but for :Remove()).
-    -- debug.getupvalues reads VALUES reliably (the log showed it read 1 and 0 correctly),
-    -- so we identify scheduleM1SwingTimers UNIQUELY by its upvalue value-set: it is the
-    -- only fn owning a number ~1.25 AND ~0.45 AND ~1.55. resetLocalCombatState's numeric
-    -- upvalues are all 0; ServerResponse's were 1/0 — both fail this test.
-    local EXP_FIN, EXP_ATK, EXP_CMB = 1.25, 0.45, 1.55
-    local function near(a, b) return type(a) == "number" and math.abs(a - b) <= 0.15 end
-
-    local function isScheduleFn(fn)
-        if type(fn) ~= "function" then return false end
-        local ups = _getupvalues(fn)
-        if type(ups) ~= "table" then return false end
-        local hasFin, hasAtk, hasCmb = false, false, false
-        for _, v in pairs(ups) do
-            if near(v, EXP_FIN) then hasFin = true end
-            if near(v, EXP_ATK) then hasAtk = true end
-            if near(v, EXP_CMB) then hasCmb = true end
+    local function getOHSFromTable(tbl)
+        if type(tbl) == "table" then
+            local ohs = rawget(tbl, "OnHoldSwing")
+            if type(ohs) == "function" then return ohs end
         end
-        return hasFin and hasAtk and hasCmb
+        return nil
     end
 
-    -- extract scheduleM1SwingTimers out of a resolved M1 module table (v1).
-    -- OnHoldSwing upvalues (verified) = {LocalPlayer, u19(num), Evasive, MovementServiceClient,
-    -- scheduleM1SwingTimers} → the ONLY function-typed upvalue is what we want.
-    local function drillModuleTable(mod)
-        if type(mod) ~= "table" then return nil end
-        local ohs = rawget(mod, "OnHoldSwing")
-        if type(ohs) == "function" then
-            local ups = _getupvalues(ohs) or {}
-            -- pass 1: value-verified match
-            for _, v in pairs(ups) do
-                if isScheduleFn(v) then dbg("combo lever: FOUND via OnHoldSwing (verified)"); return v end
-            end
-            -- pass 2: sole function-typed upvalue (deterministic per bytecode layout)
-            local onlyFn, count = nil, 0
-            for _, v in pairs(ups) do
-                if type(v) == "function" then onlyFn = v; count = count + 1 end
-            end
-            if count == 1 and type(onlyFn) == "function" then
-                dbg("combo lever: FOUND via OnHoldSwing (sole fn upvalue)"); return onlyFn
-            end
-        end
-        local oma = rawget(mod, "OnM1Activated")  -- 2-hop: OnM1Activated → tryM1 → schedule
-        if type(oma) == "function" then
-            for _, tryM1 in pairs(_getupvalues(oma) or {}) do
-                if type(tryM1) == "function" then
-                    for _, v in pairs(_getupvalues(tryM1) or {}) do
-                        if isScheduleFn(v) then dbg("combo lever: FOUND via OnM1Activated->tryM1"); return v end
+    -- Resolve v1.OnHoldSwing (deterministic anchor). Path 1: getloadedmodules + require
+    -- (returns the CACHED module table, does NOT re-run). Path 2: filtergc the module table.
+    local function findOHS()
+        if _ohs then return _ohs end
+        if type(_getloadedmodules) == "function" then
+            local ok, mods = pcall(_getloadedmodules)
+            if ok and type(mods) == "table" then
+                for _, m in ipairs(mods) do
+                    if typeof(m) == "Instance" and m.Name == "M1" then
+                        local full = ""; pcall(function() full = m:GetFullName() end)
+                        if string.find(full, "CombatSystemClient", 1, true) then
+                            local okr, tbl = pcall(require, m)
+                            local ohs = okr and getOHSFromTable(tbl)
+                            if ohs then dbg("combo lever: OnHoldSwing via getloadedmodules"); _ohs = ohs; return ohs end
+                        end
                     end
                 end
             end
         end
+        if _filtergc then
+            local ok, tbl = pcall(_filtergc, "table",
+                { Keys = { "OnM1Activated", "OnHoldSwing", "Hold", "ServerResponse" } }, true)
+            local ohs = ok and getOHSFromTable(tbl)
+            if ohs then dbg("combo lever: OnHoldSwing via filtergc"); _ohs = ohs; return ohs end
+        end
+        dbg("combo lever: OnHoldSwing NOT found")
         return nil
     end
 
-    -- PRIMARY (deterministic): getloadedmodules → find the M1 ModuleScript → require it
-    -- (returns the CACHED v1 table, does NOT re-run) → drill. No GC guesswork.
-    local function findViaLoadedModules()
-        if type(_getloadedmodules) ~= "function" then return nil end
-        local ok, mods = pcall(_getloadedmodules)
-        if not (ok and type(mods) == "table") then dbg("combo lever: getloadedmodules failed"); return nil end
-        for _, m in ipairs(mods) do
-            if typeof(m) == "Instance" and m.Name == "M1" then
-                local full = ""
-                pcall(function() full = m:GetFullName() end)
-                if string.find(full, "CombatSystemClient", 1, true) and string.find(full, "M1", 1, true) then
-                    local okr, tbl = pcall(require, m)
-                    if okr and type(tbl) == "table" then
-                        local fn = drillModuleTable(tbl)
-                        if fn then dbg("combo lever: resolved M1 via getloadedmodules(" .. full .. ")"); return fn end
-                        dbg("combo lever: required M1 (" .. full .. ") but drill found nothing")
-                    else
-                        dbg("combo lever: require(M1) failed: " .. tostring(tbl))
-                    end
-                end
-            end
-        end
-        dbg("combo lever: no M1 module in getloadedmodules")
-        return nil
-    end
-
-    -- PRIMARY: M1 module table (real keys) → OnHoldSwing upvalues → scheduleM1SwingTimers.
-    local function findViaModule()
-        local ok, mod = pcall(_filtergc, "table",
-            { Keys = { "OnM1Activated", "OnHoldSwing", "Hold", "ServerResponse" } }, true)
-        if not (ok and type(mod) == "table") then dbg("combo lever: M1 module table NOT found"); return nil end
-        -- OnHoldSwing captures scheduleM1SwingTimers directly (1-hop, unambiguous)
-        local ohs = rawget(mod, "OnHoldSwing")
-        if type(ohs) == "function" then
-            local ups = _getupvalues(ohs)
-            if type(ups) == "table" then
-                for _, v in pairs(ups) do
-                    if isScheduleFn(v) then dbg("combo lever: FOUND via module.OnHoldSwing"); return v end
-                end
-            end
-        end
-        -- 2-hop fallback: OnM1Activated → tryM1 → scheduleM1SwingTimers
-        local oma = rawget(mod, "OnM1Activated")
-        if type(oma) == "function" then
-            for _, tryM1 in pairs(_getupvalues(oma) or {}) do
-                if type(tryM1) == "function" then
-                    for _, v in pairs(_getupvalues(tryM1) or {}) do
-                        if isScheduleFn(v) then dbg("combo lever: FOUND via OnM1Activated->tryM1"); return v end
-                    end
-                end
-            end
-        end
-        dbg("combo lever: module drill found no schedule fn")
-        return nil
-    end
-
-    -- FALLBACK: string-Constants filter (multiple fns match → disambiguate via isScheduleFn).
-    local function findViaConstants()
-        local ok, res = pcall(_filtergc, "function",
-            { Constants = { "M1AttackCooldownTask", "M1ComboResetTask" } }, false)
-        if not (ok and type(res) == "table") then dbg("combo lever: Constants filter failed"); return nil end
-        for _, fn in ipairs(res) do
-            if isScheduleFn(fn) then dbg("combo lever: FOUND via Constants filter"); return fn end
-        end
-        dbg("combo lever: Constants filter matched " .. #res .. " fn(s), none qualified")
-        return nil
-    end
-
-    local function findScheduleFn()
-        if _schedFn then return _schedFn end
-        if not _getupvalues then dbg("combo lever: no getupvalues -> cannot find fn"); return nil end
-        _schedFn = findViaLoadedModules() or findViaModule() or findViaConstants()
-        dbg("combo lever: scheduleM1SwingTimers " .. (_schedFn and "FOUND" or "NOT found"))
-        return _schedFn
-    end
-
-    -- identify which upvalue index is which by proximity to the known config values.
-    local function mapCooldownUpvalues()
+    -- Map schedFn, u19 index (in OHS), u21 index + fin/atk/combo indices (in schedFn).
+    local function mapAll()
         if _cdMapped then return true end
-        local fn = findScheduleFn()
-        if not fn then return false end
-        local ups = _getupvalues(fn)
-        if type(ups) ~= "table" then dbg("combo lever: getupvalues returned non-table"); return false end
-        local nums = {}
-        for i, v in pairs(ups) do if type(v) == "number" then nums[#nums + 1] = { idx = i, val = v } end end
-        if #nums < 2 then dbg("combo lever: <2 numeric upvalues (" .. #nums .. ")"); return false end
-        -- pick by closeness to config: finisher~1.25, attack~0.45, comboReset~1.55
-        local function pick(target)
-            local best, bestd
-            for _, e in ipairs(nums) do
-                local d = math.abs(e.val - target)
-                if not bestd or d < bestd then best, bestd = e, d end
+        if not _getupvalues then dbg("combo lever: no getupvalues"); return false end
+        local ohs = findOHS()
+        if not ohs then return false end
+        local oups = _getupvalues(ohs)
+        if type(oups) ~= "table" then dbg("combo lever: OHS getupvalues failed"); return false end
+        local fnCount, numCount = 0, 0
+        for i, v in pairs(oups) do
+            if type(v) == "function" then _schedFn = v; fnCount = fnCount + 1 end
+            if type(v) == "number" then _u19idx = i; numCount = numCount + 1 end
+        end
+        if not _schedFn then dbg("combo lever: OHS has no function upvalue"); return false end
+        if fnCount ~= 1 then dbg("combo lever: WARN OHS fn upvalue count=" .. fnCount) end
+        if numCount ~= 1 then dbg("combo lever: WARN OHS number upvalue count=" .. numCount .. " (u19 may be off)") end
+        local sups = _getupvalues(_schedFn)
+        if type(sups) ~= "table" then dbg("combo lever: sched getupvalues failed"); return false end
+        local fin, atk, cmb, boolIdx, boolCount = nil, nil, nil, nil, 0
+        for i, v in pairs(sups) do
+            if type(v) == "boolean" then boolIdx = i; boolCount = boolCount + 1 end
+            if type(v) == "number" then
+                if near(v, 1.25) and not fin then fin = { idx = i, val = v } end
+                if near(v, 0.45) and not atk then atk = { idx = i, val = v } end
+                if near(v, 1.55) and not cmb then cmb = { idx = i, val = v } end
             end
-            return best
         end
-        local fin  = pick(1.25)
-        local atk  = pick(0.45)
-        local cmb  = pick(1.55)
-        if not (fin and atk) or fin.idx == atk.idx then
-            dbg("combo lever: could not disambiguate finisher/attack upvalues"); return false
-        end
-        _cd.finIdx,  _cd.origFin    = fin.idx, fin.val
-        _cd.attackIdx, _cd.origAttack = atk.idx, atk.val
-        if cmb and cmb.idx ~= fin.idx and cmb.idx ~= atk.idx then
-            _cd.comboIdx, _cd.origCombo = cmb.idx, cmb.val
-        end
+        if not (fin and atk) or fin.idx == atk.idx then dbg("combo lever: fin/atk map failed"); return false end
+        _cd.finIdx, _cd.origFin = fin.idx, fin.val
+        _cd.atkIdx, _cd.origAtk = atk.idx, atk.val
+        if cmb and cmb.idx ~= fin.idx and cmb.idx ~= atk.idx then _cd.cmbIdx, _cd.origCmb = cmb.idx, cmb.val end
+        _u21idx = boolIdx
+        if boolCount ~= 1 then dbg("combo lever: WARN sched boolean upvalue count=" .. boolCount .. " (u21 may be off)") end
         _cdMapped = true
-        dbg("combo lever: MAPPED Finisher=" .. tostring(fin.val) .. "(#" .. fin.idx ..
-            ") Attack=" .. tostring(atk.val) .. "(#" .. atk.idx ..
-            ") Combo=" .. (cmb and (tostring(cmb.val) .. "(#" .. cmb.idx .. ")") or "n/a"))
+        dbg("combo lever: MAPPED u19idx=" .. tostring(_u19idx) .. " u21idx=" .. tostring(_u21idx) ..
+            " fin=" .. tostring(fin.val) .. "(#" .. fin.idx .. ") atk=" .. tostring(atk.val) .. "(#" .. atk.idx .. ")")
         return true
     end
 
     local function applyComboCooldowns()
-        if not mapCooldownUpvalues() then
-            _cdStatus = _schedFn and "mapped=false" or "scheduleM1SwingTimers NOT found"
+        if not mapAll() then
+            _cdStatus = _schedFn and "mapped=false" or "OnHoldSwing NOT found"
             return false
         end
         local mul = math.max(1, Config.NCW_Speed or 1)
-        -- kill the EXTRA finisher wait: finisher gates like a normal swing, then both
-        -- shrink by Combo Speed. Floor keeps it sane (avoid exactly 0).
-        local newAttack = math.max(0.02, _cd.origAttack / mul)
-        local newFin    = math.max(0.02, math.min(_cd.origAttack, _cd.origFin) / mul)
-        pcall(_setupvalue, _schedFn, _cd.attackIdx, newAttack)
+        -- shrink the timer as backup; the per-frame u21=true force is the real no-wait.
+        local newAtk = math.max(0.02, _cd.origAtk / mul)
+        local newFin = math.max(0.02, math.min(_cd.origAtk, _cd.origFin) / mul)
+        pcall(_setupvalue, _schedFn, _cd.atkIdx, newAtk)
         pcall(_setupvalue, _schedFn, _cd.finIdx, newFin)
         _cdPatched = true
-        -- read-back verification (proves the write landed)
         local ups = _getupvalues(_schedFn)
         local rbFin = ups and ups[_cd.finIdx]
-        local rbAtk = ups and ups[_cd.attackIdx]
         local landed = (type(rbFin) == "number" and math.abs(rbFin - newFin) < 0.001)
-        _cdStatus = "finisher " .. string.format("%.2f", _cd.origFin) .. "->" .. string.format("%.2f", rbFin or -1) ..
-            (landed and " OK" or " WRITE-FAILED")
-        dbg("combo lever: APPLIED finisher " .. tostring(_cd.origFin) .. "->" .. string.format("%.3f", newFin) ..
-            " attack " .. tostring(_cd.origAttack) .. "->" .. string.format("%.3f", newAttack) ..
-            " | read-back finisher=" .. tostring(rbFin) .. " attack=" .. tostring(rbAtk) ..
-            " landed=" .. tostring(landed) .. " (Combo Speed=" .. mul .. ")")
+        _cdStatus = "fin " .. string.format("%.2f", _cd.origFin) .. "->" .. string.format("%.2f", rbFin or -1) ..
+            (landed and " OK" or " WRITE-FAIL") .. " | u21force=" .. tostring(_u21idx ~= nil)
+        dbg("combo lever: APPLIED fin->" .. string.format("%.3f", newFin) .. " atk->" .. string.format("%.3f", newAtk) ..
+            " read-back=" .. tostring(rbFin) .. " landed=" .. tostring(landed) .. " (Combo Speed=" .. mul .. ")")
         return true
     end
 
     local function restoreComboCooldowns()
-        if not (_cdPatched and _schedFn and _cd.attackIdx) then return end
-        pcall(_setupvalue, _schedFn, _cd.attackIdx, _cd.origAttack)
+        if not (_cdPatched and _schedFn) then return end
+        pcall(_setupvalue, _schedFn, _cd.atkIdx, _cd.origAtk)
         pcall(_setupvalue, _schedFn, _cd.finIdx, _cd.origFin)
         _cdPatched = false
-        dbg("combo lever: RESTORED originals (attack=" .. tostring(_cd.origAttack) ..
-            " finisher=" .. tostring(_cd.origFin) .. ")")
+        dbg("combo lever: RESTORED originals (atk=" .. tostring(_cd.origAtk) .. " fin=" .. tostring(_cd.origFin) .. ")")
     end
 
     local _charConnDone = false
@@ -793,7 +707,7 @@ return function(Lib, Core)
         dbg("=== install combat lever (cooldown upvalue patch + optional anim speed) ===")
         buildM1Ids()
         local okAnim = hookAnimator()
-        local okCd   = mapCooldownUpvalues()
+        local okCd   = mapAll()
         if not _charConnDone then
             _charConnDone = true
             LocalPlayer.CharacterAdded:Connect(function()
@@ -866,23 +780,29 @@ return function(Lib, Core)
         return true
     end
 
-    -- No Combo Wait per-frame driver: the animation speed / 4th->1st are handled by the
-    -- hooks; here we also drop the SERVER-set post-combo gate locally. tryM1 refuses when
-    -- Character:GetAttribute("M1Cooldown") is truthy (M1.lua:409); the client never sets
-    -- it, so clearing it locally lets the next swing fire immediately after a combo. The
-    -- server re-replicates it, so we clear every frame to win the race. Real damage is
-    -- still server rate-capped; this only removes the client-side stall.
-    local _ncwCdClears = 0
+    -- No Combo Wait per-frame driver. Three levers, all client-side:
+    --   1) force u21=true  → the swing-cooldown gate in tryM1 (`if not u21 then return`)
+    --      never blocks the next input, finisher or not. This is the real no-wait.
+    --   2) if Finisher-First on, hold u19=3 → tryM1 computes u19%4+1==4 every swing, so the
+    --      4th (finisher) animation + client combo state play on every hit.
+    --   3) clear the SERVER-set M1Cooldown attribute locally (best-effort; server re-sets
+    --      it, so we clear each frame). Real damage stays server-authoritative.
+    local _ncwCdClears, _u21forces, _u19forces = 0, 0, 0
     local function driveNCW()
         if not Config.NCW_On then return end
+        -- 1) keep the client swing gate open
+        if _cdMapped and _u21idx and _schedFn then
+            if pcall(_setupvalue, _schedFn, _u21idx, true) then _u21forces = _u21forces + 1 end
+        end
+        -- 2) finisher-first: pin the combo counter so the next swing resolves to index 4
+        if Config.FF_On and _cdMapped and _u19idx and _ohs then
+            if pcall(_setupvalue, _ohs, _u19idx, 3) then _u19forces = _u19forces + 1 end
+        end
+        -- 3) drop the server post-combo attribute locally
         local c = LocalPlayer.Character
-        if not c then return end
-        if c:GetAttribute("M1Cooldown") ~= nil then
+        if c and c:GetAttribute("M1Cooldown") ~= nil then
             pcall(function() c:SetAttribute("M1Cooldown", nil) end)
             _ncwCdClears = _ncwCdClears + 1
-            if _ncwCdClears <= 8 or _ncwCdClears % 25 == 0 then
-                dbg("NCW: cleared M1Cooldown attribute (#" .. _ncwCdClears .. ")")
-            end
         end
     end
 
@@ -917,6 +837,7 @@ return function(Lib, Core)
     function M.start()
         Config.Speed_On, Config.Fly_On = false, false
         Config.NS_On, Config.NCW_On, Config.Ping_On = false, false, false
+        Config.FF_On = false
         Config.Sprint_On, Config.Sprint_Bypass = false, false
         -- Warm up the hooks in the background now, so toggling a feature later never
         -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
@@ -928,14 +849,19 @@ return function(Lib, Core)
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
                 -- COMBO COOLDOWN LEVER (the real fix) — the important lines
-                dbg("--- combo cooldown lever ---")
-                dbg("schedFnFound=", _schedFn ~= nil, "mapped=", _cdMapped, "patched=", _cdPatched)
+                dbg("--- combo lever ---")
+                dbg("OHSfound=", _ohs ~= nil, "schedFnFound=", _schedFn ~= nil, "mapped=", _cdMapped, "patched=", _cdPatched)
+                dbg("u19idx=", _u19idx, "u21idx=", _u21idx, "status=", _cdStatus)
                 if _cdMapped then
-                    dbg("   origFinisher=", _cd.origFin, "(#" .. tostring(_cd.finIdx) .. ")",
-                        "origAttack=", _cd.origAttack, "(#" .. tostring(_cd.attackIdx) .. ")")
+                    dbg("   origFin=", _cd.origFin, "(#" .. tostring(_cd.finIdx) .. ")",
+                        "origAtk=", _cd.origAtk, "(#" .. tostring(_cd.atkIdx) .. ")")
                     local ups = _schedFn and _getupvalues(_schedFn)
-                    dbg("   LIVE finisher=", ups and ups[_cd.finIdx], "LIVE attack=", ups and ups[_cd.attackIdx])
+                    dbg("   LIVE fin=", ups and ups[_cd.finIdx], "LIVE atk=", ups and ups[_cd.atkIdx],
+                        "LIVE u21=", ups and _u21idx and ups[_u21idx])
+                    local ou = _ohs and _getupvalues(_ohs)
+                    dbg("   LIVE u19=", ou and _u19idx and ou[_u19idx], "| u21forces=", _u21forces, "u19forces=", _u19forces)
                 end
+                dbg("FF_On=", Config.FF_On)
                 dbg("animHook=", animHookInstalled, "animatorHooked=", _apInstalled, "M1 idSet=", _m1Count)
                 dbg("AnimationPlayed total=", _apPlays, "M1 matched=", _apM1, "speed applied=", _apApply, "cdClears=", _ncwCdClears)
                 dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "SpeedMul=", string.format("%.2f", speedMul()))
@@ -1091,14 +1017,32 @@ return function(Lib, Core)
                     notify("No Combo Wait", "Disabled")
                 end
             end,
-            Desc = "removes the delay after the 4th M1 by rewriting the game's own\nFinisherCooldown (1.25s) down to a normal swing via debug.setupvalue",
+            Desc = "kills the post-combo delay: forces the client swing gate u21=true every\nframe + shrinks FinisherCooldown (1.25s) via debug.setupvalue",
         })
         slider(sCbt, { Name = "Combo Speed", Flag = "MV_NCWSpeed", Default = Config.NCW_Speed,
             Min = 1, Max = 50, Suffix = "x", Callback = function(v)
                 Config.NCW_Speed = v
                 if Config.NCW_On then applyComboCooldowns() end  -- re-scale live
             end })
-        sCbt:SubLabel({ Text = "Finds scheduleM1SwingTimers (M1.lua) by its {1.25,0.45,1.55} upvalue set and\nrewrites FinisherCooldown+AttackDuration with debug.setupvalue, dividing by Combo\nSpeed. This changes the real attack gate (u21), not the animation. Server may still\nrate-cap real damage, but the client-side post-combo wait is gone." })
+        feature(sCbt, {
+            Title = "Finisher First (4th->1st)", Flag = "MV_FF",
+            get = function() return Config.FF_On end,
+            set = function(v)
+                Config.FF_On = v
+                if v then
+                    bootstrapHooks()
+                    if not Config.NCW_On then notify("Finisher First", "enable No Combo Wait too (else 1.25s wait each hit)") end
+                    task.spawn(function()
+                        for _ = 1, 8 do if mapAll() then break end task.wait(0.4) end
+                        notify("Finisher First", _cdMapped and ("ON (u19idx=" .. tostring(_u19idx) .. ")") or "combo counter not found")
+                    end)
+                else
+                    notify("Finisher First", "Disabled")
+                end
+            end,
+            Desc = "every M1 plays the 4th (finisher) swing: pins the combo counter u19 so\ntryM1 resolves index 4 each hit. Finisher DAMAGE stays server-decided.",
+        })
+        sCbt:SubLabel({ Text = "Anchors on M1.OnHoldSwing: u19 (combo counter) = its only number upvalue,\nscheduleM1SwingTimers = its only function upvalue, u21 (gate) = that fn's only\nboolean. No Combo Wait forces u21=true each frame; Finisher First pins u19=3 so\nevery swing is the 4th hit. Server stays authoritative over real damage." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
