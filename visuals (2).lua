@@ -25,6 +25,7 @@ return function(Lib, Core)
     local Workspace         = game:GetService("Workspace")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local TweenService      = game:GetService("TweenService")
+    local UserInputService  = game:GetService("UserInputService")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -45,11 +46,13 @@ return function(Lib, Core)
         ESP_State    = true,
         ESP_Style    = true,
         ESP_Health   = true,
+        ESP_M2Bar    = true,     -- purple vertical bar (right of box) = target's M2 cooldown
         ESP_Skeleton = false,
         ESP_Tracer   = false,
         ESP_MaxDist  = 1200,
         ESP_Box_Color  = Color3.fromRGB(90, 150, 255),
         ESP_Text_Color = Color3.fromRGB(235, 235, 240),
+        ESP_M2_Color   = Color3.fromRGB(170, 110, 255),
 
         -- Indicators
         Ind_On      = false,
@@ -90,6 +93,20 @@ return function(Lib, Core)
             if ok and type(v) == "number" then return v end
         end
         return 1.5
+    end
+    -- M2Cooldown is a boolean attribute → mirror it into a timed ratio per target,
+    -- using the exact duration from CombatConfig. `trk` is the per-esp o.m2t table.
+    -- Returns remaining ratio (0..1) while on cooldown, or nil when ready.
+    local function readTargetM2Ratio(char, trk)
+        local on = char:GetAttribute("M2Cooldown") == true
+        if on and not trk.active then
+            trk.active = true; trk.t0 = time(); trk.dur = cfgM2Cooldown(char)
+        elseif not on and trk.active then
+            trk.active = false
+        end
+        if not on then return nil end
+        local remaining = math.max(0, trk.dur - (time() - trk.t0))
+        return math.clamp(remaining / math.max(trk.dur, 0.01), 0, 1)
     end
 
     -- ── Small helpers ────────────────────────────────────────────────────────
@@ -150,18 +167,41 @@ return function(Lib, Core)
         return d
     end
 
+    -- One factory so EVERY ESP label shares IDENTICAL font + outline settings. The
+    -- name used to look crisper than the rest simply because the props weren't shared;
+    -- now name/info/state/style all render with the same Plex font (2) and outline.
+    local function newText(size, color)
+        return newDrawing("Text", {
+            Size    = size,
+            Font    = 2,                      -- Plex (the nice-looking one)
+            Center  = true,
+            Outline = true,
+            OutlineColor = Color3.new(0, 0, 0),
+            Visible = false,
+            Color   = color,
+            ZIndex  = 3,
+        })
+    end
+
+    local TEXT_KEYS = { "name", "info", "state", "style" }
+    local BAR_KEYS  = { "box", "boxOutline", "hpBg", "hp", "m2Bg", "m2", "tracer" }
+
     local function createEsp(plr)
         if espPool[plr] then return espPool[plr] end
         local o = {}
         o.box = newDrawing("Square", { Thickness = 1, Filled = false, Visible = false, Color = Config.ESP_Box_Color, ZIndex = 2 })
         o.boxOutline = newDrawing("Square", { Thickness = 3, Filled = false, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 1 })
-        o.name = newDrawing("Text", { Size = 13, Center = true, Outline = true, Visible = false, Color = Config.ESP_Text_Color, Font = 2 })
-        o.info = newDrawing("Text", { Size = 12, Center = true, Outline = true, Visible = false, Color = Config.ESP_Text_Color, Font = 2 })
-        o.state = newDrawing("Text", { Size = 12, Center = true, Outline = true, Visible = false, Color = Color3.new(1, 1, 1), Font = 2 })
-        o.style = newDrawing("Text", { Size = 12, Center = true, Outline = true, Visible = false, Color = Color3.fromRGB(200, 200, 210), Font = 2 })
+        o.name  = newText(14, Config.ESP_Text_Color)
+        o.info  = newText(13, Config.ESP_Text_Color)
+        o.state = newText(13, Color3.new(1, 1, 1))
+        o.style = newText(13, Color3.fromRGB(200, 200, 210))
         o.hpBg = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 1 })
         o.hp   = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Color3.fromRGB(90, 220, 90), ZIndex = 2 })
+        -- purple M2-cooldown bar, mirrored on the RIGHT side of the box
+        o.m2Bg = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 1 })
+        o.m2   = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Config.ESP_M2_Color, ZIndex = 2 })
         o.tracer = newDrawing("Line", { Thickness = 1, Visible = false, Color = Config.ESP_Box_Color })
+        o.m2t = { active = false, t0 = 0, dur = 7 }   -- per-player M2 timer (boolean attr → timed)
         o.bones = {}
         for i = 1, #BONES do
             o.bones[i] = newDrawing("Line", { Thickness = 1, Visible = false, Color = Color3.fromRGB(255, 255, 255) })
@@ -172,18 +212,16 @@ return function(Lib, Core)
 
     local function hideEsp(o)
         if not o then return end
-        for _, key in ipairs({ "box", "boxOutline", "name", "info", "state", "style", "hpBg", "hp", "tracer" }) do
-            if o[key] then o[key].Visible = false end
-        end
+        for _, key in ipairs(TEXT_KEYS) do if o[key] then o[key].Visible = false end end
+        for _, key in ipairs(BAR_KEYS)  do if o[key] then o[key].Visible = false end end
         for _, b in ipairs(o.bones) do b.Visible = false end
     end
 
     local function destroyEsp(plr)
         local o = espPool[plr]
         if not o then return end
-        for _, key in ipairs({ "box", "boxOutline", "name", "info", "state", "style", "hpBg", "hp", "tracer" }) do
-            if o[key] then pcall(function() o[key]:Remove() end) end
-        end
+        for _, key in ipairs(TEXT_KEYS) do if o[key] then pcall(function() o[key]:Remove() end) end end
+        for _, key in ipairs(BAR_KEYS)  do if o[key] then pcall(function() o[key]:Remove() end) end end
         for _, b in ipairs(o.bones) do pcall(function() b:Remove() end) end
         espPool[plr] = nil
     end
@@ -202,15 +240,21 @@ return function(Lib, Core)
         local dist = lpRoot and (root.Position - lpRoot.Position).Magnitude or 0
         if Config.ESP_MaxDist > 0 and dist > Config.ESP_MaxDist then hideEsp(o); return end
 
-        -- 2D box from the model bounding box (8 projected corners)
+        -- 2D box from the model bounding box. Corners are built AXIS-ALIGNED in world
+        -- space (NOT rotated by the model CFrame): shiftlock forces the character to
+        -- yaw toward the camera, and an orientation-locked box would shift/breathe with
+        -- that yaw. Using world axes + the max horizontal extent keeps the box steady.
         local cf, size = char:GetBoundingBox()
-        local half = size * 0.5
+        local center = cf.Position
+        local hx = math.max(size.X, size.Z) * 0.5
+        local hy = size.Y * 0.5
+        local hz = hx
         local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
         local anyOn = false
         for _, cx in ipairs({ -1, 1 }) do
             for _, cy in ipairs({ -1, 1 }) do
                 for _, cz in ipairs({ -1, 1 }) do
-                    local world = (cf * CFrame.new(half.X * cx, half.Y * cy, half.Z * cz)).Position
+                    local world = center + Vector3.new(hx * cx, hy * cy, hz * cz)
                     local sp, on = Camera:WorldToViewportPoint(world)
                     if on then anyOn = true end
                     if sp.X < minX then minX = sp.X end
@@ -237,14 +281,32 @@ return function(Lib, Core)
         -- Health bar (left of the box)
         if Config.ESP_Health then
             local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-            local hx = bx - 5
-            o.hpBg.Position = Vector2.new(hx - 1, by - 1); o.hpBg.Size = Vector2.new(4, bh + 2); o.hpBg.Visible = true
+            local hbx = bx - 5
+            o.hpBg.Position = Vector2.new(hbx - 1, by - 1); o.hpBg.Size = Vector2.new(4, bh + 2); o.hpBg.Visible = true
             local fillH = bh * ratio
-            o.hp.Position = Vector2.new(hx, by + (bh - fillH)); o.hp.Size = Vector2.new(2, fillH)
+            o.hp.Position = Vector2.new(hbx, by + (bh - fillH)); o.hp.Size = Vector2.new(2, fillH)
             o.hp.Color = lerpColor(Color3.fromRGB(255, 70, 70), Color3.fromRGB(90, 220, 90), ratio)
             o.hp.Visible = true
         else
             o.hpBg.Visible = false; o.hp.Visible = false
+        end
+
+        -- M2 (heavy) cooldown bar — purple, mirrored on the RIGHT side of the box.
+        -- Fills from the bottom up and drains as the target's heavy attack recharges.
+        if Config.ESP_M2Bar then
+            local ratio = readTargetM2Ratio(char, o.m2t)
+            if ratio then
+                local mbx = bx + bw + 3
+                o.m2Bg.Position = Vector2.new(mbx - 1, by - 1); o.m2Bg.Size = Vector2.new(4, bh + 2); o.m2Bg.Visible = true
+                local fillH = bh * ratio
+                o.m2.Position = Vector2.new(mbx, by + (bh - fillH)); o.m2.Size = Vector2.new(2, fillH)
+                o.m2.Color = Config.ESP_M2_Color
+                o.m2.Visible = true
+            else
+                o.m2Bg.Visible = false; o.m2.Visible = false
+            end
+        else
+            o.m2Bg.Visible = false; o.m2.Visible = false
         end
 
         -- Name (above box)
@@ -327,7 +389,7 @@ return function(Lib, Core)
         end
     end
 
-    -- ═══════════════════════════════════════════════════════════════════════
+    -- ═══════════════════════════════════════════════════════════════��═══════
     -- INDICATORS  (Neverlose-style animated GUI)
     -- ═══════════════════════════════════════════════════════════════════════
     local function guiParent()
@@ -344,72 +406,150 @@ return function(Lib, Core)
     local TW_IN  = TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
     local TW_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
 
+    -- ── Drag + persistence state (position saved via MacLib FAL Data API) ────
+    local MacLibRef                       -- captured from ctx.MacLib in buildUI
+    local POS_FLAG                        -- FAL key for the saved HUD position
+    local IND_W = 214                     -- HUD width (px)
+    local drag = {
+        target  = Vector2.new(0, 0),      -- desired top-left offset (px)
+        disp    = Vector2.new(0, 0),      -- smoothed actual offset (px)
+        active  = false,
+        startIn = Vector2.new(0, 0),
+        startPos = Vector2.new(0, 0),
+    }
+    local dragConns = {}                  -- UIS connections owned by the HUD (cleaned in stop)
+    local clampPos, savePos               -- forward decls (row handlers use them)
+
     local function mkRow(key, label)
         local frame = Instance.new("Frame")
         frame.Name = key
-        frame.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+        frame.BackgroundColor3 = Color3.fromRGB(13, 13, 17)
         frame.BackgroundTransparency = 1
         frame.BorderSizePixel = 0
         frame.Size = UDim2.new(1, 0, 0, ROW_H)
+        frame.ClipsDescendants = true
         frame.AutomaticSize = Enum.AutomaticSize.None
+        frame.Active = true               -- catches drag input (grab any row to move)
         frame.Visible = false
         frame.Parent = indHolder
 
-        local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 7); corner.Parent = frame
+        local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = frame
 
-        -- accent bar (left)
+        -- subtle top→bottom glass gradient over the panel
+        local grad = Instance.new("UIGradient")
+        grad.Rotation = 90
+        grad.Color = ColorSequence.new(Color3.fromRGB(34, 34, 44), Color3.fromRGB(12, 12, 16))
+        grad.Parent = frame
+
+        -- thin outline (cheat-HUD signature)
+        local stroke = Instance.new("UIStroke")
+        stroke.Thickness = 1
+        stroke.Color = Color3.fromRGB(255, 255, 255)
+        stroke.Transparency = 1
+        stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        stroke.Parent = frame
+
+        -- left accent chip
         local accent = Instance.new("Frame")
         accent.Name = "Accent"
         accent.BackgroundColor3 = Config.Ind_Accent
         accent.BorderSizePixel = 0
-        accent.Position = UDim2.new(0, 0, 0, 4)
-        accent.Size = UDim2.new(0, 3, 1, -8)
+        accent.AnchorPoint = Vector2.new(0, 0.5)
+        accent.Position = UDim2.new(0, 6, 0.5, -1)
+        accent.Size = UDim2.new(0, 3, 1, -13)
         accent.Parent = frame
         local ac = Instance.new("UICorner"); ac.CornerRadius = UDim.new(1, 0); ac.Parent = accent
 
-        -- progress fill (dim, behind text)
-        local fill = Instance.new("Frame")
-        fill.Name = "Fill"
-        fill.BackgroundColor3 = Config.Ind_Accent
-        fill.BackgroundTransparency = 0.82
-        fill.BorderSizePixel = 0
-        fill.Position = UDim2.new(0, 0, 0, 0)
-        fill.Size = UDim2.new(0, 0, 1, 0)
-        fill.Parent = frame
-        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(0, 7); fc.Parent = fill
-
-        -- label
+        -- label (uppercase, left)
         local lab = Instance.new("TextLabel")
         lab.Name = "Label"
         lab.BackgroundTransparency = 1
-        lab.Font = Enum.Font.GothamMedium
-        lab.TextSize = 12
-        lab.TextColor3 = Color3.fromRGB(225, 225, 232)
+        lab.Font = Enum.Font.GothamBold
+        lab.TextSize = 11
+        lab.TextColor3 = Color3.fromRGB(178, 180, 194)
         lab.TextXAlignment = Enum.TextXAlignment.Left
         lab.TextTransparency = 1
-        lab.Position = UDim2.new(0, 12, 0, 0)
-        lab.Size = UDim2.new(1, -70, 1, 0)
+        lab.Position = UDim2.new(0, 16, 0, -2)
+        lab.Size = UDim2.new(1, -84, 1, -5)
         lab.Text = label
         lab.Parent = frame
 
-        -- value
+        -- value (right, heavy)
         local val = Instance.new("TextLabel")
         val.Name = "Value"
         val.BackgroundTransparency = 1
-        val.Font = Enum.Font.GothamBold
+        val.Font = Enum.Font.GothamBlack
         val.TextSize = 12
         val.TextColor3 = Color3.fromRGB(255, 255, 255)
         val.TextXAlignment = Enum.TextXAlignment.Right
         val.TextTransparency = 1
-        val.Position = UDim2.new(0, 0, 0, 0)
-        val.Size = UDim2.new(1, -12, 1, 0)
+        val.Position = UDim2.new(0, 0, 0, -2)
+        val.Size = UDim2.new(1, -12, 1, -5)
         val.Text = ""
         val.Parent = frame
 
+        -- bottom progress track + glossy fill
+        local track = Instance.new("Frame")
+        track.Name = "Track"
+        track.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        track.BackgroundTransparency = 0.4
+        track.BorderSizePixel = 0
+        track.AnchorPoint = Vector2.new(0, 1)
+        track.Position = UDim2.new(0, 6, 1, -4)
+        track.Size = UDim2.new(1, -12, 0, 3)
+        track.Parent = frame
+        local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(1, 0); tc.Parent = track
+
+        local fill = Instance.new("Frame")
+        fill.Name = "Fill"
+        fill.BackgroundColor3 = Config.Ind_Accent
+        fill.BorderSizePixel = 0
+        fill.Size = UDim2.new(0, 0, 1, 0)
+        fill.Parent = track
+        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
+        -- vertical gloss (colour stays solid; this is just a brightness gradient)
+        local fgrad = Instance.new("UIGradient")
+        fgrad.Rotation = 90
+        fgrad.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.15),
+            NumberSequenceKeypoint.new(1, 0.5),
+        })
+        fgrad.Parent = fill
+
+        -- start a drag when this row is pressed
+        frame.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+                drag.active   = true
+                drag.startIn  = Vector2.new(input.Position.X, input.Position.Y)
+                drag.startPos = drag.target
+            end
+        end)
+        frame.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+                if drag.active then drag.active = false; savePos() end
+            end
+        end)
+
         return {
-            key = key, frame = frame, accent = accent, fill = fill, label = lab, value = val,
-            shown = false, dispRatio = 0, dispVisible = 0,
+            key = key, frame = frame, accent = accent, fill = fill, track = track,
+            stroke = stroke, label = lab, value = val, shown = false, dispRatio = 0,
         }
+    end
+
+    function clampPos(x, y)
+        local vp = Camera.ViewportSize
+        local h = #rowOrder * (ROW_H + ROW_GAP)
+        x = math.clamp(x, 0, math.max(0, vp.X - IND_W))
+        y = math.clamp(y, 0, math.max(0, vp.Y - h))
+        return x, y
+    end
+
+    function savePos()
+        if MacLibRef and POS_FLAG then
+            pcall(function() MacLibRef:FALSetData(POS_FLAG, { x = drag.target.X, y = drag.target.Y }) end)
+        end
     end
 
     local function buildIndicatorGui()
@@ -426,15 +566,34 @@ return function(Lib, Core)
         indHolder = Instance.new("Frame")
         indHolder.Name = "Indicators"
         indHolder.BackgroundTransparency = 1
-        indHolder.AnchorPoint = Vector2.new(1, 1)
-        indHolder.Position = UDim2.new(1, -24, 1, -24)
-        indHolder.Size = UDim2.new(0, 190, 0, #rowOrder * (ROW_H + ROW_GAP))
+        indHolder.AnchorPoint = Vector2.new(0, 0)
+        indHolder.Size = UDim2.new(0, IND_W, 0, 0)
+        indHolder.AutomaticSize = Enum.AutomaticSize.Y
         indHolder.Parent = screenGui
+
+        -- default position: near the bottom-right; overwritten by the saved pos in buildUI
+        local vp = Camera.ViewportSize
+        local dx, dy = clampPos(vp.X - IND_W - 24, vp.Y - (#rowOrder * (ROW_H + ROW_GAP)) - 24)
+        drag.target = Vector2.new(dx, dy)
+        drag.disp   = Vector2.new(dx, dy)
+        indHolder.Position = UDim2.fromOffset(dx, dy)
+
+        -- global pointer-move drives the drag while a row is held
+        dragConns[#dragConns + 1] = UserInputService.InputChanged:Connect(function(input)
+            if not drag.active then return end
+            if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+                local cur = Vector2.new(input.Position.X, input.Position.Y)
+                local delta = cur - drag.startIn
+                local nx, ny = clampPos(drag.startPos.X + delta.X, drag.startPos.Y + delta.Y)
+                drag.target = Vector2.new(nx, ny)
+            end
+        end)
 
         local list = Instance.new("UIListLayout")
         list.FillDirection = Enum.FillDirection.Vertical
         list.HorizontalAlignment = Enum.HorizontalAlignment.Right
-        list.VerticalAlignment = Enum.VerticalAlignment.Bottom
+        list.VerticalAlignment = Enum.VerticalAlignment.Top
         list.SortOrder = Enum.SortOrder.LayoutOrder
         list.Padding = UDim.new(0, ROW_GAP)
         list.Parent = indHolder
@@ -447,17 +606,41 @@ return function(Lib, Core)
         end
     end
 
+    -- restore the saved HUD position (called from buildUI once MacLib is available)
+    local function restoreSavedPos()
+        if not (MacLibRef and POS_FLAG) then return end
+        pcall(function()
+            local saved = MacLibRef.FALGetData and MacLibRef:FALGetData(POS_FLAG, nil)
+            if type(saved) == "table" and type(saved.x) == "number" and type(saved.y) == "number" then
+                local nx, ny = clampPos(saved.x, saved.y)
+                drag.target = Vector2.new(nx, ny)
+                drag.disp   = Vector2.new(nx, ny)
+                if indHolder then indHolder.Position = UDim2.fromOffset(nx, ny) end
+            end
+        end)
+    end
+
+    -- reset HUD back to the default bottom-right position
+    local function resetPos()
+        local vp = Camera.ViewportSize
+        local dx, dy = clampPos(vp.X - IND_W - 24, vp.Y - (#rowOrder * (ROW_H + ROW_GAP)) - 24)
+        drag.target = Vector2.new(dx, dy)
+        savePos()
+    end
+
     -- appear / disappear animation for a row
     local function setRowShown(r, shown)
         if r.shown == shown then return end
         r.shown = shown
         if shown then
             r.frame.Visible = true
-            TweenService:Create(r.frame, TW_IN, { BackgroundTransparency = 0.15, Size = UDim2.new(1, 0, 0, ROW_H) }):Play()
+            TweenService:Create(r.frame, TW_IN, { BackgroundTransparency = 0.1, Size = UDim2.new(1, 0, 0, ROW_H) }):Play()
+            TweenService:Create(r.stroke, TW_IN, { Transparency = 0.75 }):Play()
             TweenService:Create(r.label, TW_IN, { TextTransparency = 0 }):Play()
             TweenService:Create(r.value, TW_IN, { TextTransparency = 0 }):Play()
         else
             TweenService:Create(r.frame, TW_OUT, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0) }):Play()
+            TweenService:Create(r.stroke, TW_OUT, { Transparency = 1 }):Play()
             TweenService:Create(r.label, TW_OUT, { TextTransparency = 1 }):Play()
             local t = TweenService:Create(r.value, TW_OUT, { TextTransparency = 1 })
             t.Completed:Connect(function() if not r.shown then r.frame.Visible = false end end)
@@ -536,6 +719,11 @@ return function(Lib, Core)
     end
 
     local function updateIndicators(dt)
+        -- smooth drag follow (runs whenever the HUD exists so it eases into place)
+        if indHolder then
+            drag.disp = drag.disp:Lerp(drag.target, math.clamp(dt * 16, 0, 1))
+            indHolder.Position = UDim2.fromOffset(math.floor(drag.disp.X + 0.5), math.floor(drag.disp.Y + 0.5))
+        end
         if not (Config.Ind_On and indHolder) then
             if indHolder then for _, r in pairs(rows) do setRowShown(r, false) end end
             return
@@ -744,6 +932,11 @@ return function(Lib, Core)
             section:Colorpicker({ Name = name, Default = default, Callback = function(c) set(c) end }, ctx.flag(flag))
         end
 
+        -- Persist the HUD position via MacLib's FAL Data API, then restore it.
+        MacLibRef = ctx.MacLib
+        POS_FLAG  = ctx.flag("VIS_IND_Pos")
+        restoreSavedPos()
+
         local V = ctx.tabs.Visuals
 
         -- ─────────────── Section 1: ESP (Left) ───────────────
@@ -759,6 +952,7 @@ return function(Lib, Core)
         boolToggle(sEsp, "Name",     "ESP Name",     function() return Config.ESP_Name end,     function(v) Config.ESP_Name = v end)
         boolToggle(sEsp, "Distance", "ESP Distance", function() return Config.ESP_Distance end, function(v) Config.ESP_Distance = v end)
         boolToggle(sEsp, "Health Bar", "ESP Health", function() return Config.ESP_Health end,   function(v) Config.ESP_Health = v end)
+        boolToggle(sEsp, "Heavy (M2) Bar", "ESP M2Bar", function() return Config.ESP_M2Bar end, function(v) Config.ESP_M2Bar = v end)
         boolToggle(sEsp, "Combat State", "ESP State", function() return Config.ESP_State end,    function(v) Config.ESP_State = v end)
         boolToggle(sEsp, "Combat Style", "ESP Style", function() return Config.ESP_Style end,    function(v) Config.ESP_Style = v end)
         boolToggle(sEsp, "Skeleton", "ESP Skeleton", function() return Config.ESP_Skeleton end, function(v) Config.ESP_Skeleton = v end)
@@ -767,6 +961,7 @@ return function(Lib, Core)
             Min = 100, Max = 3000, Suffix = "m", Callback = function(v) Config.ESP_MaxDist = v end })
         colorpick(sEsp, "Box Color", "VIS_ESP_BoxCol", Config.ESP_Box_Color, function(c) Config.ESP_Box_Color = c end)
         colorpick(sEsp, "Text Color", "VIS_ESP_TxtCol", Config.ESP_Text_Color, function(c) Config.ESP_Text_Color = c end)
+        colorpick(sEsp, "Heavy (M2) Bar Color", "VIS_ESP_M2Col", Config.ESP_M2_Color, function(c) Config.ESP_M2_Color = c end)
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
@@ -787,6 +982,10 @@ return function(Lib, Core)
         boolToggle(sInd, "Dodge CD",     "Ind Dodge",   function() return Config.Ind_Dodge end,   function(v) Config.Ind_Dodge = v end)
         boolToggle(sInd, "Block CD",     "Ind Block",   function() return Config.Ind_Block end,   function(v) Config.Ind_Block = v end)
         colorpick(sInd, "Accent Color", "VIS_IND_Accent", Config.Ind_Accent, function(c) Config.Ind_Accent = c end)
+        pcall(function()
+            sInd:Button({ Name = "Reset HUD Position", Callback = function() resetPos() end })
+        end)
+        sInd:SubLabel({ Text = "Drag the HUD anywhere to move it - the position is saved automatically." })
         sInd:SubLabel({ Text = "Heavy/Dodge cooldowns are read from the game's own combat config for exact timing." })
 
         -- ─────────────── Section 3: Hit Direction (Right) ───────────────
@@ -806,6 +1005,8 @@ return function(Lib, Core)
     function M.stop()
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
         conns = {}
+        for _, c in ipairs(dragConns) do pcall(function() c:Disconnect() end) end
+        dragConns = {}
         for plr in pairs(espPool) do destroyEsp(plr) end
         for _, h in ipairs(hitArrows) do pcall(function() h.tri:Remove() end) end
         hitArrows = {}
