@@ -56,7 +56,7 @@ return function(Lib, Core)
 
         -- Indicators
         Ind_On      = false,
-        Ind_Style   = "Panel",   -- "Panel" | "Neverlose" | "Player"
+        Ind_Style   = "Panel",   -- "Panel" | "Neverlose" | "Player" | "Minimal" | "Corner"
         Ind_Health  = true,
         Ind_Stamina = true,
         Ind_IFrame  = true,
@@ -64,6 +64,8 @@ return function(Lib, Core)
         Ind_Dodge   = true,
         Ind_Block   = true,
         Ind_Accent  = Color3.fromRGB(72, 138, 255),   -- watermark blue
+        Ind_ScreenY = 0.60,      -- vertical position (frac) for screen-anchored styles
+        Ind_Scale   = 1.0,       -- extra manual scale multiplier for Drawing styles
 
         -- Hit direction
         HitDir_On    = false,
@@ -72,13 +74,13 @@ return function(Lib, Core)
 
     -- ── Watermark palette (shared by every indicator style) ──────────────────
     local WM = {
-        bgDark  = Color3.fromRGB(12, 12, 19),
-        bgChip  = Color3.fromRGB(10, 10, 16),
-        stroke  = Color3.fromRGB(42, 42, 62),
-        txtMain = Color3.fromRGB(215, 215, 230),
-        txtMute = Color3.fromRGB(130, 130, 155),
-        accent2 = Color3.fromRGB(140, 90, 255),        -- watermark purple (secondary)
-        bgTransp = 0.28,
+        bgDark  = Color3.fromRGB(14, 14, 20),
+        bgChip  = Color3.fromRGB(9, 9, 14),
+        stroke  = Color3.fromRGB(52, 52, 74),
+        txtMain = Color3.fromRGB(255, 255, 255),        -- value text: pure white
+        txtMute = Color3.fromRGB(214, 216, 226),        -- label text: near-white
+        accent2 = Color3.fromRGB(140, 90, 255),         -- watermark purple (secondary)
+        bgTransp = 0.22,
     }
 
     -- ── Combat config (exact cooldown durations; optional) ───────────────────
@@ -156,20 +158,79 @@ return function(Lib, Core)
 
     -- ═══════════════════════════════════════════════════════════════════════
     -- ESP  (Drawing API)
-    -- ═══════════════════════════════════════════════════════════════════════
+    -- ���══════════════════════════════════════════════════════════════════════
     local hasDrawing = (type(Drawing) == "table" and type(Drawing.new) == "function")
 
-    -- R15 + R6 skeleton bone pairs (by part name; missing parts are skipped)
-    local BONES = {
-        { "Head", "UpperTorso" }, { "UpperTorso", "LowerTorso" },
-        { "UpperTorso", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
-        { "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
-        { "LowerTorso", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
-        { "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" }, { "RightLowerLeg", "RightFoot" },
-        -- R6 fallback
-        { "Head", "Torso" }, { "Torso", "Left Arm" }, { "Torso", "Right Arm" },
-        { "Torso", "Left Leg" }, { "Torso", "Right Leg" },
+    -- Skeleton is drawn from computed JOINT points, not raw part centres. Shoulders and
+    -- hips are placed at the TOP / BOTTOM edge of the torso (offset along the torso's own
+    -- up/right axes) so the shoulder line sits where real shoulders are — connecting arms
+    -- to the torso centre (the old behaviour) put the shoulders far too low.
+    local SKELETON_MAX = 24
+
+    -- R15 bone list, referencing keys resolved by skeletonPoints()
+    local BONES_R15 = {
+        { "Neck", "ShoulderL" }, { "Neck", "ShoulderR" },   -- shoulder line
+        { "Neck", "Chest" }, { "Chest", "Hip" },            -- spine
+        { "ShoulderL", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
+        { "ShoulderR", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
+        { "HipL", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
+        { "HipR", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" }, { "RightLowerLeg", "RightFoot" },
     }
+    -- R6 fallback (Torso is a single part; shoulders/hips offset from it)
+    local BONES_R6 = {
+        { "ShoulderL", "ShoulderR" },
+        { "Neck", "Chest" },
+        { "ShoulderL", "Left Arm" }, { "ShoulderR", "Right Arm" },
+        { "HipL", "Left Leg" }, { "HipR", "Right Leg" },
+    }
+
+    -- Resolve world-space joint points for the character. Returns (points, bones, headPart).
+    local function skeletonPoints(char)
+        local head = char:FindFirstChild("Head")
+        local uT   = char:FindFirstChild("UpperTorso")
+        local pts  = {}
+        local function pp(n) local p = char:FindFirstChild(n); return p and p.Position or nil end
+        if uT then
+            -- R15
+            local cf = uT.CFrame
+            local up, rt = cf.UpVector, cf.RightVector
+            local hy, hx = uT.Size.Y * 0.5, uT.Size.X * 0.5
+            local neck = uT.Position + up * hy
+            local lT = char:FindFirstChild("LowerTorso")
+            local hip = lT and lT.Position or (uT.Position - up * hy)
+            pts.Neck      = neck
+            pts.Chest     = uT.Position
+            pts.Hip       = hip
+            pts.ShoulderL = neck - rt * hx
+            pts.ShoulderR = neck + rt * hx
+            pts.HipL      = hip - rt * (hx * 0.7)
+            pts.HipR      = hip + rt * (hx * 0.7)
+            for _, n in ipairs({ "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }) do
+                pts[n] = pp(n)
+            end
+            return pts, BONES_R15, head
+        end
+        local torso = char:FindFirstChild("Torso")
+        if torso then
+            -- R6
+            local cf = torso.CFrame
+            local up, rt = cf.UpVector, cf.RightVector
+            local hy, hx = torso.Size.Y * 0.5, torso.Size.X * 0.5
+            local neck = torso.Position + up * hy
+            local hip  = torso.Position - up * hy
+            pts.Neck      = neck
+            pts.Chest     = torso.Position
+            pts.ShoulderL = neck - rt * hx
+            pts.ShoulderR = neck + rt * hx
+            pts.HipL      = hip - rt * (hx * 0.6)
+            pts.HipR      = hip + rt * (hx * 0.6)
+            for _, n in ipairs({ "Left Arm", "Right Arm", "Left Leg", "Right Leg" }) do
+                pts[n] = pp(n)
+            end
+            return pts, BONES_R6, head
+        end
+        return pts, BONES_R15, head
+    end
 
     local espPool = {}   -- [player] = { objects... }
 
@@ -214,8 +275,10 @@ return function(Lib, Core)
         o.m2   = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Config.ESP_M2_Color, ZIndex = 2 })
         o.tracer = newDrawing("Line", { Thickness = 1, Visible = false, Color = Config.ESP_Box_Color })
         o.m2t = { active = false, t0 = 0, dur = 7 }   -- per-player M2 timer (boolean attr → timed)
+        -- skeleton head circle
+        o.headCircle = newDrawing("Circle", { Thickness = 1, Filled = false, NumSides = 24, Radius = 6, Visible = false, Color = Color3.fromRGB(255, 255, 255), ZIndex = 2 })
         o.bones = {}
-        for i = 1, #BONES do
+        for i = 1, SKELETON_MAX do
             o.bones[i] = newDrawing("Line", { Thickness = 1, Visible = false, Color = Color3.fromRGB(255, 255, 255) })
         end
         espPool[plr] = o
@@ -226,6 +289,7 @@ return function(Lib, Core)
         if not o then return end
         for _, key in ipairs(TEXT_KEYS) do if o[key] then o[key].Visible = false end end
         for _, key in ipairs(BAR_KEYS)  do if o[key] then o[key].Visible = false end end
+        if o.headCircle then o.headCircle.Visible = false end
         for _, b in ipairs(o.bones) do b.Visible = false end
     end
 
@@ -234,6 +298,7 @@ return function(Lib, Core)
         if not o then return end
         for _, key in ipairs(TEXT_KEYS) do if o[key] then pcall(function() o[key]:Remove() end) end end
         for _, key in ipairs(BAR_KEYS)  do if o[key] then pcall(function() o[key]:Remove() end) end end
+        if o.headCircle then pcall(function() o.headCircle:Remove() end) end
         for _, b in ipairs(o.bones) do pcall(function() b:Remove() end) end
         espPool[plr] = nil
     end
@@ -252,16 +317,17 @@ return function(Lib, Core)
         local dist = lpRoot and (root.Position - lpRoot.Position).Magnitude or 0
         if Config.ESP_MaxDist > 0 and dist > Config.ESP_MaxDist then hideEsp(o); return end
 
-        -- STATIC 2D box. The box height is derived ONLY from the character's vertical
-        -- extent projected along the WORLD-UP axis, and the width is a fixed portrait
-        -- ratio of that height. Nothing here depends on the character's facing, so
-        -- shiftlock (which yaws the character toward the camera) can no longer shift or
-        -- "breathe" the box, and it never grows wider than it should.
-        local cf, size = char:GetBoundingBox()
-        local center = cf.Position
+        -- STATIC 2D box, anchored to the ROOT PART world position (exactly like the
+        -- "Player" indicator style, which the user confirmed does NOT drift under
+        -- shiftlock). Height comes from the bounding-box vertical extent applied along
+        -- WORLD-up from the root; width is a fixed portrait ratio of that height. Because
+        -- nothing here reads the model's orientation/CFrame, shiftlock (which yaws the
+        -- character toward the camera) can no longer shift or breathe the box.
+        local _, size = char:GetBoundingBox()
+        local anchor = root.Position
         local halfH  = size.Y * 0.5
-        local topSp, onT = Camera:WorldToViewportPoint(center + Vector3.new(0, halfH, 0))
-        local botSp, onB = Camera:WorldToViewportPoint(center - Vector3.new(0, halfH, 0))
+        local topSp, onT = Camera:WorldToViewportPoint(anchor + Vector3.new(0, halfH, 0))
+        local botSp, onB = Camera:WorldToViewportPoint(anchor - Vector3.new(0, halfH, 0))
         if not (onT or onB) then hideEsp(o); return end
 
         local topY = math.min(topSp.Y, botSp.Y)
@@ -365,19 +431,22 @@ return function(Lib, Core)
             o.tracer.Visible = false
         end
 
-        -- Skeleton
+        -- Skeleton (computed joints + head circle)
         if Config.ESP_Skeleton then
-            for i, pair in ipairs(BONES) do
-                local line = o.bones[i]
-                local p0 = char:FindFirstChild(pair[1])
-                local p1 = char:FindFirstChild(pair[2])
-                if p0 and p1 then
-                    local s0, on0 = Camera:WorldToViewportPoint(p0.Position)
-                    local s1, on1 = Camera:WorldToViewportPoint(p1.Position)
-                    if on0 and on1 then
+            local pts, bones, headPart = skeletonPoints(char)
+            local col = Config.ESP_Box_Color
+            local used = 0
+            for _, pair in ipairs(bones) do
+                local a, b = pts[pair[1]], pts[pair[2]]
+                used = used + 1
+                local line = o.bones[used]
+                if a and b then
+                    local s0, on0 = Camera:WorldToViewportPoint(a)
+                    local s1, on1 = Camera:WorldToViewportPoint(b)
+                    if on0 or on1 then
                         line.From = Vector2.new(s0.X, s0.Y)
-                        line.To = Vector2.new(s1.X, s1.Y)
-                        line.Color = Config.ESP_Box_Color
+                        line.To   = Vector2.new(s1.X, s1.Y)
+                        line.Color = col
                         line.Visible = true
                     else
                         line.Visible = false
@@ -386,8 +455,28 @@ return function(Lib, Core)
                     line.Visible = false
                 end
             end
+            for i = used + 1, #o.bones do o.bones[i].Visible = false end
+
+            -- head circle: radius from the head part's projected vertical size
+            if headPart then
+                local hc = headPart.Position
+                local hs = (headPart:IsA("BasePart") and headPart.Size.Y or 1) * 0.5
+                local cS, onC = Camera:WorldToViewportPoint(hc)
+                local tS      = Camera:WorldToViewportPoint(hc + Vector3.new(0, hs, 0))
+                if onC then
+                    o.headCircle.Position = Vector2.new(cS.X, cS.Y)
+                    o.headCircle.Radius = math.max(2, math.abs(cS.Y - tS.Y) + 1)
+                    o.headCircle.Color = col
+                    o.headCircle.Visible = true
+                else
+                    o.headCircle.Visible = false
+                end
+            else
+                o.headCircle.Visible = false
+            end
         else
             for _, b in ipairs(o.bones) do b.Visible = false end
+            o.headCircle.Visible = false
         end
     end
 
@@ -400,7 +489,7 @@ return function(Lib, Core)
         return cref(game:GetService("CoreGui"))
     end
 
-    local screenGui, indHolder
+    local screenGui, indHolder, indUIScale
     local rows = {}       -- [key] = row object
     local rowOrder = { "Health", "Stamina", "IFrame", "M2", "Dodge", "Block" }
 
@@ -557,6 +646,11 @@ return function(Lib, Core)
         indHolder.AutomaticSize = Enum.AutomaticSize.Y
         indHolder.Parent = screenGui
 
+        -- auto-rescale for mobile / small screens
+        indUIScale = Instance.new("UIScale")
+        indUIScale.Scale = 1
+        indUIScale.Parent = indHolder
+
         -- default position: near the bottom-right; overwritten by the saved pos in buildUI
         local vp = Camera.ViewportSize
         local dx, dy = clampPos(vp.X - IND_W - 24, vp.Y - (#rowOrder * (ROW_H + ROW_GAP)) - 24)
@@ -640,36 +734,53 @@ return function(Lib, Core)
     -- down over the wire. So a raw read shows a frozen "1.5s". To make the number
     -- and bar actually tick (1.5 → 1.4 → ...), we snapshot the duration on the
     -- rising edge and interpolate the remainder locally with time().
-    local cdTracks = {}   -- [key] = { active, t0, dur }
-    local function cdGet(key) local t = cdTracks[key]; if not t then t = { active = false, t0 = 0, dur = 0 }; cdTracks[key] = t end return t end
-
-    -- Boolean-attribute cooldowns (M2Cooldown, IFRAMES). Duration comes from config.
-    local function tickBoolCD(key, isActive, dur)
-        local t = cdGet(key)
-        if isActive and not t.active then t.active = true; t.t0 = time(); t.dur = dur
-        elseif not isActive then t.active = false end
-        if not t.active then return nil end
-        local rem = t.dur - (time() - t.t0)
-        if rem <= 0 then t.active = false; return nil end
-        return rem, math.clamp(rem / math.max(t.dur, 0.01), 0, 1)
+    local cdTracks = {}   -- [key] = { active, deadline, dur, lastRaw, t0, measured }
+    local function cdGet(key)
+        local t = cdTracks[key]
+        if not t then t = { active = false, deadline = 0, dur = 0, lastRaw = nil, t0 = 0, measured = nil }; cdTracks[key] = t end
+        return t
     end
 
-    -- Numeric-remaining cooldowns (IFRAMECD, EvasiveCooldownRemaining, BlockCooldown).
-    -- Snapshot the value on the rising edge; re-trigger if the server bumps it back up
-    -- past our current local estimate (a fresh cast). `full` overrides the bar's 100%
-    -- reference when the game exposes only a small numeric window.
-    local function tickNumCD(key, raw, full)
+    -- Deadline-based cooldown, mirroring the game's own syncCooldownFromServer:
+    --   • the cooldown is gated by a BOOLEAN attribute (M2Cooldown / IFRAMECD);
+    --   • an optional NUMERIC "remaining" (EvasiveCooldownRemaining) is written once
+    --     and re-synced occasionally — it does NOT tick over the wire;
+    --   • so we snapshot a local deadline on the rising edge (and re-snapshot only when
+    --     the numeric value actually CHANGES) and predict the countdown with os.clock().
+    -- `fullDur` is the bar's 100% reference (kept constant so the bar doesn't jump).
+    local function trackGate(key, gateActive, remRaw, fullDur)
         local t = cdGet(key)
-        if type(raw) == "number" and raw > 0.02 then
-            local est = t.active and math.max(0, t.dur - (time() - t.t0)) or 0
-            if (not t.active) or raw > est + 0.12 then
-                t.active = true; t.t0 = time(); t.dur = raw
-            end
+        if not gateActive then t.active = false; t.lastRaw = nil; return nil end
+        local now = os.clock()
+        if type(remRaw) == "number" and remRaw > 0 then
+            if remRaw ~= t.lastRaw then t.deadline = now + remRaw; t.lastRaw = remRaw end
+            t.active = true
+        elseif not t.active then
+            t.active = true; t.deadline = now + fullDur; t.lastRaw = nil
         end
-        if not t.active then return nil end
-        local rem = t.dur - (time() - t.t0)
-        if rem <= 0.02 then t.active = false; return nil end
-        return rem, math.clamp(rem / math.max(full or t.dur, 0.01), 0, 1)
+        t.dur = (fullDur and fullDur > 0) and fullDur or (t.deadline - t.t0)
+        local rem = math.max(0, t.deadline - now)
+        return rem, math.clamp(rem / math.max(fullDur, 0.01), 0, 1)
+    end
+
+    -- Boolean cooldown of UNKNOWN duration (BlockCooldown — the server never tells the
+    -- client how long it lasts). We LEARN the duration by measuring the first full cycle,
+    -- then show an accurate countdown on subsequent cooldowns. Returns rem, ratio, known.
+    local function trackMeasured(key, active)
+        local t = cdGet(key)
+        local now = os.clock()
+        if active then
+            if not t.active then t.active = true; t.t0 = now end
+            local elapsed = now - t.t0
+            if t.measured and t.measured > 0.05 then
+                local rem = math.max(0, t.measured - elapsed)
+                return rem, math.clamp(rem / t.measured, 0, 1), true
+            end
+            return 0, 1, false            -- duration not learned yet → pulsing full bar
+        else
+            if t.active then t.measured = math.clamp(now - t.t0, 0.1, 10); t.active = false end
+            return nil
+        end
     end
 
     local staminaMax = 100
@@ -693,49 +804,45 @@ return function(Lib, Core)
             return true, r, string.format("%d", math.floor(s + 0.5)), Config.Ind_Accent
 
         elseif key == "IFrame" then
+            -- IFRAMES is the brief active-invulnerability window (boolean). Too short to
+            -- count down meaningfully, so just flag it ACTIVE while it's up.
             if not Config.Ind_IFrame then return false end
-            -- active i-frames: the window itself ticks down (bool attr → config dur)
             if A("IFRAMES") == true then
-                local rem, r = tickBoolCD("IFrame", true, 0.5)
-                if rem then return true, r, string.format("%.1fs", rem), Color3.fromRGB(150, 120, 255) end
                 return true, 1, "ACTIVE", Color3.fromRGB(150, 120, 255)
             end
-            cdGet("IFrame").active = false
-            -- otherwise the post-dash cooldown counts down
-            local rem, r = tickNumCD("IFrameCD", A("IFRAMECD"))
-            if rem then return true, r, string.format("%.1fs", rem), Color3.fromRGB(120, 100, 210) end
             return false
 
         elseif key == "M2" then
+            -- Heavy: boolean gate + exact duration from CombatConfig.
             if not Config.Ind_M2 then return false end
-            local rem, r = tickBoolCD("M2", A("M2Cooldown") == true, cfgM2Cooldown(char))
-            if rem then return true, r, string.format("%.1fs", rem), Color3.fromRGB(255, 150, 60) end
+            local rem, r = trackGate("M2", A("M2Cooldown") == true, nil, cfgM2Cooldown(char))
+            if rem and rem > 0.02 then return true, r, string.format("%.1fs", rem), Color3.fromRGB(255, 150, 60) end
             return false
 
         elseif key == "Dodge" then
+            -- Dodge: gated by IFRAMECD(bool); EvasiveCooldownRemaining(number) seeds the
+            -- deadline; full reference = config evasive cooldown. This is exactly how the
+            -- game predicts it, so no more 1.4↔1.5 cycling while moving.
             if not Config.Ind_Dodge then return false end
-            local rem, r = tickNumCD("Dodge", A("EvasiveCooldownRemaining"), cfgEvasiveCooldown(char))
-            if rem then return true, r, string.format("%.1fs", rem), Color3.fromRGB(120, 220, 255) end
+            local rem, r = trackGate("Dodge", A("IFRAMECD") == true, A("EvasiveCooldownRemaining"), cfgEvasiveCooldown(char))
+            if rem and rem > 0.02 then return true, r, string.format("%.1fs", rem), Color3.fromRGB(120, 220, 255) end
             return false
 
         elseif key == "Block" then
+            -- Block: boolean of unknown duration → self-learning measured countdown.
             if not Config.Ind_Block then return false end
-            local bc = A("BlockCooldown")
-            if bc == true then
-                local rem, r = tickBoolCD("Block", true, 1.5)
-                if rem then return true, r, string.format("%.1fs", rem), Color3.fromRGB(90, 180, 255) end
+            local rem, r, known = trackMeasured("Block", A("BlockCooldown") == true)
+            if rem ~= nil then
+                if known then return true, r, string.format("%.1fs", rem), Color3.fromRGB(90, 180, 255) end
                 return true, 1, "CD", Color3.fromRGB(90, 180, 255)
             end
-            cdGet("Block").active = false
-            local rem, r = tickNumCD("BlockN", bc, 1.5)
-            if rem then return true, r, string.format("%.1fs", rem), Color3.fromRGB(90, 180, 255) end
             return false
         end
         return false
     end
 
     -- short labels used by the minimalist Drawing styles
-    local STAT_LABELS = { Health = "HP", Stamina = "STAM", IFrame = "IFRAME", M2 = "HEAVY", Dodge = "DODGE", Block = "BLOCK" }
+    local STAT_LABELS = { Health = "HP", Stamina = "STAMINA", IFrame = "IFRAME", M2 = "HEAVY", Dodge = "DODGE", Block = "BLOCK" }
 
     -- ordered list of currently-active local stats { key, ratio, text, color }
     local function collectStats(char, hum)
@@ -749,21 +856,41 @@ return function(Lib, Core)
         return list
     end
 
-    -- ── Drawing-based cell pool (shared by Neverlose + Player styles) ────────
-    local drawCells = {}
+    -- Drawing indicator STYLE definitions. `anchor`:
+    --   "screen"  – fixed point on screen (ax/ay = fractions of the viewport)
+    --   "sideL"   – to the LEFT of the local player, vertically centred on the body
+    --   "corner"  – pinned to the top-left corner
+    -- `bars` toggles the progress lines, `box` the background panel.
+    local STYLE_DEFS = {
+        Neverlose = { anchor = "screen", ax = 0.5,  ay = 0.60, width = 196, row = 30, txt = 14, bars = true,  box = true,  align = "center" },
+        Player    = { anchor = "sideL",             width = 168, row = 26, txt = 13, bars = true,  box = true,  align = "right"  },
+        Minimal   = { anchor = "screen", ax = 0.5,  ay = 0.62, width = 200, row = 24, txt = 15, bars = false, box = false, align = "center" },
+        Corner    = { anchor = "corner",            width = 210, row = 28, txt = 14, bars = true,  box = false, align = "left"   },
+    }
+    local DRAW_STYLES = { Neverlose = true, Player = true, Minimal = true, Corner = true }
+
+    -- ── Drawing-based cell pool (shared by all Drawing styles) ───────────────
+    local drawCells, stackBox, stackBoxOutline, stackAccent
+    local function ensureStackChrome()
+        if stackBox then return end
+        stackBoxOutline = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 3 })
+        stackBox        = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = WM.bgDark,       ZIndex = 4 })
+        stackAccent     = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Config.Ind_Accent, ZIndex = 5 })
+    end
     local function textWidth(d)
         local ok, b = pcall(function() return d.TextBounds end)
         if ok and b and b.X and b.X > 0 then return b.X end
         return #tostring(d.Text) * (d.Size * 0.55)
     end
+    drawCells = {}
     local function getDrawCell(key)
         local c = drawCells[key]
         if c then return c end
         c = {
-            label = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMute, ZIndex = 6 }),
-            value = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMain, ZIndex = 6 }),
-            track = newDrawing("Line", { Thickness = 2, Visible = false, Color = WM.stroke, ZIndex = 5, Transparency = 0 }),
-            fill  = newDrawing("Line", { Thickness = 2, Visible = false, Color = Config.Ind_Accent, ZIndex = 6, Transparency = 0 }),
+            label = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMute, ZIndex = 7 }),
+            value = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMain, ZIndex = 7 }),
+            track = newDrawing("Line", { Thickness = 2, Visible = false, Color = WM.stroke, ZIndex = 6, Transparency = 0 }),
+            fill  = newDrawing("Line", { Thickness = 2, Visible = false, Color = Config.Ind_Accent, ZIndex = 7, Transparency = 0 }),
             alpha = 0, dispRatio = 0, y = 0, hasY = false,
         }
         drawCells[key] = c
@@ -774,22 +901,51 @@ return function(Lib, Core)
     end
     local function hideAllDrawCells()
         for _, c in pairs(drawCells) do c.alpha = 0; c.hasY = false; hideDrawCell(c) end
+        if stackBox then stackBox.Visible = false; stackBoxOutline.Visible = false; stackAccent.Visible = false end
     end
 
-    -- Animated vertical stack rendered with Drawing objects. `centerX` centers the
-    -- block; rows appear from a slight offset and fade in, and fade out in place.
-    local function renderDrawStack(stats, dt, centerX, topY, width, step, txtSize)
-        local activeMap = {}
-        for i, s in ipairs(stats) do activeMap[s.key] = { idx = i, stat = s } end
+    -- viewport-relative UI scale so every Drawing style stays readable on phones
+    local function uiScale()
+        local vp = Camera.ViewportSize
+        local s  = math.clamp(vp.Y / 864, 0.85, 1.7)
+        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then s = s * 1.18 end
+        return s * math.clamp(Config.Ind_Scale or 1, 0.5, 2.5)
+    end
+
+    -- Animated vertical stack rendered with Drawing objects. Rows ease into their slot
+    -- and fade in/out. `def` selects layout (bars/box/alignment); `sc` is the UI scale.
+    local function renderDrawStack(stats, dt, def, centerX, topY, sc)
+        ensureStackChrome()
+        local width, step, txtSize = def.width * sc, def.row * sc, def.txt * sc
+        local padX, padY = 12 * sc, 9 * sc
         local left, right = centerX - width / 2, centerX + width / 2
         local aA = math.clamp(dt * 12, 0, 1)
+
+        -- background panel (fades with the stack, sized to the active rows)
+        local n = #stats
+        if def.box and n > 0 then
+            local h = n * step + padY
+            local bx, by = left - padX, topY - padY * 0.6
+            local bw, bh = width + padX * 2, h
+            stackBoxOutline.Position = Vector2.new(bx - 1, by - 1); stackBoxOutline.Size = Vector2.new(bw + 2, bh + 2)
+            stackBoxOutline.Color = WM.stroke; stackBoxOutline.Transparency = 0.85; stackBoxOutline.Visible = true
+            stackBox.Position = Vector2.new(bx, by); stackBox.Size = Vector2.new(bw, bh)
+            stackBox.Color = WM.bgDark; stackBox.Transparency = WM.bgTransp; stackBox.Visible = true
+            stackAccent.Position = Vector2.new(bx, by); stackAccent.Size = Vector2.new(2 * sc, bh)
+            stackAccent.Color = Config.Ind_Accent; stackAccent.Transparency = 0; stackAccent.Visible = true
+        else
+            stackBox.Visible = false; stackBoxOutline.Visible = false; stackAccent.Visible = false
+        end
+
+        local activeMap = {}
+        for i, s in ipairs(stats) do activeMap[s.key] = { idx = i, stat = s } end
         for _, key in ipairs(rowOrder) do
             local c  = getDrawCell(key)
             local am = activeMap[key]
             c.alpha = lerp(c.alpha, am and 1 or 0, aA)
             if am then
                 local slotY = topY + (am.idx - 1) * step
-                if not c.hasY then c.y = slotY + 7; c.hasY = true end
+                if not c.hasY then c.y = slotY + 8 * sc; c.hasY = true end
                 c.y = lerp(c.y, slotY, aA)
             end
             if c.alpha < 0.02 then
@@ -798,27 +954,37 @@ return function(Lib, Core)
                 local rowY  = c.y
                 local ratio = am and am.stat.ratio or c.dispRatio
                 c.dispRatio = lerp(c.dispRatio, ratio, aA)
+                local col   = am and am.stat.color or Config.Ind_Accent
 
                 c.label.Size = txtSize
                 c.label.Text = STAT_LABELS[key] or key
                 c.label.Position = Vector2.new(left, rowY)
+                c.label.Color = WM.txtMute
                 c.label.Transparency = c.alpha
                 c.label.Visible = true
 
                 if am then c.value.Text = am.stat.text end
                 c.value.Size = txtSize
                 c.value.Position = Vector2.new(right - textWidth(c.value), rowY)
+                c.value.Color = WM.txtMain
                 c.value.Transparency = c.alpha
                 c.value.Visible = true
 
-                local lineY = rowY + txtSize + 5
-                c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
-                c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.35; c.track.Visible = true
+                if def.bars then
+                    local lineY = rowY + txtSize + 5 * sc
+                    c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
+                    c.track.Thickness = math.max(1, 2 * sc)
+                    c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.4; c.track.Visible = true
 
-                local fillW = width * math.clamp(c.dispRatio, 0, 1)
-                c.fill.From = Vector2.new(left, lineY); c.fill.To = Vector2.new(left + fillW, lineY)
-                c.fill.Color = am and am.stat.color or Config.Ind_Accent
-                c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
+                    local fillW = width * math.clamp(c.dispRatio, 0, 1)
+                    c.fill.From = Vector2.new(left, lineY); c.fill.To = Vector2.new(left + fillW, lineY)
+                    c.fill.Thickness = math.max(1, 2 * sc)
+                    c.fill.Color = col; c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
+                else
+                    -- no bars: tint the value by the stat colour instead
+                    c.value.Color = col
+                    c.track.Visible = false; c.fill.Visible = false
+                end
             end
         end
     end
@@ -828,6 +994,8 @@ return function(Lib, Core)
         if indHolder then
             drag.disp = drag.disp:Lerp(drag.target, math.clamp(dt * 16, 0, 1))
             indHolder.Position = UDim2.fromOffset(math.floor(drag.disp.X + 0.5), math.floor(drag.disp.Y + 0.5))
+            -- keep the GUI panel readable on small screens
+            if indUIScale then indUIScale.Scale = lerp(indUIScale.Scale, uiScale(), math.clamp(dt * 8, 0, 1)) end
         end
 
         local style = Config.Ind_Style
@@ -853,36 +1021,58 @@ return function(Lib, Core)
             for _, r in pairs(rows) do setRowShown(r, false) end
         end
 
-        -- ── Drawing styles (Neverlose / Player) ─────────────────────────────
-        if char and hasDrawing and (style == "Neverlose" or style == "Player") then
+        -- ── Drawing styles ──────────────────────────────────────────────────
+        local def = DRAW_STYLES[style] and STYLE_DEFS[style] or nil
+        if char and hasDrawing and def then
             local stats = collectStats(char, hum)
-            if style == "Neverlose" then
-                -- centered, just below the middle of the screen
-                local vp = Camera.ViewportSize
-                renderDrawStack(stats, dt, vp.X / 2, vp.Y * 0.58, 178, 26, 13)
-            else
-                -- floating panel above the LOCAL player's head
-                local head = char:FindFirstChild("Head") or getRoot(char)
-                local drawn = false
-                if head then
-                    local sp, onScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 2.6, 0))
-                    if onScreen then
-                        local step = 22
-                        local top  = sp.Y - 12 - #stats * step
-                        renderDrawStack(stats, dt, sp.X, top, 150, step, 12)
+            local sc    = uiScale()
+            local vp    = Camera.ViewportSize
+            local drawn = false
+
+            if def.anchor == "screen" then
+                local ay = math.clamp(Config.Ind_ScreenY or def.ay, 0.2, 0.92)
+                renderDrawStack(stats, dt, def, vp.X * def.ax, vp.Y * ay, sc)
+                drawn = true
+
+            elseif def.anchor == "corner" then
+                local margin = 18 * sc
+                renderDrawStack(stats, dt, def, margin + (def.width * sc) / 2, margin, sc)
+                drawn = true
+
+            elseif def.anchor == "sideL" then
+                -- beside the local player: project the body centre + a horizontal
+                -- (camera-space) offset for the body's half-width. Because we offset
+                -- along the CAMERA right vector (never the character CFrame), shiftlock
+                -- yaw cannot shift the panel.
+                local root = getRoot(char)
+                if root then
+                    local _, size = char:GetBoundingBox()
+                    local halfW = math.max(size.X, size.Z) * 0.5 + 0.4
+                    local sp, on = Camera:WorldToViewportPoint(root.Position)
+                    local edge   = Camera:WorldToViewportPoint(root.Position + Camera.CFrame.RightVector * halfW)
+                    if on then
+                        local edgePx = math.abs(edge.X - sp.X)
+                        local width  = def.width * sc
+                        local gap    = 16 * sc
+                        local n      = math.max(#stats, 1)
+                        local totalH = n * def.row * sc
+                        local cx     = sp.X - edgePx - gap - width / 2
+                        local topY   = sp.Y - totalH / 2
+                        renderDrawStack(stats, dt, def, cx, topY, sc)
                         drawn = true
                     end
                 end
-                if not drawn then hideAllDrawCells() end
             end
+
+            if not drawn then hideAllDrawCells() end
         else
             hideAllDrawCells()
         end
     end
 
-    -- ═══════════════════════════════════════════════════════════════════════
+    -- ═════════════════════════════════════════════════════════════════���═════
     -- HIT DIRECTION  (fading arrows around the crosshair)
-    -- ═══════════════════════════════════════════════════════════════════════
+    -- ══════════════════════════════════════════��════════════════════════════
     local hitArrows = {}          -- active { tri, born, angle }
     local ARROW_LIFE = 1.1
     local lastHealth = nil
@@ -952,9 +1142,19 @@ return function(Lib, Core)
     end
 
     local function onLocalDamage()
-        if not Config.HitDir_On then return end
         local ang = nearestAttackerAngle()
-        if ang then spawnHitArrow(ang) end
+        spawnHitArrow(ang or 0)   -- always show something, even if no attacker is resolvable
+    end
+
+    -- Poll local health every frame (more reliable than Humanoid.HealthChanged, which
+    -- can be missed when the character/humanoid instance is swapped on respawn).
+    local function pollLocalDamage()
+        if not Config.HitDir_On then return end
+        local hum = getHum(getChar(LocalPlayer))
+        if not hum then lastHealth = nil; return end
+        local h = hum.Health
+        if lastHealth and h < lastHealth - 0.5 and h > 0 then onLocalDamage() end
+        lastHealth = h
     end
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -964,14 +1164,8 @@ return function(Lib, Core)
     local function track(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
 
     local function hookLocalHumanoid()
-        local char = getChar(LocalPlayer)
-        local hum = getHum(char)
-        if not hum then return end
-        lastHealth = hum.Health
-        track(hum.HealthChanged, function(h)
-            if lastHealth and h < lastHealth - 0.5 then onLocalDamage() end
-            lastHealth = h
-        end)
+        local hum = getHum(getChar(LocalPlayer))
+        lastHealth = hum and hum.Health or nil
     end
 
     local started = false
@@ -999,6 +1193,7 @@ return function(Lib, Core)
             end
             -- Indicators + hit direction
             updateIndicators(dt)
+            pollLocalDamage()
             updateHitDir()
         end)
     end
@@ -1055,14 +1250,14 @@ return function(Lib, Core)
         end
 
         local function slider(section, o)
-            section:Slider({
+            return section:Slider({
                 Name = o.Name, Default = o.Default, Minimum = o.Min, Maximum = o.Max,
                 Precision = o.Precision or 0, Suffix = o.Suffix, Callback = o.Callback,
             }, ctx.flag(o.Flag))
         end
 
         local function colorpick(section, name, flag, default, set)
-            section:Colorpicker({ Name = name, Default = default, Callback = function(c) set(c) end }, ctx.flag(flag))
+            return section:Colorpicker({ Name = name, Default = default, Callback = function(c) set(c) end }, ctx.flag(flag))
         end
 
         -- Persist the HUD position via MacLib's FAL Data API, then restore it.
@@ -1108,17 +1303,30 @@ return function(Lib, Core)
             set = function(v) Config.Ind_On = v end,
             Desc = "Animated HUD stack of your own combat data - slides in when relevant, out when not.",
         })
+        -- per-style setting elements (their visibility is driven by the Style dropdown)
+        local styleEls = {}   -- element -> { style1, style2, ... } (nil/"*" = always visible)
+        local function applyStyleVis()
+            local cur = Config.Ind_Style
+            for el, styles in pairs(styleEls) do
+                local vis = false
+                if styles == "*" then vis = true
+                else for _, s in ipairs(styles) do if s == cur then vis = true break end end end
+                pcall(function() el:SetVisibility(vis) end)
+            end
+        end
+
         pcall(function()
             sInd:Dropdown({
                 Name = "Style",
-                Options = { "Panel", "Neverlose", "Player" },
+                Options = { "Panel", "Neverlose", "Player", "Minimal", "Corner" },
                 Default = Config.Ind_Style,
                 Callback = function(v)
-                    if type(v) == "string" and v ~= "" then Config.Ind_Style = v end
+                    if type(v) == "string" and v ~= "" then Config.Ind_Style = v; applyStyleVis() end
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Panel = draggable HUD  |  Neverlose = centered minimal  |  Player = above your head." })
+        sInd:SubLabel({ Text = "Panel = draggable HUD | Neverlose = centered box | Player = beside you | Minimal = text only | Corner = top-left." })
+
         boolToggle(sInd, "Health",       "Ind Health",  function() return Config.Ind_Health end,  function(v) Config.Ind_Health = v end)
         boolToggle(sInd, "Stamina",      "Ind Stamina", function() return Config.Ind_Stamina end, function(v) Config.Ind_Stamina = v end)
         boolToggle(sInd, "IFrame",       "Ind IFrame",  function() return Config.Ind_IFrame end,  function(v) Config.Ind_IFrame = v end)
@@ -1126,11 +1334,30 @@ return function(Lib, Core)
         boolToggle(sInd, "Dodge CD",     "Ind Dodge",   function() return Config.Ind_Dodge end,   function(v) Config.Ind_Dodge = v end)
         boolToggle(sInd, "Block CD",     "Ind Block",   function() return Config.Ind_Block end,   function(v) Config.Ind_Block = v end)
         colorpick(sInd, "Accent Color", "VIS_IND_Accent", Config.Ind_Accent, function(c) Config.Ind_Accent = c end)
-        pcall(function()
-            sInd:Button({ Name = "Reset HUD Position", Callback = function() resetPos() end })
-        end)
-        sInd:SubLabel({ Text = "Drag the HUD anywhere to move it - the position is saved automatically." })
-        sInd:SubLabel({ Text = "Heavy/Dodge cooldowns are read from the game's own combat config for exact timing." })
+
+        -- ── Per-style settings (shown only for the relevant style) ──
+        -- Panel: draggable, so it gets a reset-position button.
+        local resetBtn = sInd:Button({ Name = "Reset HUD Position", Callback = function() resetPos() end })
+        styleEls[resetBtn] = { "Panel" }
+        local dragHint = sInd:SubLabel({ Text = "Drag the HUD anywhere - the position is saved automatically." })
+        styleEls[dragHint] = { "Panel" }
+
+        -- Screen-anchored styles: vertical position on screen.
+        local screenYSlider = slider(sInd, {
+            Name = "Screen Position", Flag = "VIS_IND_ScreenY", Default = math.floor((Config.Ind_ScreenY or 0.6) * 100),
+            Min = 20, Max = 92, Suffix = "%", Callback = function(v) Config.Ind_ScreenY = v / 100 end,
+        })
+        styleEls[screenYSlider] = { "Neverlose", "Minimal" }
+
+        -- Every Drawing style: manual scale on top of the automatic mobile rescale.
+        local scaleSlider = slider(sInd, {
+            Name = "Scale", Flag = "VIS_IND_Scale", Default = math.floor((Config.Ind_Scale or 1) * 100),
+            Min = 60, Max = 200, Suffix = "%", Callback = function(v) Config.Ind_Scale = v / 100 end,
+        })
+        styleEls[scaleSlider] = { "Neverlose", "Player", "Minimal", "Corner" }
+
+        applyStyleVis()
+        sInd:SubLabel({ Text = "Cooldowns are predicted client-side from the game's own combat data, so they tick down accurately." })
 
         -- ─────────────── Section 3: Hit Direction (Right) ────���──────────
         local sHit = V:Section({ Side = "Right" })
@@ -1160,6 +1387,11 @@ return function(Lib, Core)
             end
         end
         drawCells = {}
+        for _, d in ipairs({ stackBox, stackBoxOutline, stackAccent }) do
+            if d then pcall(function() d:Remove() end) end
+        end
+        stackBox, stackBoxOutline, stackAccent = nil, nil, nil
+        indUIScale = nil
         if screenGui then pcall(function() screenGui:Destroy() end); screenGui = nil end
     end
 
