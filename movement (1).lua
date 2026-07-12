@@ -577,33 +577,52 @@ return function(Lib, Core)
     local _cdPatched, _cdMapped = false, false
     local _cdStatus = "not run"
 
-    -- a fn is scheduleM1SwingTimers if its constants contain BOTH cooldown-task strings
-    -- AND it has >=2 numeric upvalues (resetLocalCombatState has 0, ServerResponse 1).
+    -- Verified from M1.lua bytecode. scheduleM1SwingTimers upvalue layout:
+    --   #1 u21(bool) #2 u22(nil) #3 u31(Janitor) #4 FinisherCooldown=1.25
+    --   #5 AttackDuration=0.45 #6 u20(nil) #7 ComboResetTime=1.55 #8 resetCombo(fn)
+    -- CombatConfig.ClientPredict.M1 confirmed: 1.25 / 0.45 / 1.55.
+    -- IMPORTANT: DO NOT verify via debug.getconstants — on Potassium it proved
+    -- unreliable here (rejected the real fn, accepted resetLocalCombatState which also
+    -- carries the "M1AttackCooldownTask"/"M1ComboResetTask" strings but for :Remove()).
+    -- debug.getupvalues reads VALUES reliably (the log showed it read 1 and 0 correctly),
+    -- so we identify scheduleM1SwingTimers UNIQUELY by its upvalue value-set: it is the
+    -- only fn owning a number ~1.25 AND ~0.45 AND ~1.55. resetLocalCombatState's numeric
+    -- upvalues are all 0; ServerResponse's were 1/0 — both fail this test.
+    local EXP_FIN, EXP_ATK, EXP_CMB = 1.25, 0.45, 1.55
+    local function near(a, b) return type(a) == "number" and math.abs(a - b) <= 0.15 end
+
     local function isScheduleFn(fn)
-        if type(fn) ~= "function" or not _getconstants then return false end
-        local okc, consts = pcall(_getconstants, fn)
-        if not (okc and type(consts) == "table") then return false end
-        local a, b = false, false
-        for _, c in ipairs(consts) do
-            if c == "M1AttackCooldownTask" then a = true
-            elseif c == "M1ComboResetTask" then b = true end
-        end
-        if not (a and b) then return false end
-        local nNum = 0
+        if type(fn) ~= "function" then return false end
         local ups = _getupvalues(fn)
-        if type(ups) == "table" then
-            for _, v in pairs(ups) do if type(v) == "number" then nNum = nNum + 1 end end
+        if type(ups) ~= "table" then return false end
+        local hasFin, hasAtk, hasCmb = false, false, false
+        for _, v in pairs(ups) do
+            if near(v, EXP_FIN) then hasFin = true end
+            if near(v, EXP_ATK) then hasAtk = true end
+            if near(v, EXP_CMB) then hasCmb = true end
         end
-        return nNum >= 2
+        return hasFin and hasAtk and hasCmb
     end
 
     -- extract scheduleM1SwingTimers out of a resolved M1 module table (v1).
+    -- OnHoldSwing upvalues (verified) = {LocalPlayer, u19(num), Evasive, MovementServiceClient,
+    -- scheduleM1SwingTimers} → the ONLY function-typed upvalue is what we want.
     local function drillModuleTable(mod)
         if type(mod) ~= "table" then return nil end
-        local ohs = rawget(mod, "OnHoldSwing")   -- captures scheduleM1SwingTimers directly (1-hop)
+        local ohs = rawget(mod, "OnHoldSwing")
         if type(ohs) == "function" then
-            for _, v in pairs(_getupvalues(ohs) or {}) do
-                if isScheduleFn(v) then dbg("combo lever: FOUND via OnHoldSwing"); return v end
+            local ups = _getupvalues(ohs) or {}
+            -- pass 1: value-verified match
+            for _, v in pairs(ups) do
+                if isScheduleFn(v) then dbg("combo lever: FOUND via OnHoldSwing (verified)"); return v end
+            end
+            -- pass 2: sole function-typed upvalue (deterministic per bytecode layout)
+            local onlyFn, count = nil, 0
+            for _, v in pairs(ups) do
+                if type(v) == "function" then onlyFn = v; count = count + 1 end
+            end
+            if count == 1 and type(onlyFn) == "function" then
+                dbg("combo lever: FOUND via OnHoldSwing (sole fn upvalue)"); return onlyFn
             end
         end
         local oma = rawget(mod, "OnM1Activated")  -- 2-hop: OnM1Activated → tryM1 → schedule
@@ -689,9 +708,7 @@ return function(Lib, Core)
 
     local function findScheduleFn()
         if _schedFn then return _schedFn end
-        if not (_filtergc and _getupvalues and _getconstants) then
-            dbg("combo lever: missing filtergc/getupvalues/getconstants -> cannot find fn"); return nil
-        end
+        if not _getupvalues then dbg("combo lever: no getupvalues -> cannot find fn"); return nil end
         _schedFn = findViaLoadedModules() or findViaModule() or findViaConstants()
         dbg("combo lever: scheduleM1SwingTimers " .. (_schedFn and "FOUND" or "NOT found"))
         return _schedFn
@@ -894,7 +911,7 @@ return function(Lib, Core)
         if Config.Sprint_On then setSprint(true) end
     end)
 
-    -- ═══════════════════════════════ UI ═════════════════════════════════════
+    -- ═══════════════════���═══════════ UI ═════════════════════════════════════
     local M = {}
 
     function M.start()
