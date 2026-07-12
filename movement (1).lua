@@ -587,7 +587,7 @@ return function(Lib, Core)
     --   (b) hold u19=3 so u19%4+1==4 every swing → 4th (finisher) animation each hit.
     --   Finisher DAMAGE is server-decided (client only sends a sequence #), so (b) forces
     --   the client-side finisher animation/state, not guaranteed server damage.
-    local _ohs, _schedFn = nil, nil
+    local _m1mod, _ohs, _schedFn = nil, nil, nil
     local _u19idx, _u21idx = nil, nil
     local _cd = { finIdx = nil, atkIdx = nil, cmbIdx = nil,
                   origFin = nil, origAtk = nil, origCmb = nil }
@@ -595,18 +595,18 @@ return function(Lib, Core)
     local _cdStatus = "not run"
     local function near(a, b) return type(a) == "number" and math.abs(a - b) <= 0.2 end
 
-    local function getOHSFromTable(tbl)
-        if type(tbl) == "table" then
-            local ohs = rawget(tbl, "OnHoldSwing")
-            if type(ohs) == "function" then return ohs end
-        end
-        return nil
+    local function looksLikeM1Mod(tbl)
+        return type(tbl) == "table"
+            and type(rawget(tbl, "OnHoldSwing")) == "function"
+            and type(rawget(tbl, "ServerResponse")) == "function"
     end
 
-    -- Resolve v1.OnHoldSwing (deterministic anchor). Path 1: getloadedmodules + require
-    -- (returns the CACHED module table, does NOT re-run). Path 2: filtergc the module table.
-    local function findOHS()
-        if _ohs then return _ohs end
+    -- Resolve the M1 module table v1 (deterministic). Path 1: getloadedmodules + require
+    -- (returns the CACHED table, does NOT re-run). Path 2: filtergc the module table.
+    -- The dispatcher (CombatReplicatorClient.dispatchCombat) does a FRESH lookup
+    -- `moduleTable[Func](...)` each call, so replacing a field on this table is honored.
+    local function findM1Mod()
+        if _m1mod then return _m1mod end
         if type(_getloadedmodules) == "function" then
             local ok, mods = pcall(_getloadedmodules)
             if ok and type(mods) == "table" then
@@ -615,8 +615,9 @@ return function(Lib, Core)
                         local full = ""; pcall(function() full = m:GetFullName() end)
                         if string.find(full, "CombatSystemClient", 1, true) then
                             local okr, tbl = pcall(require, m)
-                            local ohs = okr and getOHSFromTable(tbl)
-                            if ohs then dbg("combo lever: OnHoldSwing via getloadedmodules"); _ohs = ohs; return ohs end
+                            if okr and looksLikeM1Mod(tbl) then
+                                dbg("combo lever: M1 module via getloadedmodules"); _m1mod = tbl; return tbl
+                            end
                         end
                     end
                 end
@@ -625,11 +626,20 @@ return function(Lib, Core)
         if _filtergc then
             local ok, tbl = pcall(_filtergc, "table",
                 { Keys = { "OnM1Activated", "OnHoldSwing", "Hold", "ServerResponse" } }, true)
-            local ohs = ok and getOHSFromTable(tbl)
-            if ohs then dbg("combo lever: OnHoldSwing via filtergc"); _ohs = ohs; return ohs end
+            if ok and looksLikeM1Mod(tbl) then
+                dbg("combo lever: M1 module via filtergc"); _m1mod = tbl; return tbl
+            end
         end
-        dbg("combo lever: OnHoldSwing NOT found")
+        dbg("combo lever: M1 module NOT found")
         return nil
+    end
+
+    local function findOHS()
+        if _ohs then return _ohs end
+        local mod = findM1Mod()
+        if mod then _ohs = rawget(mod, "OnHoldSwing") end
+        if not _ohs then dbg("combo lever: OnHoldSwing NOT found") end
+        return _ohs
     end
 
     -- Map schedFn, u19 index (in OHS), u21 index + fin/atk/combo indices (in schedFn).
@@ -701,6 +711,84 @@ return function(Lib, Core)
         dbg("combo lever: RESTORED originals (atk=" .. tostring(_cd.origAtk) .. " fin=" .. tostring(_cd.origFin) .. ")")
     end
 
+    -- ── VISUAL BYPASS: swallow the server "Declined" verdict ────────────────────
+    -- v1.ServerResponse(player,"Declined",seq) is what rolls the combo back
+    -- (u19=v63-1) and interrupts the swing animation (StopAnim). The client can't
+    -- make the server ACCEPT faster hits, but by replacing v1.ServerResponse on the
+    -- module table (dispatcher does a fresh lookup each call) we stop the client-side
+    -- rollback + animation cancel, so the combo flows smoothly/visually. NON-"Declined"
+    -- responses (Hit fx etc.) are forwarded to the original untouched.
+    local _srOrig, _srHooked = nil, false
+    local function hookServerResponse()
+        if _srHooked then return true end
+        local mod = findM1Mod()
+        if not mod then dbg("SR hook: M1 module not found"); return false end
+        local orig = rawget(mod, "ServerResponse")
+        if type(orig) ~= "function" then dbg("SR hook: ServerResponse missing"); return false end
+        _srOrig = orig
+        rawset(mod, "ServerResponse", function(p, verdict, ...)
+            if verdict == "Declined" and Config.NCW_On then
+                -- swallow: no combo rollback, no StopAnim
+                return
+            end
+            return _srOrig(p, verdict, ...)
+        end)
+        _srHooked = true
+        dbg("SR hook: v1.ServerResponse wrapped (Declined swallowed while NCW on)")
+        return true
+    end
+    local function unhookServerResponse()
+        if _srHooked and _m1mod and _srOrig then
+            rawset(_m1mod, "ServerResponse", _srOrig)
+            _srHooked = false
+            dbg("SR hook: restored original ServerResponse")
+        end
+    end
+
+    -- ── Finisher First: every M1 plays the 4th (finisher) swing animation ───────
+    -- getM1Animations() returns the CACHED table u2[style] = {1stM1,2ndM1,3rdM1,4thM1}
+    -- BY REFERENCE. playM1SwingAnimation does getM1Animations()[index]. If we remap
+    -- [1]=[2]=[3]=[4], any combo index resolves to the finisher animation — no fight
+    -- with u19 reassignment. We find getM1Animations by its unique string constants
+    -- "1stM1".."4thM1" (reliable string-based filtergc), call it to get the cache ref,
+    -- store originals, then remap. Finisher DAMAGE stays server-decided.
+    local _ffAnims, _ffOrig, _ffApplied = nil, nil, false
+    local _getM1Anims = nil
+    local function findGetM1Anims()
+        if _getM1Anims then return _getM1Anims end
+        if not _filtergc then return nil end
+        local ok, res = pcall(_filtergc, "function",
+            { Constants = { "1stM1", "2ndM1", "3rdM1", "4thM1" } }, false)
+        if ok and type(res) == "table" then
+            for _, fn in ipairs(res) do if type(fn) == "function" then _getM1Anims = fn; break end end
+        end
+        if not _getM1Anims then
+            local ok2, one = pcall(_filtergc, "function", { Constants = { "1stM1", "4thM1" } }, true)
+            if ok2 and type(one) == "function" then _getM1Anims = one end
+        end
+        dbg("FF: getM1Animations " .. (_getM1Anims and "FOUND" or "NOT found"))
+        return _getM1Anims
+    end
+    local function applyFinisherFirst()
+        local fn = findGetM1Anims()
+        if not fn then return false end
+        local ok, tbl = pcall(fn)
+        if not (ok and type(tbl) == "table" and tbl[4] ~= nil) then dbg("FF: anim table invalid"); return false end
+        _ffAnims = tbl
+        if not _ffOrig then _ffOrig = { tbl[1], tbl[2], tbl[3], tbl[4] } end   -- snapshot for restore
+        tbl[1], tbl[2], tbl[3] = tbl[4], tbl[4], tbl[4]                         -- remap to finisher
+        _ffApplied = true
+        dbg("FF: remapped anim cache [1..3] -> [4] (finisher)")
+        return true
+    end
+    local function restoreFinisherFirst()
+        if _ffApplied and _ffAnims and _ffOrig then
+            _ffAnims[1], _ffAnims[2], _ffAnims[3] = _ffOrig[1], _ffOrig[2], _ffOrig[3]
+            _ffApplied = false
+            dbg("FF: restored original anim cache")
+        end
+    end
+
     local _charConnDone = false
     local function installAnimHook()
         if animHookInstalled then return true end
@@ -714,9 +802,10 @@ return function(Lib, Core)
                 task.wait(0.5)
                 buildM1Ids()          -- style/anim ids may differ after respawn
                 hookAnimator()
-                -- scheduleM1SwingTimers is module-cached (survives respawn), but re-assert
-                -- the patch if the player still has NCW enabled.
-                if Config.NCW_On then applyComboCooldowns() end
+                -- scheduleM1SwingTimers + module table are cached (survive respawn), but
+                -- re-assert the patches, and re-remap the anim cache (rebuilt per style).
+                if Config.NCW_On then applyComboCooldowns(); hookServerResponse() end
+                if Config.FF_On then _ffApplied = false; _ffAnims = nil; _ffOrig = nil; applyFinisherFirst() end
             end)
         end
         animHookInstalled = true
@@ -780,13 +869,14 @@ return function(Lib, Core)
         return true
     end
 
-    -- No Combo Wait per-frame driver. Three levers, all client-side:
-    --   1) force u21=true  → the swing-cooldown gate in tryM1 (`if not u21 then return`)
-    --      never blocks the next input, finisher or not. This is the real no-wait.
-    --   2) if Finisher-First on, hold u19=3 → tryM1 computes u19%4+1==4 every swing, so the
-    --      4th (finisher) animation + client combo state play on every hit.
-    --   3) clear the SERVER-set M1Cooldown attribute locally (best-effort; server re-sets
+    -- No Combo Wait per-frame driver. Client-side levers:
+    --   1) force u21=true → the swing-cooldown gate in tryM1 (`if not u21 then return`)
+    --      never blocks the next input. Combined with the ServerResponse hook (which
+    --      swallows the "Declined" rollback), the combo flows without the client stall.
+    --   2) clear the SERVER-set M1Cooldown attribute locally (best-effort; server re-sets
     --      it, so we clear each frame). Real damage stays server-authoritative.
+    -- Finisher-First is NOT driven here — it's a one-shot anim-cache remap (applyFinisherFirst),
+    -- because per-frame u19 writes get overwritten by OnHoldSwing's `u19 = clamp(arg)`.
     local _ncwCdClears, _u21forces, _u19forces = 0, 0, 0
     local function driveNCW()
         if not Config.NCW_On then return end
@@ -794,11 +884,7 @@ return function(Lib, Core)
         if _cdMapped and _u21idx and _schedFn then
             if pcall(_setupvalue, _schedFn, _u21idx, true) then _u21forces = _u21forces + 1 end
         end
-        -- 2) finisher-first: pin the combo counter so the next swing resolves to index 4
-        if Config.FF_On and _cdMapped and _u19idx and _ohs then
-            if pcall(_setupvalue, _ohs, _u19idx, 3) then _u19forces = _u19forces + 1 end
-        end
-        -- 3) drop the server post-combo attribute locally
+        -- 2) drop the server post-combo attribute locally
         local c = LocalPlayer.Character
         if c and c:GetAttribute("M1Cooldown") ~= nil then
             pcall(function() c:SetAttribute("M1Cooldown", nil) end)
@@ -859,9 +945,11 @@ return function(Lib, Core)
                     dbg("   LIVE fin=", ups and ups[_cd.finIdx], "LIVE atk=", ups and ups[_cd.atkIdx],
                         "LIVE u21=", ups and _u21idx and ups[_u21idx])
                     local ou = _ohs and _getupvalues(_ohs)
-                    dbg("   LIVE u19=", ou and _u19idx and ou[_u19idx], "| u21forces=", _u21forces, "u19forces=", _u19forces)
+                    dbg("   LIVE u19=", ou and _u19idx and ou[_u19idx], "| u21forces=", _u21forces)
                 end
-                dbg("FF_On=", Config.FF_On)
+                dbg("--- visual bypass ---")
+                dbg("SR-hooked=", _srHooked, "| FF_On=", Config.FF_On, "FF-applied=", _ffApplied,
+                    "getM1Anims=", _getM1Anims ~= nil)
                 dbg("animHook=", animHookInstalled, "animatorHooked=", _apInstalled, "M1 idSet=", _m1Count)
                 dbg("AnimationPlayed total=", _apPlays, "M1 matched=", _apM1, "speed applied=", _apApply, "cdClears=", _ncwCdClears)
                 dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "SpeedMul=", string.format("%.2f", speedMul()))
@@ -1007,17 +1095,19 @@ return function(Lib, Core)
                     -- retry the find a few times (module may not be required yet on first click)
                     task.spawn(function()
                         for _ = 1, 8 do
-                            if applyComboCooldowns() then break end
+                            if applyComboCooldowns() and hookServerResponse() then break end
                             task.wait(0.4)
                         end
-                        notify("No Combo Wait", _cdStatus)
+                        hookServerResponse()
+                        notify("No Combo Wait", _cdStatus .. (_srHooked and " | SR-hook ON" or " | SR-hook FAIL"))
                     end)
                 else
                     restoreComboCooldowns()
+                    unhookServerResponse()
                     notify("No Combo Wait", "Disabled")
                 end
             end,
-            Desc = "kills the post-combo delay: forces the client swing gate u21=true every\nframe + shrinks FinisherCooldown (1.25s) via debug.setupvalue",
+            Desc = "smooths the combo: forces the swing gate u21=true each frame AND hooks\nServerResponse to swallow the 'Declined' rollback that cancels your animation",
         })
         slider(sCbt, { Name = "Combo Speed", Flag = "MV_NCWSpeed", Default = Config.NCW_Speed,
             Min = 1, Max = 50, Suffix = "x", Callback = function(v)
@@ -1031,16 +1121,18 @@ return function(Lib, Core)
                 Config.FF_On = v
                 if v then
                     bootstrapHooks()
-                    if not Config.NCW_On then notify("Finisher First", "enable No Combo Wait too (else 1.25s wait each hit)") end
+                    if not Config.NCW_On then notify("Finisher First", "tip: enable No Combo Wait too for smooth chaining") end
                     task.spawn(function()
-                        for _ = 1, 8 do if mapAll() then break end task.wait(0.4) end
-                        notify("Finisher First", _cdMapped and ("ON (u19idx=" .. tostring(_u19idx) .. ")") or "combo counter not found")
+                        local okFF = false
+                        for _ = 1, 8 do okFF = applyFinisherFirst(); if okFF then break end task.wait(0.4) end
+                        notify("Finisher First", okFF and "ON (every M1 = finisher anim)" or "getM1Animations not found")
                     end)
                 else
+                    restoreFinisherFirst()
                     notify("Finisher First", "Disabled")
                 end
             end,
-            Desc = "every M1 plays the 4th (finisher) swing: pins the combo counter u19 so\ntryM1 resolves index 4 each hit. Finisher DAMAGE stays server-decided.",
+            Desc = "every M1 plays the 4th (finisher) swing animation by remapping the M1\nanim cache. Finisher DAMAGE stays server-decided (visual/feel only).",
         })
         sCbt:SubLabel({ Text = "Anchors on M1.OnHoldSwing: u19 (combo counter) = its only number upvalue,\nscheduleM1SwingTimers = its only function upvalue, u21 (gate) = that fn's only\nboolean. No Combo Wait forces u21=true each frame; Finisher First pins u19=3 so\nevery swing is the 4th hit. Server stays authoritative over real damage." })
 
