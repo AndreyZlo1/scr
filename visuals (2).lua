@@ -56,7 +56,8 @@ return function(Lib, Core)
 
         -- Indicators
         Ind_On      = false,
-        Ind_Style   = "Panel",   -- "Panel" | "Neverlose" | "Player" | "Minimal" | "Corner"
+        Ind_Style   = "Panel",   -- "Panel" | "Player" | "Simple"
+        Ind_PlayerSide = "Left", -- "Left" | "Right" | "Bottom" (Player style only)
         Ind_Health  = true,
         Ind_Stamina = true,
         Ind_IFrame  = true,
@@ -197,14 +198,25 @@ return function(Lib, Core)
             local hy, hx = uT.Size.Y * 0.5, uT.Size.X * 0.5
             local neck = uT.Position + up * hy
             local lT = char:FindFirstChild("LowerTorso")
-            local hip = lT and lT.Position or (uT.Position - up * hy)
+            -- pelvis: bottom face of the LowerTorso (where the legs actually attach), and
+            -- hip width from the LowerTorso's OWN size — using the UpperTorso size put the
+            -- hips too high and too wide, so the thighs splayed out incorrectly.
+            local hipCenter, lup, lrt, lhx, lhy
+            if lT then
+                lup, lrt = lT.CFrame.UpVector, lT.CFrame.RightVector
+                lhx, lhy = lT.Size.X * 0.5, lT.Size.Y * 0.5
+                hipCenter = lT.Position
+            else
+                lup, lrt, lhx, lhy, hipCenter = up, rt, hx, hy, uT.Position - up * hy
+            end
+            local pelvis = hipCenter - lup * lhy       -- bottom of the pelvis
             pts.Neck      = neck
             pts.Chest     = uT.Position
-            pts.Hip       = hip
+            pts.Hip       = hipCenter
             pts.ShoulderL = neck - rt * hx
             pts.ShoulderR = neck + rt * hx
-            pts.HipL      = hip - rt * (hx * 0.7)
-            pts.HipR      = hip + rt * (hx * 0.7)
+            pts.HipL      = pelvis - lrt * (lhx * 0.5)
+            pts.HipR      = pelvis + lrt * (lhx * 0.5)
             for _, n in ipairs({ "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }) do
                 pts[n] = pp(n)
             end
@@ -482,7 +494,7 @@ return function(Lib, Core)
 
     -- ═══════════════════════════════════════════════════════════════��═══════
     -- INDICATORS  (Neverlose-style animated GUI)
-    -- ═══════════════════════════════════════════════════════════════════════
+    -- ══════════════���════════════════════════════════════════════════════════
     local function guiParent()
         local ok, hui = pcall(function() return (type(gethui) == "function") and gethui() or nil end)
         if ok and hui then return hui end
@@ -856,33 +868,23 @@ return function(Lib, Core)
         return list
     end
 
-    -- Drawing indicator STYLE definitions. `anchor`:
-    --   "screen"  – fixed point on screen (ax/ay = fractions of the viewport)
-    --   "sideL"   – to the LEFT of the local player, vertically centred on the body
-    --   "corner"  – pinned to the top-left corner
-    -- `bars` toggles the progress lines, `box` the background panel.
+    -- Drawing indicator STYLE definitions (clean, NO background panel — just text +
+    -- a thin accent bar per row, white text). Only two Drawing styles exist:
+    --   Simple – a centred stack near the middle-bottom of the screen
+    --   Player – a stack pinned to the side of the local player (left/right/bottom)
     local STYLE_DEFS = {
-        Neverlose = { anchor = "screen", ax = 0.5,  ay = 0.60, width = 196, row = 30, txt = 14, bars = true,  box = true,  align = "center" },
-        Player    = { anchor = "sideL",             width = 168, row = 26, txt = 13, bars = true,  box = true,  align = "right"  },
-        Minimal   = { anchor = "screen", ax = 0.5,  ay = 0.62, width = 200, row = 24, txt = 15, bars = false, box = false, align = "center" },
-        Corner    = { anchor = "corner",            width = 210, row = 28, txt = 14, bars = true,  box = false, align = "left"   },
+        Simple = { width = 190, row = 27, txt = 15 },
+        Player = { width = 150, row = 22, txt = 13 },
     }
-    local DRAW_STYLES = { Neverlose = true, Player = true, Minimal = true, Corner = true }
+    local DRAW_STYLES = { Simple = true, Player = true }
 
-    -- ── Drawing-based cell pool (shared by all Drawing styles) ───────────────
-    local drawCells, stackBox, stackBoxOutline, stackAccent
-    local function ensureStackChrome()
-        if stackBox then return end
-        stackBoxOutline = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 3 })
-        stackBox        = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = WM.bgDark,       ZIndex = 4 })
-        stackAccent     = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Config.Ind_Accent, ZIndex = 5 })
-    end
+    -- ── Drawing-based cell pool (text + thin bar per row, no chrome) ─────────
+    local drawCells = {}
     local function textWidth(d)
         local ok, b = pcall(function() return d.TextBounds end)
         if ok and b and b.X and b.X > 0 then return b.X end
         return #tostring(d.Text) * (d.Size * 0.55)
     end
-    drawCells = {}
     local function getDrawCell(key)
         local c = drawCells[key]
         if c then return c end
@@ -901,7 +903,6 @@ return function(Lib, Core)
     end
     local function hideAllDrawCells()
         for _, c in pairs(drawCells) do c.alpha = 0; c.hasY = false; hideDrawCell(c) end
-        if stackBox then stackBox.Visible = false; stackBoxOutline.Visible = false; stackAccent.Visible = false end
     end
 
     -- viewport-relative UI scale so every Drawing style stays readable on phones
@@ -912,30 +913,13 @@ return function(Lib, Core)
         return s * math.clamp(Config.Ind_Scale or 1, 0.5, 2.5)
     end
 
-    -- Animated vertical stack rendered with Drawing objects. Rows ease into their slot
-    -- and fade in/out. `def` selects layout (bars/box/alignment); `sc` is the UI scale.
+    -- Animated vertical stack drawn as clean text rows with a thin accent progress bar
+    -- underneath each. No background box. Rows ease into their slot and fade in/out.
+    -- (centerX, topY) is the top-centre of the block.
     local function renderDrawStack(stats, dt, def, centerX, topY, sc)
-        ensureStackChrome()
         local width, step, txtSize = def.width * sc, def.row * sc, def.txt * sc
-        local padX, padY = 12 * sc, 9 * sc
         local left, right = centerX - width / 2, centerX + width / 2
         local aA = math.clamp(dt * 12, 0, 1)
-
-        -- background panel (fades with the stack, sized to the active rows)
-        local n = #stats
-        if def.box and n > 0 then
-            local h = n * step + padY
-            local bx, by = left - padX, topY - padY * 0.6
-            local bw, bh = width + padX * 2, h
-            stackBoxOutline.Position = Vector2.new(bx - 1, by - 1); stackBoxOutline.Size = Vector2.new(bw + 2, bh + 2)
-            stackBoxOutline.Color = WM.stroke; stackBoxOutline.Transparency = 0.85; stackBoxOutline.Visible = true
-            stackBox.Position = Vector2.new(bx, by); stackBox.Size = Vector2.new(bw, bh)
-            stackBox.Color = WM.bgDark; stackBox.Transparency = WM.bgTransp; stackBox.Visible = true
-            stackAccent.Position = Vector2.new(bx, by); stackAccent.Size = Vector2.new(2 * sc, bh)
-            stackAccent.Color = Config.Ind_Accent; stackAccent.Transparency = 0; stackAccent.Visible = true
-        else
-            stackBox.Visible = false; stackBoxOutline.Visible = false; stackAccent.Visible = false
-        end
 
         local activeMap = {}
         for i, s in ipairs(stats) do activeMap[s.key] = { idx = i, stat = s } end
@@ -970,21 +954,15 @@ return function(Lib, Core)
                 c.value.Transparency = c.alpha
                 c.value.Visible = true
 
-                if def.bars then
-                    local lineY = rowY + txtSize + 5 * sc
-                    c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
-                    c.track.Thickness = math.max(1, 2 * sc)
-                    c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.4; c.track.Visible = true
+                local lineY = rowY + txtSize + 4 * sc
+                c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
+                c.track.Thickness = math.max(1, 2 * sc)
+                c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.5; c.track.Visible = true
 
-                    local fillW = width * math.clamp(c.dispRatio, 0, 1)
-                    c.fill.From = Vector2.new(left, lineY); c.fill.To = Vector2.new(left + fillW, lineY)
-                    c.fill.Thickness = math.max(1, 2 * sc)
-                    c.fill.Color = col; c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
-                else
-                    -- no bars: tint the value by the stat colour instead
-                    c.value.Color = col
-                    c.track.Visible = false; c.fill.Visible = false
-                end
+                local fillW = width * math.clamp(c.dispRatio, 0, 1)
+                c.fill.From = Vector2.new(left, lineY); c.fill.To = Vector2.new(left + fillW, lineY)
+                c.fill.Thickness = math.max(1, 2 * sc)
+                c.fill.Color = col; c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
             end
         end
     end
@@ -1021,45 +999,50 @@ return function(Lib, Core)
             for _, r in pairs(rows) do setRowShown(r, false) end
         end
 
-        -- ── Drawing styles ──────────────────────────────────────────────────
+        -- ── Drawing styles (Simple / Player) ────────────────────────────────
         local def = DRAW_STYLES[style] and STYLE_DEFS[style] or nil
         if char and hasDrawing and def then
             local stats = collectStats(char, hum)
             local sc    = uiScale()
             local vp    = Camera.ViewportSize
+            local width = def.width * sc
+            local n     = math.max(#stats, 1)
+            local totalH = n * def.row * sc
             local drawn = false
 
-            if def.anchor == "screen" then
-                local ay = math.clamp(Config.Ind_ScreenY or def.ay, 0.2, 0.92)
-                renderDrawStack(stats, dt, def, vp.X * def.ax, vp.Y * ay, sc)
+            if style == "Simple" then
+                local ay = math.clamp(Config.Ind_ScreenY or 0.60, 0.2, 0.92)
+                renderDrawStack(stats, dt, def, vp.X * 0.5, vp.Y * ay, sc)
                 drawn = true
 
-            elseif def.anchor == "corner" then
-                local margin = 18 * sc
-                renderDrawStack(stats, dt, def, margin + (def.width * sc) / 2, margin, sc)
-                drawn = true
-
-            elseif def.anchor == "sideL" then
-                -- beside the local player: project the body centre + a horizontal
-                -- (camera-space) offset for the body's half-width. Because we offset
-                -- along the CAMERA right vector (never the character CFrame), shiftlock
-                -- yaw cannot shift the panel.
+            elseif style == "Player" then
+                -- Beside the local player. Offsets are projected along CAMERA axes (never
+                -- the character CFrame), so shiftlock yaw can't move the stack. "closer"
+                -- => small gap. Side is user-selectable.
                 local root = getRoot(char)
                 if root then
                     local _, size = char:GetBoundingBox()
-                    local halfW = math.max(size.X, size.Z) * 0.5 + 0.4
+                    local halfW = math.max(size.X, size.Z) * 0.5
+                    local halfH = size.Y * 0.5
                     local sp, on = Camera:WorldToViewportPoint(root.Position)
-                    local edge   = Camera:WorldToViewportPoint(root.Position + Camera.CFrame.RightVector * halfW)
                     if on then
-                        local edgePx = math.abs(edge.X - sp.X)
-                        local width  = def.width * sc
-                        local gap    = 16 * sc
-                        local n      = math.max(#stats, 1)
-                        local totalH = n * def.row * sc
-                        local cx     = sp.X - edgePx - gap - width / 2
-                        local topY   = sp.Y - totalH / 2
-                        renderDrawStack(stats, dt, def, cx, topY, sc)
-                        drawn = true
+                        local side = Config.Ind_PlayerSide or "Left"
+                        local gap  = 8 * sc
+                        if side == "Bottom" then
+                            local footSp = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, halfH, 0))
+                            local topY   = footSp.Y + gap
+                            renderDrawStack(stats, dt, def, sp.X, topY, sc)
+                            drawn = true
+                        else
+                            local edge   = Camera:WorldToViewportPoint(root.Position + Camera.CFrame.RightVector * halfW)
+                            local edgePx = math.abs(edge.X - sp.X)
+                            local topY   = sp.Y - totalH / 2
+                            local cx
+                            if side == "Right" then cx = sp.X + edgePx + gap + width / 2
+                            else                    cx = sp.X - edgePx - gap - width / 2 end
+                            renderDrawStack(stats, dt, def, cx, topY, sc)
+                            drawn = true
+                        end
                     end
                 end
             end
@@ -1073,14 +1056,25 @@ return function(Lib, Core)
     -- ═════════════════════════════════════════════════════════════════���═════
     -- HIT DIRECTION  (fading arrows around the crosshair)
     -- ══════════════════════════════════════════��════════════════════════════
-    local hitArrows = {}          -- active { tri, born, angle }
-    local ARROW_LIFE = 1.1
+    local hitArrows = {}          -- active { head, headOut, stem, born, angle }
+    local ARROW_LIFE = 1.25
     local lastHealth = nil
+
+    local function removeArrow(h)
+        for _, k in ipairs({ "head", "headOut", "stem" }) do
+            if h[k] then pcall(function() h[k]:Remove() end) end
+        end
+    end
 
     local function spawnHitArrow(angle)
         if not hasDrawing then return end
-        local tri = newDrawing("Triangle", { Thickness = 1, Filled = true, Visible = true, Color = Config.HitDir_Color })
-        hitArrows[#hitArrows + 1] = { tri = tri, born = os.clock(), angle = angle }
+        local h = {
+            born = os.clock(), angle = angle,
+            headOut = newDrawing("Triangle", { Thickness = 1, Filled = true, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 90 }),
+            head    = newDrawing("Triangle", { Thickness = 1, Filled = true, Visible = false, Color = Config.HitDir_Color, ZIndex = 92 }),
+            stem    = newDrawing("Line",     { Thickness = 3, Visible = false, Color = Config.HitDir_Color, ZIndex = 91 }),
+        }
+        hitArrows[#hitArrows + 1] = h
     end
 
     local function nearestAttackerAngle()
@@ -1098,45 +1092,87 @@ return function(Lib, Core)
             end
         end
         if not best then return nil end
+        -- Screen-relative bearing to the attacker, projected onto the camera's OWN
+        -- flattened look/right axes. The previous version used a world cross-product with
+        -- a fixed +Z assumption, so the left/right sign flipped whenever the camera faced
+        -- a different world direction (arrows pointed the wrong way "in some moments").
+        -- atan2(rightComponent, forwardComponent) is orientation-independent:
+        --   0 = attacker straight ahead (arrow points up), +pi/2 = to the right, etc.
         local rel = best.Position - root.Position
-        local look = Camera.CFrame.LookVector
-        local flatRel  = Vector3.new(rel.X, 0, rel.Z)
-        local flatLook = Vector3.new(look.X, 0, look.Z)
-        if flatRel.Magnitude < 0.01 or flatLook.Magnitude < 0.01 then return 0 end
-        flatRel = flatRel.Unit; flatLook = flatLook.Unit
-        local dot = math.clamp(flatLook:Dot(flatRel), -1, 1)
-        local ang = math.acos(dot)
-        if flatLook:Cross(flatRel).Y < 0 then ang = -ang end
-        return ang
+        local flatRel = Vector3.new(rel.X, 0, rel.Z)
+        if flatRel.Magnitude < 0.01 then return 0 end
+        flatRel = flatRel.Unit
+        local look  = Camera.CFrame.LookVector
+        local right = Camera.CFrame.RightVector
+        local lookF  = Vector3.new(look.X, 0, look.Z)
+        local rightF = Vector3.new(right.X, 0, right.Z)
+        if lookF.Magnitude < 0.01 or rightF.Magnitude < 0.01 then return 0 end
+        lookF, rightF = lookF.Unit, rightF.Unit
+        return math.atan2(flatRel:Dot(rightF), flatRel:Dot(lookF))
     end
 
     local function updateHitDir()
         if not hasDrawing then return end
         local vp = Camera.ViewportSize
         local cx, cy = vp.X / 2, vp.Y / 2
-        local radius = 90
+        local sc = math.clamp(vp.Y / 864, 0.85, 1.7)
+        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then sc = sc * 1.1 end
+        local radius = 78 * sc
         local now = os.clock()
         for i = #hitArrows, 1, -1 do
             local h = hitArrows[i]
             local age = now - h.born
             if age > ARROW_LIFE or not Config.HitDir_On then
-                pcall(function() h.tri:Remove() end)
+                removeArrow(h)
                 table.remove(hitArrows, i)
             else
                 local a = h.angle
-                -- angle 0 = attacker in front (arrow at top), positive = to the right
+                -- outward direction on screen: 0 = up (front), +pi/2 = right
                 local dirx, diry = math.sin(a), -math.cos(a)
-                local tipx, tipy = cx + dirx * (radius + 14), cy + diry * (radius + 14)
-                local bx, by = cx + dirx * radius, cy + diry * radius
                 local perpx, perpy = -diry, dirx
-                local w = 9
-                h.tri.PointA = Vector2.new(tipx, tipy)
-                h.tri.PointB = Vector2.new(bx + perpx * w, by + perpy * w)
-                h.tri.PointC = Vector2.new(bx - perpx * w, by - perpy * w)
-                local t = 1 - (age / ARROW_LIFE)
-                h.tri.Transparency = t
-                h.tri.Color = Config.HitDir_Color
-                h.tri.Visible = true
+
+                local life = age / ARROW_LIFE
+                -- quick pop-in (first 12%) then ease-out fade; also drift outward slightly
+                local pop  = math.clamp(age / (ARROW_LIFE * 0.12), 0, 1)
+                local ease = pop * pop * (3 - 2 * pop)                 -- smoothstep
+                local fade = 1 - math.clamp((life - 0.12) / 0.88, 0, 1)
+                local alpha = math.min(ease, fade)                     -- opacity 0..1
+                local scale = (0.7 + 0.3 * ease)                       -- grows in
+                local drift = radius + (6 + 10 * life) * sc            -- eases away from centre
+
+                local headLen  = 18 * sc * scale
+                local headHalf = 11 * sc * scale
+                local tipR   = drift + headLen
+                local baseR  = drift
+                local stemR  = drift - 12 * sc * scale
+
+                local tipx,  tipy  = cx + dirx * tipR,  cy + diry * tipR
+                local baseCx, baseCy = cx + dirx * baseR, cy + diry * baseR
+                local bLx, bLy = baseCx + perpx * headHalf, baseCy + perpy * headHalf
+                local bRx, bRy = baseCx - perpx * headHalf, baseCy - perpy * headHalf
+
+                -- head fill + slightly larger black outline behind it for contrast
+                h.head.PointA = Vector2.new(tipx, tipy)
+                h.head.PointB = Vector2.new(bLx, bLy)
+                h.head.PointC = Vector2.new(bRx, bRy)
+                h.head.Color = Config.HitDir_Color
+                h.head.Transparency = alpha
+                h.head.Visible = true
+
+                local o = 2 * sc
+                h.headOut.PointA = Vector2.new(tipx + dirx * o, tipy + diry * o)
+                h.headOut.PointB = Vector2.new(bLx + perpx * o - dirx * o, bLy + perpy * o - diry * o)
+                h.headOut.PointC = Vector2.new(bRx - perpx * o - dirx * o, bRy - perpy * o - diry * o)
+                h.headOut.Transparency = alpha * 0.55
+                h.headOut.Visible = true
+
+                -- short tail
+                h.stem.From = Vector2.new(cx + dirx * stemR, cy + diry * stemR)
+                h.stem.To   = Vector2.new(baseCx, baseCy)
+                h.stem.Thickness = math.max(2, 3 * sc)
+                h.stem.Color = Config.HitDir_Color
+                h.stem.Transparency = alpha
+                h.stem.Visible = true
             end
         end
     end
@@ -1161,6 +1197,7 @@ return function(Lib, Core)
     -- Lifecycle wiring
     -- ═══════════════════════════════════════════════════════════════════════
     local conns = {}
+    local renderBoundName = nil
     local function track(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
 
     local function hookLocalHumanoid()
@@ -1183,19 +1220,41 @@ return function(Lib, Core)
         end)
         track(Players.PlayerRemoving, function(plr) destroyEsp(plr) end)
 
-        -- master render loop
-        track(RunService.RenderStepped, function(dt)
-            -- ESP
-            if hasDrawing then
-                for _, plr in ipairs(Players:GetPlayers()) do
-                    if plr ~= LocalPlayer then updateEspFor(plr) end
+        -- master render loop.
+        -- IMPORTANT: bound AFTER the camera update (priority Camera+1) rather than a
+        -- plain RenderStepped connection. RenderStepped fires BEFORE Roblox's camera
+        -- BindToRenderStep step, so under shiftlock (which applies a constant camera
+        -- offset) we would project every world point with a one-frame-stale camera —
+        -- exactly the persistent horizontal shift the user saw. Running after the camera
+        -- guarantees Camera.CFrame already includes the shiftlock offset.
+        local RENDER_NAME = "MacVisuals_Render"
+        local ok = pcall(function()
+            RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, function(dt)
+                if hasDrawing then
+                    for _, plr in ipairs(Players:GetPlayers()) do
+                        if plr ~= LocalPlayer then updateEspFor(plr) end
+                    end
                 end
-            end
-            -- Indicators + hit direction
-            updateIndicators(dt)
-            pollLocalDamage()
-            updateHitDir()
+                updateIndicators(dt)
+                pollLocalDamage()
+                updateHitDir()
+            end)
         end)
+        if ok then
+            renderBoundName = RENDER_NAME
+        else
+            -- fallback for executors without BindToRenderStep
+            track(RunService.RenderStepped, function(dt)
+                if hasDrawing then
+                    for _, plr in ipairs(Players:GetPlayers()) do
+                        if plr ~= LocalPlayer then updateEspFor(plr) end
+                    end
+                end
+                updateIndicators(dt)
+                pollLocalDamage()
+                updateHitDir()
+            end)
+        end
     end
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -1318,14 +1377,14 @@ return function(Lib, Core)
         pcall(function()
             sInd:Dropdown({
                 Name = "Style",
-                Options = { "Panel", "Neverlose", "Player", "Minimal", "Corner" },
+                Options = { "Panel", "Player", "Simple" },
                 Default = Config.Ind_Style,
                 Callback = function(v)
                     if type(v) == "string" and v ~= "" then Config.Ind_Style = v; applyStyleVis() end
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Panel = draggable HUD | Neverlose = centered box | Player = beside you | Minimal = text only | Corner = top-left." })
+        sInd:SubLabel({ Text = "Panel = draggable HUD | Player = beside your character | Simple = clean centered stack." })
 
         boolToggle(sInd, "Health",       "Ind Health",  function() return Config.Ind_Health end,  function(v) Config.Ind_Health = v end)
         boolToggle(sInd, "Stamina",      "Ind Stamina", function() return Config.Ind_Stamina end, function(v) Config.Ind_Stamina = v end)
@@ -1342,19 +1401,30 @@ return function(Lib, Core)
         local dragHint = sInd:SubLabel({ Text = "Drag the HUD anywhere - the position is saved automatically." })
         styleEls[dragHint] = { "Panel" }
 
-        -- Screen-anchored styles: vertical position on screen.
+        -- Player: which side of the character the stack sits on.
+        pcall(function()
+            local sideDd = sInd:Dropdown({
+                Name = "Player Side",
+                Options = { "Left", "Right", "Bottom" },
+                Default = Config.Ind_PlayerSide,
+                Callback = function(v) if type(v) == "string" and v ~= "" then Config.Ind_PlayerSide = v end end,
+            }, ctx.flag("VIS_IND_PlayerSide"))
+            styleEls[sideDd] = { "Player" }
+        end)
+
+        -- Simple: vertical position on screen.
         local screenYSlider = slider(sInd, {
             Name = "Screen Position", Flag = "VIS_IND_ScreenY", Default = math.floor((Config.Ind_ScreenY or 0.6) * 100),
             Min = 20, Max = 92, Suffix = "%", Callback = function(v) Config.Ind_ScreenY = v / 100 end,
         })
-        styleEls[screenYSlider] = { "Neverlose", "Minimal" }
+        styleEls[screenYSlider] = { "Simple" }
 
-        -- Every Drawing style: manual scale on top of the automatic mobile rescale.
+        -- Both Drawing styles: manual scale on top of the automatic mobile rescale.
         local scaleSlider = slider(sInd, {
             Name = "Scale", Flag = "VIS_IND_Scale", Default = math.floor((Config.Ind_Scale or 1) * 100),
             Min = 60, Max = 200, Suffix = "%", Callback = function(v) Config.Ind_Scale = v / 100 end,
         })
-        styleEls[scaleSlider] = { "Neverlose", "Player", "Minimal", "Corner" }
+        styleEls[scaleSlider] = { "Player", "Simple" }
 
         applyStyleVis()
         sInd:SubLabel({ Text = "Cooldowns are predicted client-side from the game's own combat data, so they tick down accurately." })
@@ -1374,12 +1444,16 @@ return function(Lib, Core)
     end
 
     function M.stop()
+        if renderBoundName then
+            pcall(function() RunService:UnbindFromRenderStep(renderBoundName) end)
+            renderBoundName = nil
+        end
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
         conns = {}
         for _, c in ipairs(dragConns) do pcall(function() c:Disconnect() end) end
         dragConns = {}
         for plr in pairs(espPool) do destroyEsp(plr) end
-        for _, h in ipairs(hitArrows) do pcall(function() h.tri:Remove() end) end
+        for _, h in ipairs(hitArrows) do removeArrow(h) end
         hitArrows = {}
         for _, c in pairs(drawCells) do
             for _, key in ipairs({ "label", "value", "track", "fill" }) do
@@ -1387,10 +1461,6 @@ return function(Lib, Core)
             end
         end
         drawCells = {}
-        for _, d in ipairs({ stackBox, stackBoxOutline, stackAccent }) do
-            if d then pcall(function() d:Remove() end) end
-        end
-        stackBox, stackBoxOutline, stackAccent = nil, nil, nil
         indUIScale = nil
         if screenGui then pcall(function() screenGui:Destroy() end); screenGui = nil end
     end
