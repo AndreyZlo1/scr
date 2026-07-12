@@ -69,6 +69,48 @@ return function(Lib, Core)
     local _hasHookFn    = type(_hookfunction) == "function"
     local _hasHookMeta  = type(_hookmeta) == "function" and type(_namecall) == "function"
     local _hasUpval     = type(_getupvalues) == "function" and type(_setupvalue) == "function"
+    local _writefile    = rawget(getfenv(0), "writefile")  or (getgenv and getgenv().writefile)
+    local _getconstants = (debug and rawget(debug, "getconstants")) or rawget(getfenv(0), "getconstants")
+    local _getinfo      = (debug and rawget(debug, "getinfo"))      or rawget(getfenv(0), "getinfo")
+
+    -- ── Debug logger ─────────────────────────────────────────────────────────
+    -- Every dbg() line is printed to the executor console AND appended to a buffer.
+    -- Press K in-game to flush the buffer to  Syllinse_Movement_Log.txt  (workspace
+    -- folder of your executor) so it can be shared. Also mirrors to setclipboard.
+    local _logBuf = {}
+    local _logStart = os.clock()
+    local function dbg(...)
+        local parts = {}
+        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+        local line = string.format("[%.2fs] ", os.clock() - _logStart) .. table.concat(parts, " ")
+        _logBuf[#_logBuf + 1] = line
+        print("[Movement] " .. line)
+    end
+    local function dbgEnv()
+        dbg("=== ENV CAPABILITIES ===")
+        dbg("filtergc:", _filtergc ~= nil, "| hookfunction:", _hasHookFn,
+            "| hookmeta:", _hasHookMeta, "| getupvalues/setupvalue:", _hasUpval)
+        dbg("getconstants:", _getconstants ~= nil, "| getinfo:", _getinfo ~= nil,
+            "| writefile:", _writefile ~= nil)
+        dbg("executor:", (identifyexecutor and select(1, identifyexecutor())) or "unknown")
+    end
+    local function saveLog()
+        local body = "Syllinse Movement debug log\n"
+            .. "generated: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n"
+            .. string.rep("-", 60) .. "\n"
+            .. table.concat(_logBuf, "\n") .. "\n"
+        if _writefile then
+            local ok, err = pcall(_writefile, "Syllinse_Movement_Log.txt", body)
+            if ok then
+                dbg(">>> LOG SAVED to Syllinse_Movement_Log.txt (" .. #_logBuf .. " lines)")
+            else
+                dbg(">>> writefile FAILED:", err)
+            end
+        else
+            dbg(">>> no writefile in this executor")
+        end
+        if setclipboard then pcall(setclipboard, body); dbg(">>> log copied to clipboard") end
+    end
 
     -- PreSimulation runs BEFORE physics (what the vape reference uses), so our
     -- CFrame / velocity writes win the frame. Heartbeat runs AFTER the game's
@@ -366,21 +408,79 @@ return function(Lib, Core)
     -- ambiguous "M1*Task" string constants (shared by several functions) are avoided.
     local ncwFn, ncwGateIdx
     local ncwHooked = false
+    -- dump a closure's upvalues (types + short values) for diagnostics
+    local function dumpUpvalues(tag, fn)
+        local ok, ups = pcall(_getupvalues, fn)
+        if not ok or type(ups) ~= "table" then
+            dbg(tag, "getupvalues FAILED:", ups); return nil
+        end
+        local n = 0
+        for i = 1, 32 do
+            local v = ups[i]
+            if v == nil then
+                -- upvalues may be a sparse/1-based list; keep scanning a bit
+                if i > 24 then break end
+            else
+                n = i
+                local tv = type(v)
+                local sv = (tv == "number" or tv == "boolean" or tv == "string") and tostring(v) or tv
+                dbg(tag, "  up[" .. i .. "] =", tv, sv)
+            end
+        end
+        dbg(tag, "upvalue count ~=", n)
+        return ups
+    end
     local function installNCW()
         if ncwHooked then return true end
-        if not (_hasUpval and _filtergc) then return false end
+        dbg("=== installNCW ===")
+        if not _hasUpval then dbg("installNCW ABORT: no getupvalues/setupvalue"); return false end
+        if not _filtergc then dbg("installNCW ABORT: no filtergc"); return false end
+
+        -- diagnostic: how many functions match the upvalue fingerprint?
+        local okAll, all = pcall(_filtergc, "function", { Upvalues = { 1.25, 0.45, 1.55 }, IgnoreExecutor = true }, false)
+        if okAll and type(all) == "table" then
+            dbg("filtergc Upvalues{1.25,0.45,1.55} matched", #all, "function(s)")
+        else
+            dbg("filtergc(all) failed or non-table:", all)
+        end
+
         local fn = findFn(nil, { 1.25, 0.45, 1.55 })
-        if not fn then return false end
+        if not fn then
+            dbg("findFn Upvalues{1.25,0.45,1.55} -> NIL. trying constants fallback...")
+            fn = findFn({ "M1AttackCooldownTask", "M1ComboResetTask" })
+            if fn then dbg("constants fallback FOUND a function") end
+        else
+            dbg("findFn Upvalues -> FOUND function")
+        end
+        if not fn then dbg("installNCW ABORT: scheduleM1SwingTimers not found by any fingerprint"); return false end
+
+        if _getinfo then
+            local okI, info = pcall(_getinfo, fn)
+            if okI and type(info) == "table" then
+                dbg("fn info: name=", info.name, "nups=", info.nups, "numparams=", info.numparams, "source=", info.short_src)
+            end
+        end
+        local ups = dumpUpvalues("NCW", fn)
+
         -- locate the boolean upvalue (u21) on the REAL closure
-        local ok, ups = pcall(_getupvalues, fn)
-        if ok and type(ups) == "table" then
-            for i = 1, 16 do
+        if type(ups) == "table" then
+            for i = 1, 32 do
                 if type(ups[i]) == "boolean" then ncwGateIdx = i; break end
             end
         end
-        if not ncwGateIdx then return false end
+        if not ncwGateIdx then dbg("installNCW ABORT: no boolean upvalue (u21 gate) found"); return false end
+        dbg("NCW gate found at upvalue index", ncwGateIdx, "-> current value:", tostring(ups[ncwGateIdx]))
+
+        -- prove setupvalue actually works on this closure
+        local before = ups[ncwGateIdx]
+        local okSet = pcall(_setupvalue, fn, ncwGateIdx, true)
+        local okRead, ups2 = pcall(_getupvalues, fn)
+        local after = okRead and type(ups2) == "table" and ups2[ncwGateIdx] or "?"
+        dbg("setupvalue test: ok=", okSet, "before=", tostring(before), "after=", tostring(after))
+
         ncwFn = fn
         ncwHooked = true
+        dbg("installNCW SUCCESS (gate idx", ncwGateIdx, ")")
         return true
     end
 
@@ -397,36 +497,64 @@ return function(Lib, Core)
     -- no hookfunction/newcclosure quirks. Low spoof → multiplier ~1 → full-speed combat
     -- anims + shorter attack cooldown (animSpeed is the cooldown divisor).
     local pingHooked = false
+    local _pingCallCount = 0
     local function computeMult(delay)
         if type(delay) ~= "number" or delay <= 0 then return 1 end
         local pingSec = math.max(0, (Config.Ping_Value or 0) / 1000)
         if pingSec <= 0 then return 1 end
         return delay / (delay + math.clamp(pingSec * 0.5, 0, 0.35))
     end
+    -- wrap so we can log real invocations (throttled) to confirm the hook is live
+    local function spoofedMult(orig, delay, player, ...)
+        if Config.Ping_On then
+            local m = computeMult(delay)
+            _pingCallCount = _pingCallCount + 1
+            if _pingCallCount <= 8 or _pingCallCount % 20 == 0 then
+                dbg("Ping mult() called #" .. _pingCallCount, "delay=", tostring(delay),
+                    "spoof=", Config.Ping_Value .. "ms", "-> mult=", string.format("%.3f", m))
+            end
+            return m
+        end
+        return orig(delay, player, ...)
+    end
     local function installPing()
         if pingHooked then return true end
-        if not _filtergc then return false end
-        -- find the module table that holds the multiplier function
+        dbg("=== installPing ===")
+        if not _filtergc then dbg("installPing ABORT: no filtergc"); return false end
+
+        -- diagnostic: how many tables carry that key?
+        local okAll, all = pcall(_filtergc, "table", { Keys = { "GetPingAnimSpeedMultiplier" }, IgnoreExecutor = true }, false)
+        if okAll and type(all) == "table" then dbg("filtergc tables w/ GetPingAnimSpeedMultiplier:", #all) end
+
         local ok, tbl = pcall(_filtergc, "table", { Keys = { "GetPingAnimSpeedMultiplier" } }, true)
-        if not (ok and type(tbl) == "table" and type(tbl.GetPingAnimSpeedMultiplier) == "function") then
-            return false
+        if not ok then dbg("installPing ABORT: filtergc error:", tbl); return false end
+        if type(tbl) ~= "table" then dbg("installPing ABORT: result not a table:", type(tbl)); return false end
+        if type(tbl.GetPingAnimSpeedMultiplier) ~= "function" then
+            dbg("installPing ABORT: key present but not a function:", type(tbl.GetPingAnimSpeedMultiplier)); return false
         end
+        dbg("found module table with GetPingAnimSpeedMultiplier")
+
         local orig = tbl.GetPingAnimSpeedMultiplier
         local replacement = function(delay, player, ...)
-            if Config.Ping_On then return computeMult(delay) end
-            return orig(delay, player, ...)
+            return spoofedMult(orig, delay, player, ...)
         end
         -- prefer a straight field replacement; if the table is frozen, fall back to hookfunction
         local okSet = pcall(function() tbl.GetPingAnimSpeedMultiplier = replacement end)
-        if okSet and tbl.GetPingAnimSpeedMultiplier == replacement then
+        local stuck = okSet and tbl.GetPingAnimSpeedMultiplier == replacement
+        dbg("field replacement: okSet=", okSet, "stuck=", stuck, "(isfrozen:",
+            (table.isfrozen and pcall(table.isfrozen, tbl) and table.isfrozen(tbl)) or "n/a", ")")
+        if stuck then
             pingHooked = true
+            dbg("installPing SUCCESS via field replacement")
         elseif _hasHookFn then
             local o2
             o2 = _hookfunction(orig, function(delay, player, ...)
-                if Config.Ping_On then return computeMult(delay) end
-                return o2(delay, player, ...)
+                return spoofedMult(o2, delay, player, ...)
             end)
             pingHooked = true
+            dbg("installPing SUCCESS via hookfunction fallback")
+        else
+            dbg("installPing ABORT: field frozen and no hookfunction")
         end
         return pingHooked
     end
@@ -440,10 +568,14 @@ return function(Lib, Core)
         if bootstrapStarted then return end
         bootstrapStarted = true
         task.spawn(function()
-            installSetSpeedHook(); task.wait()
-            installNCW();          task.wait()
-            installPing()
+            dbg("bootstrap: starting hook installs")
+            dbgEnv()
+            local a = installSetSpeedHook(); dbg("installSetSpeedHook ->", a); task.wait()
+            local b = installNCW();          dbg("installNCW ->", b);          task.wait()
+            local c = installPing();         dbg("installPing ->", c)
             bootstrapDone = true
+            dbg("bootstrap: DONE  (SetSpeed=" .. tostring(a) .. " NCW=" .. tostring(b) .. " Ping=" .. tostring(c) .. ")")
+            dbg("Press K in-game to save this log to a file you can send.")
         end)
     end
     local function combatHooksReady()
@@ -483,8 +615,18 @@ return function(Lib, Core)
     -- flips u21 false at the start of each swing; re-asserting it true immediately means
     -- tryM1's `if not u21` never blocks → no inter-hit or finisher wait. The reset timer
     -- (u20) is left alone, so the chain never prematurely prints "combo reset".
+    local _ncwFlips = 0
     local function driveNCW()
         if not (Config.NCW_On and ncwHooked and ncwFn and ncwGateIdx and _hasUpval) then return end
+        -- read current gate; if the game just flipped it false (a swing started), log it,
+        -- then force it back to true so tryM1 never blocks on the next hit.
+        local okR, ups = pcall(_getupvalues, ncwFn)
+        if okR and type(ups) == "table" and ups[ncwGateIdx] == false then
+            _ncwFlips = _ncwFlips + 1
+            if _ncwFlips <= 12 or _ncwFlips % 25 == 0 then
+                dbg("NCW: gate was FALSE (swing #" .. _ncwFlips .. ") -> forcing true")
+            end
+        end
         pcall(_setupvalue, ncwFn, ncwGateIdx, true)
     end
 
@@ -532,6 +674,18 @@ return function(Lib, Core)
         -- Warm up the hooks in the background now, so toggling a feature later never
         -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
         bootstrapHooks()
+
+        -- DEBUG: press K to dump the debug log to a file (and clipboard) to share.
+        UserInputService.InputBegan:Connect(function(input, gpe)
+            if gpe then return end
+            if input.KeyCode == Enum.KeyCode.K then
+                dbg("=== K pressed: current status ===")
+                dbg("NCW_On=", Config.NCW_On, "ncwHooked=", ncwHooked, "gateIdx=", ncwGateIdx, "gateFlips=", _ncwFlips)
+                dbg("Ping_On=", Config.Ping_On, "pingHooked=", pingHooked, "pingCalls=", _pingCallCount, "spoof=", Config.Ping_Value .. "ms")
+                dbg("NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
+                saveLog()
+            end
+        end)
     end
 
     function M.buildUI(ctx)
@@ -602,7 +756,7 @@ return function(Lib, Core)
         slider(sSpeed, { Name = "Speed", Flag = "MV_SpeedVal", Default = Config.Speed_Value,
             Min = 16, Max = 150, Suffix = " studs", Callback = function(v) Config.Speed_Value = v end })
 
-        -- ─────────────── Section 2: Fly (Left) ───────────────
+        -- ─────────��───── Section 2: Fly (Left) ───────────────
         local sFly = MV:Section({ Side = "Left" })
         sFly:Header({ Name = "Fly" })
         feature(sFly, {
