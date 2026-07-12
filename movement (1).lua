@@ -73,6 +73,7 @@ return function(Lib, Core)
     local _writefile    = rawget(getfenv(0), "writefile")  or (getgenv and getgenv().writefile)
     local _getconstants = (debug and rawget(debug, "getconstants")) or rawget(getfenv(0), "getconstants")
     local _getinfo      = (debug and rawget(debug, "getinfo"))      or rawget(getfenv(0), "getinfo")
+    local _getloadedmodules = rawget(getfenv(0), "getloadedmodules") or (getgenv and getgenv().getloadedmodules)
 
     -- ── Debug logger ─────────────────────────────────────────────────────────
     -- Every dbg() line is printed to the executor console AND appended to a buffer.
@@ -574,6 +575,7 @@ return function(Lib, Core)
     local _cd = { attackIdx = nil, finIdx = nil, comboIdx = nil,
                   origAttack = nil, origFin = nil, origCombo = nil }
     local _cdPatched, _cdMapped = false, false
+    local _cdStatus = "not run"
 
     -- a fn is scheduleM1SwingTimers if its constants contain BOTH cooldown-task strings
     -- AND it has >=2 numeric upvalues (resetLocalCombatState has 0, ServerResponse 1).
@@ -593,6 +595,54 @@ return function(Lib, Core)
             for _, v in pairs(ups) do if type(v) == "number" then nNum = nNum + 1 end end
         end
         return nNum >= 2
+    end
+
+    -- extract scheduleM1SwingTimers out of a resolved M1 module table (v1).
+    local function drillModuleTable(mod)
+        if type(mod) ~= "table" then return nil end
+        local ohs = rawget(mod, "OnHoldSwing")   -- captures scheduleM1SwingTimers directly (1-hop)
+        if type(ohs) == "function" then
+            for _, v in pairs(_getupvalues(ohs) or {}) do
+                if isScheduleFn(v) then dbg("combo lever: FOUND via OnHoldSwing"); return v end
+            end
+        end
+        local oma = rawget(mod, "OnM1Activated")  -- 2-hop: OnM1Activated → tryM1 → schedule
+        if type(oma) == "function" then
+            for _, tryM1 in pairs(_getupvalues(oma) or {}) do
+                if type(tryM1) == "function" then
+                    for _, v in pairs(_getupvalues(tryM1) or {}) do
+                        if isScheduleFn(v) then dbg("combo lever: FOUND via OnM1Activated->tryM1"); return v end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    -- PRIMARY (deterministic): getloadedmodules → find the M1 ModuleScript → require it
+    -- (returns the CACHED v1 table, does NOT re-run) → drill. No GC guesswork.
+    local function findViaLoadedModules()
+        if type(_getloadedmodules) ~= "function" then return nil end
+        local ok, mods = pcall(_getloadedmodules)
+        if not (ok and type(mods) == "table") then dbg("combo lever: getloadedmodules failed"); return nil end
+        for _, m in ipairs(mods) do
+            if typeof(m) == "Instance" and m.Name == "M1" then
+                local full = ""
+                pcall(function() full = m:GetFullName() end)
+                if string.find(full, "CombatSystemClient", 1, true) and string.find(full, "M1", 1, true) then
+                    local okr, tbl = pcall(require, m)
+                    if okr and type(tbl) == "table" then
+                        local fn = drillModuleTable(tbl)
+                        if fn then dbg("combo lever: resolved M1 via getloadedmodules(" .. full .. ")"); return fn end
+                        dbg("combo lever: required M1 (" .. full .. ") but drill found nothing")
+                    else
+                        dbg("combo lever: require(M1) failed: " .. tostring(tbl))
+                    end
+                end
+            end
+        end
+        dbg("combo lever: no M1 module in getloadedmodules")
+        return nil
     end
 
     -- PRIMARY: M1 module table (real keys) → OnHoldSwing upvalues → scheduleM1SwingTimers.
@@ -642,7 +692,7 @@ return function(Lib, Core)
         if not (_filtergc and _getupvalues and _getconstants) then
             dbg("combo lever: missing filtergc/getupvalues/getconstants -> cannot find fn"); return nil
         end
-        _schedFn = findViaModule() or findViaConstants()
+        _schedFn = findViaLoadedModules() or findViaModule() or findViaConstants()
         dbg("combo lever: scheduleM1SwingTimers " .. (_schedFn and "FOUND" or "NOT found"))
         return _schedFn
     end
@@ -685,7 +735,10 @@ return function(Lib, Core)
     end
 
     local function applyComboCooldowns()
-        if not mapCooldownUpvalues() then return false end
+        if not mapCooldownUpvalues() then
+            _cdStatus = _schedFn and "mapped=false" or "scheduleM1SwingTimers NOT found"
+            return false
+        end
         local mul = math.max(1, Config.NCW_Speed or 1)
         -- kill the EXTRA finisher wait: finisher gates like a normal swing, then both
         -- shrink by Combo Speed. Floor keeps it sane (avoid exactly 0).
@@ -698,10 +751,13 @@ return function(Lib, Core)
         local ups = _getupvalues(_schedFn)
         local rbFin = ups and ups[_cd.finIdx]
         local rbAtk = ups and ups[_cd.attackIdx]
+        local landed = (type(rbFin) == "number" and math.abs(rbFin - newFin) < 0.001)
+        _cdStatus = "finisher " .. string.format("%.2f", _cd.origFin) .. "->" .. string.format("%.2f", rbFin or -1) ..
+            (landed and " OK" or " WRITE-FAILED")
         dbg("combo lever: APPLIED finisher " .. tostring(_cd.origFin) .. "->" .. string.format("%.3f", newFin) ..
             " attack " .. tostring(_cd.origAttack) .. "->" .. string.format("%.3f", newAttack) ..
             " | read-back finisher=" .. tostring(rbFin) .. " attack=" .. tostring(rbAtk) ..
-            " (Combo Speed=" .. mul .. ")")
+            " landed=" .. tostring(landed) .. " (Combo Speed=" .. mul .. ")")
         return true
     end
 
@@ -1005,13 +1061,17 @@ return function(Lib, Core)
                 Config.NCW_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if applyComboCooldowns() then
-                        notify("No Combo Wait", "combo cooldown removed")
-                    else
-                        notify("No Combo Wait", "cooldown fn not mapped yet - will retry on spawn")
-                    end
+                    -- retry the find a few times (module may not be required yet on first click)
+                    task.spawn(function()
+                        for _ = 1, 8 do
+                            if applyComboCooldowns() then break end
+                            task.wait(0.4)
+                        end
+                        notify("No Combo Wait", _cdStatus)
+                    end)
                 else
                     restoreComboCooldowns()
+                    notify("No Combo Wait", "Disabled")
                 end
             end,
             Desc = "removes the delay after the 4th M1 by rewriting the game's own\nFinisherCooldown (1.25s) down to a normal swing via debug.setupvalue",
