@@ -56,8 +56,10 @@ return function(Lib, Core)
 
         -- Indicators
         Ind_On      = false,
-        Ind_Style   = "Panel",   -- "Panel" | "Player" | "Simple"
+        Ind_Style   = "Panel",   -- "Panel" | "Neverlose" | "Player" | "Simple"
         Ind_PlayerSide = "Left", -- "Left" | "Right" | "Bottom" (Player style only)
+        Ind_PlayerTextY = 0,     -- vertical text offset (px) for the Player style
+        Ind_Drag    = true,      -- allow dragging the GUI HUD (Panel / Neverlose)
         Ind_Health  = true,
         Ind_Stamina = true,
         Ind_IFrame  = true,
@@ -83,6 +85,12 @@ return function(Lib, Core)
         txtMute = Color3.fromRGB(214, 216, 226),        -- label text: near-white
         accent2 = Color3.fromRGB(140, 90, 255),         -- watermark purple (secondary)
         bgTransp = 0.22,
+        -- Neverlose-style panel palette (deeper, more solid than the watermark chips)
+        nlBg     = Color3.fromRGB(17, 18, 26),          -- panel body
+        nlHeader = Color3.fromRGB(11, 12, 18),          -- header strip
+        nlTrack  = Color3.fromRGB(40, 42, 58),          -- progress track
+        nlStroke = Color3.fromRGB(60, 62, 88),          -- panel border
+        nlTitle  = Color3.fromRGB(150, 154, 174),       -- muted title text
     }
 
     -- ── Combat config (exact cooldown durations; optional) ───────────────────
@@ -506,7 +514,10 @@ return function(Lib, Core)
     end
 
     local screenGui, indHolder, indUIScale
-    local rows = {}       -- [key] = row object
+    local panelBody, nlBody, nlHeadTitle, nlAccentLine  -- Panel + Neverlose containers
+    local rows = {}       -- [key] = Panel row object
+    local nlRows = {}     -- [key] = Neverlose row object
+    local beginDrag       -- forward decl (shared by every draggable surface)
     local rowOrder = { "Health", "Stamina", "IFrame", "M2", "Dodge", "Block" }
 
     local ROW_H, ROW_GAP = 26, 6
@@ -539,7 +550,6 @@ return function(Lib, Core)
         frame.AutomaticSize = Enum.AutomaticSize.None
         frame.Active = true               -- catches drag input (grab any row to move)
         frame.Visible = false
-        frame.Parent = indHolder
 
         frame.BackgroundColor3 = WM.bgDark
         local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = frame
@@ -608,21 +618,8 @@ return function(Lib, Core)
         val.Text = ""
         val.Parent = frame
 
-        -- start a drag when this row is pressed
-        frame.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-                drag.active   = true
-                drag.startIn  = Vector2.new(input.Position.X, input.Position.Y)
-                drag.startPos = drag.target
-            end
-        end)
-        frame.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-                if drag.active then drag.active = false; savePos() end
-            end
-        end)
+        -- grab any row to move the HUD (gated by the Drag toggle)
+        frame.InputBegan:Connect(function(input) beginDrag(input) end)
 
         return {
             key = key, frame = frame, accent = accent, fill = fill,
@@ -630,12 +627,101 @@ return function(Lib, Core)
         }
     end
 
+    -- Neverlose-style row: label + value on one line, a full-width thin progress bar
+    -- underneath. Cleaner and more "cheat panel" than the boxed Panel rows.
+    local NL_ROW_H = 30
+    local function mkNLRow(key, label)
+        local frame = Instance.new("Frame")
+        frame.Name = key
+        frame.BackgroundTransparency = 1
+        frame.BorderSizePixel = 0
+        frame.Size = UDim2.new(1, 0, 0, NL_ROW_H)
+        frame.ClipsDescendants = true
+        frame.AutomaticSize = Enum.AutomaticSize.None
+        frame.Active = true
+        frame.Visible = false
+
+        local lab = Instance.new("TextLabel")
+        lab.Name = "Label"
+        lab.BackgroundTransparency = 1
+        lab.Font = Enum.Font.GothamMedium
+        lab.TextSize = 13
+        lab.TextColor3 = WM.txtMute
+        lab.TextXAlignment = Enum.TextXAlignment.Left
+        lab.TextYAlignment = Enum.TextYAlignment.Top
+        lab.TextTransparency = 1
+        lab.Position = UDim2.new(0, 0, 0, 2)
+        lab.Size = UDim2.new(1, -60, 0, 16)
+        lab.Text = label
+        lab.Parent = frame
+
+        local val = Instance.new("TextLabel")
+        val.Name = "Value"
+        val.BackgroundTransparency = 1
+        val.Font = Enum.Font.GothamBold
+        val.TextSize = 13
+        val.TextColor3 = WM.txtMain
+        val.TextXAlignment = Enum.TextXAlignment.Right
+        val.TextYAlignment = Enum.TextYAlignment.Top
+        val.TextTransparency = 1
+        val.Position = UDim2.new(0, 0, 0, 2)
+        val.Size = UDim2.new(1, 0, 0, 16)
+        val.Text = ""
+        val.Parent = frame
+
+        -- progress track (dim, full width) at the bottom of the row
+        local track = Instance.new("Frame")
+        track.Name = "Track"
+        track.BackgroundColor3 = WM.nlTrack
+        track.BackgroundTransparency = 1
+        track.BorderSizePixel = 0
+        track.AnchorPoint = Vector2.new(0, 1)
+        track.Position = UDim2.new(0, 0, 1, -2)
+        track.Size = UDim2.new(1, 0, 0, 3)
+        track.Parent = frame
+        local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(1, 0); tc.Parent = track
+
+        -- accent fill on top of the track
+        local fill = Instance.new("Frame")
+        fill.Name = "Fill"
+        fill.BackgroundColor3 = Config.Ind_Accent
+        fill.BackgroundTransparency = 1
+        fill.BorderSizePixel = 0
+        fill.AnchorPoint = Vector2.new(0, 0.5)
+        fill.Position = UDim2.new(0, 0, 0.5, 0)
+        fill.Size = UDim2.new(0, 0, 1, 0)
+        fill.Parent = track
+        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
+
+        frame.InputBegan:Connect(function(input) beginDrag(input) end)
+
+        return { key = key, frame = frame, label = lab, value = val,
+                 track = track, fill = fill, shown = false, dispRatio = 0 }
+    end
+
+    -- Clamp against the HUD's ACTUAL rendered size (AbsoluteSize already includes the
+    -- UIScale and only counts the rows that are currently visible). The old version
+    -- reserved a fixed 6-row height, so a 2-row HUD could never reach the bottom edge —
+    -- that's why the panel refused to sit in the lower corners.
     function clampPos(x, y)
         local vp = Camera.ViewportSize
-        local h = #rowOrder * (ROW_H + ROW_GAP)
-        x = math.clamp(x, 0, math.max(0, vp.X - IND_W))
+        local w = (indHolder and indHolder.AbsoluteSize.X > 1) and indHolder.AbsoluteSize.X or IND_W
+        local h = (indHolder and indHolder.AbsoluteSize.Y > 1) and indHolder.AbsoluteSize.Y or ROW_H
+        x = math.clamp(x, 0, math.max(0, vp.X - w))
         y = math.clamp(y, 0, math.max(0, vp.Y - h))
         return x, y
+    end
+
+    -- Start dragging from any draggable surface (Panel rows or the Neverlose body).
+    -- Honors the Drag toggle so the HUD can be locked in place.
+    function beginDrag(input)
+        if not Config.Ind_Drag then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            drag.active   = true
+            drag.startIn  = Vector2.new(input.Position.X, input.Position.Y)
+            drag.startPos = drag.target
+        end
     end
 
     -- Persist the HUD position as VIEWPORT FRACTIONS (not absolute pixels) so it lands
@@ -699,7 +785,7 @@ return function(Lib, Core)
             end)
         end)
 
-        -- global pointer-move drives the drag while a row is held
+        -- global pointer-move drives the drag while a surface is held
         dragConns[#dragConns + 1] = UserInputService.InputChanged:Connect(function(input)
             if not drag.active then return end
             if input.UserInputType == Enum.UserInputType.MouseMovement
@@ -710,6 +796,24 @@ return function(Lib, Core)
                 drag.target = Vector2.new(nx, ny)
             end
         end)
+        -- global release ends the drag and persists the position
+        dragConns[#dragConns + 1] = UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+                if drag.active then drag.active = false; savePos() end
+            end
+        end)
+
+        -- friendly, non-uppercase labels shared by both GUI styles
+        local labels = { Health = "HP", Stamina = "Stamina", IFrame = "I-Frame", M2 = "Heavy", Dodge = "Dodge", Block = "Block" }
+
+        -- ── Panel body (stacked chips) ──────────────────────────────────────
+        panelBody = Instance.new("Frame")
+        panelBody.Name = "PanelBody"
+        panelBody.BackgroundTransparency = 1
+        panelBody.Size = UDim2.new(1, 0, 0, 0)
+        panelBody.AutomaticSize = Enum.AutomaticSize.Y
+        panelBody.Parent = indHolder
 
         local list = Instance.new("UIListLayout")
         list.FillDirection = Enum.FillDirection.Vertical
@@ -717,13 +821,89 @@ return function(Lib, Core)
         list.VerticalAlignment = Enum.VerticalAlignment.Top
         list.SortOrder = Enum.SortOrder.LayoutOrder
         list.Padding = UDim.new(0, ROW_GAP)
-        list.Parent = indHolder
+        list.Parent = panelBody
 
-        local labels = { Health = "HEALTH", Stamina = "STAMINA", IFrame = "IFRAME", M2 = "HEAVY", Dodge = "DODGE", Block = "BLOCK" }
         for i, key in ipairs(rowOrder) do
             local r = mkRow(key, labels[key])
             r.frame.LayoutOrder = i
+            r.frame.Parent = panelBody
             rows[key] = r
+        end
+
+        -- ── Neverlose body (single detailed panel) ──────────────────────────
+        nlBody = Instance.new("Frame")
+        nlBody.Name = "NeverloseBody"
+        nlBody.BackgroundColor3 = WM.nlBg
+        nlBody.BackgroundTransparency = 0.06
+        nlBody.BorderSizePixel = 0
+        nlBody.Size = UDim2.new(1, 0, 0, 0)
+        nlBody.AutomaticSize = Enum.AutomaticSize.Y
+        nlBody.Active = true
+        nlBody.Visible = false
+        nlBody.Parent = indHolder
+        local nlCorner = Instance.new("UICorner"); nlCorner.CornerRadius = UDim.new(0, 8); nlCorner.Parent = nlBody
+        local nlStroke = Instance.new("UIStroke")
+        nlStroke.Thickness = 1; nlStroke.Color = WM.nlStroke
+        nlStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; nlStroke.Parent = nlBody
+
+        -- top accent line (accent → fade), the signature cheat-panel touch
+        nlAccentLine = Instance.new("Frame")
+        nlAccentLine.Name = "TopAccent"
+        nlAccentLine.BackgroundColor3 = Config.Ind_Accent
+        nlAccentLine.BorderSizePixel = 0
+        nlAccentLine.ZIndex = 3
+        nlAccentLine.Position = UDim2.new(0, 0, 0, 0)
+        nlAccentLine.Size = UDim2.new(1, 0, 0, 2)
+        nlAccentLine.Parent = nlBody
+        local accGrad = Instance.new("UIGradient")
+        accGrad.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.75, 0.15), NumberSequenceKeypoint.new(1, 0.9),
+        })
+        accGrad.Parent = nlAccentLine
+        local acCorner = Instance.new("UICorner"); acCorner.CornerRadius = UDim.new(0, 8); acCorner.Parent = nlAccentLine
+
+        local nlPad = Instance.new("UIPadding")
+        nlPad.PaddingTop = UDim.new(0, 8); nlPad.PaddingBottom = UDim.new(0, 9)
+        nlPad.PaddingLeft = UDim.new(0, 12); nlPad.PaddingRight = UDim.new(0, 12)
+        nlPad.Parent = nlBody
+
+        local nlList = Instance.new("UIListLayout")
+        nlList.FillDirection = Enum.FillDirection.Vertical
+        nlList.SortOrder = Enum.SortOrder.LayoutOrder
+        nlList.Padding = UDim.new(0, 3)
+        nlList.Parent = nlBody
+
+        -- header: accent dot + player display name
+        local head = Instance.new("Frame")
+        head.Name = "Header"
+        head.BackgroundTransparency = 1
+        head.Size = UDim2.new(1, 0, 0, 18)
+        head.LayoutOrder = 0
+        head.Parent = nlBody
+        local dot = Instance.new("Frame")
+        dot.Name = "Dot"; dot.BackgroundColor3 = Config.Ind_Accent; dot.BorderSizePixel = 0
+        dot.AnchorPoint = Vector2.new(0, 0.5); dot.Position = UDim2.new(0, 1, 0.5, 0)
+        dot.Size = UDim2.new(0, 6, 0, 6); dot.Parent = head
+        local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(1, 0); dc.Parent = dot
+        nlHeadTitle = Instance.new("TextLabel")
+        nlHeadTitle.Name = "Title"; nlHeadTitle.BackgroundTransparency = 1
+        nlHeadTitle.Font = Enum.Font.GothamBold; nlHeadTitle.TextSize = 12
+        nlHeadTitle.TextColor3 = WM.nlTitle; nlHeadTitle.TextXAlignment = Enum.TextXAlignment.Left
+        nlHeadTitle.Position = UDim2.new(0, 14, 0, 0); nlHeadTitle.Size = UDim2.new(1, -14, 1, 0)
+        nlHeadTitle.Text = (LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName) or LocalPlayer.Name
+        nlHeadTitle.Parent = head
+        local hdiv = Instance.new("Frame")
+        hdiv.Name = "Divider"; hdiv.BackgroundColor3 = WM.nlStroke; hdiv.BackgroundTransparency = 0.4
+        hdiv.BorderSizePixel = 0; hdiv.AnchorPoint = Vector2.new(0, 1)
+        hdiv.Position = UDim2.new(0, 0, 1, 0); hdiv.Size = UDim2.new(1, 0, 0, 1); hdiv.Parent = head
+
+        nlBody.InputBegan:Connect(function(input) beginDrag(input) end)
+
+        for i, key in ipairs(rowOrder) do
+            local r = mkNLRow(key, labels[key])
+            r.frame.LayoutOrder = i
+            r.frame.Parent = nlBody
+            nlRows[key] = r
         end
     end
 
@@ -770,6 +950,28 @@ return function(Lib, Core)
             TweenService:Create(r.frame, TW_OUT, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0) }):Play()
             TweenService:Create(r.stroke, TW_OUT, { Transparency = 1 }):Play()
             TweenService:Create(r.label, TW_OUT, { TextTransparency = 1 }):Play()
+            local t = TweenService:Create(r.value, TW_OUT, { TextTransparency = 1 })
+            t.Completed:Connect(function() if not r.shown then r.frame.Visible = false end end)
+            t:Play()
+        end
+    end
+
+    -- appear / disappear animation for a Neverlose row (collapses its height + fades)
+    local function setNLRowShown(r, shown)
+        if r.shown == shown then return end
+        r.shown = shown
+        if shown then
+            r.frame.Visible = true
+            TweenService:Create(r.frame, TW_IN, { Size = UDim2.new(1, 0, 0, NL_ROW_H) }):Play()
+            TweenService:Create(r.label, TW_IN, { TextTransparency = 0 }):Play()
+            TweenService:Create(r.value, TW_IN, { TextTransparency = 0 }):Play()
+            TweenService:Create(r.track, TW_IN, { BackgroundTransparency = 0.35 }):Play()
+            TweenService:Create(r.fill,  TW_IN, { BackgroundTransparency = 0 }):Play()
+        else
+            TweenService:Create(r.frame, TW_OUT, { Size = UDim2.new(1, 0, 0, 0) }):Play()
+            TweenService:Create(r.label, TW_OUT, { TextTransparency = 1 }):Play()
+            TweenService:Create(r.track, TW_OUT, { BackgroundTransparency = 1 }):Play()
+            TweenService:Create(r.fill,  TW_OUT, { BackgroundTransparency = 1 }):Play()
             local t = TweenService:Create(r.value, TW_OUT, { TextTransparency = 1 })
             t.Completed:Connect(function() if not r.shown then r.frame.Visible = false end end)
             t:Play()
@@ -856,7 +1058,7 @@ return function(Lib, Core)
             -- count down meaningfully, so just flag it ACTIVE while it's up.
             if not Config.Ind_IFrame then return false end
             if A("IFRAMES") == true then
-                return true, 1, "ACTIVE", Color3.fromRGB(150, 120, 255)
+                return true, 1, "Active", Color3.fromRGB(150, 120, 255)
             end
             return false
 
@@ -890,7 +1092,7 @@ return function(Lib, Core)
     end
 
     -- short labels used by the minimalist Drawing styles
-    local STAT_LABELS = { Health = "HP", Stamina = "STAMINA", IFrame = "IFRAME", M2 = "HEAVY", Dodge = "DODGE", Block = "BLOCK" }
+    local STAT_LABELS = { Health = "HP", Stamina = "Stamina", IFrame = "I-Frame", M2 = "Heavy", Dodge = "Dodge", Block = "Block" }
 
     -- ordered list of currently-active local stats { key, ratio, text, color }
     local function collectStats(char, hum)
@@ -1016,7 +1218,13 @@ return function(Lib, Core)
         local char  = Config.Ind_On and getChar(LocalPlayer) or nil
         local hum   = getHum(char)
 
-        -- ── PANEL style (GUI, draggable) ────────────────────────────────────
+        -- toggle which GUI body is live (only one draggable container is ever shown)
+        if indHolder then
+            if panelBody then panelBody.Visible = (style == "Panel") and char ~= nil end
+            if nlBody then nlBody.Visible = (style == "Neverlose") and char ~= nil end
+        end
+
+        -- ── PANEL style (stacked chips, draggable) ──────────────────────────
         if char and style == "Panel" and indHolder then
             local a = math.clamp(dt * 12, 0, 1)
             for _, key in ipairs(rowOrder) do
@@ -1033,6 +1241,25 @@ return function(Lib, Core)
             end
         elseif indHolder then
             for _, r in pairs(rows) do setRowShown(r, false) end
+        end
+
+        -- ── NEVERLOSE style (single detailed panel, draggable) ──────────────
+        if char and style == "Neverlose" and indHolder then
+            local a = math.clamp(dt * 12, 0, 1)
+            nlAccentLine.BackgroundColor3 = Config.Ind_Accent
+            for _, key in ipairs(rowOrder) do
+                local r = nlRows[key]
+                local show, ratio, text, color = readIndicator(key, char, hum)
+                setNLRowShown(r, show and true or false)
+                if show then
+                    r.dispRatio = lerp(r.dispRatio, ratio, a)
+                    r.fill.Size = UDim2.new(math.clamp(r.dispRatio, 0, 1), 0, 1, 0)
+                    r.fill.BackgroundColor3 = color
+                    r.value.Text = text
+                end
+            end
+        elseif indHolder then
+            for _, r in pairs(nlRows) do setNLRowShown(r, false) end
         end
 
         -- ── Drawing styles (Simple / Player) ────────────────────────────────
@@ -1065,11 +1292,12 @@ return function(Lib, Core)
                     local gap  = 8 * sc
                     local SIDE_STUDS = 2.6    -- lateral world offset (close to the body)
                     local DOWN_STUDS = 3.6    -- vertical world offset for Bottom
+                    local textY = (Config.Ind_PlayerTextY or 0) * sc  -- user vertical nudge
                     if side == "Bottom" then
                         local wp = root.Position - Vector3.new(0, DOWN_STUDS, 0)
                         local fsp, on = Camera:WorldToViewportPoint(wp)
                         if on then
-                            renderDrawStack(stats, dt, def, fsp.X, fsp.Y + gap, sc)
+                            renderDrawStack(stats, dt, def, fsp.X, fsp.Y + gap + textY, sc)
                             drawn = true
                         end
                     else
@@ -1078,7 +1306,7 @@ return function(Lib, Core)
                         local esp, on = Camera:WorldToViewportPoint(wp)
                         if on then
                             local cx   = esp.X + dir * (gap + width / 2)
-                            local topY = esp.Y - totalH / 2
+                            local topY = esp.Y - totalH / 2 + textY
                             renderDrawStack(stats, dt, def, cx, topY, sc)
                             drawn = true
                         end
@@ -1288,15 +1516,15 @@ return function(Lib, Core)
             return { commit = commit }
         end
 
-        local function boolToggle(section, name, title, get, set)
-            section:Toggle({
-                Name = name, Default = get(),
-                Callback = function(v)
-                    set(v and true or false)
-                    notify(title, v and "Enabled" or "Disabled")
-                end,
-            }, ctx.flag(name:gsub("%s+", "") .. "_T"))
-        end
+    local function boolToggle(section, name, title, get, set)
+        return section:Toggle({
+            Name = name, Default = get(),
+            Callback = function(v)
+                set(v and true or false)
+                notify(title, v and "Enabled" or "Disabled")
+            end,
+        }, ctx.flag(name:gsub("%s+", "") .. "_T"))
+    end
 
         local function slider(section, o)
             return section:Slider({
@@ -1367,14 +1595,14 @@ return function(Lib, Core)
         pcall(function()
             sInd:Dropdown({
                 Name = "Style",
-                Options = { "Panel", "Player", "Simple" },
+                Options = { "Panel", "Neverlose", "Player", "Simple" },
                 Default = Config.Ind_Style,
                 Callback = function(v)
                     if type(v) == "string" and v ~= "" then Config.Ind_Style = v; applyStyleVis() end
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Panel = draggable HUD | Player = beside your character | Simple = clean centered stack." })
+        sInd:SubLabel({ Text = "Panel = chip HUD | Neverlose = detailed panel | Player = beside your character | Simple = centered stack." })
 
         boolToggle(sInd, "Health",       "Ind Health",  function() return Config.Ind_Health end,  function(v) Config.Ind_Health = v end)
         boolToggle(sInd, "Stamina",      "Ind Stamina", function() return Config.Ind_Stamina end, function(v) Config.Ind_Stamina = v end)
@@ -1385,11 +1613,14 @@ return function(Lib, Core)
         colorpick(sInd, "Accent Color", "VIS_IND_Accent", Config.Ind_Accent, function(c) Config.Ind_Accent = c end)
 
         -- ── Per-style settings (shown only for the relevant style) ──
-        -- Panel: draggable, so it gets a reset-position button.
+        -- Draggable GUI styles (Panel / Neverlose): reset button + drag lock.
         local resetBtn = sInd:Button({ Name = "Reset HUD Position", Callback = function() resetPos() end })
-        styleEls[resetBtn] = { "Panel" }
-        local dragHint = sInd:SubLabel({ Text = "Drag the HUD anywhere - the position is saved automatically." })
-        styleEls[dragHint] = { "Panel" }
+        styleEls[resetBtn] = { "Panel", "Neverlose" }
+        local dragToggle = boolToggle(sInd, "Drag", "Ind Drag",
+            function() return Config.Ind_Drag end, function(v) Config.Ind_Drag = v end)
+        styleEls[dragToggle] = { "Panel", "Neverlose" }
+        local dragHint = sInd:SubLabel({ Text = "Grab the HUD to move it (position saved automatically). Turn Drag off to lock it." })
+        styleEls[dragHint] = { "Panel", "Neverlose" }
 
         -- Player: which side of the character the stack sits on.
         pcall(function()
@@ -1401,6 +1632,13 @@ return function(Lib, Core)
             }, ctx.flag("VIS_IND_PlayerSide"))
             styleEls[sideDd] = { "Player" }
         end)
+
+        -- Player: vertical text nudge relative to the character.
+        local playerTextY = slider(sInd, {
+            Name = "Text Position", Flag = "VIS_IND_PlayerTextY", Default = math.floor(Config.Ind_PlayerTextY or 0),
+            Min = -120, Max = 120, Suffix = "px", Callback = function(v) Config.Ind_PlayerTextY = v end,
+        })
+        styleEls[playerTextY] = { "Player" }
 
         -- Simple: vertical position on screen.
         local screenYSlider = slider(sInd, {
@@ -1414,7 +1652,7 @@ return function(Lib, Core)
             Name = "Scale", Flag = "VIS_IND_Scale", Default = math.floor((Config.Ind_Scale or 1) * 100),
             Min = 60, Max = 200, Suffix = "%", Callback = function(v) Config.Ind_Scale = v / 100 end,
         })
-        styleEls[scaleSlider] = { "Panel", "Player", "Simple" }
+        styleEls[scaleSlider] = { "Panel", "Neverlose", "Player", "Simple" }
 
         applyStyleVis()
         sInd:SubLabel({ Text = "Cooldowns are predicted client-side from the game's own combat data, so they tick down accurately." })
