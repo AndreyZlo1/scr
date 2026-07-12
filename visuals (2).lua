@@ -71,6 +71,7 @@ return function(Lib, Core)
         -- Hit direction
         HitDir_On    = false,
         HitDir_Color = Color3.fromRGB(255, 74, 74),
+        HitDir_Transparency = 0,   -- 0 = opaque, 1 = invisible
     }
 
     -- ── Watermark palette (shared by every indicator style) ──────────────────
@@ -172,6 +173,7 @@ return function(Lib, Core)
     local BONES_R15 = {
         { "Neck", "ShoulderL" }, { "Neck", "ShoulderR" },   -- shoulder line
         { "Neck", "Chest" }, { "Chest", "Hip" },            -- spine
+        { "Hip", "HipL" }, { "Hip", "HipR" }, { "HipL", "HipR" }, -- pelvis (spread + bar)
         { "ShoulderL", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
         { "ShoulderR", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
         { "HipL", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
@@ -180,7 +182,8 @@ return function(Lib, Core)
     -- R6 fallback (Torso is a single part; shoulders/hips offset from it)
     local BONES_R6 = {
         { "ShoulderL", "ShoulderR" },
-        { "Neck", "Chest" },
+        { "Neck", "Chest" }, { "Chest", "Hip" },
+        { "Hip", "HipL" }, { "Hip", "HipR" }, { "HipL", "HipR" }, -- pelvis line
         { "ShoulderL", "Left Arm" }, { "ShoulderR", "Right Arm" },
         { "HipL", "Left Leg" }, { "HipR", "Right Leg" },
     }
@@ -232,6 +235,7 @@ return function(Lib, Core)
             local hip  = torso.Position - up * hy
             pts.Neck      = neck
             pts.Chest     = torso.Position
+            pts.Hip       = hip
             pts.ShoulderL = neck - rt * hx
             pts.ShoulderR = neck + rt * hx
             pts.HipL      = hip - rt * (hx * 0.6)
@@ -521,7 +525,8 @@ return function(Lib, Core)
         startPos = Vector2.new(0, 0),
     }
     local dragConns = {}                  -- UIS connections owned by the HUD (cleaned in stop)
-    local clampPos, savePos               -- forward decls (row handlers use them)
+    local posFrac = nil                   -- saved position as {fx,fy} fractions of the viewport
+    local clampPos, savePos, restoreSavedPos, applyFracPos  -- forward decls
 
     local function mkRow(key, label)
         local frame = Instance.new("Frame")
@@ -633,10 +638,24 @@ return function(Lib, Core)
         return x, y
     end
 
+    -- Persist the HUD position as VIEWPORT FRACTIONS (not absolute pixels) so it lands
+    -- in the same relative spot on any resolution — same approach the watermark uses.
     function savePos()
+        local vp = Camera.ViewportSize
+        posFrac = { fx = drag.target.X / math.max(1, vp.X), fy = drag.target.Y / math.max(1, vp.Y) }
         if MacLibRef and POS_FLAG then
-            pcall(function() MacLibRef:FALSetData(POS_FLAG, { x = drag.target.X, y = drag.target.Y }) end)
+            pcall(function() MacLibRef:FALSetData(POS_FLAG, posFrac) end)
         end
+    end
+
+    -- Convert the stored fraction back into clamped pixels for the current viewport.
+    function applyFracPos()
+        if not posFrac then return end
+        local vp = Camera.ViewportSize
+        local nx, ny = clampPos(posFrac.fx * vp.X, posFrac.fy * vp.Y)
+        drag.target = Vector2.new(nx, ny)
+        drag.disp   = Vector2.new(nx, ny)
+        if indHolder then indHolder.Position = UDim2.fromOffset(nx, ny) end
     end
 
     local function buildIndicatorGui()
@@ -663,12 +682,22 @@ return function(Lib, Core)
         indUIScale.Scale = 1
         indUIScale.Parent = indHolder
 
-        -- default position: near the bottom-right; overwritten by the saved pos in buildUI
+        -- default position: near the bottom-right...
         local vp = Camera.ViewportSize
         local dx, dy = clampPos(vp.X - IND_W - 24, vp.Y - (#rowOrder * (ROW_H + ROW_GAP)) - 24)
         drag.target = Vector2.new(dx, dy)
         drag.disp   = Vector2.new(dx, dy)
         indHolder.Position = UDim2.fromOffset(dx, dy)
+        -- ...then immediately apply the saved position if MacLib is already available.
+        -- (buildUI may run before OR after this, so we restore in both places.)
+        restoreSavedPos()
+
+        -- keep the HUD in its saved RELATIVE spot when the viewport/resolution changes
+        pcall(function()
+            dragConns[#dragConns + 1] = Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+                if not drag.active then applyFracPos() end
+            end)
+        end)
 
         -- global pointer-move drives the drag while a row is held
         dragConns[#dragConns + 1] = UserInputService.InputChanged:Connect(function(input)
@@ -698,17 +727,24 @@ return function(Lib, Core)
         end
     end
 
-    -- restore the saved HUD position (called from buildUI once MacLib is available)
-    local function restoreSavedPos()
+    -- restore the saved HUD position (fraction-based, resolution-independent).
+    -- Called from BOTH buildUI (once MacLib is available) and buildIndicatorGui (which
+    -- sets a default first) so start-order never clobbers the saved spot.
+    function restoreSavedPos()
         if not (MacLibRef and POS_FLAG) then return end
         pcall(function()
             local saved = MacLibRef.FALGetData and MacLibRef:FALGetData(POS_FLAG, nil)
-            if type(saved) == "table" and type(saved.x) == "number" and type(saved.y) == "number" then
-                local nx, ny = clampPos(saved.x, saved.y)
-                drag.target = Vector2.new(nx, ny)
-                drag.disp   = Vector2.new(nx, ny)
-                if indHolder then indHolder.Position = UDim2.fromOffset(nx, ny) end
+            if type(saved) ~= "table" then return end
+            local vp = Camera.ViewportSize
+            if type(saved.fx) == "number" and type(saved.fy) == "number" then
+                posFrac = { fx = saved.fx, fy = saved.fy }
+            elseif type(saved.x) == "number" and type(saved.y) == "number" then
+                -- legacy absolute-pixel save → convert to a fraction of the viewport
+                posFrac = { fx = saved.x / math.max(1, vp.X), fy = saved.y / math.max(1, vp.Y) }
+            else
+                return
             end
+            applyFracPos()
         end)
     end
 
@@ -1016,30 +1052,33 @@ return function(Lib, Core)
                 drawn = true
 
             elseif style == "Player" then
-                -- Beside the local player. Offsets are projected along CAMERA axes (never
-                -- the character CFrame), so shiftlock yaw can't move the stack. "closer"
-                -- => small gap. Side is user-selectable.
+                -- Beside the local player, anchored to a real 3D point. We offset the
+                -- root position by a FIXED number of world studs and re-project every
+                -- frame — so the stack holds a true 3D position that tracks the player
+                -- through space and depth. The horizontal offset uses the camera's right
+                -- vector (not the character CFrame and not GetBoundingBox, whose world
+                -- AABB size oscillated with player yaw and made the panel "rotate with"
+                -- the character). Result: yaw-independent, shiftlock-safe, 3D-anchored.
                 local root = getRoot(char)
                 if root then
-                    local _, size = char:GetBoundingBox()
-                    local halfW = math.max(size.X, size.Z) * 0.5
-                    local halfH = size.Y * 0.5
-                    local sp, on = Camera:WorldToViewportPoint(root.Position)
-                    if on then
-                        local side = Config.Ind_PlayerSide or "Left"
-                        local gap  = 8 * sc
-                        if side == "Bottom" then
-                            local footSp = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, halfH, 0))
-                            local topY   = footSp.Y + gap
-                            renderDrawStack(stats, dt, def, sp.X, topY, sc)
+                    local side = Config.Ind_PlayerSide or "Left"
+                    local gap  = 8 * sc
+                    local SIDE_STUDS = 2.6    -- lateral world offset (close to the body)
+                    local DOWN_STUDS = 3.6    -- vertical world offset for Bottom
+                    if side == "Bottom" then
+                        local wp = root.Position - Vector3.new(0, DOWN_STUDS, 0)
+                        local fsp, on = Camera:WorldToViewportPoint(wp)
+                        if on then
+                            renderDrawStack(stats, dt, def, fsp.X, fsp.Y + gap, sc)
                             drawn = true
-                        else
-                            local edge   = Camera:WorldToViewportPoint(root.Position + Camera.CFrame.RightVector * halfW)
-                            local edgePx = math.abs(edge.X - sp.X)
-                            local topY   = sp.Y - totalH / 2
-                            local cx
-                            if side == "Right" then cx = sp.X + edgePx + gap + width / 2
-                            else                    cx = sp.X - edgePx - gap - width / 2 end
+                        end
+                    else
+                        local dir = (side == "Right") and 1 or -1
+                        local wp  = root.Position + Camera.CFrame.RightVector * (SIDE_STUDS * dir)
+                        local esp, on = Camera:WorldToViewportPoint(wp)
+                        if on then
+                            local cx   = esp.X + dir * (gap + width / 2)
+                            local topY = esp.Y - totalH / 2
                             renderDrawStack(stats, dt, def, cx, topY, sc)
                             drawn = true
                         end
@@ -1056,25 +1095,18 @@ return function(Lib, Core)
     -- ═════════════════════════════════════════════════════════════════���═════
     -- HIT DIRECTION  (fading arrows around the crosshair)
     -- ══════════════════════════════════════════��════════════════════════════
-    local hitArrows = {}          -- active { head, headOut, stem, born, angle }
-    local ARROW_LIFE = 1.25
+    local hitArrows = {}          -- active { tri, born, angle }
+    local ARROW_LIFE = 1.1
     local lastHealth = nil
 
     local function removeArrow(h)
-        for _, k in ipairs({ "head", "headOut", "stem" }) do
-            if h[k] then pcall(function() h[k]:Remove() end) end
-        end
+        if h.tri then pcall(function() h.tri:Remove() end) end
     end
 
     local function spawnHitArrow(angle)
         if not hasDrawing then return end
-        local h = {
-            born = os.clock(), angle = angle,
-            headOut = newDrawing("Triangle", { Thickness = 1, Filled = true, Visible = false, Color = Color3.new(0, 0, 0), ZIndex = 90 }),
-            head    = newDrawing("Triangle", { Thickness = 1, Filled = true, Visible = false, Color = Config.HitDir_Color, ZIndex = 92 }),
-            stem    = newDrawing("Line",     { Thickness = 3, Visible = false, Color = Config.HitDir_Color, ZIndex = 91 }),
-        }
-        hitArrows[#hitArrows + 1] = h
+        local tri = newDrawing("Triangle", { Thickness = 1, Filled = true, Visible = false, Color = Config.HitDir_Color, ZIndex = 90 })
+        hitArrows[#hitArrows + 1] = { tri = tri, born = os.clock(), angle = angle }
     end
 
     local function nearestAttackerAngle()
@@ -1117,7 +1149,9 @@ return function(Lib, Core)
         local cx, cy = vp.X / 2, vp.Y / 2
         local sc = math.clamp(vp.Y / 864, 0.85, 1.7)
         if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then sc = sc * 1.1 end
-        local radius = 78 * sc
+        local radius = 90 * sc
+        -- user opacity: 0 = fully opaque, 1 = invisible
+        local userAlpha = 1 - math.clamp(Config.HitDir_Transparency or 0, 0, 1)
         local now = os.clock()
         for i = #hitArrows, 1, -1 do
             local h = hitArrows[i]
@@ -1127,52 +1161,26 @@ return function(Lib, Core)
                 table.remove(hitArrows, i)
             else
                 local a = h.angle
-                -- outward direction on screen: 0 = up (front), +pi/2 = right
+                -- outward screen direction: 0 = up (attacker in front), +pi/2 = right
                 local dirx, diry = math.sin(a), -math.cos(a)
                 local perpx, perpy = -diry, dirx
 
-                local life = age / ARROW_LIFE
-                -- quick pop-in (first 12%) then ease-out fade; also drift outward slightly
-                local pop  = math.clamp(age / (ARROW_LIFE * 0.12), 0, 1)
-                local ease = pop * pop * (3 - 2 * pop)                 -- smoothstep
-                local fade = 1 - math.clamp((life - 0.12) / 0.88, 0, 1)
-                local alpha = math.min(ease, fade)                     -- opacity 0..1
-                local scale = (0.7 + 0.3 * ease)                       -- grows in
-                local drift = radius + (6 + 10 * life) * sc            -- eases away from centre
+                -- simple clean triangle arrow that fades out over its lifetime
+                local fade  = 1 - (age / ARROW_LIFE)
+                local trans = fade * userAlpha
+                local tipR  = radius + 16 * sc
+                local baseR = radius
+                local w     = 10 * sc
 
-                local headLen  = 18 * sc * scale
-                local headHalf = 11 * sc * scale
-                local tipR   = drift + headLen
-                local baseR  = drift
-                local stemR  = drift - 12 * sc * scale
-
-                local tipx,  tipy  = cx + dirx * tipR,  cy + diry * tipR
+                local tipx, tipy   = cx + dirx * tipR, cy + diry * tipR
                 local baseCx, baseCy = cx + dirx * baseR, cy + diry * baseR
-                local bLx, bLy = baseCx + perpx * headHalf, baseCy + perpy * headHalf
-                local bRx, bRy = baseCx - perpx * headHalf, baseCy - perpy * headHalf
 
-                -- head fill + slightly larger black outline behind it for contrast
-                h.head.PointA = Vector2.new(tipx, tipy)
-                h.head.PointB = Vector2.new(bLx, bLy)
-                h.head.PointC = Vector2.new(bRx, bRy)
-                h.head.Color = Config.HitDir_Color
-                h.head.Transparency = alpha
-                h.head.Visible = true
-
-                local o = 2 * sc
-                h.headOut.PointA = Vector2.new(tipx + dirx * o, tipy + diry * o)
-                h.headOut.PointB = Vector2.new(bLx + perpx * o - dirx * o, bLy + perpy * o - diry * o)
-                h.headOut.PointC = Vector2.new(bRx - perpx * o - dirx * o, bRy - perpy * o - diry * o)
-                h.headOut.Transparency = alpha * 0.55
-                h.headOut.Visible = true
-
-                -- short tail
-                h.stem.From = Vector2.new(cx + dirx * stemR, cy + diry * stemR)
-                h.stem.To   = Vector2.new(baseCx, baseCy)
-                h.stem.Thickness = math.max(2, 3 * sc)
-                h.stem.Color = Config.HitDir_Color
-                h.stem.Transparency = alpha
-                h.stem.Visible = true
+                h.tri.PointA = Vector2.new(tipx, tipy)
+                h.tri.PointB = Vector2.new(baseCx + perpx * w, baseCy + perpy * w)
+                h.tri.PointC = Vector2.new(baseCx - perpx * w, baseCy - perpy * w)
+                h.tri.Color = Config.HitDir_Color
+                h.tri.Transparency = trans
+                h.tri.Visible = trans > 0.02
             end
         end
     end
@@ -1197,7 +1205,6 @@ return function(Lib, Core)
     -- Lifecycle wiring
     -- ═══════════════════════════════════════════════════════════════════════
     local conns = {}
-    local renderBoundName = nil
     local function track(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
 
     local function hookLocalHumanoid()
@@ -1220,41 +1227,24 @@ return function(Lib, Core)
         end)
         track(Players.PlayerRemoving, function(plr) destroyEsp(plr) end)
 
-        -- master render loop.
-        -- IMPORTANT: bound AFTER the camera update (priority Camera+1) rather than a
-        -- plain RenderStepped connection. RenderStepped fires BEFORE Roblox's camera
-        -- BindToRenderStep step, so under shiftlock (which applies a constant camera
-        -- offset) we would project every world point with a one-frame-stale camera —
-        -- exactly the persistent horizontal shift the user saw. Running after the camera
-        -- guarantees Camera.CFrame already includes the shiftlock offset.
-        local RENDER_NAME = "MacVisuals_Render"
-        local ok = pcall(function()
-            RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, function(dt)
-                if hasDrawing then
-                    for _, plr in ipairs(Players:GetPlayers()) do
-                        if plr ~= LocalPlayer then updateEspFor(plr) end
-                    end
+        -- master render loop — bound to Heartbeat, NOT RenderStepped.
+        -- RenderStepped fires BEFORE Roblox's camera BindToRenderStep step, so under
+        -- shiftlock (which offsets the camera to the shoulder every frame) we projected
+        -- every enemy with a one-frame-stale camera → the persistent sideways drift.
+        -- Heartbeat fires AFTER the whole render step (camera already updated), so
+        -- Camera.CFrame is fully current and the shiftlock offset is baked in. This is
+        -- exactly how the working BRM5 ESP avoids the shift. The one-frame draw latency
+        -- is imperceptible and is the correct trade-off here.
+        track(RunService.Heartbeat, function(dt)
+            if hasDrawing then
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= LocalPlayer then updateEspFor(plr) end
                 end
-                updateIndicators(dt)
-                pollLocalDamage()
-                updateHitDir()
-            end)
+            end
+            updateIndicators(dt)
+            pollLocalDamage()
+            updateHitDir()
         end)
-        if ok then
-            renderBoundName = RENDER_NAME
-        else
-            -- fallback for executors without BindToRenderStep
-            track(RunService.RenderStepped, function(dt)
-                if hasDrawing then
-                    for _, plr in ipairs(Players:GetPlayers()) do
-                        if plr ~= LocalPlayer then updateEspFor(plr) end
-                    end
-                end
-                updateIndicators(dt)
-                pollLocalDamage()
-                updateHitDir()
-            end)
-        end
     end
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -1419,12 +1409,12 @@ return function(Lib, Core)
         })
         styleEls[screenYSlider] = { "Simple" }
 
-        -- Both Drawing styles: manual scale on top of the automatic mobile rescale.
+        -- All styles: manual scale on top of the automatic mobile rescale.
         local scaleSlider = slider(sInd, {
             Name = "Scale", Flag = "VIS_IND_Scale", Default = math.floor((Config.Ind_Scale or 1) * 100),
             Min = 60, Max = 200, Suffix = "%", Callback = function(v) Config.Ind_Scale = v / 100 end,
         })
-        styleEls[scaleSlider] = { "Player", "Simple" }
+        styleEls[scaleSlider] = { "Panel", "Player", "Simple" }
 
         applyStyleVis()
         sInd:SubLabel({ Text = "Cooldowns are predicted client-side from the game's own combat data, so they tick down accurately." })
@@ -1439,15 +1429,15 @@ return function(Lib, Core)
             Desc = "Fading arrows around the crosshair pointing at whoever is hitting you.",
         })
         colorpick(sHit, "Arrow Color", "VIS_HIT_Col", Config.HitDir_Color, function(c) Config.HitDir_Color = c end)
+        slider(sHit, {
+            Name = "Transparency", Flag = "VIS_HIT_Transp", Default = math.floor((Config.HitDir_Transparency or 0) * 100),
+            Min = 0, Max = 90, Suffix = "%", Callback = function(v) Config.HitDir_Transparency = v / 100 end,
+        })
 
         uiReady = true
     end
 
     function M.stop()
-        if renderBoundName then
-            pcall(function() RunService:UnbindFromRenderStep(renderBoundName) end)
-            renderBoundName = nil
-        end
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
         conns = {}
         for _, c in ipairs(dragConns) do pcall(function() c:Disconnect() end) end
@@ -1465,5 +1455,4 @@ return function(Lib, Core)
         if screenGui then pcall(function() screenGui:Destroy() end); screenGui = nil end
     end
 
-    return M
-end
+    re
