@@ -145,7 +145,7 @@ return function(Lib, Core)
         NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
         NS_Speed  = 0,            -- restore target used ONLY during those states: 0 = game base (12/25), 1..25 = exact
 
-        -- No Combo Wait (hook getFinalM1AnimSpeed + getM1Animations 4->1 + clear M1Cooldown)
+        -- No Combo Wait (override AnimationHandler.LoadAnim: 4thM1->1stM1 + speed x NCW_Speed)
         NCW_On    = false,
         NCW_Speed = 20,           -- animSpeed multiplier fed to the scheduler (higher = shorter waits)
 
@@ -389,171 +389,131 @@ return function(Lib, Core)
         return true
     end
 
-    -- find ALL functions matching constants, then pick the one whose getinfo source
-    -- contains a needle — needed to disambiguate names shared across modules.
-    local function findFnBySource(constants, srcNeedle)
-        if not _filtergc then return nil end
-        local ok, res = pcall(_filtergc, "function", { Constants = constants, IgnoreExecutor = true }, false)
-        if not ok or type(res) ~= "table" then return nil end
-        if not _getinfo then return res[1] end
-        for _, f in ipairs(res) do
-            local oki, info = pcall(_getinfo, f)
-            if oki and type(info) == "table" and type(info.short_src) == "string"
-                and string.find(info.short_src, srcNeedle, 1, true) then
-                return f
-            end
-        end
-        return res[1]
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- UNIVERSAL COMBAT LEVER: override AnimationHandler.LoadAnim
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- The last log was decisive: hookfunction on getFinalM1AnimSpeed / getM1Animations /
+    -- GetPingAnimSpeedMultiplier ALL installed (ncwHooked/pingHooked=true) yet fired
+    -- ZERO times (speedCalls=0, pingCalls=0) even though those functions ARE called
+    -- every swing (M1.lua:459/88). Conclusion: on Potassium, hookfunction does NOT
+    -- redirect a module's INTERNAL local/upvalue calls — it only swaps the GC-visible
+    -- object. So hooking module-local functions is useless here.
+    --
+    -- The reliable pattern is overwriting a TABLE FIELD that is indexed at CALL TIME.
+    -- Every combat animation flows through ONE such choke point:
+    --   playM1SwingAnimation → AnimationHandler.LoadAnim(char,"M1",animInstance,nil,false,speed)
+    -- (M1.lua:271). AnimationHandler is a Packages singleton required everywhere, and
+    -- callers do `AnimationHandler.LoadAnim(...)` (a table index each call), so writing
+    -- our own function into that field is picked up by EVERY caller in EVERY combat
+    -- module — no matter which script/version drives the swing. This is the fix.
+    --
+    -- LoadAnim(char, category, animId, kfCb, looped, speed, fade):
+    --   • category=="M1"  → an M1 swing. animId is the Animation Instance named
+    --     "1stM1".."4thM1" (siblings in the combat-anims folder, M1.lua:62-67).
+    --   • NCW: swap a "4thM1" animId → its sibling "1stM1"  (the finisher literally
+    --     PLAYS as the first attack — animation, priority, everything), and multiply
+    --     `speed` by NCW_Speed so swings are faster and the felt wait collapses.
+    --   • Ping spoof: the ping penalty slows anim speed via delay/(delay+clamp(ping*.5,
+    --     0,.35)). We read the REAL ping now and rescale `speed` by mult(spoof)/mult(real)
+    --     → spoof 0 removes the slowdown (faster), spoof 1000ms adds a big slowdown
+    --     (obvious live proof).
+    local ncwHooked = false      -- reused name: true once the LoadAnim override is in
+    local pingHooked = false     -- both features share the same override
+    local animHookInstalled = false
+    local _loadCalls, _m1Calls, _swapCount = 0, 0, 0
+    local ATTACK_DELAY = 0.45    -- CombatConfig ClientPredict M1 AttackDuration (approx)
+
+    local function pingSpeedFactor()
+        if not Config.Ping_On then return 1 end
+        local realPing = 0
+        pcall(function() realPing = LocalPlayer:GetNetworkPing() end)  -- seconds
+        if type(realPing) ~= "number" then realPing = 0 end
+        local spoof = math.max(0, (Config.Ping_Value or 0) / 1000)
+        local d = ATTACK_DELAY
+        local mReal  = d / (d + math.clamp(realPing * 0.5, 0, 0.35))
+        local mSpoof = d / (d + math.clamp(spoof   * 0.5, 0, 0.35))
+        if mReal <= 0 then return 1 end
+        return mSpoof / mReal
     end
 
-    -- ---- No Combo Wait: hook getFinalM1AnimSpeed + getM1Animations --------------
-    -- Root cause of all prior NCW failures, proven by the last log: our
-    -- scheduleM1SwingTimers hook FIRED (animSpeed 1.018 -> 50.93) but nothing changed,
-    -- because that function only schedules client-predict Janitor timers (u21/u20) that
-    -- do NOT gate the real swing. The ACTUAL levers (full M1.lua read):
-    --   • getFinalM1AnimSpeed(char, combo) (line 80) → the ONE source of anim speed. Its
-    --     result v51 is passed to playM1SwingAnimation → AnimationHandler.LoadAnim(...,
-    --     v51) (line 271), i.e. the real animation PLAYBACK SPEED, and also divides the
-    --     predict timers. Inflating it makes swings visibly faster and collapses waits.
-    --   • the animation played is picked by u19 via getM1Animations()[u19] (lines 461-
-    --     462, 256-257). Remapping index 4 → 1 makes the finisher play as the 1st hit.
-    -- NOTE: the hard inter-hit / post-combo gates are the SERVER-set attributes "M1" and
-    -- "M1Cooldown" (tryM1 lines 403/409); the client never writes them. We additionally
-    -- clear "M1Cooldown" locally each frame (see master loop) to drop the post-combo
-    -- stall client-side. Server still rate-caps real damage.
-    local ncwHooked = false
-    local _ncwSpeedCalls = 0
-    local realPingTbl   -- the EXACT CombatPingAnimUtils table M1 uses (from upvalues)
-    local function captureRealPingTable(animSpeedFn)
-        if realPingTbl or not (_hasUpval and animSpeedFn) then return end
-        local ok, ups = pcall(_getupvalues, animSpeedFn)
-        if ok and type(ups) == "table" then
-            for i = 1, 32 do
-                local v = ups[i]
-                if type(v) == "table" and type(rawget(v, "GetPingAnimSpeedMultiplier")) == "function" then
-                    realPingTbl = v; break
+    local function installAnimHook()
+        if animHookInstalled then return true end
+        dbg("=== installAnimHook (AnimationHandler.LoadAnim) ===")
+        if not _filtergc then dbg("installAnimHook ABORT: no filtergc"); return false end
+
+        -- AnimationHandler is unique: only it has all of these keys.
+        local ok, tbl = pcall(_filtergc, "table",
+            { Keys = { "LoadAnim", "StopAnim", "PreloadAnimations", "Anims" } }, true)
+        if not (ok and type(tbl) == "table" and type(rawget(tbl, "LoadAnim")) == "function") then
+            dbg("installAnimHook ABORT: AnimationHandler table not found (ok=", ok, "type=", type(tbl), ")")
+            return false
+        end
+        dbg("found AnimationHandler table")
+
+        local origLoad = tbl.LoadAnim
+        local function newLoad(char, category, animId, kfCb, looped, speed, fade, ...)
+            _loadCalls = _loadCalls + 1
+            local isM1 = (category == "M1")
+            if isM1 then _m1Calls = _m1Calls + 1 end
+
+            -- log a sample of combat-relevant loads so we can SEE what really fires
+            if _loadCalls <= 20 or isM1 then
+                if isM1 and (_m1Calls <= 20 or _m1Calls % 15 == 0) then
+                    local nm = (typeof(animId) == "Instance") and animId.Name or tostring(animId)
+                    dbg("LoadAnim M1 #" .. _m1Calls, "anim=", nm, "speed=", tostring(speed),
+                        "NCW=", Config.NCW_On, "Ping=", Config.Ping_On)
                 end
             end
-        end
-        dbg("captured real CombatPingAnimUtils table:", realPingTbl ~= nil)
-    end
-    local function installNCW()
-        if ncwHooked then return true end
-        dbg("=== installNCW ===")
-        if not _hasHookFn then dbg("installNCW ABORT: no hookfunction"); return false end
-        if not _filtergc  then dbg("installNCW ABORT: no filtergc");     return false end
 
-        -- 1) getFinalM1AnimSpeed — unique to M1.lua by {GetScaledStyleM1HitboxDelay,
-        --    GetCharacterHeight}. This is the real speed source.
-        local speedFn = findFnBySource({ "GetScaledStyleM1HitboxDelay", "GetCharacterHeight" }, "M1")
-        if not speedFn then dbg("installNCW ABORT: getFinalM1AnimSpeed not found"); return false end
-        if _getinfo then
-            local oki, i = pcall(_getinfo, speedFn)
-            if oki and type(i) == "table" then dbg("NCW speedFn source=", i.short_src, "nparams=", i.numparams) end
-        end
-        captureRealPingTable(speedFn)   -- grab the real ping table while we're here
+            local newAnim, newSpeed = animId, speed
 
-        local origSpeed
-        origSpeed = _hookfunction(speedFn, function(char, comboIdx, ...)
-            local base = origSpeed(char, comboIdx, ...)
-            if not Config.NCW_On then return base end
-            local mult = math.max(1, Config.NCW_Speed or 20)
-            local out  = (type(base) == "number" and base or 1) * mult
-            _ncwSpeedCalls = _ncwSpeedCalls + 1
-            if _ncwSpeedCalls <= 10 or _ncwSpeedCalls % 25 == 0 then
-                dbg("NCW speed #" .. _ncwSpeedCalls, "combo", tostring(comboIdx),
-                    "base", tostring(base), "->", string.format("%.2f", out))
-            end
-            return out
-        end)
-
-        -- 2) getM1Animations — remap the 4th (finisher) anim to the 1st. Unique by
-        --    {1stM1,4thM1} + source M1 (AnimationHandler also carries those strings).
-        local animsFn = findFnBySource({ "1stM1", "4thM1" }, "M1")
-        if animsFn then
-            local origAnims
-            origAnims = _hookfunction(animsFn, function(...)
-                local t = origAnims(...)
-                if Config.NCW_On and type(t) == "table" and t[1] then
-                    return { t[1], t[2], t[3], t[1] }   -- 4th slot -> 1st animation
+            if isM1 then
+                -- NCW: 4th (finisher) plays as 1st, and speed up
+                if Config.NCW_On then
+                    if typeof(animId) == "Instance" and animId.Name == "4thM1" and animId.Parent then
+                        local first = animId.Parent:FindFirstChild("1stM1")
+                        if first then
+                            newAnim = first
+                            _swapCount = _swapCount + 1
+                            if _swapCount <= 10 or _swapCount % 10 == 0 then
+                                dbg("NCW: swapped 4thM1 -> 1stM1 (#" .. _swapCount .. ")")
+                            end
+                        end
+                    end
+                    if type(newSpeed) == "number" and newSpeed > 0 then
+                        newSpeed = newSpeed * math.max(1, Config.NCW_Speed or 20)
+                    end
                 end
-                return t
-            end)
-            dbg("NCW: getM1Animations hooked (4th->1st)")
-        else
-            dbg("NCW: getM1Animations NOT found (4th->1st skipped)")
+                -- Ping spoof: rescale speed by ping factor
+                if Config.Ping_On and type(newSpeed) == "number" and newSpeed > 0 then
+                    local f = pingSpeedFactor()
+                    newSpeed = newSpeed * f
+                    if _m1Calls <= 20 or _m1Calls % 15 == 0 then
+                        dbg("Ping factor=", string.format("%.3f", f), "-> speed", tostring(speed), "->", string.format("%.3f", newSpeed))
+                    end
+                end
+            end
+
+            return origLoad(char, category, newAnim, kfCb, looped, newSpeed, fade, ...)
         end
 
-        ncwHooked = true
-        dbg("installNCW SUCCESS")
+        -- primary: field overwrite (indexed at call time by every caller)
+        local okSet = pcall(function() tbl.LoadAnim = newLoad end)
+        local stuck = okSet and tbl.LoadAnim == newLoad
+        dbg("LoadAnim field overwrite okSet=", okSet, "stuck=", stuck)
+        if not stuck and _hasHookFn then
+            -- fallback: hook the function object too
+            local o2; o2 = _hookfunction(origLoad, function(...) return newLoad(...) end)
+            dbg("LoadAnim fell back to hookfunction")
+        end
+
+        animHookInstalled = true
+        dbg("installAnimHook SUCCESS")
         return true
     end
 
-    -- ---- Ping Spoof: hook the REAL GetPingAnimSpeedMultiplier -------------------
-    -- Why every prior attempt logged pingCalls=0: on Potassium, require() is sandboxed
-    -- and returned a DIFFERENT CombatPingAnimUtils table than the one M1 captured, and
-    -- the string-fingerprint matched a look-alike in CombatConfig. The bullet-proof
-    -- source is getFinalM1AnimSpeed's OWN upvalue: it holds the exact module table it
-    -- calls at M1.lua:88. We grab that table (captureRealPingTable) and hook its real
-    -- GetPingAnimSpeedMultiplier function object (+ overwrite the field as backup).
-    -- Multiplier = delay/(delay + clamp(spoofSec*0.5, 0, 0.35)); spoof 0 => 1 (no slow),
-    -- spoof 1000ms => strong slow (easy live-proof).
-    local pingHooked = false
-    local _pingCallCount = 0
-    local function computeMult(delay)
-        if type(delay) ~= "number" or delay <= 0 then return 1 end
-        local pingSec = math.max(0, (Config.Ping_Value or 0) / 1000)
-        if pingSec <= 0 then return 1 end
-        return delay / (delay + math.clamp(pingSec * 0.5, 0, 0.35))
-    end
-    local function pingHookBody(orig, delay, player, ...)
-        if Config.Ping_On then
-            local m = computeMult(delay)
-            _pingCallCount = _pingCallCount + 1
-            if _pingCallCount <= 10 or _pingCallCount % 25 == 0 then
-                dbg("Ping mult() #" .. _pingCallCount, "delay=", tostring(delay),
-                    "spoof=", Config.Ping_Value .. "ms -> mult=", string.format("%.3f", m))
-            end
-            return m
-        end
-        return orig(delay, player, ...)
-    end
-    local function installPing()
-        if pingHooked then return true end
-        dbg("=== installPing ===")
-        if not _hasHookFn then dbg("installPing ABORT: no hookfunction"); return false end
-
-        -- ensure we have the real table (NCW install captures it; if NCW was skipped,
-        -- find getFinalM1AnimSpeed now and pull it from that closure's upvalues).
-        if not realPingTbl then
-            local speedFn = findFnBySource({ "GetScaledStyleM1HitboxDelay", "GetCharacterHeight" }, "M1")
-            captureRealPingTable(speedFn)
-        end
-        local mod = realPingTbl
-        if not (type(mod) == "table" and type(rawget(mod, "GetPingAnimSpeedMultiplier")) == "function") then
-            dbg("installPing ABORT: real CombatPingAnimUtils table not found"); return false
-        end
-
-        local orig = mod.GetPingAnimSpeedMultiplier
-        if _getinfo then
-            local okI, info = pcall(_getinfo, orig)
-            if okI and type(info) == "table" then dbg("Ping fn source=", info.short_src, "nups=", info.nups) end
-        end
-        -- primary: hook the real function object (catches M1.lua:88 regardless of ref)
-        local hooked
-        hooked = _hookfunction(orig, function(delay, player, ...)
-            return pingHookBody(hooked, delay, player, ...)
-        end)
-        -- backup: overwrite the field (pcall in case the table is frozen)
-        pcall(function()
-            mod.GetPingAnimSpeedMultiplier = function(delay, player, ...)
-                return pingHookBody(orig, delay, player, ...)
-            end
-        end)
-        pingHooked = true
-        dbg("installPing SUCCESS (real table hook + field overwrite)")
-        return true
-    end
+    local function installNCW()  ncwHooked = installAnimHook();  return ncwHooked  end
+    local function installPing() pingHooked = installAnimHook(); return pingHooked end
 
     -- ---- Background bootstrap ---------------------------------------------------
     -- All heavy scans run ONCE here, spread across frames with task.wait(), while
@@ -684,8 +644,8 @@ return function(Lib, Core)
             if gpe then return end
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
-                dbg("NCW_On=", Config.NCW_On, "ncwHooked=", ncwHooked, "speedCalls=", _ncwSpeedCalls, "cdClears=", _ncwCdClears, "NCW_Speed=", Config.NCW_Speed)
-                dbg("Ping_On=", Config.Ping_On, "pingHooked=", pingHooked, "pingCalls=", _pingCallCount, "spoof=", Config.Ping_Value .. "ms")
+                dbg("animHook=", animHookInstalled, "loadCalls=", _loadCalls, "m1Calls=", _m1Calls, "swaps=", _swapCount, "cdClears=", _ncwCdClears)
+                dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "| Ping_On=", Config.Ping_On, "spoof=", Config.Ping_Value .. "ms")
                 dbg("NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
                 saveLog()
             end
@@ -817,20 +777,20 @@ return function(Lib, Core)
                 Config.NCW_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not (_hasHookFn and _filtergc) then
-                        notify("No Combo Wait", "needs hookfunction + filtergc")
+                    if not _filtergc then
+                        notify("No Combo Wait", "needs filtergc")
                         Config.NCW_On = false
                     elseif bootstrapDone and not ncwHooked then
-                        notify("No Combo Wait", "failed - scheduleM1SwingTimers not found")
+                        notify("No Combo Wait", "failed - AnimationHandler not found")
                         Config.NCW_On = false
                     end
                 end
             end,
-            Desc = "speeds up M1 swing animations, remaps the 4th (finisher)\nhit to the 1st, and drops the post-combo cooldown locally",
+            Desc = "the 4th (finisher) hit plays as the 1st attack, and M1 swing\nanimations are sped up by Combo Speed so the wait collapses",
         })
         slider(sCbt, { Name = "Combo Speed", Flag = "MV_NCWSpeed", Default = Config.NCW_Speed,
             Min = 1, Max = 50, Suffix = "x", Callback = function(v) Config.NCW_Speed = v end })
-        sCbt:SubLabel({ Text = "Hooks getFinalM1AnimSpeed (x Combo Speed) so swings play faster, remaps\ngetM1Animations[4]->[1] so the finisher plays as the 1st hit, and clears the\nserver-set M1Cooldown attribute locally. Server still rate-caps real damage." })
+        sCbt:SubLabel({ Text = "Overrides AnimationHandler.LoadAnim (the choke point every M1 swing passes\nthrough): swaps the 4thM1 animation instance for 1stM1 so the finisher plays\nas the first attack, and multiplies swing speed by Combo Speed. Server rate-caps." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
@@ -841,16 +801,16 @@ return function(Lib, Core)
                 Config.Ping_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not _hasHookFn then
-                        notify("Ping Spoof", "needs hookfunction")
+                    if not _filtergc then
+                        notify("Ping Spoof", "needs filtergc")
                         Config.Ping_On = false
                     elseif bootstrapDone and not pingHooked then
-                        notify("Ping Spoof", "failed - CombatPingAnimUtils not found")
+                        notify("Ping Spoof", "failed - AnimationHandler not found")
                         Config.Ping_On = false
                     end
                 end
             end,
-            Desc = "hooks the real CombatPingAnimUtils.GetPingAnimSpeedMultiplier.\nlow spoof = no anim slowdown; high spoof (1000ms) = obvious slow (test)",
+            Desc = "rescales M1 swing anim speed by spoofed-vs-real ping in LoadAnim.\nspoof 0 = removes ping slowdown (faster); 1000ms = obvious slow (test)",
         })
         slider(sCbt, { Name = "Spoofed Ping", Flag = "MV_PingVal", Default = Config.Ping_Value,
             Min = 0, Max = 1000, Suffix = " ms", Callback = function(v) Config.Ping_Value = v end })
