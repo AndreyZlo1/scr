@@ -145,7 +145,7 @@ return function(Lib, Core)
         NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
         NS_Speed  = 0,            -- restore target used ONLY during those states: 0 = game base (12/25), 1..25 = exact
 
-        -- No Combo Wait (__namecall: LoadAnimation 4thM1->1stM1 + AdjustSpeed x NCW_Speed)
+        -- No Combo Wait (AnimationPlayed: match M1 id -> AdjustSpeed x NCW_Speed)
         NCW_On    = false,
         NCW_Speed = 20,           -- animSpeed multiplier fed to the scheduler (higher = shorter waits)
 
@@ -390,37 +390,43 @@ return function(Lib, Core)
     end
 
     -- ═══════════════════════════════════════════════════════════════════════════
-    -- UNIVERSAL COMBAT LEVER: hook game.__namecall (LoadAnimation + AdjustSpeed)
+    -- UNIVERSAL COMBAT LEVER: Animator.AnimationPlayed + AnimationTrack:AdjustSpeed
     -- ═══════════════════════════════════════════════════════════════════════════
-    -- History that led here (all disproven, kept as a map of dead ends):
+    -- Map of dead ends (all proven by diag logs, do NOT retry):
     --   1) hookfunction on M1.lua getFinalM1AnimSpeed/GetPingAnimSpeedMultiplier →
-    --      installed but fired 0× (Potassium hookfunction doesn't redirect a module's
-    --      internal local/upvalue calls).
-    --   2) overwrite AnimationHandler.LoadAnim table field → the table filtergc returns
-    --      is a DIFFERENT copy than the combat module's; our override only ever saw
-    --      replicated anims (RemoteWhiteboardDraw), never M1 (m1Calls=0).
-    --   3) actor injection → getactors()=0. There are NO Actors; combat is in the MAIN
-    --      VM (the user was right). So (2)'s miss is purely the wrong table copy.
+    --      fired 0× (Potassium hookfunction can't redirect a module's internal calls).
+    --   2) overwrite AnimationHandler.LoadAnim table field → filtergc returns a
+    --      DIFFERENT copy than combat uses; only saw replicated anims, never M1.
+    --   3) actor injection → getactors()=0. No Actors; combat is in the MAIN VM.
+    --   4) hookmetamethod(game,"__namecall") → intercepted 8600+ IsA calls but
+    --      LoadAnimation/AdjustSpeed/Play = 0. Those method refs are cached in
+    --      upvalues/locals so the `:` calls bypass the __namecall metamethod entirely.
     --
-    -- The lever that CANNOT be missed: AnimationHandler.LoadAnim ALWAYS plays through
-    -- two Roblox C-side namecalls no matter which table copy owns it —
-    --   • Animator:LoadAnimation(Animation)  (Packages/AnimationHandler.lua:190)
-    --   • AnimationTrack:AdjustSpeed(speed)   (…:243)
-    -- hookmetamethod(game,"__namecall") intercepts BOTH for every caller in the VM.
-    --   NCW reorder: at LoadAnimation, if the Animation is a non-first M1 swing
-    --     (name ordinal > 1, e.g. "4thM1"), swap the arg to its "1stM1" sibling → the
-    --     finisher loads & plays as the FIRST attack (animation + Action4 priority).
-    --   NCW speed / Ping: at AdjustSpeed on an M1-swing track, multiply the speed arg
-    --     (Ping spoof rescales by mult(spoof)/mult(realPing); spoof 0 = no slowdown).
-    -- No newcclosure (broke Ping before) and no _G (detectable) — per notes.
+    -- What DOES work (proven): Animator.AnimationPlayed fires for EVERY track the
+    -- local Humanoid plays, no matter how it was loaded. The diag caught the attack
+    -- as a track named "Animation" with id 137980914350618. That name is generic
+    -- because the game hides real ids: the style folder anims (1stM1..4thM1) carry
+    -- FAKE AnimationIds, and at play time the id is swapped via ReplicatedStorage.
+    -- AnimationRemap ([73977397773505]=137980914350618), loaded into a fresh
+    -- Instance.new("Animation"). So we can't match by name/ordinal — we match by the
+    -- numeric AnimationId against a prebuilt set of every style's M1 ids (both the raw
+    -- folder id AND its remap[] value).
+    --
+    -- On a matched M1 track we drive AnimationTrack:AdjustSpeed() OURSELVES from our
+    -- thread (a plain method call — unaffected by the namecall-bypass that blocks
+    -- INTERCEPTION). We re-assert the target speed for a short window so the game's own
+    -- AdjustSpeed at play time can't win. mul = NCW_Speed × pingFactor; Ping spoof
+    -- rescales by mult(spoof)/mult(realPing) (spoof 0 = no slowdown, 1000ms = slow).
     local ncwHooked = false
     local pingHooked = false
     local animHookInstalled = false
     local ATTACK_DELAY = 0.45    -- CombatConfig ClientPredict M1 AttackDuration (approx)
 
-    -- namecall diagnostics
-    local _ncLoad, _ncAdj, _ncM1Load, _ncM1Adj, _swapCount = 0, 0, 0, 0, 0
-    local _animNames = {}        -- Animation.Name seen at Animator:LoadAnimation
+    -- diagnostics
+    local _apPlays, _apM1, _apApply = 0, 0, 0
+    local _playedIds = {}        -- id -> { name, count, m1 }
+    local _m1Ids, _m1Count = {}, 0
+    local _apInstalled = false
 
     local function pingSpeedFactor()
         if not Config.Ping_On then return 1 end
@@ -442,98 +448,126 @@ return function(Lib, Core)
         return mul
     end
 
-    -- Is this Animation/track name an M1 swing? Combat anims are named "1stM1",
-    -- "2ndM1", "3rdM1", "4thM1" (siblings in the style's anim folder). Returns the
-    -- ordinal (1..N) or nil.
-    local function m1Ordinal(name)
-        if type(name) ~= "string" then return nil end
-        local d = string.match(name, "^(%d+)%a-M1$")
+    -- pull the trailing numeric id out of "rbxassetid://123" / ".../?id=123"
+    local function extractId(s)
+        if type(s) ~= "string" then return nil end
+        local d = string.match(s, "(%d+)%s*$") or string.match(s, "(%d+)")
         return d and tonumber(d) or nil
     end
 
-    -- ── The real lever: hook game.__namecall ──────────────────────────────────
-    -- Proven by the last log: getactors()=0 (NO Actors — all combat is in the MAIN
-    -- VM, so the user is right), yet our main-VM AnimationHandler.LoadAnim override
-    -- only ever saw replicated anims (RemoteWhiteboardDraw), never our M1. Reason:
-    -- the combat module holds a DIFFERENT copy of the AnimationHandler *table* than
-    -- the one filtergc returned, so a table-field override misses it.
-    --
-    -- But AnimationHandler.LoadAnim (dump: Packages/AnimationHandler.lua:96) ALWAYS
-    -- plays through two Roblox C-side namecalls, regardless of which table copy it is:
-    --   • u25:LoadAnimation(u26)   -- Animator loads the Animation instance (line 190)
-    --   • result:AdjustSpeed(p22)  -- sets the swing playback speed (line 243)
-    -- hookmetamethod(game,"__namecall") intercepts BOTH for every caller in the VM.
-    -- This sidesteps the "which table" problem entirely.
-    --   NCW reorder: at LoadAnimation, if the Animation is a non-first M1 swing
-    --     (ordinal > 1, e.g. "4thM1"), swap the argument to its "1stM1" sibling so the
-    --     finisher literally loads & plays as the first attack (animation + priority).
-    --   NCW speed / Ping: at AdjustSpeed on an M1 track, multiply the speed arg.
-    -- NOTE: no newcclosure wrapper (that broke Ping before); no _G (detectable).
+    -- Build the set of M1 attack ids for ALL combat styles (robust to style switches):
+    -- ReplicatedStorage.Animations.Combat.<Style>Anims → children 1stM1..4thM1. For
+    -- each, add the raw folder AnimationId AND its AnimationRemap[] value (the id that
+    -- actually plays). Run once at bootstrap + on respawn.
+    local function buildM1Ids()
+        _m1Ids, _m1Count = {}, 0
+        local function addId(x)
+            if x and not _m1Ids[x] then _m1Ids[x] = true; _m1Count = _m1Count + 1 end
+        end
+        local remap
+        pcall(function()
+            local mod = ReplicatedStorage:FindFirstChild("AnimationRemap")
+            if mod and mod:IsA("ModuleScript") then remap = require(mod) end
+        end)
+        local anims  = ReplicatedStorage:FindFirstChild("Animations")
+        local combat = anims and anims:FindFirstChild("Combat")
+        if not combat then dbg("buildM1Ids: no ReplicatedStorage.Animations.Combat"); return 0 end
+        for _, styleFolder in ipairs(combat:GetChildren()) do
+            if styleFolder:IsA("Folder") then
+                for _, nm in ipairs({ "1stM1", "2ndM1", "3rdM1", "4thM1" }) do
+                    local a = styleFolder:FindFirstChild(nm)
+                    if a and a:IsA("Animation") then
+                        local raw = extractId(a.AnimationId)
+                        if raw then
+                            addId(raw)
+                            if type(remap) == "table" and remap[raw] then addId(remap[raw]) end
+                        end
+                    end
+                end
+            end
+        end
+        dbg("buildM1Ids: collected", _m1Count, "M1 ids (remap=" .. tostring(type(remap) == "table") .. ")")
+        return _m1Count
+    end
+
+    -- called for every track the local Humanoid plays
+    local function onAnimPlayed(track)
+        _apPlays = _apPlays + 1
+        local okA, anim = pcall(function() return track.Animation end)
+        local id  = (okA and anim) and extractId(anim.AnimationId) or nil
+        local nm  = (okA and anim) and anim.Name or "?"
+        if id then
+            local rec = _playedIds[id]
+            if not rec then
+                rec = { name = nm, count = 0, m1 = (_m1Ids[id] == true) }
+                _playedIds[id] = rec
+                dbg("AnimPlayed NEW id=" .. id .. " name='" .. tostring(nm) .. "' M1=" .. tostring(rec.m1))
+            end
+            rec.count = rec.count + 1
+        end
+        if not (Config.NCW_On or Config.Ping_On) then return end
+        if not (id and _m1Ids[id]) then return end
+        _apM1 = _apM1 + 1
+        local mul = speedMul()
+        if mul == 1 then return end
+        local okS, base = pcall(function() return track.Speed end)
+        if not okS or type(base) ~= "number" or base <= 0 then base = 1 end
+        local target = base * mul
+        _apApply = _apApply + 1
+        if _apApply <= 10 or _apApply % 15 == 0 then
+            dbg("M1 speed x" .. string.format("%.1f", mul) .. " id=" .. id ..
+                " base=" .. string.format("%.2f", base) .. " -> " .. string.format("%.2f", target))
+        end
+        -- re-assert for a short window so the game's own AdjustSpeed can't override us
+        task.spawn(function()
+            local t0 = os.clock()
+            while os.clock() - t0 < 0.3 do
+                local playing = true
+                pcall(function() playing = track.IsPlaying end)
+                if not playing then break end
+                pcall(function() track:AdjustSpeed(target) end)
+                task.wait()
+            end
+        end)
+    end
+
+    -- (re)connect AnimationPlayed on the local character's Animator
+    local _animator, _animConn
+    local function hookAnimator()
+        local char = LocalPlayer.Character
+        if not char then return false end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if not animator then return false end
+        if _animator == animator and _animConn then return true end
+        if _animConn then pcall(function() _animConn:Disconnect() end) end
+        _animator = animator
+        _animConn = animator.AnimationPlayed:Connect(function(track)
+            pcall(onAnimPlayed, track)
+        end)
+        _apInstalled = true
+        dbg("AnimationPlayed connected on", (pcall(function() return animator:GetFullName() end)) and animator:GetFullName() or "Animator")
+        return true
+    end
+
+    local _charConnDone = false
     local function installAnimHook()
         if animHookInstalled then return true end
-        dbg("=== installAnimHook (game.__namecall: LoadAnimation + AdjustSpeed) ===")
-        if not _hasHookMeta then dbg("installAnimHook ABORT: no hookmetamethod/getnamecallmethod"); return false end
-
-        local oldNamecall
-        oldNamecall = _hookmeta(game, "__namecall", function(self, ...)
-            local method = _namecall()
-
-            if method == "LoadAnimation" then
-                if not _checkcaller() then
-                    local anim = ...
-                    if typeof(anim) == "Instance" and anim:IsA("Animation") then
-                        _ncLoad = _ncLoad + 1
-                        local nm = anim.Name
-                        if not _animNames[nm] then
-                            _animNames[nm] = 0
-                            dbg("LoadAnimation Animation name seen: '" .. tostring(nm) .. "'")
-                        end
-                        _animNames[nm] = _animNames[nm] + 1
-                        local ord = m1Ordinal(nm)
-                        if ord then
-                            _ncM1Load = _ncM1Load + 1
-                            if Config.NCW_On and ord > 1 and anim.Parent then
-                                local first = anim.Parent:FindFirstChild("1stM1")
-                                if first and first ~= anim then
-                                    _swapCount = _swapCount + 1
-                                    if _swapCount <= 10 or _swapCount % 10 == 0 then
-                                        dbg("NCW: swapped " .. nm .. " -> 1stM1 (#" .. _swapCount .. ")")
-                                    end
-                                    return oldNamecall(self, first)
-                                end
-                            end
-                        end
-                    end
-                end
-                return oldNamecall(self, ...)
-
-            elseif method == "AdjustSpeed" then
-                if (Config.NCW_On or Config.Ping_On) and not _checkcaller() then
-                    local okA, anim = pcall(function() return self.Animation end)
-                    if okA and typeof(anim) == "Instance" and m1Ordinal(anim.Name) then
-                        local sp = ...
-                        if type(sp) == "number" and sp > 0 then
-                            _ncM1Adj = _ncM1Adj + 1
-                            local out = sp * speedMul()
-                            if _ncM1Adj <= 10 or _ncM1Adj % 15 == 0 then
-                                dbg("M1 AdjustSpeed #" .. _ncM1Adj, anim.Name, tostring(sp), "->", string.format("%.2f", out))
-                            end
-                            return oldNamecall(self, out)
-                        end
-                    end
-                    _ncAdj = _ncAdj + 1
-                end
-                return oldNamecall(self, ...)
-            end
-
-            return oldNamecall(self, ...)
-        end)
-
-        if not oldNamecall then dbg("installAnimHook: hookmetamethod returned nil"); return false end
+        dbg("=== installAnimHook (Animator.AnimationPlayed + AdjustSpeed) ===")
+        buildM1Ids()
+        local ok = hookAnimator()
+        if not _charConnDone then
+            _charConnDone = true
+            LocalPlayer.CharacterAdded:Connect(function()
+                task.wait(0.5)
+                buildM1Ids()   -- style/anim ids may differ after respawn
+                hookAnimator()
+            end)
+        end
         animHookInstalled = true
         ncwHooked = true
         pingHooked = true
-        dbg("installAnimHook SUCCESS (__namecall installed)")
+        dbg("installAnimHook done (animatorHooked=" .. tostring(ok) .. ", m1Ids=" .. _m1Count .. ")")
         return true
     end
 
@@ -651,15 +685,18 @@ return function(Lib, Core)
             if gpe then return end
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
-                dbg("animHook(__namecall)=", animHookInstalled)
-                dbg("namecall LoadAnimation=", _ncLoad, "M1 loads=", _ncM1Load, "swaps=", _swapCount, "| M1 AdjustSpeed=", _ncM1Adj, "cdClears=", _ncwCdClears)
+                dbg("animHook=", animHookInstalled, "animatorHooked=", _apInstalled, "M1 idSet=", _m1Count)
+                dbg("AnimationPlayed total=", _apPlays, "M1 matched=", _apM1, "speed applied=", _apApply, "cdClears=", _ncwCdClears)
                 dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "SpeedMul=", string.format("%.2f", speedMul()))
                 dbg("Ping_On=", Config.Ping_On, "spoof=", Config.Ping_Value .. "ms | NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
-                -- every Animation.Name seen at Animator:LoadAnimation (find the M1 names)
-                dbg("--- Animation names seen at LoadAnimation ---")
+                -- every played track id + whether it matched the M1 set (spot mismatches)
+                dbg("--- played tracks (id / name / M1? / count) ---")
                 local anyN = false
-                for nm, cnt in pairs(_animNames) do anyN = true; dbg("   '" .. nm .. "' x" .. cnt) end
-                if not anyN then dbg("   (none seen - LoadAnimation never fired in this VM!)") end
+                for pid, rec in pairs(_playedIds) do
+                    anyN = true
+                    dbg("   id=" .. pid .. " '" .. tostring(rec.name) .. "' M1=" .. tostring(rec.m1) .. " x" .. rec.count)
+                end
+                if not anyN then dbg("   (none - AnimationPlayed never fired; animator not hooked?)") end
                 saveLog()
             end
         end)
@@ -790,20 +827,16 @@ return function(Lib, Core)
                 Config.NCW_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not _hasHookMeta then
-                        notify("No Combo Wait", "needs hookmetamethod")
-                        Config.NCW_On = false
-                    elseif bootstrapDone and not ncwHooked then
-                        notify("No Combo Wait", "failed - __namecall hook not installed")
-                        Config.NCW_On = false
+                    if bootstrapDone and not _apInstalled then
+                        notify("No Combo Wait", "no Animator yet - will hook on spawn")
                     end
                 end
             end,
-            Desc = "the 4th (finisher) hit plays as the 1st attack, and M1 swing\nanimations are sped up by Combo Speed so the wait collapses",
+            Desc = "M1 swing animations are sped up by Combo Speed so the combo\nwait collapses (server still rate-caps real damage)",
         })
         slider(sCbt, { Name = "Combo Speed", Flag = "MV_NCWSpeed", Default = Config.NCW_Speed,
             Min = 1, Max = 50, Suffix = "x", Callback = function(v) Config.NCW_Speed = v end })
-        sCbt:SubLabel({ Text = "Hooks game.__namecall: at Animator:LoadAnimation swaps a non-first M1 swing\n(e.g. 4thM1) for 1stM1 so the finisher plays as the first attack, and at\nAnimationTrack:AdjustSpeed multiplies swing speed by Combo Speed. Server rate-caps." })
+        sCbt:SubLabel({ Text = "Listens to Animator.AnimationPlayed and, for M1 swing tracks (matched by\nremapped AnimationId across all styles), drives AnimationTrack:AdjustSpeed to\nmultiply playback by Combo Speed. Server rate-caps real damage." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
@@ -814,16 +847,12 @@ return function(Lib, Core)
                 Config.Ping_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not _hasHookMeta then
-                        notify("Ping Spoof", "needs hookmetamethod")
-                        Config.Ping_On = false
-                    elseif bootstrapDone and not pingHooked then
-                        notify("Ping Spoof", "failed - __namecall hook not installed")
-                        Config.Ping_On = false
+                    if bootstrapDone and not _apInstalled then
+                        notify("Ping Spoof", "no Animator yet - will hook on spawn")
                     end
                 end
             end,
-            Desc = "rescales M1 swing anim speed by spoofed-vs-real ping via __namecall.\nspoof 0 = removes ping slowdown (faster); 1000ms = obvious slow (test)",
+            Desc = "rescales M1 swing anim speed by spoofed-vs-real ping via AdjustSpeed.\nspoof 0 = removes ping slowdown (faster); 1000ms = obvious slow (test)",
         })
         slider(sCbt, { Name = "Spoofed Ping", Flag = "MV_PingVal", Default = Config.Ping_Value,
             Min = 0, Max = 1000, Suffix = " ms", Callback = function(v) Config.Ping_Value = v end })
