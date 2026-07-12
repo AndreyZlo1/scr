@@ -752,41 +752,60 @@ return function(Lib, Core)
     -- with u19 reassignment. We find getM1Animations by its unique string constants
     -- "1stM1".."4thM1" (reliable string-based filtergc), call it to get the cache ref,
     -- store originals, then remap. Finisher DAMAGE stays server-decided.
-    local _ffAnims, _ffOrig, _ffApplied = nil, nil, false
-    local _getM1Anims = nil
+    -- Previous approach (remapping the getM1Animations() cache table u2[style]) FAILED:
+    -- the cache is keyed per COMBAT STYLE, built lazily. Remapping the table for the
+    -- style active at toggle-time doesn't touch other styles' tables (rebuilt fresh in
+    -- combat) → 4 distinct swing anims still played (proven by log's played-tracks).
+    -- ROBUST FIX: hookfunction(getM1Animations). playM1SwingAnimation does
+    -- getM1Animations()[index] (M1.lua:256) and tryM1 does getM1Animations()[u19].
+    -- Our hook runs the original, then (while FF on) returns a NEW table {t4,t4,t4,t4}
+    -- so EVERY index resolves to 4thM1 — for ANY style, no race, cache never corrupted
+    -- (toggle just flips Config.FF_On). getM1Animations is found via its unique string
+    -- constants "1stM1".."4thM1"; candidate validated by calling it (returns 4-elem table).
+    local _getM1Anims, _ffOrigFn, _ffApplied = nil, nil, false
     local function findGetM1Anims()
         if _getM1Anims then return _getM1Anims end
         if not _filtergc then return nil end
+        local cands = {}
         local ok, res = pcall(_filtergc, "function",
             { Constants = { "1stM1", "2ndM1", "3rdM1", "4thM1" } }, false)
         if ok and type(res) == "table" then
-            for _, fn in ipairs(res) do if type(fn) == "function" then _getM1Anims = fn; break end end
+            for _, fn in ipairs(res) do if type(fn) == "function" then cands[#cands + 1] = fn end end
         end
-        if not _getM1Anims then
-            local ok2, one = pcall(_filtergc, "function", { Constants = { "1stM1", "4thM1" } }, true)
-            if ok2 and type(one) == "function" then _getM1Anims = one end
+        -- validate: the real getM1Animations returns a table whose [4] exists (may be nil
+        -- if no folder yet, so accept a fn that either returns such a table OR is the sole
+        -- candidate). Prefer one that returns a 4-element table right now.
+        for _, fn in ipairs(cands) do
+            local okc, tbl = pcall(fn)
+            if okc and type(tbl) == "table" and tbl[4] ~= nil then _getM1Anims = fn; break end
         end
-        dbg("FF: getM1Animations " .. (_getM1Anims and "FOUND" or "NOT found"))
+        if not _getM1Anims and #cands == 1 then _getM1Anims = cands[1] end
+        dbg("FF: getM1Animations " .. (_getM1Anims and ("FOUND (" .. #cands .. " cand)") or ("NOT found (" .. #cands .. " cand)")))
         return _getM1Anims
     end
     local function applyFinisherFirst()
+        if _ffApplied then return true end
+        if not _hasHookFn then dbg("FF: hookfunction unavailable"); return false end
         local fn = findGetM1Anims()
         if not fn then return false end
-        local ok, tbl = pcall(fn)
-        if not (ok and type(tbl) == "table" and tbl[4] ~= nil) then dbg("FF: anim table invalid"); return false end
-        _ffAnims = tbl
-        if not _ffOrig then _ffOrig = { tbl[1], tbl[2], tbl[3], tbl[4] } end   -- snapshot for restore
-        tbl[1], tbl[2], tbl[3] = tbl[4], tbl[4], tbl[4]                         -- remap to finisher
+        local ok = pcall(function()
+            _ffOrigFn = _hookfunction(fn, function(...)
+                local t = _ffOrigFn(...)
+                if Config.FF_On and type(t) == "table" and t[4] ~= nil then
+                    local f = t[4]
+                    return { f, f, f, f }   -- every combo index -> finisher animation
+                end
+                return t
+            end)
+        end)
+        if not (ok and _ffOrigFn) then dbg("FF: hookfunction failed"); return false end
         _ffApplied = true
-        dbg("FF: remapped anim cache [1..3] -> [4] (finisher)")
+        dbg("FF: hooked getM1Animations (every swing -> 4th/finisher anim)")
         return true
     end
+    -- Note: no unhook needed — the hook is inert while Config.FF_On is false.
     local function restoreFinisherFirst()
-        if _ffApplied and _ffAnims and _ffOrig then
-            _ffAnims[1], _ffAnims[2], _ffAnims[3] = _ffOrig[1], _ffOrig[2], _ffOrig[3]
-            _ffApplied = false
-            dbg("FF: restored original anim cache")
-        end
+        dbg("FF: disabled (hook now passthrough)")
     end
 
     local _charConnDone = false
@@ -805,7 +824,9 @@ return function(Lib, Core)
                 -- scheduleM1SwingTimers + module table are cached (survive respawn), but
                 -- re-assert the patches, and re-remap the anim cache (rebuilt per style).
                 if Config.NCW_On then applyComboCooldowns(); hookServerResponse() end
-                if Config.FF_On then _ffApplied = false; _ffAnims = nil; _ffOrig = nil; applyFinisherFirst() end
+                -- FF hook is on the module-cached getM1Animations fn (survives respawn) and
+                -- is inert unless Config.FF_On, so no re-apply needed; ensure it's installed.
+                if Config.FF_On then applyFinisherFirst() end
             end)
         end
         animHookInstalled = true
