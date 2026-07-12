@@ -54,6 +54,7 @@ return function(Lib, Core)
     local RunService       = game:GetService("RunService")
     local UserInputService  = game:GetService("UserInputService")
     local Workspace        = game:GetService("Workspace")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -144,12 +145,13 @@ return function(Lib, Core)
         NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
         NS_Speed  = 0,            -- restore target used ONLY during those states: 0 = game base (12/25), 1..25 = exact
 
-        -- No Combo Wait (force the shared u21 combo gate open every frame via setupvalue)
-        NCW_On   = false,
+        -- No Combo Wait (hook scheduleM1SwingTimers: combo 4->1 + shrink cooldown/reset)
+        NCW_On    = false,
+        NCW_Speed = 20,           -- animSpeed multiplier fed to the scheduler (higher = shorter waits)
 
-        -- Ping Spoof (replace GetPingAnimSpeedMultiplier with a spoofed-ping version)
+        -- Ping Spoof (hook the REAL CombatPingAnimUtils.GetPingAnimSpeedMultiplier)
         Ping_On    = false,
-        Ping_Value = 0,           -- spoofed ping in ms
+        Ping_Value = 0,           -- spoofed ping in ms (0 = no slowdown; high = test slowdown)
 
         -- Sprint
         Sprint_On     = false,    -- AutoSprint (hold sprint on)
@@ -387,133 +389,76 @@ return function(Lib, Core)
         return true
     end
 
-    -- ---- No Combo Wait: hold the u21 combo gate open (debug.setupvalue) ----------
-    -- Verified against a full read of M1.lua:
-    --   tryM1 (line 349): `if not u21 then return false end`   ← the ONLY client wait.
-    --   u19 (line 460):   `u19 = u19 % 4 + 1`  cycles combo 1,2,3,4,1,...
-    --   scheduleM1SwingTimers(combo, animSpeed): sets u21=false, then a task flips it
-    --   back to true after (combo==4 and 1.25 or 0.45)/animSpeed seconds. THAT window
-    --   is the inter-hit / finisher wait.
-    -- Why the previous attempt failed: I called debug.setupvalue on the value RETURNED
-    -- by hookfunction (a C wrapper with no readable upvalues) → the gate index was
-    -- never found. Fix: operate on the ACTUAL closure returned by filtergc, whose
-    -- upvalues ARE readable, and just force u21=true every frame. u21 is a SHARED
-    -- upvalue cell, so writing it through scheduleM1SwingTimers is what tryM1 reads →
-    -- the gate is always open → no wait, and the 4th (finisher) cooldown is moot
-    -- because we reopen before it matters. The separate reset timer (u20) is never
-    -- touched, so the chain never prints "combo reset". Pure local upvalue write — no
-    -- remotes, no attribute writes; the server M1 rate still caps real hits.
-    -- Fingerprint: Upvalues {1.25,0.45,1.55} — ONLY scheduleM1SwingTimers holds all
-    -- three (ServerResponse has just 1.55; resetLocalCombatState has none), so the
-    -- ambiguous "M1*Task" string constants (shared by several functions) are avoided.
-    local ncwFn, ncwGateIdx, ncwFinisherIdx, ncwAttackIdx
-    local ncwOrigFinisher, ncwOrigAttack   -- original durations, to restore on toggle-off
+    -- ---- No Combo Wait: HOOK M1.scheduleM1SwingTimers(combo, animSpeed) ----------
+    -- Definitive read of M1.lua (line numbers):
+    --   scheduleM1SwingTimers(p47 combo, p48 animSpeed) (295): sets u21=false, then
+    --       u22 = task.delay((p47==4 and FinisherCooldown or AttackDuration)/p48, ()->u21=true)
+    --       u20 = task.delay(ComboResetTime/p48, resetCombo)
+    --   tryM1 (349): `if not u21 then return false` → the ONLY client swing gate.
+    -- The log proved setupvalue-on-upvalues does NOT change runtime cadence (stayed
+    -- ~0.45/animSpeed). But filtergc finds THE scheduler reliably (exactly 1 match,
+    -- name confirmed) and it IS called every swing. So we HOOK it: hookfunction fires
+    -- deterministically for a found+called closure (unlike the ping hook, which had
+    -- hit the wrong object). In the hook we:
+    --   • pass combo = 1  → the finisher branch (1.25s) is never taken  → this is the
+    --     "make the 4th hit behave like the 1st" the user asked for.
+    --   • pass animSpeed * NCW_Speed → BOTH task.delay durations collapse toward 0, so
+    --     u21 reopens almost instantly (no inter-hit wait) AND resetCombo fires fast so
+    --     the counter returns to 1 (you keep swinging the 1st attack, no finisher stall).
+    -- scheduleM1SwingTimers is pure client-prediction (Janitor timers); the server fire
+    -- is a separate counter at tryM1:484, so nothing bad is sent. Server still rate-caps.
     local ncwHooked = false
-    local NCW_FAST = 0.05                   -- shrunk cooldown while NCW is on (near-zero)
-    -- dump a closure's upvalues (types + short values) for diagnostics
-    local function dumpUpvalues(tag, fn)
-        local ok, ups = pcall(_getupvalues, fn)
-        if not ok or type(ups) ~= "table" then
-            dbg(tag, "getupvalues FAILED:", ups); return nil
-        end
-        local n = 0
-        for i = 1, 32 do
-            local v = ups[i]
-            if v == nil then
-                -- upvalues may be a sparse/1-based list; keep scanning a bit
-                if i > 24 then break end
-            else
-                n = i
-                local tv = type(v)
-                local sv = (tv == "number" or tv == "boolean" or tv == "string") and tostring(v) or tv
-                dbg(tag, "  up[" .. i .. "] =", tv, sv)
-            end
-        end
-        dbg(tag, "upvalue count ~=", n)
-        return ups
-    end
+    local _ncwCalls = 0
     local function installNCW()
         if ncwHooked then return true end
         dbg("=== installNCW ===")
-        if not _hasUpval then dbg("installNCW ABORT: no getupvalues/setupvalue"); return false end
-        if not _filtergc then dbg("installNCW ABORT: no filtergc"); return false end
+        if not _hasHookFn then dbg("installNCW ABORT: no hookfunction"); return false end
+        if not _filtergc  then dbg("installNCW ABORT: no filtergc");     return false end
 
         -- diagnostic: how many functions match the upvalue fingerprint?
         local okAll, all = pcall(_filtergc, "function", { Upvalues = { 1.25, 0.45, 1.55 }, IgnoreExecutor = true }, false)
-        if okAll and type(all) == "table" then
-            dbg("filtergc Upvalues{1.25,0.45,1.55} matched", #all, "function(s)")
-        else
-            dbg("filtergc(all) failed or non-table:", all)
-        end
+        if okAll and type(all) == "table" then dbg("filtergc Upvalues{1.25,0.45,1.55} matched", #all, "function(s)") end
 
         local fn = findFn(nil, { 1.25, 0.45, 1.55 })
-        if not fn then
-            dbg("findFn Upvalues{1.25,0.45,1.55} -> NIL. trying constants fallback...")
-            fn = findFn({ "M1AttackCooldownTask", "M1ComboResetTask" })
-            if fn then dbg("constants fallback FOUND a function") end
-        else
-            dbg("findFn Upvalues -> FOUND function")
-        end
-        if not fn then dbg("installNCW ABORT: scheduleM1SwingTimers not found by any fingerprint"); return false end
-
+        if not fn then dbg("installNCW ABORT: scheduleM1SwingTimers not found"); return false end
         if _getinfo then
             local okI, info = pcall(_getinfo, fn)
             if okI and type(info) == "table" then
-                dbg("fn info: name=", info.name, "nups=", info.nups, "numparams=", info.numparams, "source=", info.short_src)
+                dbg("NCW fn: name=", info.name, "nparams=", info.numparams, "source=", info.short_src)
             end
         end
-        local ups = dumpUpvalues("NCW", fn)
 
-        -- locate the boolean upvalue (u21) on the REAL closure
-        if type(ups) == "table" then
-            for i = 1, 32 do
-                if type(ups[i]) == "boolean" then ncwGateIdx = i; break end
+        local orig
+        orig = _hookfunction(fn, function(combo, animSpeed, ...)
+            if not Config.NCW_On then return orig(combo, animSpeed, ...) end
+            _ncwCalls = _ncwCalls + 1
+            local mult = math.max(1, Config.NCW_Speed or 20)
+            local spd  = (type(animSpeed) == "number" and animSpeed > 0) and animSpeed * mult or mult
+            if _ncwCalls <= 10 or _ncwCalls % 25 == 0 then
+                dbg("NCW sched #" .. _ncwCalls, "combo", tostring(combo), "->1  animSpeed",
+                    tostring(animSpeed), "->", string.format("%.2f", spd))
             end
-        end
-        if not ncwGateIdx then dbg("installNCW ABORT: no boolean upvalue (u21 gate) found"); return false end
-        dbg("NCW gate found at upvalue index", ncwGateIdx, "-> current value:", tostring(ups[ncwGateIdx]))
-
-        -- REAL fix: the felt wait is the u22 task that re-opens u21 after
-        -- (combo==4 and FinisherCooldown or AttackDuration)/animSpeed seconds. Those
-        -- two durations are number upvalues of THIS closure (FinisherCooldown=1.25,
-        -- AttackDuration=0.45). Forcing the shared boolean cell proved unreliable
-        -- across closures, so instead we shrink the durations the scheduler reads at
-        -- schedule time → u21 flips back to true almost instantly → no inter-hit or
-        -- finisher wait. ComboResetTime (1.55) is left alone so the chain isn't cut
-        -- short. These are plain client-predict numbers; the server still rate-caps.
-        for i = 1, 32 do
-            local v = ups[i]
-            if type(v) == "number" then
-                if math.abs(v - 1.25) < 1e-6 then ncwFinisherIdx = i; ncwOrigFinisher = v
-                elseif math.abs(v - 0.45) < 1e-6 then ncwAttackIdx = i; ncwOrigAttack = v end
-            end
-        end
-        dbg("NCW duration indices: finisher(1.25)=", ncwFinisherIdx, " attack(0.45)=", ncwAttackIdx)
-
-        -- prove setupvalue actually works on this closure (boolean gate round-trip)
-        local before = ups[ncwGateIdx]
-        local okSet = pcall(_setupvalue, fn, ncwGateIdx, true)
-        local okRead, ups2 = pcall(_getupvalues, fn)
-        local after = okRead and type(ups2) == "table" and ups2[ncwGateIdx] or "?"
-        dbg("setupvalue test: ok=", okSet, "before=", tostring(before), "after=", tostring(after))
-
-        ncwFn = fn
+            return orig(1, spd, ...)   -- combo 4->1, inflate animSpeed => tiny cooldown/reset
+        end)
         ncwHooked = true
-        dbg("installNCW SUCCESS (gate idx", ncwGateIdx, ", will shrink durations while enabled)")
+        dbg("installNCW SUCCESS (hooked scheduleM1SwingTimers)")
         return true
     end
 
-    -- ---- Ping Spoof: hookfunction GetPingAnimSpeedMultiplier --------------------
-    -- Log proof from the field-replacement attempt: pingCalls=0 while 47 swings fired,
-    -- so getFinalM1AnimSpeed (M1.lua:88 → CombatPingAnimUtils.GetPingAnimSpeedMultiplier,
-    -- called every successful swing at M1.lua:459) was NOT routing through our replaced
-    -- table field. That means the table we swapped is not the object the caller reads
-    -- (a proxy/clone, or the function was captured directly). The bullet-proof fix is to
-    -- hook the FUNCTION OBJECT itself with hookfunction: every reference to that closure
-    -- — table index OR captured upvalue — dispatches to our hook. We recompute the
-    -- multiplier from the SPOOFED ping: multiplier = delay/(delay + clamp(ping*0.5,0,0.35)).
-    -- Low spoof → ~1 (full-speed anims + shorter cooldown); high spoof (1000ms) → strong
-    -- slowdown, which is the easy way to confirm the hook is live.
+    -- ---- Ping Spoof: hook the REAL CombatPingAnimUtils.GetPingAnimSpeedMultiplier --
+    -- Root cause of the last failure (from the dumps): the strings
+    -- "NetworkAnimPingCompensation"/"MaxEstimatedOneWaySeconds" ALSO live in
+    -- CombatConfig.lua, so findFn(constants) matched the WRONG function → hookfunction
+    -- patched something never called during M1 → pingCalls=0.
+    -- Deterministic fix: require the module by its known path
+    -- (ReplicatedStorage.Shared.Utils.CombatPingAnimUtils). require() is cached, so we
+    -- get the EXACT table + function object that getFinalM1AnimSpeed captured
+    -- (M1.lua:88 `CombatPingAnimUtils.GetPingAnimSpeedMultiplier(...)`). We then
+    -- hookfunction that real function object, so every caller (M1 + both M2 paths)
+    -- dispatches to our hook, plus we overwrite the table field as a belt-and-braces.
+    -- The hook recomputes the multiplier from the SPOOFED ping:
+    --   delay <= 0 or spoof <= 0  → 1  (no slowdown)
+    --   else  delay/(delay + clamp(spoofSec*0.5, 0, 0.35))   (spoof 1000ms => big slow).
     local pingHooked = false
     local _pingCallCount = 0
     local function computeMult(delay)
@@ -522,42 +467,62 @@ return function(Lib, Core)
         if pingSec <= 0 then return 1 end
         return delay / (delay + math.clamp(pingSec * 0.5, 0, 0.35))
     end
+    local function pingHookBody(orig, delay, player, ...)
+        if Config.Ping_On then
+            local m = computeMult(delay)
+            _pingCallCount = _pingCallCount + 1
+            if _pingCallCount <= 10 or _pingCallCount % 25 == 0 then
+                dbg("Ping mult() #" .. _pingCallCount, "delay=", tostring(delay),
+                    "spoof=", Config.Ping_Value .. "ms -> mult=", string.format("%.3f", m))
+            end
+            return m
+        end
+        return orig(delay, player, ...)
+    end
     local function installPing()
         if pingHooked then return true end
         dbg("=== installPing ===")
-        if not _filtergc then dbg("installPing ABORT: no filtergc"); return false end
         if not _hasHookFn then dbg("installPing ABORT: no hookfunction"); return false end
 
-        -- find the multiplier FUNCTION directly (not the table). Its constants include
-        -- the unique strings "NetworkAnimPingCompensation" + "MaxEstimatedOneWaySeconds".
-        local fn = findFn({ "NetworkAnimPingCompensation", "MaxEstimatedOneWaySeconds" })
-        if not fn then
-            -- fall back: pull it off the module table
+        -- require the module directly (cached => same object the game uses)
+        local mod
+        local okReq = pcall(function()
+            local inst = ReplicatedStorage:FindFirstChild("Shared")
+                and ReplicatedStorage.Shared:FindFirstChild("Utils")
+                and ReplicatedStorage.Shared.Utils:FindFirstChild("CombatPingAnimUtils")
+            if inst then mod = require(inst) end
+        end)
+        dbg("Ping require ok=", okReq, "mod type=", type(mod))
+        if type(mod) ~= "table" or type(mod.GetPingAnimSpeedMultiplier) ~= "function" then
+            -- fallback: locate the table on the heap by its key
             local ok, tbl = pcall(_filtergc, "table", { Keys = { "GetPingAnimSpeedMultiplier" } }, true)
             if ok and type(tbl) == "table" and type(tbl.GetPingAnimSpeedMultiplier) == "function" then
-                fn = tbl.GetPingAnimSpeedMultiplier
-                dbg("Ping: got function via module table")
+                mod = tbl; dbg("Ping: got module via filtergc fallback")
             end
-        else
-            dbg("Ping: found function via constants")
         end
-        if type(fn) ~= "function" then dbg("installPing ABORT: multiplier function not found"); return false end
+        if type(mod) ~= "table" or type(mod.GetPingAnimSpeedMultiplier) ~= "function" then
+            dbg("installPing ABORT: CombatPingAnimUtils not resolved"); return false
+        end
 
-        local orig
-        orig = _hookfunction(fn, function(delay, player, ...)
-            if Config.Ping_On then
-                local m = computeMult(delay)
-                _pingCallCount = _pingCallCount + 1
-                if _pingCallCount <= 8 or _pingCallCount % 20 == 0 then
-                    dbg("Ping mult() #" .. _pingCallCount, "delay=", tostring(delay),
-                        "spoof=", Config.Ping_Value .. "ms -> mult=", string.format("%.3f", m))
-                end
-                return m
+        local orig = mod.GetPingAnimSpeedMultiplier
+        if _getinfo then
+            local okI, info = pcall(_getinfo, orig)
+            if okI and type(info) == "table" then dbg("Ping fn source=", info.short_src, "nups=", info.nups) end
+        end
+
+        -- 1) hook the function object (covers callers that captured it directly)
+        local hooked
+        hooked = _hookfunction(orig, function(delay, player, ...)
+            return pingHookBody(hooked, delay, player, ...)
+        end)
+        -- 2) overwrite the table field too (covers callers that index the table)
+        pcall(function()
+            mod.GetPingAnimSpeedMultiplier = function(delay, player, ...)
+                return pingHookBody(orig, delay, player, ...)
             end
-            return orig(delay, player, ...)
         end)
         pingHooked = true
-        dbg("installPing SUCCESS via hookfunction")
+        dbg("installPing SUCCESS (hookfunction + field overwrite)")
         return true
     end
 
@@ -611,45 +576,8 @@ return function(Lib, Core)
         return true
     end
 
-    -- ---- No Combo Wait driver ---------------------------------------------------
-    -- PRIMARY mechanism: shrink the FinisherCooldown/AttackDuration upvalues that the
-    -- scheduler reads → the u22 task re-opens u21 almost instantly → no wait. We apply
-    -- the shrink when NCW turns on and restore the originals when it turns off, so the
-    -- game behaves normally when disabled. BACKUP: force the u21 boolean true each frame
-    -- (harmless even if the cross-closure cell write doesn't propagate).
-    local _ncwState = nil   -- nil=unknown, true=shrunk applied, false=originals restored
-    local _ncwFlips = 0
-    local function applyNCWDurations(on)
-        if not (ncwHooked and ncwFn and _hasUpval) then return end
-        if on then
-            if ncwFinisherIdx then pcall(_setupvalue, ncwFn, ncwFinisherIdx, NCW_FAST) end
-            if ncwAttackIdx   then pcall(_setupvalue, ncwFn, ncwAttackIdx,   NCW_FAST) end
-        else
-            if ncwFinisherIdx and ncwOrigFinisher then pcall(_setupvalue, ncwFn, ncwFinisherIdx, ncwOrigFinisher) end
-            if ncwAttackIdx   and ncwOrigAttack   then pcall(_setupvalue, ncwFn, ncwAttackIdx,   ncwOrigAttack)   end
-        end
-    end
-    local function driveNCW()
-        if not (ncwHooked and ncwFn and _hasUpval) then return end
-        -- apply/restore durations only on state change
-        if _ncwState ~= Config.NCW_On then
-            _ncwState = Config.NCW_On
-            applyNCWDurations(Config.NCW_On)
-            dbg("NCW durations", Config.NCW_On and ("shrunk to " .. NCW_FAST) or "restored")
-        end
-        if not Config.NCW_On then return end
-        -- backup: keep the boolean gate open
-        if ncwGateIdx then
-            local okR, ups = pcall(_getupvalues, ncwFn)
-            if okR and type(ups) == "table" and ups[ncwGateIdx] == false then
-                _ncwFlips = _ncwFlips + 1
-                if _ncwFlips <= 12 or _ncwFlips % 25 == 0 then
-                    dbg("NCW: gate FALSE (swing #" .. _ncwFlips .. ") -> forcing true")
-                end
-            end
-            pcall(_setupvalue, ncwFn, ncwGateIdx, true)
-        end
-    end
+    -- No Combo Wait needs no per-frame driver: the scheduleM1SwingTimers hook does
+    -- everything (combo 4->1 + inflated animSpeed => tiny cooldown/reset) on each swing.
 
     -- ═════════════════════════ MASTER LOOPS ═════════════════════════════════
     PreStep:Connect(function(dt)
@@ -658,7 +586,6 @@ return function(Lib, Core)
         pcall(stepFly, dt)
     end)
     PostStep:Connect(function()
-        driveNCW()
         -- keep sprint desired asserted (game clears it after combat cancels)
         if Config.Sprint_On then
             local s = getSprint()
@@ -701,7 +628,7 @@ return function(Lib, Core)
             if gpe then return end
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
-                dbg("NCW_On=", Config.NCW_On, "ncwHooked=", ncwHooked, "gateIdx=", ncwGateIdx, "gateFlips=", _ncwFlips)
+                dbg("NCW_On=", Config.NCW_On, "ncwHooked=", ncwHooked, "schedCalls=", _ncwCalls, "NCW_Speed=", Config.NCW_Speed)
                 dbg("Ping_On=", Config.Ping_On, "pingHooked=", pingHooked, "pingCalls=", _pingCallCount, "spoof=", Config.Ping_Value .. "ms")
                 dbg("NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
                 saveLog()
@@ -834,8 +761,8 @@ return function(Lib, Core)
                 Config.NCW_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not (_hasUpval and _filtergc) then
-                        notify("No Combo Wait", "needs debug.setupvalue + filtergc")
+                    if not (_hasHookFn and _filtergc) then
+                        notify("No Combo Wait", "needs hookfunction + filtergc")
                         Config.NCW_On = false
                     elseif bootstrapDone and not ncwHooked then
                         notify("No Combo Wait", "failed - scheduleM1SwingTimers not found")
@@ -843,9 +770,11 @@ return function(Lib, Core)
                     end
                 end
             end,
-            Desc = "forces the u21 combo gate open every frame, so\nthere is no wait between hits or before the next combo",
+            Desc = "hooks scheduleM1SwingTimers: forces the 4th (finisher) hit\nto behave as the 1st and speeds up the cooldown/reset timers",
         })
-        sCbt:SubLabel({ Text = "Holds scheduleM1SwingTimers' shared u21 gate = true via debug.setupvalue,\nso tryM1's `if not u21` never blocks - collapsing both the 0.45s inter-hit\nwait and the 1.25s finisher cooldown. The combo-reset timer is untouched." })
+        slider(sCbt, { Name = "Combo Speed", Flag = "MV_NCWSpeed", Default = Config.NCW_Speed,
+            Min = 1, Max = 50, Suffix = "x", Callback = function(v) Config.NCW_Speed = v end })
+        sCbt:SubLabel({ Text = "Intercepts scheduleM1SwingTimers(combo, animSpeed): passes combo=1 so the\n1.25s finisher cooldown never fires, and multiplies animSpeed by Combo Speed\nso the inter-hit + reset delays collapse toward zero. Server still rate-caps." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
@@ -856,16 +785,16 @@ return function(Lib, Core)
                 Config.Ping_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if not _filtergc then
-                        notify("Ping Spoof", "needs filtergc")
+                    if not _hasHookFn then
+                        notify("Ping Spoof", "needs hookfunction")
                         Config.Ping_On = false
                     elseif bootstrapDone and not pingHooked then
-                        notify("Ping Spoof", "failed - GetPingAnimSpeedMultiplier not found")
+                        notify("Ping Spoof", "failed - CombatPingAnimUtils not found")
                         Config.Ping_On = false
                     end
                 end
             end,
-            Desc = "replaces GetPingAnimSpeedMultiplier with a spoofed-ping\nversion. low ping = no anim slowdown from ping compensation",
+            Desc = "hooks the real CombatPingAnimUtils.GetPingAnimSpeedMultiplier.\nlow spoof = no anim slowdown; high spoof (1000ms) = obvious slow (test)",
         })
         slider(sCbt, { Name = "Spoofed Ping", Flag = "MV_PingVal", Default = Config.Ping_Value,
             Min = 0, Max = 1000, Suffix = " ms", Callback = function(v) Config.Ping_Value = v end })
