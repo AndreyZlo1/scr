@@ -62,8 +62,11 @@ return function(Lib, Core)
     local _hookmeta     = rawget(getfenv(0), "hookmetamethod") or (getgenv and getgenv().hookmetamethod)
     local _namecall     = rawget(getfenv(0), "getnamecallmethod") or (getgenv and getgenv().getnamecallmethod)
     local _checkcaller  = rawget(getfenv(0), "checkcaller")   or (getgenv and getgenv().checkcaller) or function() return false end
+    local _getupvalues  = (debug and rawget(debug, "getupvalues")) or rawget(getfenv(0), "getupvalues")
+    local _setupvalue   = (debug and rawget(debug, "setupvalue"))  or rawget(getfenv(0), "setupvalue")
     local _hasHookFn    = type(_hookfunction) == "function"
     local _hasHookMeta  = type(_hookmeta) == "function" and type(_namecall) == "function"
+    local _hasUpval     = type(_getupvalues) == "function" and type(_setupvalue) == "function"
 
     -- PreSimulation runs BEFORE physics (what the vape reference uses), so our
     -- CFrame / velocity writes win the frame. Heartbeat runs AFTER the game's
@@ -90,25 +93,22 @@ return function(Lib, Core)
         Fly_Vertical = 60,        -- vertical studs/sec
         Fly_Face     = true,      -- PlatformStand + move relative to camera pitch
 
-        -- No Slowdown (master + per-type) — all via the IsLocked hook, no writes
+        -- No Slowdown (master + per-type) — hooks MovementServiceUtils.SetSpeed
         NS_On     = false,
         NS_Attack = true,         -- M1/M2/windup movement lock
         NS_Block  = true,         -- Blocking / GuardBroken
-        NS_GetHit = true,         -- CantAnything (movement lock from taking a hit)
+        NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
 
-        -- No Combo Wait (hook scheduleM1SwingTimers → drop the finisher pause)
+        -- No Combo Wait (hold the u21 combo gate open via debug.setupvalue)
         NCW_On   = false,
 
-        -- No Stun (stun immunity) — same IsLocked hook, Stunned category
-        NoStun_On = false,
-
-        -- Ping Spoof
+        -- Ping Spoof (spoof GetNetworkPing namecall → no ping anim slowdown)
         Ping_On    = false,
         Ping_Value = 0,           -- spoofed ping in ms
 
         -- Sprint
         Sprint_On     = false,    -- AutoSprint (hold sprint on)
-        Sprint_Bypass = false,    -- bypass the game's sprint restrictions
+        Sprint_Bypass = false,    -- keep sprint speed through combat locks (SetSpeed hook)
     }
 
     -- ═════════════════════════ Character helpers ════════════════════════════
@@ -239,125 +239,139 @@ return function(Lib, Core)
         end
     end
 
-    -- ═══════════════════ HOOK-BASED FEATURES (installed lazily) ══════════════
+    -- ═══════════════════ HOOK-BASED FEATURES ════════════════════════════════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
     -- when the production bytecode ships with stripped function debug-names, which
-    -- is exactly why the old {Name=...} lookups silently returned nil.
+    -- is why {Name=...} lookups silently returned nil before.
     -- PERF: ALWAYS filterOne = true. The old fallback filtergc(...,false) collected
     -- EVERY matching object on the heap into a table on every call — that full-heap
-    -- sweep + allocation was the 10-second freeze. filterOne stops at the first
-    -- match, so with a correct fingerprint it returns almost immediately.
+    -- sweep was the 10-second freeze. filterOne stops at the first match.
     local function findFn(constants, upvals)
         if not _filtergc then return nil end
         local opts = { IgnoreExecutor = true }
         if constants then opts.Constants = constants end
         if upvals   then opts.Upvalues  = upvals   end
-        local ok, res = pcall(_filtergc, "function", opts, true)  -- filterOne = true, no fallback
+        local ok, res = pcall(_filtergc, "function", opts, true)  -- filterOne = true
         if ok and type(res) == "function" then return res end
         return nil
     end
 
     local notifyFn  -- set inside buildUI so hooks can report status
 
-    -- ---- Combat lock categories (what MovementServiceUtils.IsLocked checks) ----
-    local ATTACK_ATTRS = { "M1", "M2", "M1Hold", "PendingM1", "PendingM2", "CombatAttacking" }
-    local BLOCK_ATTRS  = { "Blocking", "GuardBroken" }
-    local STUN_ATTRS   = { "Stunned" }
-    local GETHIT_ATTRS = { "CantAnything" }  -- movement lock applied when you take a hit
-    local function anyAttr(char, list)
-        for _, a in ipairs(list) do
-            if char:GetAttribute(a) == true then return true end
+    -- ---- No Slowdown / Get-Hit: hook MovementServiceUtils.SetSpeed(inst, speed) --
+    -- THE REAL ROOT CAUSE (finally): the client _setSpeed pipeline does NOTHING while
+    -- IsLocked is true (it early-returns), so hooking IsLocked never affected combat
+    -- speed. The slowdowns are written DIRECTLY by the combat scripts themselves:
+    --   M2  startCapoeiraRootLock → MovementServiceUtils.SetSpeed(humanoid, 0) EVERY Heartbeat
+    --   M2  windup                → SetSpeed(humanoid, 0)
+    --   Block engage/hold         → SetSpeed(humanoid, <reduced>)
+    -- Every path funnels through MovementServiceUtils.SetSpeed, which sets
+    -- Humanoid.WalkSpeed + ControllerManager GroundSpeed. So we hook SetSpeed itself:
+    -- when the target is OUR humanoid and the requested speed is a slowdown, we
+    -- substitute our desired speed instead of letting the write through. Because the
+    -- combat scripts call SetSpeed LAST every frame, our hook always wins the race —
+    -- no PostStep write-fight, no fling. IsMoveSpeedAuthorized skips the anti-cheat
+    -- while locked, so raising speed during a combat lock is safe.
+    -- Found by its unique constants "GroundSpeed" + "WalkSpeed".
+    local function myHumanoid()
+        local c = LocalPlayer.Character
+        return c and c:FindFirstChildOfClass("Humanoid") or nil
+    end
+    -- resolve the character that owns whatever instance SetSpeed was handed
+    local function ownerChar(inst)
+        if typeof(inst) ~= "Instance" then return nil end
+        if inst:IsA("Humanoid") or inst:IsA("ControllerManager") then
+            local m = inst.Parent
+            return (m and m:IsA("Model")) and m or nil
         end
-        return false
+        if inst:IsA("Model") then return inst end
+        return nil
+    end
+    local function desiredBaseSpeed()
+        -- what we WANT our speed to be when a slowdown is suppressed
+        if Config.Sprint_On then return SPRINT_WALK end
+        return BASE_WALK
     end
 
-    -- ---- No Slowdown / No Stun / Get-Hit: hook MovementServiceUtils.IsLocked ----
-    -- ROOT CAUSE (previous versions): SetStun is never called client-side, and the
-    -- WalkSpeed write-fight was fragile. The real client gate is IsLocked(char):
-    -- MovementServiceClient._isLocked (line 412) returns
-    --   tick() < _combatSprintLockUntil OR MovementServiceUtils.IsLocked(char)
-    -- and IsLocked reads Stunned / Blocking / M1 / M2 / CantAnything… to decide
-    -- whether to kill your movement (and sprint). We hook IsLocked and, for OUR
-    -- character, return false when the ONLY active lock reasons are categories the
-    -- user chose to bypass. We never call the original for a real hard-lock
-    -- (Ragdoll/Dead/Downed/Screening/Carry), and we write NOTHING — we only lie
-    -- about the predicate result, so no attribute/property is touched.
-    -- Found by its unique string constants "Screening" + "BeingCarried".
-    local isLockedHooked = false
-    local function installIsLockedHook()
-        if isLockedHooked then return true end
+    local setSpeedHooked = false
+    local function installSetSpeedHook()
+        if setSpeedHooked then return true end
         if not _hasHookFn then return false end
-        local fn = findFn({ "Screening", "BeingCarried", "Stunned" })
+        local fn = findFn({ "GroundSpeed", "WalkSpeed" })
         if not fn then return false end
         local orig
-        orig = _hookfunction(fn, function(char)
-            local res = orig(char)
-            if res ~= true or char ~= LocalPlayer.Character then return res end
-            if not (Config.NS_On or Config.NoStun_On or Config.Sprint_Bypass) then return res end
-
-            -- hard locks: never bypass these
-            if char:GetAttribute("Ragdoll") == true or char:GetAttribute("Dead") == true
-               or char:GetAttribute("Downed") == true or char:GetAttribute("Screening") == true then
-                return res
+        orig = _hookfunction(fn, function(inst, speed, ...)
+            if (Config.NS_On or Config.Sprint_Bypass) and type(speed) == "number" then
+                local char = ownerChar(inst)
+                if char and char == LocalPlayer.Character then
+                    local base = desiredBaseSpeed()
+                    -- only intervene on an actual slowdown (speed below our base)
+                    if speed < base - 0.05 then
+                        local c = char
+                        local block  = c:GetAttribute("Blocking") == true or c:GetAttribute("GuardBroken") == true
+                        local getHit = c:GetAttribute("CantAnything") == true or c:GetAttribute("Stunned") == true
+                        -- decide per category (unclassified slowdowns count as attack).
+                        -- Sprint Bypass forces every category through so sprint speed
+                        -- survives any combat lock.
+                        local allow
+                        if Config.Sprint_Bypass then allow = true
+                        elseif not Config.NS_On then allow = false
+                        elseif block then            allow = Config.NS_Block
+                        elseif getHit then           allow = Config.NS_GetHit
+                        else                         allow = Config.NS_Attack end
+                        if allow then
+                            return orig(inst, base, ...)
+                        end
+                    end
+                end
             end
-            local States = char:FindFirstChild("States")
-            if States then
-                local bc = States:FindFirstChild("BeingCarried")
-                local bg = States:FindFirstChild("BeingGripped")
-                if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return res end
-            end
-
-            -- which categories are we allowed to bypass right now?
-            local byAttack = Config.Sprint_Bypass or (Config.NS_On and Config.NS_Attack)
-            local byBlock  = Config.Sprint_Bypass or (Config.NS_On and Config.NS_Block)
-            local byGetHit = Config.Sprint_Bypass or (Config.NS_On and Config.NS_GetHit)
-            local byStun   = Config.Sprint_Bypass or Config.NoStun_On
-
-            -- stay locked if ANY active reason is one we are NOT allowed to bypass
-            local stillLocked = false
-            if anyAttr(char, ATTACK_ATTRS) and not byAttack then stillLocked = true end
-            if anyAttr(char, BLOCK_ATTRS)  and not byBlock  then stillLocked = true end
-            if anyAttr(char, GETHIT_ATTRS) and not byGetHit then stillLocked = true end
-            if anyAttr(char, STUN_ATTRS)   and not byStun   then stillLocked = true end
-            return stillLocked
+            return orig(inst, speed, ...)
         end)
-        isLockedHooked = true
+        setSpeedHooked = true
         return true
     end
 
-    -- ---- No Combo Wait: hook M1's scheduleM1SwingTimers(combo, animSpeed) ----
-    -- The chain pause is task.delay((combo==4 and FinisherCooldown or AttackDuration)
-    -- /animSpeed) before it re-opens the u21 gate; the combo-RESET timer is
-    -- ComboResetTime/animSpeed, scheduled in the SAME function but INDEPENDENT of
-    -- combo. Speeding animSpeed shrinks the reset window → the chain drops and
-    -- prints "combo reset" (the bug you saw). So we DON'T touch anim speed — we lie
-    -- about the combo index: pass 1 instead of 4 so the finisher cooldown collapses
-    -- to the normal inter-hit cadence while the reset timer stays intact. Nothing
-    -- here is server-visible. Found by its unique task-name constants.
+    -- ---- No Combo Wait: hold the u21 gate open on scheduleM1SwingTimers ----------
+    -- In M1.tryM1 the combo gate is `if not u21 then return false end`. u21 is an
+    -- upvalue set false at the start of a swing and flipped back to true after
+    -- task.delay((combo==4 and FinisherCooldown(1.25) or AttackDuration(0.45))/animSpeed).
+    -- THAT delay (not the anim, not combo index) is the wait before the next hit /
+    -- new combo. The previous combo→1 swap only touched the 4th-hit case, so the
+    -- 0.45s pause between every hit stayed → felt like "not working".
+    -- Correct fix: find scheduleM1SwingTimers (its FIRST upvalue is the u21 boolean
+    -- gate) and, while NCW is on, force that upvalue back to `true` every frame via
+    -- debug.setupvalue. The combo-RESET timer is a separate delay we never touch, so
+    -- the chain keeps flowing without printing "combo reset". Pure upvalue write on a
+    -- LOCAL client function — nothing is sent to the server (server M1 rate still caps).
+    local ncwFn, ncwGateIdx
     local ncwHooked = false
     local function installNCW()
         if ncwHooked then return true end
-        if not _hasHookFn then return false end
-        local fn = findFn({ "M1AttackCooldownTask", "M1ComboResetTask" })
+        if not (_hasUpval and _filtergc) then return false end
+        -- fingerprint by the three ClientPredict timers baked in as upvalue numbers
+        local fn = findFn(nil, { 1.25, 0.45, 1.55 })
+        if not fn then
+            fn = findFn({ "M1AttackCooldownTask", "M1ComboResetTask" })
+        end
         if not fn then return false end
-        local orig
-        orig = _hookfunction(fn, function(combo, animSpeed)
-            if Config.NCW_On and combo == 4 then
-                return orig(1, animSpeed)  -- treat the finisher as a normal swing
+        -- locate the boolean upvalue that is the combo gate (u21)
+        local ok, ups = pcall(_getupvalues, fn)
+        if ok and type(ups) == "table" then
+            for i, v in pairs(ups) do
+                if type(v) == "boolean" then ncwGateIdx = i; break end
             end
-            return orig(combo, animSpeed)
-        end)
-        ncwHooked = true
-        return true
+        end
+        ncwFn = fn
+        ncwHooked = ncwGateIdx ~= nil
+        return ncwHooked
     end
 
-    -- ---- Ping Spoof: hook __namecall for GetNetworkPing ----
-    -- We don't write any value — we make the game's OWN ping reads return what we
-    -- want. CombatPingAnimUtils.GetPingAnimSpeedMultiplier does `plr:GetNetworkPing()`
-    -- (a namecall) and returns 1 (no slowdown) when the result is <= 0, so a 0 ms
-    -- spoof kills the ping-based anim slowdown at the source. Plain hookmetamethod
-    -- per the executor API (no extra newcclosure wrapper — that was breaking it);
-    -- executor-origin calls pass through via checkcaller.
+    -- ---- Ping Spoof: hook __namecall for GetNetworkPing -------------------------
+    -- CombatPingAnimUtils.GetPingAnimSpeedMultiplier does `plr:GetNetworkPing()`
+    -- (a namecall) and returns multiplier 1 (no slowdown) when the ping <= 0. So a
+    -- 0 ms spoof kills the ping-based combat-anim slowdown at the source. We deceive
+    -- the game's own read instead of writing any value. Plain hookmetamethod per the
+    -- executor API; executor-origin calls pass through via checkcaller.
     local pingHooked = false
     local function installPing()
         if pingHooked then return true end
@@ -365,7 +379,7 @@ return function(Lib, Core)
         local ncOld
         ncOld = _hookmeta(game, "__namecall", function(self, ...)
             if Config.Ping_On and not _checkcaller() and _namecall() == "GetNetworkPing" then
-                return Config.Ping_Value / 1000  -- GetNetworkPing() is in seconds
+                return Config.Ping_Value / 1000  -- GetNetworkPing() returns seconds
             end
             return ncOld(self, ...)
         end)
@@ -373,41 +387,24 @@ return function(Lib, Core)
         return true
     end
 
-    -- ---- Background bootstrap ----------------------------------------------
-    -- All the heavy work (the filtergc heap scans) runs ONCE here, spread across
-    -- frames with task.wait() so no single frame does two scans back-to-back. The
-    -- hooks are installed while every Config flag is still false, so they are inert
-    -- passthroughs until the user flips a toggle. Toggles then only set a boolean —
-    -- zero scanning on click, so no more freeze when enabling a feature.
+    -- ---- Background bootstrap ---------------------------------------------------
+    -- All heavy scans run ONCE here, spread across frames with task.wait(), while
+    -- every Config flag is still false (hooks are inert passthroughs). Toggles then
+    -- only set a boolean → zero scanning on click → no freeze.
     local bootstrapStarted, bootstrapDone = false, false
     local function bootstrapHooks()
         if bootstrapStarted then return end
         bootstrapStarted = true
         task.spawn(function()
-            installIsLockedHook(); task.wait()
+            installSetSpeedHook(); task.wait()
             installNCW();          task.wait()
-            installPing();         task.wait()
-            getSprint()  -- cache the movement singleton too
+            installPing()
             bootstrapDone = true
-            if notifyFn and not isLockedHooked and _hasHookFn then
-                notifyFn("Combat hooks", "IsLocked not found - update fingerprint")
-            end
         end)
     end
-
-    -- Non-blocking gate for toggles: the hook is already installed (or will be very
-    -- shortly) by the background bootstrap, so we never scan on the click itself.
-    local function ensureCombatHook(label)
+    local function combatHooksReady()
         bootstrapHooks()
-        if not _hasHookFn then
-            if notifyFn then notifyFn(label, "needs hookfunction + filtergc") end
-            return false
-        end
-        if bootstrapDone and not isLockedHooked then
-            if notifyFn then notifyFn(label, "failed - IsLocked hook unavailable") end
-            return false
-        end
-        return true  -- hook active or arriving from the background bootstrap
+        return _hasHookFn
     end
 
     -- ══════════════════════════ AUTO SPRINT ═════════════════════════════════
@@ -436,18 +433,31 @@ return function(Lib, Core)
         return true
     end
 
-    -- ---- Bypass Restrictions ----
-    -- MovementServiceClient._isLocked (line 412) = tick() < _combatSprintLockUntil
-    -- OR MovementServiceUtils.IsLocked(char). The dominant reason sprint is denied
-    -- is IsLocked returning true during combat states, so our IsLocked hook (above)
-    -- already clears those when Sprint_Bypass is on — no separate, name-based hook
-    -- needed (those debug-names are stripped, which is why the old one never took).
+    -- ---- No Combo Wait driver: force the u21 gate open every frame --------------
+    -- While NCW is on we keep scheduleM1SwingTimers' boolean gate upvalue = true, so
+    -- tryM1's `if not u21 then return false end` never blocks the next swing. We do
+    -- it in the loop (not once) because the game flips it false at the start of each
+    -- swing; re-asserting it true immediately removes the inter-hit / finisher wait.
+    local function driveNCW()
+        if not (Config.NCW_On and ncwHooked and ncwFn and ncwGateIdx) then return end
+        pcall(_setupvalue, ncwFn, ncwGateIdx, true)
+    end
 
     -- ═════════════════════════ MASTER LOOPS ═════════════════════════════════
     PreStep:Connect(function(dt)
         dt = (typeof(dt) == "number" and dt > 0) and dt or (1 / 60)
         pcall(stepSpeed, dt)
         pcall(stepFly, dt)
+    end)
+    PostStep:Connect(function()
+        driveNCW()
+        -- keep sprint desired asserted (game clears it after combat cancels)
+        if Config.Sprint_On then
+            local s = getSprint()
+            if s and rawget(s, "_sprintInputDesired") ~= true then
+                pcall(function() s:SetSprintInputDesired(true) end)
+            end
+        end
     end)
     PostStep:Connect(function()
         -- keep sprint desired asserted (game clears it after combat cancels)
@@ -472,7 +482,7 @@ return function(Lib, Core)
 
     function M.start()
         Config.Speed_On, Config.Fly_On = false, false
-        Config.NS_On, Config.NCW_On, Config.NoStun_On, Config.Ping_On = false, false, false, false
+        Config.NS_On, Config.NCW_On, Config.Ping_On = false, false, false
         Config.Sprint_On, Config.Sprint_Bypass = false, false
         -- Warm up the hooks in the background now, so toggling a feature later never
         -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
@@ -577,9 +587,12 @@ return function(Lib, Core)
             get = function() return Config.NS_On end,
             set = function(v)
                 Config.NS_On = v
-                if v and not ensureCombatHook("No Slowdown") then Config.NS_On = false end
+                if v and not combatHooksReady() then
+                    notify("No Slowdown", "needs hookfunction + filtergc")
+                    Config.NS_On = false
+                end
             end,
-            Desc = "neutralises MovementServiceUtils.IsLocked for you\nso combat states stop killing your movement",
+            Desc = "hooks MovementServiceUtils.SetSpeed - combat scripts\nno longer force your WalkSpeed down during actions",
         })
         boolToggle(sNS, "Attack", "NoSlow Attack",
             function() return Config.NS_Attack end, function(v) Config.NS_Attack = v end)
@@ -587,7 +600,7 @@ return function(Lib, Core)
             function() return Config.NS_Block end, function(v) Config.NS_Block = v end)
         boolToggle(sNS, "Get Hit", "NoSlow GetHit",
             function() return Config.NS_GetHit end, function(v) Config.NS_GetHit = v end)
-        sNS:SubLabel({ Text = "Attack = M1/M2 windup locks · Block = blocking/guard-broken\nGet Hit = the movement lock applied when you take damage (CantAnything).\nHard locks (ragdoll/carry/downed/screening) are never bypassed." })
+        sNS:SubLabel({ Text = "Attack = M1/M2 windup + root locks · Block = blocking/guard-broken\nGet Hit = the slow applied when you take a hit (CantAnything / Stunned).\nWe only raise speed back to your base - the anti-cheat is skipped while locked." })
 
         -- ─────────────── Section 4: Combat exploits (Right) ───────────────
         local sCbt = MV:Section({ Side = "Right" })
@@ -598,32 +611,19 @@ return function(Lib, Core)
             set = function(v)
                 Config.NCW_On = v
                 if v then
-                    bootstrapHooks()  -- non-blocking; hook installs in the background
-                    if not _hasHookFn then
-                        notify("No Combo Wait", "needs hookfunction + filtergc")
+                    bootstrapHooks()  -- non-blocking; installs in the background
+                    if not (_hasUpval and _filtergc) then
+                        notify("No Combo Wait", "needs debug.setupvalue + filtergc")
                         Config.NCW_On = false
                     elseif bootstrapDone and not ncwHooked then
-                        notify("No Combo Wait", "failed - scheduler hook unavailable")
+                        notify("No Combo Wait", "failed - combo gate not found")
                         Config.NCW_On = false
                     end
                 end
             end,
-            Desc = "removes the finisher pause after the 4th hit so\na new combo starts with no extra delay",
+            Desc = "holds the M1 combo gate (u21) open so there is no\nwait between hits or before the next combo",
         })
-        sCbt:SubLabel({ Text = "hooks scheduleM1SwingTimers and makes the 4th swing use the normal\n0.45s cadence instead of the 1.25s finisher cooldown. The combo-reset\ntimer is left intact, so the chain no longer prints 'combo reset'." })
-
-        sCbt:Divider()
-        sCbt:Header({ Name = "No Stun" })
-        feature(sCbt, {
-            Title = "No Stun", Flag = "MV_NoStun",
-            get = function() return Config.NoStun_On end,
-            set = function(v)
-                Config.NoStun_On = v
-                if v and not ensureCombatHook("No Stun") then Config.NoStun_On = false end
-            end,
-            Desc = "clears the 'Stunned' lock in IsLocked for you →\nparry/stun no longer freezes your movement",
-        })
-        sCbt:SubLabel({ Text = "SetStun is never called client-side, so this hooks the real client\ngate (IsLocked) that reads the Stunned attribute for speed - deception only, no writes." })
+        sCbt:SubLabel({ Text = "finds scheduleM1SwingTimers and forces its combo-gate upvalue back to\ntrue every frame via debug.setupvalue, collapsing the 0.45s / 1.25s waits.\nThe combo-reset timer is untouched, so no more 'combo reset'." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
@@ -663,9 +663,12 @@ return function(Lib, Core)
             function() return Config.Sprint_Bypass end,
             function(v)
                 Config.Sprint_Bypass = v
-                if v and not ensureCombatHook("Sprint Bypass") then Config.Sprint_Bypass = false end
+                if v and not combatHooksReady() then
+                    notify("Sprint Bypass", "needs hookfunction + filtergc")
+                    Config.Sprint_Bypass = false
+                end
             end)
-        sSpr:SubLabel({ Text = "sprint through combat locks by clearing IsLocked for you (same hook\nas No Slowdown). the game's _combatSprintLockUntil timer still applies briefly." })
+        sSpr:SubLabel({ Text = "keeps your sprint speed through combat locks via the SetSpeed hook -\nany forced slowdown gets raised back to 25 studs while this is on." })
 
         uiReady = true
     end
