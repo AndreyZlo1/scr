@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -141,9 +139,13 @@ local Config = {
 	UplinkFactor  = 1.0,
 	UplinkMargin  = 0.008,
 	UplinkMin     = 0.010,
-	UplinkMax     = 0.330,   -- допускаем компенсацию до полного пинга (был кап 0.2 → сам резал RTT>0.4)
+	-- [V94] Подняты капы: диаг2 показал реальный RTT=345ms, а прежние UplinkMax=0.33/PingCap=0.32
+	-- САМИ резали компенсацию до ~330ms → на высоком пинге блок недокомпенсировался даже с верным
+	-- getPingRaw. Теперь тянем до 0.5с. На умеренном пинге (60–150) это ни на что не влияет (там
+	-- клампы не достигаются), а на 300–450ms пинге даёт полный round-trip lead.
+	UplinkMax     = 0.500,
 	PingSmooth    = 0.25,
-	PingCap       = 0.32,
+	PingCap       = 0.500,
 	-- [V93] peak-hold пинга: Data Ping проседает (в диаг видели ping=60 при реальных ~195) и
 	-- занижал компенсацию → LATE. Держим пик RTT это окно (сек), затем плавно распускаем к текущему.
 	PingPeakHold  = 1.5,
@@ -209,7 +211,7 @@ local Config = {
 
 	-- [V66] ЭКСТРЕННЫЙ ДОДЖ двух угроз. Если 2-й контакт прилетает раньше, чем мы
 	-- физически успеваем развернуться к нему + перевзвести перфект, блок 2-го
-	-- невозможен → доджим оба ��разу (iframes покрывают обоих). Порог = реальное
+	-- невозможен → доджим оба ���разу (iframes покрывают обоих). Порог = реальное
 	-- время разворота (по угловой скорости) + запас на перевзвод.
 	EmergencyDualDodge = true,
 	TurnRateDegPerSec  = 720,   -- насколько быстро HRP реально доворачивается снапом
@@ -510,12 +512,40 @@ local function aclog(...)
 	statusPush(...)
 end
 
+-- [V94] РОБАСТНЫЙ пинг. КОРНЕВОЙ БАГ (диаг: header ping=111/345, а все строки боя ping=60):
+-- прежняя реализация лезла ТОЛЬКО в Stats.Network.ServerStatsItem["Data Ping"], и в combat-
+-- контексте (обработчики remote/AnimationPlayed, schedulerStep) этот путь систематически
+-- фейлил pcall → возвращался хардкод 0.06 = ровно те самые 60ms. Из-за этого планировщик
+-- (pressAt = contact - lead - up - velLead, где up=uplink() зависит от getPingRaw) компенсировал
+-- ~68ms вместо реальных 111–345ms → блок стабильно опаздывал (LATE) на любом заметном пинге.
+-- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса игрока,
+-- доступен в ЛЮБОМ контексте, не бросает; возвращает one-way в секундах → RTT = ×2). Stats
+-- Data Ping (уже RTT в мс) — как второй источник; берём МАКСИМУМ (перекомпенсация безопаснее
+-- недокомпенсации для парри). Если оба недоступны — отдаём последнее валидное значение, а НЕ
+-- хардкод 60. Итог: и hot-path, и header видят один настоящий RTT.
+local _lastGoodPing = 0.08
 local function getPingRaw()
-	local ok, ms = pcall(function()
+	local best
+
+	-- Источник A: Player:GetNetworkPing() — one-way (сек). RTT ≈ ×2.
+	local okA, oneWay = pcall(function() return LocalPlayer:GetNetworkPing() end)
+	if okA and type(oneWay) == "number" and oneWay > 0 then
+		best = oneWay * 2
+	end
+
+	-- Источник B: Stats Data Ping — RTT в мс. Берём максимум с A.
+	local okB, ms = pcall(function()
 		return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 	end)
-	if ok and ms then return ms / 1000 end
-	return 0.06
+	if okB and type(ms) == "number" and ms > 1 then
+		local rtt = ms / 1000
+		if not best or rtt > best then best = rtt end
+	end
+
+	if best and best > 0 then
+		_lastGoodPing = math.clamp(best, 0.005, 1.5)
+	end
+	return _lastGoodPing
 end
 
 -- [V93] Единый неймспейс-таблица для ВСЕГО нового состояния (пинг-пик + ground-truth хитбоксы).
@@ -888,7 +918,7 @@ local function willHitMe(th)
 	local maxDY = Config.MaxHeightDiff or 12
 	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > maxDY then return false end
 
-	-- [V88] LATCH: как только закоммиченный свинг хоть раз признан угрозой (в упор, лицом
+	-- [V88] LATCH: как только закоммиченный свинг хоть раз признан у��розой (в упор, лицом
 	-- или через доворот-на-нас), держим true до конца жизни угрозы. Это чинит финты с
 	-- разворотом: враг бьёт спиной и доворачивается — раньше поздний кадр с "смотрит мимо"
 	-- сбрасывал willHitMe и парри отменялся. Настоящий финт-кэнсел сюда не попадает: его
@@ -1035,7 +1065,7 @@ local function willHitMe(th)
 		end
 
 		if mode == "High" then
-			-- [V93] HIGH = GROUND-TRUTH. Решает не «рядом и примерно смотрит», а реальная игровая
+			-- [V93] HIGH = GROUND-TRUTH. Решает не «рядом и п��имерно смотрит», а реальная игровая
 			-- геометрия удара.
 			-- ── Шаг 1: реальный парт. Если игра УЖЕ породила хитбокс-парт этого атакующего в
 			-- workspace.Hitboxes — проверяем пересечение с нами тем же методом, что и
@@ -1077,16 +1107,32 @@ local function willHitMe(th)
 				local fside  = math.abs(ox * (-look.Z) + oz * look.X)
 				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
 			end
-			-- [V92] ЖЁСТКИЙ BACK-FACING ГЕЙТ. Смотрит явно от нас (rawDot < порога) И предсказанный
-			-- facing тоже не наводится (faceDotPred низкий) — этим свингом физически не достанет →
-			-- сразу мимо. Прямой фикс жалобы «стоит спиной, а скрипт реагирует».
-			if rawDot < (Config.HighBackDot or -0.15)
-			   and faceDotPred < (Config.HighFaceMin or 0.25) then
+			-- [V94] AIM-AWARE предикт facing к МОМЕНТУ contact. Серверный хитбокс строится по yaw
+			-- атакующего в момент удара (дамп VictimHitboxService). Прежний predLook капался жёстко
+			-- на RotPredMaxDegHigh=55° → враг, доворачивающийся к нам со спины/сбоку, «не долетал»
+			-- предиктом → back-facing gate его резал → MISS/поздний ответ (жалоба «бьёт и
+			-- поворачивается — скрипт не вовремя»). Считаем знаковый угол rawL→toMe и сколько враг
+			-- РЕАЛЬНО успеет повернуть за tHit (rotRate = макс физической и измеренной кадр-к-кадру
+			-- угловой скорости). Поворачиваем rawL к нам не больше, чем позволяет скорость:
+			--   • доворачивается быстро → aimLook смотрит на нас → парируем ВОВРЕМЯ (взвод заранее);
+			--   • стоит спиной без вращения → maxTurn≈0 → aimLook≈спина → aimDot низкий → мимо.
+			local dotRT   = rawL.X * toMe.X + rawL.Z * toMe.Z
+			local crossRT = rawL.X * toMe.Z - rawL.Z * toMe.X
+			local angToUs = math.atan2(crossRT, dotRT)          -- знаковый угол rawL→toMe
+			local maxTurn = math.max(rotRate, 0) * tHit          -- сколько успеет повернуть (рад)
+			local phi     = math.clamp(angToUs, -maxTurn, maxTurn)
+			local cphi, sphi = math.cos(phi), math.sin(phi)
+			local aimLook = Vector3.new(rawL.X * cphi - rawL.Z * sphi, 0, rawL.X * sphi + rawL.Z * cphi)
+			aimLook = (aimLook.Magnitude > 0.05) and aimLook.Unit or rawL
+			-- BACK-FACING gate по facing С УЧЁТОМ доворота: даже повернувшись на максимум своей
+			-- угловой скорости, враг не наводится на нас → этим свингом не достанет → мимо.
+			if aimLook:Dot(toMe) < (Config.HighFaceMin or 0.25) then
 				th.trustedHit = false
 				return false
 			end
-			local hit = inBox(predA.X, predA.Z, predLook)
-			         or inBox(aHRP.Position.X, aHRP.Position.Z, rawL)
+			-- бокс строим с facing К МОМЕНТУ contact (aimLook) от предсказанной И текущей позиции
+			local hit = inBox(predA.X, predA.Z, aimLook)
+			         or inBox(aHRP.Position.X, aHRP.Position.Z, aimLook)
 			th.trustedHit = false
 			return hit
 		end
@@ -1370,7 +1416,7 @@ local function hitTimelineBase(info, combo)
 
 	loadGameModules()
 	if GameData.cfg then
-		-- 3-й аргумент = 1: берём НЕмасштабированную базу, множитель применяем ниже сами.
+		-- 3-й аргумент = 1: берём НЕмасштабированную ��азу, множитель применяем ниже сами.
 		local ok, d = pcall(function() return GameData.cfg.GetScaledStyleM1HitboxDelay(info.s, combo or 1, 1) end)
 		if ok and type(d) == "number" then return d end
 	end
@@ -2281,7 +2327,7 @@ local function schedulerStep(now)
 			-- закрыть "скрипт проёбывает атаку" по фактам, а не догадкам.
 			-- [V69] при ненаправленном блоке угроза, вошедшая в окно, покрыта поднятым
 			-- guard'ом (один блок = защита от всех). Это НЕ промах — раньше логировалось
-			-- ложным "перебит EDF". Считаем отдельно, чтобы не путать с реа��ьными потерями.
+			-- лож��ым "перебит EDF". Считаем отдельно, чтобы не путать с реа��ьными потерями.
 			local coveredByGuard = th.coveredByHeldGuard == true
 				or (Config.OmniBlock and State.blocking and th.enteredWindow
 					and th.contactAbs <= (State.holdUntil or 0) + 0.05)
@@ -3711,7 +3757,7 @@ end
 --   raknet.add_recv_hook(fn) / raknet.remove_recv_hook(fn)
 -- Старый код: (1) ��итал packet.id / packet.size — таких полей нет; (2) хранил "hookId"
 -- из add_send_hook и зва�� remove_send_hook(hookId) — передавал не-функцию в C++ →
--- вылет. Теперь хук — ИМЕНОВАННАЯ функция, снимается по ссылке. Скан read-only:
+-- вылет. Теперь хук — ИМЕНОВАННАЯ фун��ция, снимается по ссылке. Скан read-only:
 -- не трогает па��еты (ни Drop, ни SetData), только считает PacketId. Максимально
 -- безопасно и минимально по работе на пакет — как в андетект-примере.
 -- [V79] КОРЕНЬ КРАША НАЙДЕН: send-хук исполняется на СЕТЕВОМ потоке игры, а НЕ на потоке
