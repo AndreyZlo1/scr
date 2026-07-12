@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -99,7 +101,7 @@ local Config = {
 
 	PerfectWindow = 0.15,
 	PerfectMin    = 0.05,
-	-- [V93] ЦЕНТР перфект-окна, НЕ полное окно. Раньше 0.125 (всё окно) СКЛАДЫВАЛОСЬ с уплинком
+	-- [V93] ЦЕНТР перфект-окна, НЕ полное окно. Раньше 0.125 (всё окно) СКЛАДЫВАЛОСЬ с уплин��ом
 	-- → двойной учёт задержки. Физика: локальный атрибут PerfectBlocking истинен на нашем клиенте
 	-- в интервале [T+RTT, T+RTT+0.125] (T = момент нажатия). Контакт C должен попасть в него;
 	-- при press = C - RTT - lead любой lead∈[0,0.125] даёт перфект, центр 0.0625 максимизирует
@@ -471,6 +473,16 @@ local State = {
 	lastGapMs    = 0,
 	tally        = { PERFECT=0, EARLY=0, LATE=0, GUARDBREAK=0 },
 	vizTarget    = nil,
+	-- [V95] ЕДИНЫЙ канал поворота (facing authority). Раньше поворотом рулили 4 писателя HRP.CFrame
+	-- вразнобой (faceToward в Heartbeat, boxing pre-face, enforceFaceLock в RenderStepped, игровой
+	-- AutoRotate/шифтлок) — они дрались, отсюда залипание на одной цели и дёрганье. Теперь schedulerStep
+	-- лишь ВЫСТАВЛЯЕТ цель сюда, а применяет ОДИН аппликатор applyFacing в RenderStepped (последний
+	-- писатель кадра, гасит AutoRotate). faceGoalHRP=на кого смотреть, Hard=жёсткий снап vs лерп,
+	-- Until=до какого времени держать (грейс после последней выставки), Hum=кэш Humanoid для AutoRotate.
+	faceGoalHRP   = nil,
+	faceGoalHard  = false,
+	faceGoalUntil = 0,
+	faceHum       = nil,
 }
 
 local Threats = {}
@@ -709,33 +721,20 @@ local function faceDotTo(targetHRP)
 	return flatLook.Unit:Dot(dir)
 end
 
-local function faceToward(targetHRP, hard)
+-- [V95] Выставить ЦЕЛЬ поворота в единый канал. НЕ пишет HRP.CFrame напрямую (это делает
+-- applyFacing в RenderStepped) — так убираем гонку Heartbeat↔RenderStepped и войну писателей.
+-- hard=true → жёсткий снап (у контакта/в замесе), иначе плавный лерп. holdFor — грейс, сколько
+-- держать цель после этого вызова (schedulerStep дёргает каждый Heartbeat, но грейс покрывает
+-- сам момент контакта и пару кадров после). Velocity-lead УБРАН: сервер валидирует facing на
+-- ФАКТИЧЕСКУЮ позицию атакующего в момент удара, упреждение по скорости уводило прицел вбок
+-- (в логах давало face=0.5 BACK на стрейфящем враге) → блок отклонялся.
+local function setFaceGoal(targetHRP, hard, holdFor)
 	if not Config.AutoFace then return end
-	-- [V62] face-lock (boxing-counter) имеет приоритет и дела��т hard lookAt в
-	-- RenderStepped. Плавный ле��п здесь боролся бы с ним (особенно в мультибое,
-	-- где targetHRP = wantBlock, а lock смотрит на того, кого мы бьём) и тянул
-	-- HRP прочь от цели удара. Пока lock активен — не вме��иваемся.
-	if State.faceLockUntil and os.clock() < State.faceLockUntil then return end
-	local myHRP = localHRP()
-	if not myHRP or not targetHRP or not targetHRP.Parent then return end
-	-- [V91] упреждаем движение врага: целимся в его БУДУЩУЮ позицию (pos + vel*FaceLead),
-	-- чтобы наш facing шёл чуть наперёд стрейфа, а не догонял его. Кап FaceLeadMax гасит
-	-- перелёт при резких сменах направления.
-	local aimPos = targetHRP.Position
-	local fLead  = Config.FaceLead or 0
-	if fLead > 0 then
-		local v = safeGet(targetHRP, "AssemblyLinearVelocity", nil) or safeGet(targetHRP, "Velocity", Vector3.zero)
-		local ld = Vector3.new(v.X, 0, v.Z) * fLead
-		local mx = Config.FaceLeadMax or 4
-		if ld.Magnitude > mx then ld = ld.Unit * mx end
-		aimPos = aimPos + ld
-	end
-	local dir = flatDirTo(myHRP.Position, aimPos)
-	if not dir then return end
-	local goal = CFrame.lookAt(myHRP.Position, myHRP.Position + dir)
-	-- [V64] hard=true → прямой снап лицом на цель (у контакта), иначе плавный лерп
-	myHRP.CFrame = hard and goal or myHRP.CFrame:Lerp(goal, Config.FaceLerp)
-	end
+	if not targetHRP or not targetHRP.Parent then return end
+	State.faceGoalHRP   = targetHRP
+	State.faceGoalHard  = hard and true or false
+	State.faceGoalUntil = os.clock() + (holdFor or 0.15)
+end
 
 local styleForward
 local registryKind
@@ -1031,7 +1030,7 @@ local function willHitMe(th)
 	-- это ВЫПАДЫ: атакующий закрывает дистанцию прямо в замахе. Capoeira M2 детектился на
 	-- dist=10, а WillHitVelCap=2.0 обрезал экстраполяцию predA до 2 студов → geom-бокс
 	-- давал false ВЕСЬ путь → "never-in-hitbox" NO-PRESS, следом Ragdoll и каскад на
-	-- остальных атакующих (отсюда и «не справляется с мультиатаками»). Тяжёлые пропускать
+	-- остальных ��такующих (отсюда и «не справляется с мультиатаками»). Тяжёлые пропускать
 	-- нельзя (их не перевзвести повторным блоком): если враг в расширенном радиусе И либо
 	-- смотрит приме��н�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
 	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
@@ -1798,10 +1797,11 @@ local function sendBoxingCounter(th, keepGuard)
 		-- ServerCheck. Экстраполяция по скорости на ближней дистанции разворачивала
 		-- HRP вбок (в логе face=0.51 BACK!) и counter уходил мимо. Короткий
 		-- boxing-хитбокс требует, чтобы мы смотрели ТОЧНО на врага сейчас.
+		-- мгновенный точный снап прямо сейчас (counter стреляет в этот кадр, серверу нужен
+		-- наш LookVector немедленно), + держим цель в едином канале весь BoxingFaceLockDur
 		local d = flatDirTo(myHRP.Position, aHRP.Position)
 		if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
-		State.faceLockHRP   = aHRP
-		State.faceLockUntil = os.clock() + (Config.BoxingFaceLockDur or 0.55)
+		setFaceGoal(aHRP, true, Config.BoxingFaceLockDur or 0.55)
 	end
 	-- [V62] в мультибое НЕ роняем guard: держим Blocking для ��стальных угроз,
 	-- иначе deactivate создаёт дыру + BlockCooldown при повторном нажатии.
@@ -2409,7 +2409,10 @@ local function schedulerStep(now)
 					end
 					if take then wantBlock = th end
 				end
-				if dt <= Config.FaceLeadWindow and dt >= -Config.HoldAfter then
+				-- [V95] окно кандидата на поворот РАСШИРЕНО на RTT (up): хард-снап нужен за
+				-- (BlockFaceHardDt + up) до контакта, иначе на высоком пинге кандидат появлялся
+				-- бы слишком поздно и мы прессили бы блок ещё не довернувшись → сервер отклонял.
+				if dt <= (Config.FaceLeadWindow + up) and dt >= -Config.HoldAfter then
 					-- [V65] лицом к тому, кто бьёт СЛЕДУЮЩИМ среди ещё не прилетевших
 					-- ударов (contactAbs >= now). После блока быстро��о разворачиваемся
 					-- к медленной тяжёлой к её контакту ("rotate to active target").
@@ -2593,25 +2596,30 @@ local function schedulerStep(now)
 		end
 	end
 
-	-- [V70] СНАП ВОЗВРАЩЁН (soft-face/центроид ��далён — оставлял face=0.2..0.5 BACK!).
-	-- Снап быстрый и муль��итар��етный: ��ель поворота = faceTgt (ближайший по времени
-	-- ЕЩЁ не прилетевший удар среди всех атакующих), пересчитывается каждый кадр, так
-	-- что после каждого контакта мы мгновенно перекидываемся на следующего врага в
-	-- замесе. Быстрый лерп на подлёте + жёсткий снап у самого контакта.
+	-- [V95] ЕДИНЫЙ АВТОРИТЕТ ПОВОРОТА. Раньше здесь напрямую дёргался faceToward (писал HRP в
+	-- Heartbeat), конфликтуя с enforceFaceLock/AutoRotate/шифтлоком в RenderStepped. Теперь только
+	-- ВЫСТАВЛЯЕМ цель — применит applyFacing в RenderStepped (последний писатель кадра).
+	-- ЦЕЛЬ = атакующий с БЛИЖАЙШИМ ещё-не-прилетевшим контактом (faceTgt), т.к. сервер валидирует
+	-- НАШ facing в момент разрешения удара (victim-репорт читает Blocking/PerfectBlocking на
+	-- Heartbeat при оверлапе хитбокса ≈ контакт). Смотрим спиной → сервер отклоняет блок. faceTgt
+	-- пересчитывается каждый кадр, поэтому как только удар первого разрешился — мгновенно
+	-- перекидываемся на следующего (тайм-мультиплекс поворота по времени контакта). wantBlock —
+	-- запасная цель, если facing-кандидата в окне ещё нет.
 	local turnTo = faceTgt or wantBlock
 	if turnTo and turnTo.attackerHRP then
 		local dtc = turnTo.contactAbs - now
-		-- [V90.2] В МУЛЬТИБОЕ (2+ угрозы) — всегда мгновенный hard-снап к следующему атакующему:
-		-- плавный лерп терял кадры на перекладку между целями и не докручивал вовремя. Иначе
-		-- (одиночная цель) hard-снап только у контакта, дальше плавный трекинг.
-		local multiSnap = Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2)
-		if multiSnap or (dtc <= (Config.BlockFaceHardDt or 0.30) and dtc >= -(Config.HoldAfter or 0.12)) then
-			faceToward(turnTo.attackerHRP, true)
-		else
-			faceToward(turnTo.attackerHRP)
-		end
+		-- HARD-снап должен успеть ДО разрешения удара: victim-репорт читает наш facing у контакта,
+		-- а пакет летит к серверу ~пол-RTT. Значит жёстко доворачиваемся заранее — за (окно + RTT)
+		-- до контакта. В мультибое (2+) — всегда hard, чтобы мгновенно перекидываться между целями
+		-- и не терять кадры на лерп. Иначе (одиночная, далеко) — плавный трекинг.
+		local hardWin = (Config.BlockFaceHardDt or 0.30) + up
+		local hard = (dtc <= hardWin) or (Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2))
+		-- держим цель до контакта + грейс (перекрывает сам момент оверлапа и пару кадров после)
+		setFaceGoal(turnTo.attackerHRP, hard, math.max(dtc, 0) + (Config.HoldAfter or 0.12) + 0.06)
+		State.vizTarget = { hrp = turnTo.attackerHRP, model = turnTo.attackerModel }
+	else
+		State.vizTarget = nil
 	end
-	State.vizTarget = turnTo and { hrp = turnTo.attackerHRP, model = turnTo.attackerModel } or nil
 
 	-- [V62] Оценка ��ультиугрозы: считаем РАЗНЫХ атакующих среди imminent и самый
 	-- дальний угрожающий контакт кластера. В логе провалы (NO-PRESS NOT-BLOCKED,
@@ -2663,13 +2671,8 @@ local function schedulerStep(now)
 			-- поддерживае�� + гасит AutoRotate). Это и есть требуемые «смотреть 0.5с на врага».
 			local dtc = wantBlock.contactAbs - now
 			if dtc <= (Config.BoxingPreFace or 0.5) and dtc >= -(Config.HoldAfter or 0.12) then
-				local myHRP, aHRP = localHRP(), wantBlock.attackerHRP
-				if myHRP and aHRP and aHRP.Parent then
-					local d = flatDirTo(myHRP.Position, aHRP.Position)
-					if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
-					State.faceLockHRP   = aHRP
-					State.faceLockUntil = math.max(State.faceLockUntil or 0, now + (Config.BoxingFaceLockDur or 0.55))
-				end
+				-- через единый канал: жёстко держим лицо на цели counter'а весь BoxingFaceLockDur
+				setFaceGoal(wantBlock.attackerHRP, true, Config.BoxingFaceLockDur or 0.55)
 			end
 			if not wantBlock.counterFired and now >= (wantBlock.contactAbs - Config.BoxingCounterLead) then
 				wantBlock.counterFired = true
@@ -4459,20 +4462,33 @@ local function vizUpdate(dt)
 	LinePool:finish(); TriPool:finish()
 end
 
-local function enforceFaceLock()
-	if not State.faceLockUntil or os.clock() > State.faceLockUntil then
-		if State.faceLockHum then pcall(function() State.faceLockHum.AutoRotate = true end); State.faceLockHum = nil end
-		State.faceLockHRP = nil
+-- [V95] ЕДИНЫЙ АППЛИКАТОР ПОВОРОТА. Единственное место, где пишется HRP.CFrame ради facing.
+-- Работает в RenderStepped ПОСЛЕ игрового AutoRotate/SmoothShiftLock (мы подключаемся позже —
+-- игра грузится раньше), поэтому наш поворот — последний писатель кадра и не проигрывает гонку.
+-- Пока есть активная цель — гасим Humanoid.AutoRotate, чтобы игра не докручивала HRP к движению
+-- (это и рвало снап + давало дёрганье). Как только цель истекла — ОДИН раз возвращаем AutoRotate.
+local function applyFacing()
+	local goalHRP = State.faceGoalHRP
+	if not goalHRP or os.clock() > (State.faceGoalUntil or 0) or not goalHRP.Parent then
+		if State.faceHum then pcall(function() State.faceHum.AutoRotate = true end); State.faceHum = nil end
+		State.faceGoalHRP = nil
 		return
 	end
-	local myHRP, aHRP = localHRP(), State.faceLockHRP
-	if not (myHRP and aHRP and aHRP.Parent) then return end
+	if not Config.AutoFace then return end
+	local myHRP = localHRP()
+	if not myHRP then return end
 	local c = localChar()
 	local hum = c and c:FindFirstChildOfClass("Humanoid")
-	if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceLockHum = hum end
-	-- [V63] держим HRP точно на текущей позиции цели (прямо�� с��ап, без lead)
-	local d = flatDirTo(myHRP.Position, aHRP.Position)
-	if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
+	if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceHum = hum end
+	-- смотрим на ТЕКУЩУЮ позицию цели (без velocity-lead — сервер валидирует по факту)
+	local d = flatDirTo(myHRP.Position, goalHRP.Position)
+	if not d then return end
+	local goal = CFrame.lookAt(myHRP.Position, myHRP.Position + d)
+	if State.faceGoalHard then
+		myHRP.CFrame = goal
+	else
+		myHRP.CFrame = myHRP.CFrame:Lerp(goal, Config.FaceLerp or 0.8)
+	end
 end
 
 -- [V93] ОТРИСОВКА визуалов — на Heartbeat, НЕ на RenderStepped.
@@ -4487,11 +4503,11 @@ RunService.Heartbeat:Connect(function(dt)
 	if not ok then vizHideAll() end
 end)
 
--- enforceFaceLock ОСТАЁТСЯ в RenderStepped: это не отрисовка, а удержание HRP против AutoRotate,
--- и он должен переигрывать шифтлок каждый рендер-кадр (иначе персонаж дёргался бы). По умолчанию
--- BoxingCounter/faceLock не активны, так что на визуал под шифтлоком это не влияет.
+-- [V95] applyFacing (единый аппликатор поворота) — в RenderStepped: должен переигрывать
+-- AutoRotate/шифтлок каждый рендер-кадр как последний писатель HRP. Пока нет активной цели
+-- поворота — он дёшево выходит и держит AutoRotate включённым (визуал/движение не трогаются).
 RunService.RenderStepped:Connect(function()
-	pcall(enforceFaceLock)
+	pcall(applyFacing)
 end)
 
 indexAllAnims()
@@ -4906,4 +4922,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
