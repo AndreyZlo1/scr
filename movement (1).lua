@@ -548,121 +548,160 @@ return function(Lib, Core)
     end
 
     -- ── Combo cooldown lever (THE fix) ─────────────────────────────────────────
-    -- Locate scheduleM1SwingTimers via its unique upvalue value-set {1.25,0.45,1.55},
-    -- map which upvalue index is AttackDuration / FinisherCooldown / ComboResetTime,
-    -- then rewrite the two cooldowns with debug.setupvalue. Persistent single write.
+    -- Read from M1.lua bytecode (verified, not grep):
+    --   scheduleM1SwingTimers(comboIdx, animSpeed)  -- upvalues (exact order):
+    --     [1]u21(bool) [2]u22(nil) [3]u31(table) [4]FinisherCooldown(1.25)
+    --     [5]AttackDuration(0.45) [6]u20(nil) [7]ComboResetTime(1.55) [8]resetCombo(fn)
+    --   body: u21=false ; u22=task.delay((comboIdx==4 and FinisherCooldown or
+    --         AttackDuration)/animSpeed, function() u21=true end)
+    --   Constants include "M1AttackCooldownTask" and "M1ComboResetTask".
+    -- Config (CombatConfig.ClientPredict.M1) verified: AttackDuration=0.45,
+    --   FinisherCooldown=1.25, ComboResetTime=1.55.
+    --
+    -- WHY the previous attempt did nothing (fixed here):
+    --   • primary used filtergc{Upvalues={1.25,0.45,1.55}} — number-value upvalue
+    --     matching is NOT reliably supported by Potassium's filtergc; likely returned
+    --     nil so nothing was ever patched.
+    --   • fallback searched module keys {"OnM1Activated","ServerResponse",
+    --     "PerfectBlocked","GuardBroken"} — PerfectBlocked/GuardBroken are NOT keys of
+    --     the M1 module (real keys: OnM1Activated, OnHoldSwing, Hold, ServerResponse),
+    --     so the fallback never matched either.
+    -- New finder: (1) grab the M1 module table by its REAL keys, then read
+    --   scheduleM1SwingTimers straight out of v1.OnHoldSwing's upvalues (OnHoldSwing
+    --   captures it directly — unambiguous). (2) Fallback: filtergc by string
+    --   Constants (always matchable) then disambiguate by upvalue signature.
     local _schedFn = nil
-    local _cd = { attackIdx = nil, finIdx = nil, origAttack = nil, origFin = nil }
+    local _cd = { attackIdx = nil, finIdx = nil, comboIdx = nil,
+                  origAttack = nil, origFin = nil, origCombo = nil }
     local _cdPatched, _cdMapped = false, false
 
-    -- true if fn's own upvalues carry both a finisher (1.0-1.4) and an attack (<1.0) number
-    local function looksLikeSchedule(fn)
-        if type(fn) ~= "function" then return false end
-        local u = _getupvalues(fn)
-        if type(u) ~= "table" then return false end
-        local hasFin, hasAtk = false, false
-        for _, n in pairs(u) do
-            if type(n) == "number" then
-                if n >= 1.0 and n < 1.4 then hasFin = true end
-                if n > 0  and n < 1.0 then hasAtk = true end
-            end
+    -- a fn is scheduleM1SwingTimers if its constants contain BOTH cooldown-task strings
+    -- AND it has >=2 numeric upvalues (resetLocalCombatState has 0, ServerResponse 1).
+    local function isScheduleFn(fn)
+        if type(fn) ~= "function" or not _getconstants then return false end
+        local okc, consts = pcall(_getconstants, fn)
+        if not (okc and type(consts) == "table") then return false end
+        local a, b = false, false
+        for _, c in ipairs(consts) do
+            if c == "M1AttackCooldownTask" then a = true
+            elseif c == "M1ComboResetTask" then b = true end
         end
-        return hasFin and hasAtk
+        if not (a and b) then return false end
+        local nNum = 0
+        local ups = _getupvalues(fn)
+        if type(ups) == "table" then
+            for _, v in pairs(ups) do if type(v) == "number" then nNum = nNum + 1 end end
+        end
+        return nNum >= 2
     end
 
-    -- Path 1: direct GC filter by the unique {1.25,0.45,1.55} upvalue value-set.
-    local function findViaFilter()
-        local ok, fn = pcall(_filtergc, "function", { Upvalues = { 1.25, 0.45, 1.55 } }, true)
-        if ok and type(fn) == "function" then
-            local verified = false
-            if _getconstants then
-                local okc, consts = pcall(_getconstants, fn)
-                if okc and type(consts) == "table" then
-                    for _, c in ipairs(consts) do
-                        if c == "M1AttackCooldownTask" then verified = true; break end
+    -- PRIMARY: M1 module table (real keys) → OnHoldSwing upvalues → scheduleM1SwingTimers.
+    local function findViaModule()
+        local ok, mod = pcall(_filtergc, "table",
+            { Keys = { "OnM1Activated", "OnHoldSwing", "Hold", "ServerResponse" } }, true)
+        if not (ok and type(mod) == "table") then dbg("combo lever: M1 module table NOT found"); return nil end
+        -- OnHoldSwing captures scheduleM1SwingTimers directly (1-hop, unambiguous)
+        local ohs = rawget(mod, "OnHoldSwing")
+        if type(ohs) == "function" then
+            local ups = _getupvalues(ohs)
+            if type(ups) == "table" then
+                for _, v in pairs(ups) do
+                    if isScheduleFn(v) then dbg("combo lever: FOUND via module.OnHoldSwing"); return v end
+                end
+            end
+        end
+        -- 2-hop fallback: OnM1Activated → tryM1 → scheduleM1SwingTimers
+        local oma = rawget(mod, "OnM1Activated")
+        if type(oma) == "function" then
+            for _, tryM1 in pairs(_getupvalues(oma) or {}) do
+                if type(tryM1) == "function" then
+                    for _, v in pairs(_getupvalues(tryM1) or {}) do
+                        if isScheduleFn(v) then dbg("combo lever: FOUND via OnM1Activated->tryM1"); return v end
                     end
                 end
             end
-            dbg("combo lever: found via filtergc Upvalues (verified=" .. tostring(verified) .. ")")
-            return fn
         end
+        dbg("combo lever: module drill found no schedule fn")
         return nil
     end
 
-    -- Path 2 (fallback): drill the M1 module table → OnM1Activated → tryM1 → the
-    -- function-upvalue that carries the timing numbers. Independent of filtergc's
-    -- upvalue-value matching, so it survives executors that ignore that filter field.
-    local function findViaModule()
-        local ok, mod = pcall(_filtergc, "table",
-            { Keys = { "OnM1Activated", "ServerResponse", "PerfectBlocked", "GuardBroken" } }, true)
-        if not (ok and type(mod) == "table" and type(rawget(mod, "OnM1Activated")) == "function") then
-            dbg("combo lever: fallback could not grab M1 module table")
-            return nil
+    -- FALLBACK: string-Constants filter (multiple fns match → disambiguate via isScheduleFn).
+    local function findViaConstants()
+        local ok, res = pcall(_filtergc, "function",
+            { Constants = { "M1AttackCooldownTask", "M1ComboResetTask" } }, false)
+        if not (ok and type(res) == "table") then dbg("combo lever: Constants filter failed"); return nil end
+        for _, fn in ipairs(res) do
+            if isScheduleFn(fn) then dbg("combo lever: FOUND via Constants filter"); return fn end
         end
-        local upsA = _getupvalues(mod.OnM1Activated)   -- OnM1Activated has a single upvalue: tryM1
-        local tryM1
-        if type(upsA) == "table" then
-            for _, v in pairs(upsA) do if type(v) == "function" then tryM1 = v; break end end
-        end
-        if not tryM1 then dbg("combo lever: fallback found no tryM1 upvalue"); return nil end
-        local upsT = _getupvalues(tryM1)
-        if type(upsT) == "table" then
-            for _, v in pairs(upsT) do
-                if looksLikeSchedule(v) then dbg("combo lever: found via module drill"); return v end
-            end
-        end
-        dbg("combo lever: fallback drill found no scheduling closure")
+        dbg("combo lever: Constants filter matched " .. #res .. " fn(s), none qualified")
         return nil
     end
 
     local function findScheduleFn()
         if _schedFn then return _schedFn end
-        if not (_filtergc and _getupvalues) then dbg("combo lever: no filtergc/getupvalues"); return nil end
-        _schedFn = findViaFilter() or findViaModule()
+        if not (_filtergc and _getupvalues and _getconstants) then
+            dbg("combo lever: missing filtergc/getupvalues/getconstants -> cannot find fn"); return nil
+        end
+        _schedFn = findViaModule() or findViaConstants()
         dbg("combo lever: scheduleM1SwingTimers " .. (_schedFn and "FOUND" or "NOT found"))
         return _schedFn
     end
 
+    -- identify which upvalue index is which by proximity to the known config values.
     local function mapCooldownUpvalues()
         if _cdMapped then return true end
         local fn = findScheduleFn()
         if not fn then return false end
         local ups = _getupvalues(fn)
-        if type(ups) ~= "table" then dbg("combo lever: getupvalues failed"); return false end
-        -- gather the numeric upvalues; identify by value band (config: 0.45/1.25/1.55)
-        local attack, fin
-        for i, v in pairs(ups) do
-            if type(v) == "number" then
-                if v > 0 and v < 1.0 and not attack then
-                    attack = { idx = i, val = v }
-                elseif v >= 1.0 and v < 1.4 and not fin then
-                    fin = { idx = i, val = v }
-                end
+        if type(ups) ~= "table" then dbg("combo lever: getupvalues returned non-table"); return false end
+        local nums = {}
+        for i, v in pairs(ups) do if type(v) == "number" then nums[#nums + 1] = { idx = i, val = v } end end
+        if #nums < 2 then dbg("combo lever: <2 numeric upvalues (" .. #nums .. ")"); return false end
+        -- pick by closeness to config: finisher~1.25, attack~0.45, comboReset~1.55
+        local function pick(target)
+            local best, bestd
+            for _, e in ipairs(nums) do
+                local d = math.abs(e.val - target)
+                if not bestd or d < bestd then best, bestd = e, d end
             end
+            return best
         end
-        if not (attack and fin) then
-            dbg("combo lever: could not identify attack(<1.0)/finisher(1.0-1.4) upvalues")
-            return false
+        local fin  = pick(1.25)
+        local atk  = pick(0.45)
+        local cmb  = pick(1.55)
+        if not (fin and atk) or fin.idx == atk.idx then
+            dbg("combo lever: could not disambiguate finisher/attack upvalues"); return false
         end
-        _cd.attackIdx, _cd.finIdx = attack.idx, fin.idx
-        _cd.origAttack, _cd.origFin = attack.val, fin.val
+        _cd.finIdx,  _cd.origFin    = fin.idx, fin.val
+        _cd.attackIdx, _cd.origAttack = atk.idx, atk.val
+        if cmb and cmb.idx ~= fin.idx and cmb.idx ~= atk.idx then
+            _cd.comboIdx, _cd.origCombo = cmb.idx, cmb.val
+        end
         _cdMapped = true
-        dbg("combo lever: mapped AttackDuration=" .. tostring(attack.val) .. "(#" .. attack.idx ..
-            ") FinisherCooldown=" .. tostring(fin.val) .. "(#" .. fin.idx .. ")")
+        dbg("combo lever: MAPPED Finisher=" .. tostring(fin.val) .. "(#" .. fin.idx ..
+            ") Attack=" .. tostring(atk.val) .. "(#" .. atk.idx ..
+            ") Combo=" .. (cmb and (tostring(cmb.val) .. "(#" .. cmb.idx .. ")") or "n/a"))
         return true
     end
 
     local function applyComboCooldowns()
         if not mapCooldownUpvalues() then return false end
         local mul = math.max(1, Config.NCW_Speed or 1)
-        -- finisher gates like a normal swing (kill the extra wait), then scale by speed
-        local newAttack = _cd.origAttack / mul
-        local newFin    = _cd.origAttack / mul
+        -- kill the EXTRA finisher wait: finisher gates like a normal swing, then both
+        -- shrink by Combo Speed. Floor keeps it sane (avoid exactly 0).
+        local newAttack = math.max(0.02, _cd.origAttack / mul)
+        local newFin    = math.max(0.02, math.min(_cd.origAttack, _cd.origFin) / mul)
         pcall(_setupvalue, _schedFn, _cd.attackIdx, newAttack)
         pcall(_setupvalue, _schedFn, _cd.finIdx, newFin)
         _cdPatched = true
-        dbg("combo lever: APPLIED attack=" .. string.format("%.3f", newAttack) ..
-            " finisher=" .. string.format("%.3f", newFin) .. " (Combo Speed=" .. mul .. ")")
+        -- read-back verification (proves the write landed)
+        local ups = _getupvalues(_schedFn)
+        local rbFin = ups and ups[_cd.finIdx]
+        local rbAtk = ups and ups[_cd.attackIdx]
+        dbg("combo lever: APPLIED finisher " .. tostring(_cd.origFin) .. "->" .. string.format("%.3f", newFin) ..
+            " attack " .. tostring(_cd.origAttack) .. "->" .. string.format("%.3f", newAttack) ..
+            " | read-back finisher=" .. tostring(rbFin) .. " attack=" .. tostring(rbAtk) ..
+            " (Combo Speed=" .. mul .. ")")
         return true
     end
 
@@ -815,6 +854,15 @@ return function(Lib, Core)
             if gpe then return end
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
+                -- COMBO COOLDOWN LEVER (the real fix) — the important lines
+                dbg("--- combo cooldown lever ---")
+                dbg("schedFnFound=", _schedFn ~= nil, "mapped=", _cdMapped, "patched=", _cdPatched)
+                if _cdMapped then
+                    dbg("   origFinisher=", _cd.origFin, "(#" .. tostring(_cd.finIdx) .. ")",
+                        "origAttack=", _cd.origAttack, "(#" .. tostring(_cd.attackIdx) .. ")")
+                    local ups = _schedFn and _getupvalues(_schedFn)
+                    dbg("   LIVE finisher=", ups and ups[_cd.finIdx], "LIVE attack=", ups and ups[_cd.attackIdx])
+                end
                 dbg("animHook=", animHookInstalled, "animatorHooked=", _apInstalled, "M1 idSet=", _m1Count)
                 dbg("AnimationPlayed total=", _apPlays, "M1 matched=", _apM1, "speed applied=", _apApply, "cdClears=", _ncwCdClears)
                 dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "SpeedMul=", string.format("%.2f", speedMul()))
