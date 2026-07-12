@@ -73,6 +73,9 @@ return function(Lib, Core)
     local _writefile    = rawget(getfenv(0), "writefile")  or (getgenv and getgenv().writefile)
     local _getconstants = (debug and rawget(debug, "getconstants")) or rawget(getfenv(0), "getconstants")
     local _getinfo      = (debug and rawget(debug, "getinfo"))      or rawget(getfenv(0), "getinfo")
+    local _getactors    = rawget(getfenv(0), "getactors")     or (getgenv and getgenv().getactors)
+    local _runOnActor   = rawget(getfenv(0), "run_on_actor")  or (getgenv and getgenv().run_on_actor)
+    local _hasActors    = type(_getactors) == "function" and type(_runOnActor) == "function"
 
     -- ── Debug logger ─────────────────────────────────────────────────────────
     -- Every dbg() line is printed to the executor console AND appended to a buffer.
@@ -93,6 +96,7 @@ return function(Lib, Core)
             "| hookmeta:", _hasHookMeta, "| getupvalues/setupvalue:", _hasUpval)
         dbg("getconstants:", _getconstants ~= nil, "| getinfo:", _getinfo ~= nil,
             "| writefile:", _writefile ~= nil)
+        dbg("actors(getactors+run_on_actor):", _hasActors)
         dbg("executor:", (identifyexecutor and select(1, identifyexecutor())) or "unknown")
     end
     local function saveLog()
@@ -421,8 +425,9 @@ return function(Lib, Core)
     local pingHooked = false     -- both features share the same override
     local animHookInstalled = false
     local _loadCalls, _m1Calls, _swapCount = 0, 0, 0
-    local _tblCount = 0          -- how many AnimationHandler tables we patched
-    local _catSeen = {}          -- category -> count (DIAGNOSTIC: what really fires)
+    local _tblCount = 0          -- how many AnimationHandler tables patched in MAIN vm
+    local _actorCount = 0        -- how many actors we injected into
+    local _catSeen = {}          -- category -> count seen in MAIN vm (DIAGNOSTIC)
     local ATTACK_DELAY = 0.45    -- CombatConfig ClientPredict M1 AttackDuration (approx)
 
     local function pingSpeedFactor()
@@ -438,88 +443,161 @@ return function(Lib, Core)
         return mSpoof / mReal
     end
 
-    -- shared body for the patched LoadAnim (used across all AnimationHandler instances)
+    -- Publish the current policy into getgenv().__MV — the shared table that BOTH the
+    -- main-VM patch and every actor-injected patch read live. Combat runs in an Actor
+    -- VM (proven: the LoadAnim we caught in main only sees whiteboard/drums, never M1,
+    -- because M1's module + its AnimationHandler live in a separate Luau state whose
+    -- require cache is NOT the main one). getgenv() is shared across all Potassium
+    -- threads, so this is how config crosses the VM boundary.
+    local function publishConfig()
+        local gg = getgenv and getgenv()
+        if type(gg) ~= "table" then return nil end
+        local MV = gg.__MV
+        if type(MV) ~= "table" then MV = {}; gg.__MV = MV end
+        MV.SwapFinisher = (Config.NCW_On == true)
+        local mul = 1
+        if Config.NCW_On then mul = mul * math.max(1, Config.NCW_Speed or 20) end
+        if Config.Ping_On then mul = mul * pingSpeedFactor() end
+        MV.SpeedMul = mul
+        MV.Stats = MV.Stats or { load = 0, m1 = 0, swap = 0 }
+        MV.Cats  = MV.Cats or {}
+        MV.ActorPatched = MV.ActorPatched or 0
+        return MV
+    end
+
+    -- main-VM LoadAnim override (covers any combat that DOES run in the main state)
     local function makeNewLoad(origLoad)
         return function(char, category, animId, kfCb, looped, speed, fade, ...)
             _loadCalls = _loadCalls + 1
-            -- DIAGNOSTIC: record every category that flows through, with a name sample
             local catKey = tostring(category)
             if not _catSeen[catKey] then
                 _catSeen[catKey] = 0
                 local nm = (typeof(animId) == "Instance") and animId.Name or tostring(animId)
-                dbg("LoadAnim NEW category seen: '" .. catKey .. "'  firstAnim=", nm)
+                dbg("MAIN LoadAnim NEW category: '" .. catKey .. "'  firstAnim=", nm)
             end
             _catSeen[catKey] = _catSeen[catKey] + 1
 
-            local isM1 = (category == "M1")
-            if isM1 then _m1Calls = _m1Calls + 1 end
-
             local newAnim, newSpeed = animId, speed
-            if isM1 then
-                if _m1Calls <= 20 or _m1Calls % 15 == 0 then
-                    local nm = (typeof(animId) == "Instance") and animId.Name or tostring(animId)
-                    dbg("LoadAnim M1 #" .. _m1Calls, "anim=", nm, "speed=", tostring(speed),
-                        "NCW=", Config.NCW_On, "Ping=", Config.Ping_On)
+            if category == "M1" then
+                _m1Calls = _m1Calls + 1
+                if Config.NCW_On and typeof(animId) == "Instance" and animId.Name == "4thM1" and animId.Parent then
+                    local first = animId.Parent:FindFirstChild("1stM1")
+                    if first then newAnim = first; _swapCount = _swapCount + 1 end
                 end
-                -- NCW: 4th (finisher) plays as 1st + speed up
-                if Config.NCW_On then
-                    if typeof(animId) == "Instance" and animId.Name == "4thM1" and animId.Parent then
-                        local first = animId.Parent:FindFirstChild("1stM1")
-                        if first then
-                            newAnim = first
-                            _swapCount = _swapCount + 1
-                            if _swapCount <= 10 or _swapCount % 10 == 0 then
-                                dbg("NCW: swapped 4thM1 -> 1stM1 (#" .. _swapCount .. ")")
-                            end
-                        end
-                    end
-                    if type(newSpeed) == "number" and newSpeed > 0 then
-                        newSpeed = newSpeed * math.max(1, Config.NCW_Speed or 20)
-                    end
-                end
-                -- Ping spoof: rescale speed by ping factor
-                if Config.Ping_On and type(newSpeed) == "number" and newSpeed > 0 then
-                    local f = pingSpeedFactor()
-                    newSpeed = newSpeed * f
+                if type(newSpeed) == "number" and newSpeed > 0 then
+                    local mul = 1
+                    if Config.NCW_On then mul = mul * math.max(1, Config.NCW_Speed or 20) end
+                    if Config.Ping_On then mul = mul * pingSpeedFactor() end
+                    newSpeed = newSpeed * mul
                 end
             end
-
             return origLoad(char, category, newAnim, kfCb, looped, newSpeed, fade, ...)
         end
     end
 
+    -- Self-contained source injected into each Actor VM. It finds AnimationHandler in
+    -- ITS OWN state and overrides LoadAnim, reading policy live from getgenv().__MV and
+    -- writing diagnostics back into it. Re-scans for a few seconds because the combat
+    -- module may require AnimationHandler lazily (on first swing).
+    local ACTOR_SRC = [==[
+        pcall(function()
+            -- _G is per-Luau-state (unique to THIS actor VM); use it to avoid spawning
+            -- duplicate scan loops when the same actor is re-injected.
+            if _G.__MV_actor_installed then return end
+            _G.__MV_actor_installed = true
+            local gg = getgenv()
+            local MV = gg and gg.__MV
+            if type(MV) ~= "table" then return end
+            MV.Stats = MV.Stats or { load = 0, m1 = 0, swap = 0 }
+            MV.Cats  = MV.Cats or {}
+            MV.ActorPatched = MV.ActorPatched or 0
+            local function patchTable(tbl)
+                if type(tbl) ~= "table" or rawget(tbl, "__MV_patched") then return false end
+                local orig = rawget(tbl, "LoadAnim")
+                if type(orig) ~= "function" then return false end
+                local function newFn(char, category, animId, kfCb, looped, speed, fade, ...)
+                    MV.Stats.load = MV.Stats.load + 1
+                    local ck = tostring(category)
+                    MV.Cats[ck] = (MV.Cats[ck] or 0) + 1
+                    local nAnim, nSpeed = animId, speed
+                    if category == "M1" then
+                        MV.Stats.m1 = MV.Stats.m1 + 1
+                        if MV.SwapFinisher and typeof(animId) == "Instance"
+                           and animId.Name == "4thM1" and animId.Parent then
+                            local first = animId.Parent:FindFirstChild("1stM1")
+                            if first then nAnim = first; MV.Stats.swap = MV.Stats.swap + 1 end
+                        end
+                        if type(nSpeed) == "number" and nSpeed > 0 and type(MV.SpeedMul) == "number" then
+                            nSpeed = nSpeed * MV.SpeedMul
+                        end
+                    end
+                    return orig(char, category, nAnim, kfCb, looped, nSpeed, fade, ...)
+                end
+                local okSet = pcall(function() tbl.LoadAnim = newFn end)
+                if okSet and tbl.LoadAnim == newFn then
+                    pcall(function() rawset(tbl, "__MV_patched", true) end)
+                    MV.ActorPatched = MV.ActorPatched + 1
+                    return true
+                end
+                return false
+            end
+            -- filterOne=true (never false — freezes 10s+). One AnimationHandler per VM.
+            local function scan()
+                local okf, tbl = pcall(filtergc, "table", { Keys = { "LoadAnim", "StopAnim", "Anims" } }, true)
+                if okf and type(tbl) == "table" then return patchTable(tbl) end
+                return false
+            end
+            task.spawn(function()
+                for i = 1, 20 do
+                    if scan() then break end  -- stop scanning once patched in this VM
+                    task.wait(1)
+                end
+            end)
+        end)
+    ]==]
+
+    local function injectActors()
+        if not _hasActors then dbg("injectActors: getactors/run_on_actor unavailable"); return 0 end
+        local okA, actors = pcall(_getactors)
+        if not (okA and type(actors) == "table") then dbg("injectActors: getactors failed"); return 0 end
+        dbg("injectActors: getactors() returned", #actors, "actor(s)")
+        local n = 0
+        for _, actor in ipairs(actors) do
+            local okR = pcall(_runOnActor, actor, ACTOR_SRC)
+            if okR then n = n + 1 end
+        end
+        dbg("injectActors: injected into", n, "actor(s)")
+        return n
+    end
+
     local function installAnimHook()
         if animHookInstalled then return true end
-        dbg("=== installAnimHook (patch ALL AnimationHandler tables) ===")
+        dbg("=== installAnimHook (main VM + actor injection) ===")
         if not _filtergc then dbg("installAnimHook ABORT: no filtergc"); return false end
 
-        -- Grab EVERY table that looks like AnimationHandler (there may be more than one
-        -- GC copy / per-context require). Patch LoadAnim on all of them so whichever
-        -- instance combat actually uses is covered.
-        local ok, list = pcall(_filtergc, "table",
-            { Keys = { "LoadAnim", "StopAnim", "Anims" } }, false)
-        if not (ok and type(list) == "table") then
-            dbg("installAnimHook ABORT: filtergc failed (ok=", ok, "type=", type(list), ")")
-            return false
-        end
-        dbg("filtergc candidate AnimationHandler tables:", #list)
+        publishConfig()   -- create getgenv().__MV BEFORE injecting actors
 
-        for _, tbl in ipairs(list) do
-            if type(tbl) == "table" and type(rawget(tbl, "LoadAnim")) == "function" then
-                local origLoad = tbl.LoadAnim
-                local newLoad = makeNewLoad(origLoad)
-                local okSet = pcall(function() tbl.LoadAnim = newLoad end)
-                local stuck = okSet and tbl.LoadAnim == newLoad
-                if not stuck and _hasHookFn then
-                    pcall(function() local o; o = _hookfunction(origLoad, function(...) return newLoad(...) end) end)
-                end
-                if stuck then _tblCount = _tblCount + 1 end
+        -- 1) patch the AnimationHandler table in the MAIN vm (filterOne=true — never
+        --    filterOne=false, that freezes the heap scan for 10s+).
+        local ok, tbl = pcall(_filtergc, "table",
+            { Keys = { "LoadAnim", "StopAnim", "Anims" } }, true)
+        if ok and type(tbl) == "table" and type(rawget(tbl, "LoadAnim")) == "function"
+           and not rawget(tbl, "__MV_patched") then
+            local origLoad = tbl.LoadAnim
+            local newLoad = makeNewLoad(origLoad)
+            local okSet = pcall(function() tbl.LoadAnim = newLoad end)
+            if okSet and tbl.LoadAnim == newLoad then
+                pcall(function() rawset(tbl, "__MV_patched", true) end)
+                _tblCount = _tblCount + 1
             end
         end
-        dbg("installAnimHook patched", _tblCount, "AnimationHandler table(s)")
+        dbg("MAIN patched", _tblCount, "AnimationHandler table(s)")
 
-        animHookInstalled = _tblCount > 0
-        if not animHookInstalled then dbg("installAnimHook: no table stuck!") end
+        -- 2) inject the same patch into every actor VM (where combat actually runs)
+        _actorCount = injectActors()
+
+        animHookInstalled = (_tblCount > 0) or (_actorCount > 0)
+        if not animHookInstalled then dbg("installAnimHook: nothing patched or injected!") end
         return animHookInstalled
     end
 
@@ -602,7 +680,26 @@ return function(Lib, Core)
         pcall(stepSpeed, dt)
         pcall(stepFly, dt)
     end)
+    -- Re-inject actors periodically: combat actors can be (re)created on respawn, and
+    -- may not exist at bootstrap. The _G guard inside makes re-runs no-ops per VM.
+    local _reinjAccum, _lastActorTotal = 0, -1
+    PostStep:Connect(function(dt)
+        if not _hasActors then return end
+        _reinjAccum = _reinjAccum + ((typeof(dt) == "number" and dt) or (1 / 60))
+        if _reinjAccum < 3 then return end
+        _reinjAccum = 0
+        pcall(function()
+            local okA, actors = pcall(_getactors)
+            if not (okA and type(actors) == "table") then return end
+            if #actors ~= _lastActorTotal then
+                _lastActorTotal = #actors
+                dbg("reinject: actor total now", #actors)
+            end
+            for _, actor in ipairs(actors) do pcall(_runOnActor, actor, ACTOR_SRC) end
+        end)
+    end)
     PostStep:Connect(function()
+        pcall(publishConfig)   -- push live NCW/Ping policy to actor VMs via getgenv().__MV
         driveNCW()
         -- keep sprint desired asserted (game clears it after combat cancels)
         if Config.Sprint_On then
@@ -655,17 +752,30 @@ return function(Lib, Core)
             if gpe then return end
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
-                dbg("animHook=", animHookInstalled, "patchedTables=", _tblCount, "loadCalls=", _loadCalls, "m1Calls=", _m1Calls, "swaps=", _swapCount, "cdClears=", _ncwCdClears)
+                dbg("animHook=", animHookInstalled, "mainTables=", _tblCount, "actorsInjected=", _actorCount)
+                dbg("MAIN loadCalls=", _loadCalls, "m1Calls=", _m1Calls, "swaps=", _swapCount, "cdClears=", _ncwCdClears)
                 dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "| Ping_On=", Config.Ping_On, "spoof=", Config.Ping_Value .. "ms")
                 dbg("NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
-                -- DIAGNOSTIC: dump every LoadAnim category we've seen so far
-                dbg("--- LoadAnim categories seen ---")
+                -- MAIN vm categories
+                dbg("--- MAIN LoadAnim categories ---")
                 local anyCat = false
-                for cat, cnt in pairs(_catSeen) do
-                    anyCat = true
-                    dbg("   category '" .. cat .. "' x" .. cnt)
+                for cat, cnt in pairs(_catSeen) do anyCat = true; dbg("   '" .. cat .. "' x" .. cnt) end
+                if not anyCat then dbg("   (none in main vm)") end
+                -- ACTOR vm stats (the real combat path) from shared getgenv().__MV
+                local gg = getgenv and getgenv()
+                local MV = (type(gg) == "table") and gg.__MV or nil
+                if type(MV) == "table" then
+                    dbg("--- ACTOR stats (getgenv().__MV) ---")
+                    dbg("   ActorPatched(tables)=", MV.ActorPatched, "SwapFinisher=", MV.SwapFinisher, "SpeedMul=", MV.SpeedMul)
+                    local s = MV.Stats or {}
+                    dbg("   actor load=", s.load, "m1=", s.m1, "swap=", s.swap)
+                    dbg("   --- ACTOR LoadAnim categories ---")
+                    local anyA = false
+                    for cat, cnt in pairs(MV.Cats or {}) do anyA = true; dbg("      '" .. cat .. "' x" .. cnt) end
+                    if not anyA then dbg("      (none seen in actors)") end
+                else
+                    dbg("--- ACTOR stats: getgenv().__MV MISSING (getgenv not shared?) ---")
                 end
-                if not anyCat then dbg("   (NONE - LoadAnim never fired in this VM!)") end
                 saveLog()
             end
         end)
