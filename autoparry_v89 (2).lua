@@ -4448,9 +4448,9 @@ return function(_Lib, _Core)
 			Title = "Dodge All Heavies", Flag = "AP_DodgeHeavy",
 			get = function() return Config.DodgeHeavy end,
 			set = function(v) Config.DodgeHeavy = v end,
-			Desc = "dodge EVERY heavy attack",
+			Desc = "dodge EVERY heavy attack, recommend disable ts",
 		})
-        AP:Divider()
+        apDodge:Divider()
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
 			Min = 6, Max = 24, Callback = function(v) Config.HeavyTrustRange = v end })
