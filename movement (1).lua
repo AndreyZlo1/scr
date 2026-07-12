@@ -390,33 +390,39 @@ return function(Lib, Core)
     end
 
     -- ═══════════════════════════════════════════════════════════════════════════
-    -- UNIVERSAL COMBAT LEVER: Animator.AnimationPlayed + AnimationTrack:AdjustSpeed
+    -- REAL COMBO LEVER: patch scheduleM1SwingTimers' cooldown upvalues (debug.setupvalue)
     -- ═══════════════════════════════════════════════════════════════════════════
-    -- Map of dead ends (all proven by diag logs, do NOT retry):
-    --   1) hookfunction on M1.lua getFinalM1AnimSpeed/GetPingAnimSpeedMultiplier →
-    --      fired 0× (Potassium hookfunction can't redirect a module's internal calls).
-    --   2) overwrite AnimationHandler.LoadAnim table field → filtergc returns a
-    --      DIFFERENT copy than combat uses; only saw replicated anims, never M1.
-    --   3) actor injection → getactors()=0. No Actors; combat is in the MAIN VM.
-    --   4) hookmetamethod(game,"__namecall") → intercepted 8600+ IsA calls but
-    --      LoadAnimation/AdjustSpeed/Play = 0. Those method refs are cached in
-    --      upvalues/locals so the `:` calls bypass the __namecall metamethod entirely.
+    -- The user's actual complaint: after the 4th (finisher) M1 there is a long stall
+    -- before you can attack again. Reading M1.lua bytecode nailed the cause:
     --
-    -- What DOES work (proven): Animator.AnimationPlayed fires for EVERY track the
-    -- local Humanoid plays, no matter how it was loaded. The diag caught the attack
-    -- as a track named "Animation" with id 137980914350618. That name is generic
-    -- because the game hides real ids: the style folder anims (1stM1..4thM1) carry
-    -- FAKE AnimationIds, and at play time the id is swapped via ReplicatedStorage.
-    -- AnimationRemap ([73977397773505]=137980914350618), loaded into a fresh
-    -- Instance.new("Animation"). So we can't match by name/ordinal — we match by the
-    -- numeric AnimationId against a prebuilt set of every style's M1 ids (both the raw
-    -- folder id AND its remap[] value).
+    --   scheduleM1SwingTimers(comboIdx, animSpeed):        -- M1.lua line 289
+    --     u21 = false                                       -- u21 = "can attack" gate
+    --     u22 = task.delay((comboIdx==4 and FinisherCooldown or AttackDuration)/animSpeed,
+    --                      function() u21 = true end)        -- unlock after the wait
+    --   tryM1(): if not u21 then return false end            -- input blocked until unlock
     --
-    -- On a matched M1 track we drive AnimationTrack:AdjustSpeed() OURSELVES from our
-    -- thread (a plain method call — unaffected by the namecall-bypass that blocks
-    -- INTERCEPTION). We re-assert the target speed for a short window so the game's own
-    -- AdjustSpeed at play time can't win. mul = NCW_Speed × pingFactor; Ping spoof
-    -- rescales by mult(spoof)/mult(realPing) (spoof 0 = no slowdown, 1000ms = slow).
+    -- After the 4th hit the unlock waits FinisherCooldown (1.25s) instead of the normal
+    -- AttackDuration (0.45s) → that IS the post-combo delay. CombatConfig.ClientPredict.M1
+    -- = { AttackDuration=0.45, FinisherCooldown=1.25, ComboResetTime=1.55 }. These are
+    -- module-level locals captured as UPVALUES of scheduleM1SwingTimers.
+    --
+    -- Why the old ComboSpeed (AnimationTrack:AdjustSpeed) was useless: the timer divisor
+    -- is `animSpeed = getFinalM1AnimSpeed(...)`, the ORIGINAL value — our track-speed
+    -- override never touched it, so the 1.25s gate stayed. We must change the GATE.
+    --
+    -- Fix: find scheduleM1SwingTimers by its unique upvalue value-set {1.25,0.45,1.55}
+    -- (filtergc "function" Upvalues, verified by its "M1AttackCooldownTask" constant),
+    -- then debug.setupvalue the FinisherCooldown upvalue down to AttackDuration (so the
+    -- finisher gates like a normal swing) and divide both by Combo Speed. ONE persistent
+    -- write to the real config the game reads — no per-frame hammering, no anim tricks.
+    -- Do NOT touch ComboResetTime (1.55) — shrinking it would drop the combo early.
+    --
+    -- Dead ends already proven (do NOT retry): (1) hookfunction on M1 internals fired 0×.
+    -- (2) AnimationHandler.LoadAnim table override caught the wrong table copy. (3) no
+    -- Actors (getactors=0). (4) __namecall never sees LoadAnimation/AdjustSpeed (cached).
+    -- (5) AnimationTrack:AdjustSpeed only speeds the VISUAL anim, not the cooldown gate.
+    -- The AnimationPlayed/AdjustSpeed path below is kept ONLY as an optional visual
+    -- speed-up so fast combos look fast; the wait removal is 100% the upvalue patch.
     local ncwHooked = false
     local pingHooked = false
     local animHookInstalled = false
@@ -455,20 +461,17 @@ return function(Lib, Core)
         return d and tonumber(d) or nil
     end
 
-    -- Build the set of M1 attack ids for ALL combat styles (robust to style switches):
-    -- ReplicatedStorage.Animations.Combat.<Style>Anims → children 1stM1..4thM1. For
-    -- each, add the raw folder AnimationId AND its AnimationRemap[] value (the id that
-    -- actually plays). Run once at bootstrap + on respawn.
+    -- Build the set of M1 attack ids from the LIVE style folders (same source the game
+    -- uses: CombatAnimationUtils → ReplicatedStorage.Animations.Combat.<Style>Anims →
+    -- children 1stM1..4thM1). These AnimationIds are the ground truth and only exist at
+    -- runtime (the static dump doesn't carry Animation.AnimationId), so we read them
+    -- live. NOTE: NO AnimationRemap — that module is used only by Seats.lua (seat/emote
+    -- anims), never by combat; the earlier remap theory was wrong. Rebuild on respawn.
     local function buildM1Ids()
         _m1Ids, _m1Count = {}, 0
         local function addId(x)
             if x and not _m1Ids[x] then _m1Ids[x] = true; _m1Count = _m1Count + 1 end
         end
-        local remap
-        pcall(function()
-            local mod = ReplicatedStorage:FindFirstChild("AnimationRemap")
-            if mod and mod:IsA("ModuleScript") then remap = require(mod) end
-        end)
         local anims  = ReplicatedStorage:FindFirstChild("Animations")
         local combat = anims and anims:FindFirstChild("Combat")
         if not combat then dbg("buildM1Ids: no ReplicatedStorage.Animations.Combat"); return 0 end
@@ -476,17 +479,11 @@ return function(Lib, Core)
             if styleFolder:IsA("Folder") then
                 for _, nm in ipairs({ "1stM1", "2ndM1", "3rdM1", "4thM1" }) do
                     local a = styleFolder:FindFirstChild(nm)
-                    if a and a:IsA("Animation") then
-                        local raw = extractId(a.AnimationId)
-                        if raw then
-                            addId(raw)
-                            if type(remap) == "table" and remap[raw] then addId(remap[raw]) end
-                        end
-                    end
+                    if a and a:IsA("Animation") then addId(extractId(a.AnimationId)) end
                 end
             end
         end
-        dbg("buildM1Ids: collected", _m1Count, "M1 ids (remap=" .. tostring(type(remap) == "table") .. ")")
+        dbg("buildM1Ids: collected", _m1Count, "M1 ids from live style folders")
         return _m1Count
     end
 
@@ -550,24 +547,157 @@ return function(Lib, Core)
         return true
     end
 
+    -- ── Combo cooldown lever (THE fix) ─────────────────────────────────────────
+    -- Locate scheduleM1SwingTimers via its unique upvalue value-set {1.25,0.45,1.55},
+    -- map which upvalue index is AttackDuration / FinisherCooldown / ComboResetTime,
+    -- then rewrite the two cooldowns with debug.setupvalue. Persistent single write.
+    local _schedFn = nil
+    local _cd = { attackIdx = nil, finIdx = nil, origAttack = nil, origFin = nil }
+    local _cdPatched, _cdMapped = false, false
+
+    -- true if fn's own upvalues carry both a finisher (1.0-1.4) and an attack (<1.0) number
+    local function looksLikeSchedule(fn)
+        if type(fn) ~= "function" then return false end
+        local u = _getupvalues(fn)
+        if type(u) ~= "table" then return false end
+        local hasFin, hasAtk = false, false
+        for _, n in pairs(u) do
+            if type(n) == "number" then
+                if n >= 1.0 and n < 1.4 then hasFin = true end
+                if n > 0  and n < 1.0 then hasAtk = true end
+            end
+        end
+        return hasFin and hasAtk
+    end
+
+    -- Path 1: direct GC filter by the unique {1.25,0.45,1.55} upvalue value-set.
+    local function findViaFilter()
+        local ok, fn = pcall(_filtergc, "function", { Upvalues = { 1.25, 0.45, 1.55 } }, true)
+        if ok and type(fn) == "function" then
+            local verified = false
+            if _getconstants then
+                local okc, consts = pcall(_getconstants, fn)
+                if okc and type(consts) == "table" then
+                    for _, c in ipairs(consts) do
+                        if c == "M1AttackCooldownTask" then verified = true; break end
+                    end
+                end
+            end
+            dbg("combo lever: found via filtergc Upvalues (verified=" .. tostring(verified) .. ")")
+            return fn
+        end
+        return nil
+    end
+
+    -- Path 2 (fallback): drill the M1 module table → OnM1Activated → tryM1 → the
+    -- function-upvalue that carries the timing numbers. Independent of filtergc's
+    -- upvalue-value matching, so it survives executors that ignore that filter field.
+    local function findViaModule()
+        local ok, mod = pcall(_filtergc, "table",
+            { Keys = { "OnM1Activated", "ServerResponse", "PerfectBlocked", "GuardBroken" } }, true)
+        if not (ok and type(mod) == "table" and type(rawget(mod, "OnM1Activated")) == "function") then
+            dbg("combo lever: fallback could not grab M1 module table")
+            return nil
+        end
+        local upsA = _getupvalues(mod.OnM1Activated)   -- OnM1Activated has a single upvalue: tryM1
+        local tryM1
+        if type(upsA) == "table" then
+            for _, v in pairs(upsA) do if type(v) == "function" then tryM1 = v; break end end
+        end
+        if not tryM1 then dbg("combo lever: fallback found no tryM1 upvalue"); return nil end
+        local upsT = _getupvalues(tryM1)
+        if type(upsT) == "table" then
+            for _, v in pairs(upsT) do
+                if looksLikeSchedule(v) then dbg("combo lever: found via module drill"); return v end
+            end
+        end
+        dbg("combo lever: fallback drill found no scheduling closure")
+        return nil
+    end
+
+    local function findScheduleFn()
+        if _schedFn then return _schedFn end
+        if not (_filtergc and _getupvalues) then dbg("combo lever: no filtergc/getupvalues"); return nil end
+        _schedFn = findViaFilter() or findViaModule()
+        dbg("combo lever: scheduleM1SwingTimers " .. (_schedFn and "FOUND" or "NOT found"))
+        return _schedFn
+    end
+
+    local function mapCooldownUpvalues()
+        if _cdMapped then return true end
+        local fn = findScheduleFn()
+        if not fn then return false end
+        local ups = _getupvalues(fn)
+        if type(ups) ~= "table" then dbg("combo lever: getupvalues failed"); return false end
+        -- gather the numeric upvalues; identify by value band (config: 0.45/1.25/1.55)
+        local attack, fin
+        for i, v in pairs(ups) do
+            if type(v) == "number" then
+                if v > 0 and v < 1.0 and not attack then
+                    attack = { idx = i, val = v }
+                elseif v >= 1.0 and v < 1.4 and not fin then
+                    fin = { idx = i, val = v }
+                end
+            end
+        end
+        if not (attack and fin) then
+            dbg("combo lever: could not identify attack(<1.0)/finisher(1.0-1.4) upvalues")
+            return false
+        end
+        _cd.attackIdx, _cd.finIdx = attack.idx, fin.idx
+        _cd.origAttack, _cd.origFin = attack.val, fin.val
+        _cdMapped = true
+        dbg("combo lever: mapped AttackDuration=" .. tostring(attack.val) .. "(#" .. attack.idx ..
+            ") FinisherCooldown=" .. tostring(fin.val) .. "(#" .. fin.idx .. ")")
+        return true
+    end
+
+    local function applyComboCooldowns()
+        if not mapCooldownUpvalues() then return false end
+        local mul = math.max(1, Config.NCW_Speed or 1)
+        -- finisher gates like a normal swing (kill the extra wait), then scale by speed
+        local newAttack = _cd.origAttack / mul
+        local newFin    = _cd.origAttack / mul
+        pcall(_setupvalue, _schedFn, _cd.attackIdx, newAttack)
+        pcall(_setupvalue, _schedFn, _cd.finIdx, newFin)
+        _cdPatched = true
+        dbg("combo lever: APPLIED attack=" .. string.format("%.3f", newAttack) ..
+            " finisher=" .. string.format("%.3f", newFin) .. " (Combo Speed=" .. mul .. ")")
+        return true
+    end
+
+    local function restoreComboCooldowns()
+        if not (_cdPatched and _schedFn and _cd.attackIdx) then return end
+        pcall(_setupvalue, _schedFn, _cd.attackIdx, _cd.origAttack)
+        pcall(_setupvalue, _schedFn, _cd.finIdx, _cd.origFin)
+        _cdPatched = false
+        dbg("combo lever: RESTORED originals (attack=" .. tostring(_cd.origAttack) ..
+            " finisher=" .. tostring(_cd.origFin) .. ")")
+    end
+
     local _charConnDone = false
     local function installAnimHook()
         if animHookInstalled then return true end
-        dbg("=== installAnimHook (Animator.AnimationPlayed + AdjustSpeed) ===")
+        dbg("=== install combat lever (cooldown upvalue patch + optional anim speed) ===")
         buildM1Ids()
-        local ok = hookAnimator()
+        local okAnim = hookAnimator()
+        local okCd   = mapCooldownUpvalues()
         if not _charConnDone then
             _charConnDone = true
             LocalPlayer.CharacterAdded:Connect(function()
                 task.wait(0.5)
-                buildM1Ids()   -- style/anim ids may differ after respawn
+                buildM1Ids()          -- style/anim ids may differ after respawn
                 hookAnimator()
+                -- scheduleM1SwingTimers is module-cached (survives respawn), but re-assert
+                -- the patch if the player still has NCW enabled.
+                if Config.NCW_On then applyComboCooldowns() end
             end)
         end
         animHookInstalled = true
-        ncwHooked = true
+        ncwHooked = okCd            -- NCW is "real" only if we mapped the cooldown upvalues
         pingHooked = true
-        dbg("installAnimHook done (animatorHooked=" .. tostring(ok) .. ", m1Ids=" .. _m1Count .. ")")
+        dbg("combat lever installed (animator=" .. tostring(okAnim) ..
+            ", cooldownMapped=" .. tostring(okCd) .. ", m1Ids=" .. _m1Count .. ")")
         return true
     end
 
@@ -827,16 +957,23 @@ return function(Lib, Core)
                 Config.NCW_On = v
                 if v then
                     bootstrapHooks()  -- non-blocking; installs in the background
-                    if bootstrapDone and not _apInstalled then
-                        notify("No Combo Wait", "no Animator yet - will hook on spawn")
+                    if applyComboCooldowns() then
+                        notify("No Combo Wait", "combo cooldown removed")
+                    else
+                        notify("No Combo Wait", "cooldown fn not mapped yet - will retry on spawn")
                     end
+                else
+                    restoreComboCooldowns()
                 end
             end,
-            Desc = "M1 swing animations are sped up by Combo Speed so the combo\nwait collapses (server still rate-caps real damage)",
+            Desc = "removes the delay after the 4th M1 by rewriting the game's own\nFinisherCooldown (1.25s) down to a normal swing via debug.setupvalue",
         })
         slider(sCbt, { Name = "Combo Speed", Flag = "MV_NCWSpeed", Default = Config.NCW_Speed,
-            Min = 1, Max = 50, Suffix = "x", Callback = function(v) Config.NCW_Speed = v end })
-        sCbt:SubLabel({ Text = "Listens to Animator.AnimationPlayed and, for M1 swing tracks (matched by\nremapped AnimationId across all styles), drives AnimationTrack:AdjustSpeed to\nmultiply playback by Combo Speed. Server rate-caps real damage." })
+            Min = 1, Max = 50, Suffix = "x", Callback = function(v)
+                Config.NCW_Speed = v
+                if Config.NCW_On then applyComboCooldowns() end  -- re-scale live
+            end })
+        sCbt:SubLabel({ Text = "Finds scheduleM1SwingTimers (M1.lua) by its {1.25,0.45,1.55} upvalue set and\nrewrites FinisherCooldown+AttackDuration with debug.setupvalue, dividing by Combo\nSpeed. This changes the real attack gate (u21), not the animation. Server may still\nrate-cap real damage, but the client-side post-combo wait is gone." })
 
         sCbt:Divider()
         sCbt:Header({ Name = "Ping Spoof" })
