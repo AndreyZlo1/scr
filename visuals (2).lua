@@ -1455,4 +1455,5 @@ return function(Lib, Core)
         if screenGui then pcall(function() screenGui:Destroy() end); screenGui = nil end
     end
 
-    re
+    return M
+end
