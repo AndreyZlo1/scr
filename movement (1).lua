@@ -421,6 +421,8 @@ return function(Lib, Core)
     local pingHooked = false     -- both features share the same override
     local animHookInstalled = false
     local _loadCalls, _m1Calls, _swapCount = 0, 0, 0
+    local _tblCount = 0          -- how many AnimationHandler tables we patched
+    local _catSeen = {}          -- category -> count (DIAGNOSTIC: what really fires)
     local ATTACK_DELAY = 0.45    -- CombatConfig ClientPredict M1 AttackDuration (approx)
 
     local function pingSpeedFactor()
@@ -436,39 +438,30 @@ return function(Lib, Core)
         return mSpoof / mReal
     end
 
-    local function installAnimHook()
-        if animHookInstalled then return true end
-        dbg("=== installAnimHook (AnimationHandler.LoadAnim) ===")
-        if not _filtergc then dbg("installAnimHook ABORT: no filtergc"); return false end
-
-        -- AnimationHandler is unique: only it has all of these keys.
-        local ok, tbl = pcall(_filtergc, "table",
-            { Keys = { "LoadAnim", "StopAnim", "PreloadAnimations", "Anims" } }, true)
-        if not (ok and type(tbl) == "table" and type(rawget(tbl, "LoadAnim")) == "function") then
-            dbg("installAnimHook ABORT: AnimationHandler table not found (ok=", ok, "type=", type(tbl), ")")
-            return false
-        end
-        dbg("found AnimationHandler table")
-
-        local origLoad = tbl.LoadAnim
-        local function newLoad(char, category, animId, kfCb, looped, speed, fade, ...)
+    -- shared body for the patched LoadAnim (used across all AnimationHandler instances)
+    local function makeNewLoad(origLoad)
+        return function(char, category, animId, kfCb, looped, speed, fade, ...)
             _loadCalls = _loadCalls + 1
+            -- DIAGNOSTIC: record every category that flows through, with a name sample
+            local catKey = tostring(category)
+            if not _catSeen[catKey] then
+                _catSeen[catKey] = 0
+                local nm = (typeof(animId) == "Instance") and animId.Name or tostring(animId)
+                dbg("LoadAnim NEW category seen: '" .. catKey .. "'  firstAnim=", nm)
+            end
+            _catSeen[catKey] = _catSeen[catKey] + 1
+
             local isM1 = (category == "M1")
             if isM1 then _m1Calls = _m1Calls + 1 end
 
-            -- log a sample of combat-relevant loads so we can SEE what really fires
-            if _loadCalls <= 20 or isM1 then
-                if isM1 and (_m1Calls <= 20 or _m1Calls % 15 == 0) then
+            local newAnim, newSpeed = animId, speed
+            if isM1 then
+                if _m1Calls <= 20 or _m1Calls % 15 == 0 then
                     local nm = (typeof(animId) == "Instance") and animId.Name or tostring(animId)
                     dbg("LoadAnim M1 #" .. _m1Calls, "anim=", nm, "speed=", tostring(speed),
                         "NCW=", Config.NCW_On, "Ping=", Config.Ping_On)
                 end
-            end
-
-            local newAnim, newSpeed = animId, speed
-
-            if isM1 then
-                -- NCW: 4th (finisher) plays as 1st, and speed up
+                -- NCW: 4th (finisher) plays as 1st + speed up
                 if Config.NCW_On then
                     if typeof(animId) == "Instance" and animId.Name == "4thM1" and animId.Parent then
                         local first = animId.Parent:FindFirstChild("1stM1")
@@ -488,28 +481,46 @@ return function(Lib, Core)
                 if Config.Ping_On and type(newSpeed) == "number" and newSpeed > 0 then
                     local f = pingSpeedFactor()
                     newSpeed = newSpeed * f
-                    if _m1Calls <= 20 or _m1Calls % 15 == 0 then
-                        dbg("Ping factor=", string.format("%.3f", f), "-> speed", tostring(speed), "->", string.format("%.3f", newSpeed))
-                    end
                 end
             end
 
             return origLoad(char, category, newAnim, kfCb, looped, newSpeed, fade, ...)
         end
+    end
 
-        -- primary: field overwrite (indexed at call time by every caller)
-        local okSet = pcall(function() tbl.LoadAnim = newLoad end)
-        local stuck = okSet and tbl.LoadAnim == newLoad
-        dbg("LoadAnim field overwrite okSet=", okSet, "stuck=", stuck)
-        if not stuck and _hasHookFn then
-            -- fallback: hook the function object too
-            local o2; o2 = _hookfunction(origLoad, function(...) return newLoad(...) end)
-            dbg("LoadAnim fell back to hookfunction")
+    local function installAnimHook()
+        if animHookInstalled then return true end
+        dbg("=== installAnimHook (patch ALL AnimationHandler tables) ===")
+        if not _filtergc then dbg("installAnimHook ABORT: no filtergc"); return false end
+
+        -- Grab EVERY table that looks like AnimationHandler (there may be more than one
+        -- GC copy / per-context require). Patch LoadAnim on all of them so whichever
+        -- instance combat actually uses is covered.
+        local ok, list = pcall(_filtergc, "table",
+            { Keys = { "LoadAnim", "StopAnim", "Anims" } }, false)
+        if not (ok and type(list) == "table") then
+            dbg("installAnimHook ABORT: filtergc failed (ok=", ok, "type=", type(list), ")")
+            return false
         end
+        dbg("filtergc candidate AnimationHandler tables:", #list)
 
-        animHookInstalled = true
-        dbg("installAnimHook SUCCESS")
-        return true
+        for _, tbl in ipairs(list) do
+            if type(tbl) == "table" and type(rawget(tbl, "LoadAnim")) == "function" then
+                local origLoad = tbl.LoadAnim
+                local newLoad = makeNewLoad(origLoad)
+                local okSet = pcall(function() tbl.LoadAnim = newLoad end)
+                local stuck = okSet and tbl.LoadAnim == newLoad
+                if not stuck and _hasHookFn then
+                    pcall(function() local o; o = _hookfunction(origLoad, function(...) return newLoad(...) end) end)
+                end
+                if stuck then _tblCount = _tblCount + 1 end
+            end
+        end
+        dbg("installAnimHook patched", _tblCount, "AnimationHandler table(s)")
+
+        animHookInstalled = _tblCount > 0
+        if not animHookInstalled then dbg("installAnimHook: no table stuck!") end
+        return animHookInstalled
     end
 
     local function installNCW()  ncwHooked = installAnimHook();  return ncwHooked  end
@@ -644,9 +655,17 @@ return function(Lib, Core)
             if gpe then return end
             if input.KeyCode == Enum.KeyCode.K then
                 dbg("=== K pressed: current status ===")
-                dbg("animHook=", animHookInstalled, "loadCalls=", _loadCalls, "m1Calls=", _m1Calls, "swaps=", _swapCount, "cdClears=", _ncwCdClears)
+                dbg("animHook=", animHookInstalled, "patchedTables=", _tblCount, "loadCalls=", _loadCalls, "m1Calls=", _m1Calls, "swaps=", _swapCount, "cdClears=", _ncwCdClears)
                 dbg("NCW_On=", Config.NCW_On, "NCW_Speed=", Config.NCW_Speed, "| Ping_On=", Config.Ping_On, "spoof=", Config.Ping_Value .. "ms")
                 dbg("NS_On=", Config.NS_On, "setSpeedHooked=", setSpeedHooked)
+                -- DIAGNOSTIC: dump every LoadAnim category we've seen so far
+                dbg("--- LoadAnim categories seen ---")
+                local anyCat = false
+                for cat, cnt in pairs(_catSeen) do
+                    anyCat = true
+                    dbg("   category '" .. cat .. "' x" .. cnt)
+                end
+                if not anyCat then dbg("   (NONE - LoadAnim never fired in this VM!)") end
                 saveLog()
             end
         end)
