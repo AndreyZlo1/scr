@@ -4414,7 +4414,7 @@ return function(_Lib, _Core)
 				notify("Accuracy Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("AP_AccuracyMode"))
-		apMain:SubLabel({ Text = "Low - easy hit check, blocks more (safer vs feints)\nHigh - angle math, more accurate but with a delay" })
+		apMain:SubLabel({ Text = "Low - ez hit check, High - angle check but its shitty rn" })
 		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
 			Min = 8, Max = 64, Callback = function(v) Config.Range = v end })
 		slider(apMain, { Name = "Dodge Reaction (lead)", Flag = "AP_DodgeLead",
@@ -4432,7 +4432,7 @@ return function(_Lib, _Core)
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 		boolToggle(apMain, "Instant Multi-Target Snap", "Multi Snap",
 			function() return Config.MultiFaceHard end, function(v) Config.MultiFaceHard = v end)
-		apMain:SubLabel({ Text = "in a group fight (2+ attackers) snap instantly to the next one\nfaster target switching" })
+		apMain:SubLabel({ Text = "in a group fight snap instantly to the next one" })
 		slider(apMain, { Name = "Rotation Speed", Flag = "AP_FaceLerp",
 			Default = Config.FaceLerp or 0.80, Min = 0.10, Max = 1.00, Precision = 2,
 			Callback = function(v) Config.FaceLerp = v end })
@@ -4443,13 +4443,14 @@ return function(_Lib, _Core)
 
 		-- Section 2 — Dodge (own box, own Enabled)
 		local apDodge = AP:Section({ Side = "Right" })
-		apDodge:Header({ Name = "Dodge" })
+		apDodge:Header({ Name = "Dodge Heavy" })
 		feature(apDodge, {
 			Title = "Dodge All Heavies", Flag = "AP_DodgeHeavy",
 			get = function() return Config.DodgeHeavy end,
 			set = function(v) Config.DodgeHeavy = v end,
-			Desc = "auto-roll EVERY heavy (M2) instead of blocking it\nMust-Dodge below only rolls the styles u pick\nleave OFF to roll only ur Must-Dodge picks",
+			Desc = "dodge EVERY heavy attack",
 		})
+        AP:Divider()
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
 			Min = 6, Max = 24, Callback = function(v) Config.HeavyTrustRange = v end })
@@ -4527,7 +4528,7 @@ return function(_Lib, _Core)
 		apBox:Divider()
 		boolToggle(apBox, "Blatant Force-Dodge", "AP_SABlatant",
 			function() return Config.SA_BlatantDodge end, function(v) Config.SA_BlatantDodge = v end)
-		apBox:SubLabel({ Text = "dodges even when the game wont let u\nif u attack at a bad time n get locked, it forces the roll so u dont eat the hit\nBLATANT - a legit player cant do this" })
+		apBox:SubLabel({ Text = "dodges even when the game wont let u (client sided)" })
 		slider(apBox, { Name = "Force-Dodge Window", Flag = "AP_SABlatantWin",
 			Default = math.floor((Config.SA_BlatantWindow or 0.32) * 1000), Min = 150, Max = 500, Suffix = " ms",
 			Callback = function(v) Config.SA_BlatantWindow = v / 1000 end })
@@ -4542,7 +4543,7 @@ return function(_Lib, _Core)
 				Config.ShowVisuals = v
 				if not v then pcall(vizHideAll) end
 			end,
-			Desc = "master switch for all AutoParry visuals\nonly shows when AutoParry is on",
+			Desc = "master switch for all AutoParry visuals",
 			})
 			boolToggle(apVis, "Rotating Ring", "Rotating Ring",
 				function() return Config.VizRing end,
@@ -4604,7 +4605,7 @@ return function(_Lib, _Core)
 			Title = "Attack Desync", Flag = "DS_Attack",
 			get = function() return Config.DesyncAttack end,
 			set = function(v) Config.DesyncAttack = v end,
-			Desc = "desyncs ur swings so enemies mistime the parry\nworks without AutoParry",
+			Desc = "desyncs ur swings so enemies mistime the parry",
 		})
 		dsAtk:Dropdown({
 			Name = "Desync Mode", 			Options = { "delay", "firedelay", "idlemask", "prerun" },
@@ -4615,7 +4616,7 @@ return function(_Lib, _Core)
 				notify("Desync Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("DS_Mode"))
-		dsAtk:SubLabel({ Text = "delay - lags ur swing visual\nfiredelay - lags only the server hit\nidlemask - enemies see u idle\nprerun - fake swing first, real one late" })
+		dsAtk:SubLabel({ Text = "not working shit  but i will fix it later ok?" })
 		slider(dsAtk, { Name = "Desync Delay", Flag = "DS_Delay", Default = Config.DesyncDelayMs or 140,
 			Min = 40, Max = 400, Suffix = " ms", Callback = function(v) Config.DesyncDelayMs = v end })
 		boolToggle(dsAtk, "Apply to M1", "Desync M1", function() return Config.DesyncApplyM1 end, function(v) Config.DesyncApplyM1 = v end)
