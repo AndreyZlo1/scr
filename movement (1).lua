@@ -406,8 +406,10 @@ return function(Lib, Core)
     -- Fingerprint: Upvalues {1.25,0.45,1.55} — ONLY scheduleM1SwingTimers holds all
     -- three (ServerResponse has just 1.55; resetLocalCombatState has none), so the
     -- ambiguous "M1*Task" string constants (shared by several functions) are avoided.
-    local ncwFn, ncwGateIdx
+    local ncwFn, ncwGateIdx, ncwFinisherIdx, ncwAttackIdx
+    local ncwOrigFinisher, ncwOrigAttack   -- original durations, to restore on toggle-off
     local ncwHooked = false
+    local NCW_FAST = 0.05                   -- shrunk cooldown while NCW is on (near-zero)
     -- dump a closure's upvalues (types + short values) for diagnostics
     local function dumpUpvalues(tag, fn)
         local ok, ups = pcall(_getupvalues, fn)
@@ -471,7 +473,24 @@ return function(Lib, Core)
         if not ncwGateIdx then dbg("installNCW ABORT: no boolean upvalue (u21 gate) found"); return false end
         dbg("NCW gate found at upvalue index", ncwGateIdx, "-> current value:", tostring(ups[ncwGateIdx]))
 
-        -- prove setupvalue actually works on this closure
+        -- REAL fix: the felt wait is the u22 task that re-opens u21 after
+        -- (combo==4 and FinisherCooldown or AttackDuration)/animSpeed seconds. Those
+        -- two durations are number upvalues of THIS closure (FinisherCooldown=1.25,
+        -- AttackDuration=0.45). Forcing the shared boolean cell proved unreliable
+        -- across closures, so instead we shrink the durations the scheduler reads at
+        -- schedule time → u21 flips back to true almost instantly → no inter-hit or
+        -- finisher wait. ComboResetTime (1.55) is left alone so the chain isn't cut
+        -- short. These are plain client-predict numbers; the server still rate-caps.
+        for i = 1, 32 do
+            local v = ups[i]
+            if type(v) == "number" then
+                if math.abs(v - 1.25) < 1e-6 then ncwFinisherIdx = i; ncwOrigFinisher = v
+                elseif math.abs(v - 0.45) < 1e-6 then ncwAttackIdx = i; ncwOrigAttack = v end
+            end
+        end
+        dbg("NCW duration indices: finisher(1.25)=", ncwFinisherIdx, " attack(0.45)=", ncwAttackIdx)
+
+        -- prove setupvalue actually works on this closure (boolean gate round-trip)
         local before = ups[ncwGateIdx]
         local okSet = pcall(_setupvalue, fn, ncwGateIdx, true)
         local okRead, ups2 = pcall(_getupvalues, fn)
@@ -480,22 +499,21 @@ return function(Lib, Core)
 
         ncwFn = fn
         ncwHooked = true
-        dbg("installNCW SUCCESS (gate idx", ncwGateIdx, ")")
+        dbg("installNCW SUCCESS (gate idx", ncwGateIdx, ", will shrink durations while enabled)")
         return true
     end
 
-    -- ---- Ping Spoof: replace CombatPingAnimUtils.GetPingAnimSpeedMultiplier -------
-    -- Full read of CombatPingAnimUtils.lua: the module RETURNS a table
-    --   { GetPingAnimSpeedMultiplier = function(delay, player) ... end }
-    -- and getFinalM1AnimSpeed / getFinalM2AnimSpeed multiply their anim speed by
-    --   delay / (delay + clamp(player:GetNetworkPing()*0.5, 0, 0.35))   (<= 1, a slow).
-    -- The old approach hooked __namecall on GetNetworkPing, which never took here.
-    -- Far more reliable: find the module TABLE by its key and REPLACE the field with
-    -- our own implementation that computes the multiplier from the SPOOFED ping. Since
-    -- every caller does `CombatPingAnimUtils.GetPingAnimSpeedMultiplier(...)` (a table
-    -- index at call time), swapping the field makes all callers use ours immediately —
-    -- no hookfunction/newcclosure quirks. Low spoof → multiplier ~1 → full-speed combat
-    -- anims + shorter attack cooldown (animSpeed is the cooldown divisor).
+    -- ---- Ping Spoof: hookfunction GetPingAnimSpeedMultiplier --------------------
+    -- Log proof from the field-replacement attempt: pingCalls=0 while 47 swings fired,
+    -- so getFinalM1AnimSpeed (M1.lua:88 → CombatPingAnimUtils.GetPingAnimSpeedMultiplier,
+    -- called every successful swing at M1.lua:459) was NOT routing through our replaced
+    -- table field. That means the table we swapped is not the object the caller reads
+    -- (a proxy/clone, or the function was captured directly). The bullet-proof fix is to
+    -- hook the FUNCTION OBJECT itself with hookfunction: every reference to that closure
+    -- — table index OR captured upvalue — dispatches to our hook. We recompute the
+    -- multiplier from the SPOOFED ping: multiplier = delay/(delay + clamp(ping*0.5,0,0.35)).
+    -- Low spoof → ~1 (full-speed anims + shorter cooldown); high spoof (1000ms) → strong
+    -- slowdown, which is the easy way to confirm the hook is live.
     local pingHooked = false
     local _pingCallCount = 0
     local function computeMult(delay)
@@ -504,59 +522,43 @@ return function(Lib, Core)
         if pingSec <= 0 then return 1 end
         return delay / (delay + math.clamp(pingSec * 0.5, 0, 0.35))
     end
-    -- wrap so we can log real invocations (throttled) to confirm the hook is live
-    local function spoofedMult(orig, delay, player, ...)
-        if Config.Ping_On then
-            local m = computeMult(delay)
-            _pingCallCount = _pingCallCount + 1
-            if _pingCallCount <= 8 or _pingCallCount % 20 == 0 then
-                dbg("Ping mult() called #" .. _pingCallCount, "delay=", tostring(delay),
-                    "spoof=", Config.Ping_Value .. "ms", "-> mult=", string.format("%.3f", m))
-            end
-            return m
-        end
-        return orig(delay, player, ...)
-    end
     local function installPing()
         if pingHooked then return true end
         dbg("=== installPing ===")
         if not _filtergc then dbg("installPing ABORT: no filtergc"); return false end
+        if not _hasHookFn then dbg("installPing ABORT: no hookfunction"); return false end
 
-        -- diagnostic: how many tables carry that key?
-        local okAll, all = pcall(_filtergc, "table", { Keys = { "GetPingAnimSpeedMultiplier" }, IgnoreExecutor = true }, false)
-        if okAll and type(all) == "table" then dbg("filtergc tables w/ GetPingAnimSpeedMultiplier:", #all) end
-
-        local ok, tbl = pcall(_filtergc, "table", { Keys = { "GetPingAnimSpeedMultiplier" } }, true)
-        if not ok then dbg("installPing ABORT: filtergc error:", tbl); return false end
-        if type(tbl) ~= "table" then dbg("installPing ABORT: result not a table:", type(tbl)); return false end
-        if type(tbl.GetPingAnimSpeedMultiplier) ~= "function" then
-            dbg("installPing ABORT: key present but not a function:", type(tbl.GetPingAnimSpeedMultiplier)); return false
-        end
-        dbg("found module table with GetPingAnimSpeedMultiplier")
-
-        local orig = tbl.GetPingAnimSpeedMultiplier
-        local replacement = function(delay, player, ...)
-            return spoofedMult(orig, delay, player, ...)
-        end
-        -- prefer a straight field replacement; if the table is frozen, fall back to hookfunction
-        local okSet = pcall(function() tbl.GetPingAnimSpeedMultiplier = replacement end)
-        local stuck = okSet and tbl.GetPingAnimSpeedMultiplier == replacement
-        dbg("field replacement: okSet=", okSet, "stuck=", stuck, "(isfrozen:",
-            (table.isfrozen and pcall(table.isfrozen, tbl) and table.isfrozen(tbl)) or "n/a", ")")
-        if stuck then
-            pingHooked = true
-            dbg("installPing SUCCESS via field replacement")
-        elseif _hasHookFn then
-            local o2
-            o2 = _hookfunction(orig, function(delay, player, ...)
-                return spoofedMult(o2, delay, player, ...)
-            end)
-            pingHooked = true
-            dbg("installPing SUCCESS via hookfunction fallback")
+        -- find the multiplier FUNCTION directly (not the table). Its constants include
+        -- the unique strings "NetworkAnimPingCompensation" + "MaxEstimatedOneWaySeconds".
+        local fn = findFn({ "NetworkAnimPingCompensation", "MaxEstimatedOneWaySeconds" })
+        if not fn then
+            -- fall back: pull it off the module table
+            local ok, tbl = pcall(_filtergc, "table", { Keys = { "GetPingAnimSpeedMultiplier" } }, true)
+            if ok and type(tbl) == "table" and type(tbl.GetPingAnimSpeedMultiplier) == "function" then
+                fn = tbl.GetPingAnimSpeedMultiplier
+                dbg("Ping: got function via module table")
+            end
         else
-            dbg("installPing ABORT: field frozen and no hookfunction")
+            dbg("Ping: found function via constants")
         end
-        return pingHooked
+        if type(fn) ~= "function" then dbg("installPing ABORT: multiplier function not found"); return false end
+
+        local orig
+        orig = _hookfunction(fn, function(delay, player, ...)
+            if Config.Ping_On then
+                local m = computeMult(delay)
+                _pingCallCount = _pingCallCount + 1
+                if _pingCallCount <= 8 or _pingCallCount % 20 == 0 then
+                    dbg("Ping mult() #" .. _pingCallCount, "delay=", tostring(delay),
+                        "spoof=", Config.Ping_Value .. "ms -> mult=", string.format("%.3f", m))
+                end
+                return m
+            end
+            return orig(delay, player, ...)
+        end)
+        pingHooked = true
+        dbg("installPing SUCCESS via hookfunction")
+        return true
     end
 
     -- ---- Background bootstrap ---------------------------------------------------
@@ -583,7 +585,7 @@ return function(Lib, Core)
         return _hasHookFn
     end
 
-    -- ══════════════════════════ AUTO SPRINT ═════════════════════════════════
+    -- ══════════════════════════ AUTO SPRINT ══════════��══════════════════════
     local sprintSingleton
     local function getSprint()
         if sprintSingleton then return sprintSingleton end
@@ -610,24 +612,43 @@ return function(Lib, Core)
     end
 
     -- ---- No Combo Wait driver ---------------------------------------------------
-    -- PRIMARY mechanism: every frame force the shared u21 combo gate back to true via
-    -- debug.setupvalue on the real scheduleM1SwingTimers closure. scheduleM1SwingTimers
-    -- flips u21 false at the start of each swing; re-asserting it true immediately means
-    -- tryM1's `if not u21` never blocks → no inter-hit or finisher wait. The reset timer
-    -- (u20) is left alone, so the chain never prematurely prints "combo reset".
+    -- PRIMARY mechanism: shrink the FinisherCooldown/AttackDuration upvalues that the
+    -- scheduler reads → the u22 task re-opens u21 almost instantly → no wait. We apply
+    -- the shrink when NCW turns on and restore the originals when it turns off, so the
+    -- game behaves normally when disabled. BACKUP: force the u21 boolean true each frame
+    -- (harmless even if the cross-closure cell write doesn't propagate).
+    local _ncwState = nil   -- nil=unknown, true=shrunk applied, false=originals restored
     local _ncwFlips = 0
-    local function driveNCW()
-        if not (Config.NCW_On and ncwHooked and ncwFn and ncwGateIdx and _hasUpval) then return end
-        -- read current gate; if the game just flipped it false (a swing started), log it,
-        -- then force it back to true so tryM1 never blocks on the next hit.
-        local okR, ups = pcall(_getupvalues, ncwFn)
-        if okR and type(ups) == "table" and ups[ncwGateIdx] == false then
-            _ncwFlips = _ncwFlips + 1
-            if _ncwFlips <= 12 or _ncwFlips % 25 == 0 then
-                dbg("NCW: gate was FALSE (swing #" .. _ncwFlips .. ") -> forcing true")
-            end
+    local function applyNCWDurations(on)
+        if not (ncwHooked and ncwFn and _hasUpval) then return end
+        if on then
+            if ncwFinisherIdx then pcall(_setupvalue, ncwFn, ncwFinisherIdx, NCW_FAST) end
+            if ncwAttackIdx   then pcall(_setupvalue, ncwFn, ncwAttackIdx,   NCW_FAST) end
+        else
+            if ncwFinisherIdx and ncwOrigFinisher then pcall(_setupvalue, ncwFn, ncwFinisherIdx, ncwOrigFinisher) end
+            if ncwAttackIdx   and ncwOrigAttack   then pcall(_setupvalue, ncwFn, ncwAttackIdx,   ncwOrigAttack)   end
         end
-        pcall(_setupvalue, ncwFn, ncwGateIdx, true)
+    end
+    local function driveNCW()
+        if not (ncwHooked and ncwFn and _hasUpval) then return end
+        -- apply/restore durations only on state change
+        if _ncwState ~= Config.NCW_On then
+            _ncwState = Config.NCW_On
+            applyNCWDurations(Config.NCW_On)
+            dbg("NCW durations", Config.NCW_On and ("shrunk to " .. NCW_FAST) or "restored")
+        end
+        if not Config.NCW_On then return end
+        -- backup: keep the boolean gate open
+        if ncwGateIdx then
+            local okR, ups = pcall(_getupvalues, ncwFn)
+            if okR and type(ups) == "table" and ups[ncwGateIdx] == false then
+                _ncwFlips = _ncwFlips + 1
+                if _ncwFlips <= 12 or _ncwFlips % 25 == 0 then
+                    dbg("NCW: gate FALSE (swing #" .. _ncwFlips .. ") -> forcing true")
+                end
+            end
+            pcall(_setupvalue, ncwFn, ncwGateIdx, true)
+        end
     end
 
     -- ═════════════════════════ MASTER LOOPS ═════════════════════════════════
