@@ -101,7 +101,12 @@ local Config = {
 
 	PerfectWindow = 0.15,
 	PerfectMin    = 0.05,
-	PerfectLead   = 0.125,
+	-- [V93] ЦЕНТР перфект-окна, НЕ полное окно. Раньше 0.125 (всё окно) СКЛАДЫВАЛОСЬ с уплинком
+	-- → двойной учёт задержки. Физика: локальный атрибут PerfectBlocking истинен на нашем клиенте
+	-- в интервале [T+RTT, T+RTT+0.125] (T = момент нажатия). Контакт C должен попасть в него;
+	-- при press = C - RTT - lead любой lead∈[0,0.125] даёт перфект, центр 0.0625 максимизирует
+	-- запас по джиттеру с обеих сторон (см. UplinkFactor — теперь компенсируем ПОЛНЫЙ RTT).
+	PerfectLead   = 0.0625,
 	HoldAfter     = 0.12,
 	HoldLateGrace = 0.14,
 
@@ -126,12 +131,22 @@ local Config = {
 	ChargeStallMs = 45,
 	ReleaseGap    = 0.40,
 
-	UplinkFactor  = 0.5,
-	UplinkMargin  = 0.006,
+	-- [V93] ПОЛНЫЙ round-trip. Локальный атрибут PerfectBlocking СЕРВЕРНЫЙ: после нашего нажатия
+	-- он проходит нажатие→сервер (RTT/2) и реплик. атрибута назад (RTT/2) = ПОЛНЫЙ RTT, и лишь
+	-- тогда становится true на нашем клиенте. VictimHitConfirm (дамп VictimHitboxServiceClient)
+	-- читает ИМЕННО этот локальный атрибут в момент оверлапа хитбокса → чтобы к контакту он был
+	-- true, жать надо на полный RTT раньше. Прежний 0.5 (полу-RTT) недокомпенсировал ровно на
+	-- пол-пинга → на 195мс пинге блок стабильно опаздывал (диаг: PERFECT@~185мс vs LATE@~95мс,
+	-- разрыв ≈ полу-RTT).
+	UplinkFactor  = 1.0,
+	UplinkMargin  = 0.008,
 	UplinkMin     = 0.010,
-	UplinkMax     = 0.200,
+	UplinkMax     = 0.330,   -- допускаем компенсацию до полного пинга (был кап 0.2 → сам резал RTT>0.4)
 	PingSmooth    = 0.25,
 	PingCap       = 0.32,
+	-- [V93] peak-hold пинга: Data Ping проседает (в диаг видели ping=60 при реальных ~195) и
+	-- занижал компенсацию → LATE. Держим пик RTT это окно (сек), затем плавно распускаем к текущему.
+	PingPeakHold  = 1.5,
 
 	MoveLeadMax   = 0.045,
 	MoveSpeedFull = 22,
@@ -194,7 +209,7 @@ local Config = {
 
 	-- [V66] ЭКСТРЕННЫЙ ДОДЖ двух угроз. Если 2-й контакт прилетает раньше, чем мы
 	-- физически успеваем развернуться к нему + перевзвести перфект, блок 2-го
-	-- невозможен → доджим оба сразу (iframes покрывают обоих). Порог = реальное
+	-- невозможен → доджим оба ��разу (iframes покрывают обоих). Порог = реальное
 	-- время разворота (по угловой скорости) + запас на перевзвод.
 	EmergencyDualDodge = true,
 	TurnRateDegPerSec  = 720,   -- насколько быстро HRP реально доворачивается снапом
@@ -219,7 +234,7 @@ local Config = {
 	-- [V91] BLATANT force-dodge. Игра НЕ даёт додж, когда мы застряли в собственной атаке
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот прилетит, а мы залочены
-	-- софт-состоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
+	-- софт-��остоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
 	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физически ничего не даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
 	SA_BlatantDodge   = false,
@@ -303,7 +318,7 @@ local Config = {
 	ServerSwingHook   = true,
 	ServerSwingDedup  = 0.35,
 
-	-- [V90.2] Мультитаргет: мгновенный (hard) снап лицом к следующему атакующему, когда в
+	-- [V90.2] Мульт��таргет: мгновенный (hard) снап лицом к следующему атакующему, когда в
 	-- замесе 2+ угрозы — без плавного лерпа, чтобы не терять кадры на перекладку между целями.
 	MultiFaceHard     = true,
 
@@ -503,14 +518,44 @@ local function getPingRaw()
 	return 0.06
 end
 
-local _pingEMA = 0.08
+-- [V93] Единый неймспейс-таблица для ВСЕГО нового состояния (пинг-пик + ground-truth хитбоксы).
+-- ВАЖНО: модуль целиком — одна гигантская функция, а в Luau лимит 200 живых локалов на функцию.
+-- Оригинал был впритык к лимиту, поэтому каждое новое состояние держим полями ОДНОЙ таблицы
+-- (=1 локал), а не десятком отдельных local — иначе CompileError "Out of local registers".
+local V93 = {
+	pingEMA = 0.08,
+	-- peak-hold: держим недавний ПИК RTT, т.к. Data Ping пилообразно проседает (в диаг видели
+	-- ping=60 при реальных ~195) и на провале мы бы недокомпенсировали → LATE-блок.
+	pingPeak = 0.08,
+	pingPeakAt = 0,
+	-- ground-truth хитбоксы:
+	hbFolder = nil,
+	sizes = {},                        -- ["M1"]/["M2"] → Vector3 реального размера парта
+	hbParams = nil,                    -- OverlapParams (лениво)
+	hbChar = nil,
+	hbFrame = -1,
+	byOwner = {},                      -- Owner.Value → { part, ... } за текущий FrameId
+}
+
 local function getPing()
 	local raw = getPingRaw()
-	_pingEMA = _pingEMA + (raw - _pingEMA) * Config.PingSmooth
-	return math.min(_pingEMA, Config.PingCap)
+	V93.pingEMA = V93.pingEMA + (raw - V93.pingEMA) * Config.PingSmooth
+	local now = os.clock()
+	if raw >= V93.pingPeak then
+		V93.pingPeak, V93.pingPeakAt = raw, now      -- новый пик — фиксируем мгновенно
+	else
+		local hold = Config.PingPeakHold or 1.5
+		local age = now - V93.pingPeakAt
+		if age >= hold then
+			-- окно удержания вышло: распускаем пик к EMA (не мгновенно, чтобы не дёргать lead)
+			V93.pingPeak = V93.pingPeak + (V93.pingEMA - V93.pingPeak) * math.min((age - hold) * 2, 1)
+		end
+	end
+	return math.min(math.max(V93.pingEMA, V93.pingPeak), Config.PingCap)
 end
 
 local function uplink()
+	-- getPing() уже держит пик RTT; берём максимум с сырым на случай резкого спайка вверх
 	local worst = math.max(getPing(), getPingRaw())
 	return math.clamp(worst * Config.UplinkFactor + Config.UplinkMargin, Config.UplinkMin, Config.UplinkMax)
 end
@@ -637,7 +682,7 @@ end
 local function faceToward(targetHRP, hard)
 	if not Config.AutoFace then return end
 	-- [V62] face-lock (boxing-counter) имеет приоритет и дела��т hard lookAt в
-	-- RenderStepped. Плавный лерп здесь боролся бы с ним (особенно в мультибое,
+	-- RenderStepped. Плавный ле��п здесь боролся бы с ним (особенно в мультибое,
 	-- где targetHRP = wantBlock, а lock смотрит на того, кого мы бьём) и тянул
 	-- HRP прочь от цели удара. Пока lock активен — не вме��иваемся.
 	if State.faceLockUntil and os.clock() < State.faceLockUntil then return end
@@ -682,6 +727,79 @@ local function attackerYawRate(aHRP, flatLook)
 	FaceTrack[aHRP] = { look = flatLook, t = now }
 	-- prevLook = facing атакующего на ПРОШЛОМ кадре (для детекта знака доворота к нам)
 	return rate, prevLook
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- [V93] GROUND-TRUTH ХИТБОКСЫ — фундамент нового High-режима.
+-- Игровой VictimHitboxServiceClient (декомпилирован из дампа) каждый Heartbeat идёт по
+-- workspace.Hitboxes: активный удар = BasePart с детьми Owner/AttackName (StringValue) и
+-- строковым атрибутом VictimSwingId. Если парт пересекается с нашим персонажем
+-- (workspace:GetPartBoundsInBox(part.CFrame, part.Size, {ourChar})) — клиент шлёт серверу
+-- VictimHitConfirm вместе с нашим PerfectBlocking. То есть ИСТИННАЯ геометрия удара — сам
+-- парт, а не наши догадки про yaw/размах. High опирается на это:
+--   • если парт атакующего уже есть — проверяем пересечение с нами 1:1 как игра (авторитетно);
+--   • пока парта нет — предсказываем бокс РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
+--     костылей (point-blank/heavy/drag/latch).
+-- Пер-кадровый индекс живых партов по владельцу (Owner.Value). Скан один раз за FrameId,
+-- чтобы не обходить папку по разу на каждую угрозу в мультибое. Всё состояние — в V93 (см. выше
+-- про лимит 200 локалов), новых local тут не заводим.
+local function hitboxIndex()
+	if V93.hbFrame == FrameId then return V93.byOwner end
+	V93.hbFrame = FrameId
+	local byOwner = V93.byOwner
+	for k in pairs(byOwner) do byOwner[k] = nil end
+	local folder = V93.hbFolder
+	if not (folder and folder.Parent) then
+		folder = Workspace:FindFirstChild("Hitboxes")
+		V93.hbFolder = folder
+	end
+	if not folder then return byOwner end
+	for _, child in ipairs(folder:GetChildren()) do
+		if child:IsA("BasePart") then
+			local owner = child:FindFirstChild("Owner")
+			local atk   = child:FindFirstChild("AttackName")
+			if owner and atk and owner:IsA("StringValue") and atk:IsA("StringValue") then
+				local sid = child:GetAttribute("VictimSwingId")
+				if typeof(sid) == "string" and sid ~= "" then
+					local aType = atk.Value
+					if aType == "M1" or aType == "M2" then V93.sizes[aType] = child.Size end
+					local nm  = owner.Value
+					local lst = byOwner[nm]
+					if not lst then lst = {}; byOwner[nm] = lst end
+					lst[#lst + 1] = child
+				end
+			end
+		end
+	end
+	return byOwner
+end
+
+-- Точная (как в игре) проверка: пересекает ли РЕАЛЬНЫЙ парт атакующего наш персонаж.
+-- true — есть парт и он в нас; false — парт(ы) есть, но мимо; nil — активного парта нет.
+local function realHitboxHitsMe(ownerName)
+	if not ownerName then return nil end
+	local lst = hitboxIndex()[ownerName]
+	if not lst or #lst == 0 then return nil end
+	local char = localChar()
+	if not char then return nil end
+	local params = V93.hbParams
+	if not params then
+		params = OverlapParams.new()
+		params.FilterType = Enum.RaycastFilterType.Include
+		params.MaxParts = 20
+		V93.hbParams = params
+	end
+	if V93.hbChar ~= char then
+		params.FilterDescendantsInstances = { char }
+		V93.hbChar = char
+	end
+	for i = 1, #lst do
+		local part = lst[i]
+		if part.Parent and #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0 then
+			return true
+		end
+	end
+	return false
 end
 
 local function hitboxGeom(th)
@@ -775,7 +893,17 @@ local function willHitMe(th)
 	-- разворотом: враг бьёт спиной и доворачивается — раньше поздний кадр с "смотрит мимо"
 	-- сбрасывал willHitMe и парри отменялся. Настоящий финт-кэнсел сюда не попадает: его
 	-- раньше удаляет ветка th.feinted в scheduler.
-	if th.trustLatch then return true end
+	local mode = Config.AccuracyMode or "Low"
+
+	-- [V93] В High доверяемся ТОЛЬКО ground-truth (реальный парт) и чистой геометрии; latch из
+	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипал» бы на угрозах,
+	-- которые в нас не попадают. Свой latch в High ставит лишь подтверждённое пересечение
+	-- реального игрового хитбокса (th.gtConfirmed) в ветке ниже.
+	if mode == "High" then
+		if th.gtConfirmed then return true end
+	elseif th.trustLatch then
+		return true
+	end
 
 	local _, forward, predA, flatLook = hitboxGeom(th)
 	if not predA then return Config.FilterFailSafe end
@@ -784,13 +912,14 @@ local function willHitMe(th)
 	-- БЕЗ дорогого предикта ротации.
 	local toMeV = Vector3.new(myHRP.Position.X - aHRP.Position.X, 0, myHRP.Position.Z - aHRP.Position.Z)
 	local dist  = toMeV.Magnitude
-	local mode  = Config.AccuracyMode or "Low"
 
 	-- Point-blank floor applies in BOTH modes. A hit landed in point-blank range is
 	-- physically unavoidable regardless of predicted rotation, so the strict High box
 	-- must never reject it — that was the root of High-mode misses on close M1s while
 	-- an enemy strafed (predA/box swung off us → false → NO-PRESS → LATE).
-	do
+	-- [V93] Point-blank floor — ТОЛЬКО не в High. «В упор» ещё не значит «попадёт»: атакующий
+	-- может махать мимо/спиной. В High это решает реальный парт либо геометрия ниже, а не радиус.
+	if mode ~= "High" then
 		local trust = Config.HitTrustRange or 0
 		if trust > 0 and dist <= (Config.PointBlank or 3.0) then
 			th.trustedHit = true; return true
@@ -877,7 +1006,10 @@ local function willHitMe(th)
 	-- смотрит приме��н�� на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
 	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
 	-- ненаправленный), а пропущенный хэви = проигранный разме��.
-		if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
+		-- [V93] HeavyTrust (радиусное доверие тяжёлым) — ТОЛЬКО не в High. В High тяжёлый лунж,
+		-- который реально дойдёт, и так ловит предсказанный бокс (predA экстраполируется по
+		-- velocity к нам); летящий мимо — не должен парироваться. Радиус тут = ложняки.
+		if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust and mode ~= "High" then
 			local heavyRange = Config.HeavyTrustRange or 14
 			if dist <= heavyRange then
 				local aV       = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
@@ -903,40 +1035,56 @@ local function willHitMe(th)
 		end
 
 		if mode == "High" then
-			-- [V90.4] HIGH = ЧИСТО ГЕОМЕТРИЯ, без radius/facing-доверия. Парируем ТОЛЬКО если мы
-			-- физически внутри прямоугольника замаха. Никаких «враг рядом и смотрит примерно на
-			-- нас» — это и заставляло High агриться на удары, которые в нас не попадут.
-			-- Проверяем ДВА бокса и берём ИХ объединение:
-			--   • предсказанный: origin predA, направление predLook (yaw в момент удара — ловит
-			--     финты/дораскрутку, если замах реально дойдёт до нас);
-			--   • текущий: origin aPos, направление rawL (снимает задержку на ПРЯМЫХ атаках,
-			--     когда velocity-предикт увёл predA мимо нас на пару кадров при стрейфе).
-			-- Удар, который не попадёт, не проходит НИ один бокс → No-press. Точность сохранена.
+			-- [V93] HIGH = GROUND-TRUTH. Решает не «рядом и примерно смотрит», а реальная игровая
+			-- геометрия удара.
+			-- ── Шаг 1: реальный парт. Если игра УЖЕ породила хитбокс-парт этого атакующего в
+			-- workspace.Hitboxes — проверяем пересечение с нами тем же методом, что и
+			-- VictimHitboxService (GetPartBoundsInBox по нашему персонажу). Это авторитетно и
+			-- пинг-независимо по геометрии; вертикаль/ориентация учтены самим партом.
+			local gt = realHitboxHitsMe(th.name)
+			if gt == true then
+				th.gtConfirmed = true      -- латчим: удар реально в нас, держим блок до конца свинга
+				th.trustedHit  = true
+				return true
+			elseif gt == false then
+				-- Парт(ы) активен, но в нас не попадает → чужой/мимо-удар. Точно не блокируем.
+				th.trustedHit = false
+				return false
+			end
+
+			-- ── Шаг 2: парта ещё нет (мы во взводе ДО контакта) → предсказательная геометрия,
+			-- но РЕАЛЬНЫМ размером бокса (кэш RealHitboxSize по типу атаки, обучается с живых
+			-- партов; фолбэк — Config для самого первого свинга). Два origin'а (predA/predLook и
+			-- aPos/rawL), их объединение. Никаких trust-радиусов — только «мы внутри замаха».
 			local slack   = Config.HighSlack or 0.6
-			local halfW   = (Config.HitHalfWidth or 4) + slack
-			local depthF  = (forward + (Config.HitboxDepth or 0)) + slack
-			local depthB  = -(Config.HitboxDepthBack or 0) - slack
+			local realSz  = V93.sizes[th.kind]
+			-- вертикальный гейт по реальной высоте парта (плюс запас): удар выше/ниже — мимо
+			if realSz then
+				local halfH = realSz.Y * 0.5 + 3
+				if math.abs(myHRP.Position.Y - aHRP.Position.Y) > halfH then
+					th.trustedHit = false
+					return false
+				end
+			end
+			-- дальность/глубина от origin атакующего вдоль его facing: центр парта ≈ forward,
+			-- полуглубина = realSz.Z/2 (фолбэк — старые Config-границы), полуширина = realSz.X/2.
+			local halfW   = (realSz and realSz.X * 0.5 or (Config.HitHalfWidth or 4)) + slack
+			local depthF  = (realSz and (forward + realSz.Z * 0.5) or (forward + (Config.HitboxDepth or 0))) + slack
+			local depthB  = (realSz and (forward - realSz.Z * 0.5) or -(Config.HitboxDepthBack or 0)) - slack
 			local function inBox(originX, originZ, look)
 				local ox, oz = myHRP.Position.X - originX, myHRP.Position.Z - originZ
-				local off    = Vector3.new(ox, 0, oz)
-				local fdepth = off:Dot(look)
-				local fside  = math.abs(off:Dot(Vector3.new(-look.Z, 0, look.X)))
+				local fdepth = ox * look.X + oz * look.Z
+				local fside  = math.abs(ox * (-look.Z) + oz * look.X)
 				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
 			end
-			-- [V92] ЖЁСТКИЙ BACK-FACING ГЕЙТ. Если враг СЕЙЧАС смотрит явно от нас (rawDot < порога)
-			-- И предсказанный facing тоже не наводится на нас (faceDotPred низкий) — он физически
-			-- НЕ может нас ударить этим свингом → выкидываем сразу. Это прямой фикс жалобы «чел
-			-- стоит спиной, а скрипт реагирует»: раньше 200°-предикт разворачивал predLook на нас.
+			-- [V92] ЖЁСТКИЙ BACK-FACING ГЕЙТ. Смотрит явно от нас (rawDot < порога) И предсказанный
+			-- facing тоже не наводится (faceDotPred низкий) — этим свингом физически не достанет →
+			-- сразу мимо. Прямой фикс жалобы «стоит спиной, а скрипт реагирует».
 			if rawDot < (Config.HighBackDot or -0.15)
 			   and faceDotPred < (Config.HighFaceMin or 0.25) then
 				th.trustedHit = false
 				return false
 			end
-			-- Текущая позиция атакующего = aHRP.Position (th.attackerHRP).
-			-- Два бокса: предсказанный (predA/predLook — ловит финт-довороты в пределах жёсткого
-			-- капа) и текущий (aHRP.Position/rawL — снимает задержку на прямых). Оба — реальная
-			-- геометрия замаха; удар не в нас не проходит ни один. turningToward-обход УБРАН:
-			-- он целил бокс прямо в нас для любого «доворачивающегося» → ложняки по спине.
 			local hit = inBox(predA.X, predA.Z, predLook)
 			         or inBox(aHRP.Position.X, aHRP.Position.Z, rawL)
 			th.trustedHit = false
@@ -2460,7 +2608,7 @@ local function schedulerStep(now)
 			and not (Config.BoxingCounterSolo and multiThreat)
 		if allowCounter then
 			-- [V89] РАННИЙ HARD FACE-LOCK. Проблема ротации при boxing-аддоне: раньше взгляд
-			-- на врага включался ТОЛЬКО в момент выстрела counter'а (contactAbs - BoxingCounterLead
+			-- на врага включался Т��ЛЬКО в момент выстрела counter'а (contactAbs - BoxingCounterLead
 			-- = ~160мс до контакта), а до этого работал мягкий faceToward-лерп (FaceLerp=0.8) —
 			-- он «лишь доворачивал» и не докручивал до врага. Сервер строит boxing-M2 хитбокс по
 			-- нашему LookVector в момент ServerCheck, поэтому смотреть надо ТОЧНО и ЗАРАНЕЕ. Теперь
@@ -3264,7 +3412,7 @@ end
 local SelfVerify = { conn = nil, lastLog = {}, decoyId = nil }
 
 -- [V76] ТЕСТ-РЕЖИМ "наоборот": пока ты стоишь в idle, ПОСТОЯННО проигрываем АТАКУ как
--- decoy (низкий локальный ��ес, тебе почти незаметно). Смысл: на обсервере (твоя мобила)
+-- decoy (низкий локальный ��ес, тебе почти незаметно). Смысл: на обсер��ере (твоя мобила)
 -- должно НЕПРЕРЫВНО показывать ATTACK, хотя ты ничего не жмёшь. Если показывает —
 -- значит decoy реально уходит в репликацию и хук подмены рабочий. Тумблер по клавише.
 local _testAnim, _testTrack, _testId
@@ -3312,7 +3460,7 @@ local function toggleDesyncTest()
 			track:Play(0.1)
 			track:AdjustWeight(wgt, 0)
 		end)
-		-- [V76.1] maintenance-цикл: при ходьбе игра запускает walk-анимацию и перебивает
+		-- [V76.1] maintenance-цикл: при ходьбе игра запускает walk-а��имацию и перебивает
 		-- нашу по весу/событию AnimationPlayed → обсервер свалив��лся на WALK. Тут мы каждые
 		-- ~0.35с ПЕРЕУТВЕРЖДАЕМ атаку: если её вырубили/понизили вес — перезапускаем, чем
 		-- держим её постоянно доминирующей и заставляем AnimationPlayed по ней срабатывать
@@ -3569,7 +3717,7 @@ end
 -- [V79] КОРЕНЬ КРАША НАЙДЕН: send-хук исполняется на СЕТЕВОМ потоке игры, а НЕ на потоке
 -- Luau VM. Luau VM однопоточный — любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
 -- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан дел��л
--- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый новый pid → rehash на сетевом потоке
+-- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый ��овый pid → rehash на сетевом потоке
 -- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трога��т Lua-таблицы в
 -- хуке — только C-операции над пакетом. Поэтому он и не крашит.
 -- ФИКС: счётчики — ПРЕДВЫДЕЛЕННЫЙ массив на 256 слотов (0..255), в хуке тольк�� IN-PLACE
@@ -3691,7 +3839,7 @@ end
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
 -- ��ак пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
--- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬНО реплицировался ему
+-- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬ��О реплицировался ему
 -- от твоего главного. Свингни ��а главном — и в дебаге второго аккаунта увидишь, что
 -- ему пришло: реальная атака, decoy-idle, или (если raknet-rewrite заработает) только idle.
 -- Это и есть объективная проверка desync с ��очки зрения противника.
@@ -4281,9 +4429,22 @@ local function enforceFaceLock()
 	if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
 end
 
-RunService.RenderStepped:Connect(function(dt)
+-- [V93] ОТРИСОВКА визуалов — на Heartbeat, НЕ на RenderStepped.
+-- Причина бага «визуал плывёт под шифтлоком»: SmoothShiftLock (дамп Packages/SmoothShiftLock)
+-- правит Camera.CFrame каждый кадр в RenderStepped. Наш прежний RenderStepped:Connect работал
+-- в ТОЙ ЖЕ фазе и проецировал WorldToViewportPoint по камере, которую шифтлок в этот же кадр
+-- ещё домётывал → 2D-точки отставали от реально отрендеренной камеры на кадр → при повороте
+-- (шифтлок) дровинги сдвигались/дрожали. Heartbeat идёт уже ПОСЛЕ рендера — камера
+-- зафиксирована, проекция стабильна (к тому же сам VictimHitboxService игры тоже на Heartbeat).
+RunService.Heartbeat:Connect(function(dt)
 	local ok = pcall(vizUpdate, dt)
 	if not ok then vizHideAll() end
+end)
+
+-- enforceFaceLock ОСТАЁТСЯ в RenderStepped: это не отрисовка, а удержание HRP против AutoRotate,
+-- и он должен переигрывать шифтлок каждый рендер-кадр (иначе персонаж дёргался бы). По умолчанию
+-- BoxingCounter/faceLock не активны, так что на визуал под шифтлоком это не влияет.
+RunService.RenderStepped:Connect(function()
 	pcall(enforceFaceLock)
 end)
 
