@@ -208,7 +208,7 @@ local Config = {
 	-- [V66] LIVE-таймер контакта для придержанных тяжёлых. Раньше remaining тикал
 	-- по стенным часам (contact0 - elapsed), а продление ����рабатывало ТОЛЬКО при
 	-- полном стойле анимации (ChargeStallMs). Если враг держит M2 плавно-замедленной
-	-- (TimePosition ползёт по чуть-чуть), стойл не детекти��������ся → contactAbs тикал к
+	-- (TimePosition ползёт по чуть-чуть), стойл не детекти����������ся → contactAbs тикал к
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
 	-- контакт считается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
@@ -261,11 +261,9 @@ local Config = {
 	AP_M1Delay        = 0.32,   -- CombatConfig M1.DefaultHitboxDelay (долёт нашего M1)
 	AP_M2Stun         = 1.0,    -- CombatConfig ParryStun.M2 (стан после M2-парри)
 	AP_M1Stun         = 0.5,    -- оценка стана после M1-парри (RecoveryLockout врага)
-	AP_M1Gap          = 0.34,   -- анти-спам между нашими M1
-	AP_Recovery       = 0.42,   -- наш attack-lockout после M1 (RecoveryLockout 0.4 + запас)
+	AP_PollGap        = 0.05,   -- [V99] троттл поллинга tryM1 (НЕ рейт-лимит; игра сама держит 0.45с)
 	AP_FaceHold       = 0.35,   -- сколько держать лицо на цели после выстрела M1
 	AP_InterruptMargin= 0.05,   -- запас времени для решения «успеем перебить»
-	AP_HoldDur        = 0.12,   -- [V98] длительность удержания Hold("Start")→Hold("Stop") (эмуляция клика ЛКМ)
 
 	-- [V98] реагировать только когда руки одеты (Equip==true). Иначе сервер всё равно
 	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-платформенно.
@@ -808,7 +806,7 @@ local function attackerYawRate(aHRP, flatLook)
 	return rate, prevLook
 end
 
--- ─────���───────────────────────────────────────────────────────────────────────
+-- ��────���───────────────────────────────────────────────────────────────────────
 -- [V93] GROUND-TRUTH ХИТБОКСЫ — фундамент нового High-режима.
 -- Игровой VictimHitboxServiceClient (декомпилирован из дампа) каждый Heartbeat идёт по
 -- workspace.Hitboxes: активный удар = BasePart с детьми Owner/AttackName (StringValue) и
@@ -1044,7 +1042,7 @@ local function willHitMe(th)
 	local faceDotPred = predLook:Dot(toMe)
 
 	-- [V88] SNAP-TURN FEINT: враг закоммитил свинг и АКТИВНО доворачивается на нас. Серверный
-	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спиной» = реальная
+	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спиной» = р��альная
 	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
 	-- текущий (rawDot) → он поворачивается в нашу сторону. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
@@ -1145,7 +1143,7 @@ local function willHitMe(th)
 					return false
 				end
 			end
-			-- дальность/глубина от origin атакующего вдоль его facing: центр парта ≈ forward,
+			-- дальность/глубина от origin а��акующего вдоль его facing: центр парта ≈ forward,
 			-- полуглубина = realSz.Z/2 (фолбэк — старые Config-границы), полуширина = realSz.X/2.
 			local halfW   = (realSz and realSz.X * 0.5 or (Config.HitHalfWidth or 4)) + slack
 			local depthF  = (realSz and (forward + realSz.Z * 0.5) or (forward + (Config.HitboxDepth or 0))) + slack
@@ -1928,7 +1926,7 @@ end
 -- Wrestling M2 (гарантированный захват, см. M2GrabTargetForwardOffset в CombatConfig). Их
 -- нельзя блокнуть, спасает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
 -- ._isSuppressed гасит урон при IFRAMES/Ragdoll/Downed/UltraInstinct). Список собираем по
--- стилю/типу через Config.MustDodgeStyles (расширяется ��ез правки движка) + живой сигнал по
+-- стилю/��ипу через Config.MustDodgeStyles (расширяется ��ез правки движка) + живой сигнал по
 -- атрибуту атакующего, если игра е��о выставит в момент замаха.
 local function isMustDodge(th)
 	if not th then return false end
@@ -1955,24 +1953,25 @@ local function isMustDodge(th)
 	return false
 end
 
--- ============================ AutoPlay addon (V97) ============================
--- Автоатака на основе фактов из дампа (CombatConfig):
---   • ParryStun.M2 = 1.0с        — жертва M2-парри застанена 1с (окно добивания);
---   • M1.DefaultHitboxDelay=0.32 — НАШ M1 долетает через 0.32с после ServerCheck;
---   • M1.RecoveryLockout=0.4     — наш лок после M1; DefaultHitboxForwardOffset=4 — реч;
---   • M1 fire wire (CombatRemoteClient.Fire): Server:FireServer({Type="Combat",
---       Action="M1", Func="ServerCheck"}, swingId) — сервер строит хитбокс по нашему
---       HRP LookVector в момент ServerCheck (как M2 boxing-counter, который уже работает).
+-- ============================ AutoPlay addon (V99) ============================
+-- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Факты из дампа (CombatConfig.ClientPredict.M1):
+--   • ParryStun.M2 = 1.0с                    — жертва M2-парри застанена 1с (окно добивания);
+--   • AttackDuration = 0.45с                 — реальный рейт M1 (tryM1 сам гейтит по нему, u21);
+--   • LocalParryAttackLockoutSeconds = 0.15с — после НАШЕГО парри tryM1 залочен 0.15с (u32);
+--   • LocalBlockAttackLockoutSeconds = 0.15с — после блока/гардбрейка (u33);
+--   • DefaultHitboxDelay = 0.32с             — хитбокс M1 долетает через 0.32с (для interrupt-расчёта).
+-- tryM1() = ровно то, что делает v1.OnM1Activated (игровой клик): проигрывает верную анимацию
+-- комбо, сам проверяет ВСЕ кулдауны/атрибуты, шлёт ServerCheck с правильным внутренним u25.
+-- Никаких hold/задержек: зовём напрямую → мгновенно и легитно. Бьём как только tryM1 разрешит.
 --   • iframe/hyperarmor-стили (boxing M2GrantsIFrames, wrestling M2GrantsHyperArmor)
 --       перебить НЕЛЬЗЯ — их только парировать.
 -- Всё состояние И функции держим на State.ap — модуль впритык к лимиту 200 локалов на функцию,
 -- поэтому НИ ОДНОГО нового top-level local (это переполняло регистры → CompileError).
 State.ap = {
-	m1         = nil,    -- кэш РОДНОГО модуля M1 игры (return-таблица v1 с .Hold/.OnM1Activated)
+	m1         = nil,    -- кэш РОДНОГО модуля M1 игры (return-таблица v1 с .OnM1Activated)
+	tryM1Fn    = nil,    -- сам локальный tryM1() (upvalue #1 в OnM1Activated) — даёт bool «свингнул ли»
 	m1Tried    = false,  -- уже пытались резолвить модуль (не спамить резолв каждый кадр)
-	holdActive = false,  -- сейчас держим M1.Hold("Start") и ждём авто-Stop
-	nextM1At   = 0,      -- локальный анти-спам между нашими M1
-	busyUntil  = 0,      -- наш attack-lockout после M1 (пока идёт свинг+recovery)
+	nextM1At   = 0,      -- анти-спам ПОЛЛА (сам tryM1 гейтит настоящий рейт по AttackDuration 0.45с)
 	punishTgt  = nil,    -- модель врага, которого добиваем после парри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
 	blatantId  = 0,      -- счётчик для RAW ServerCheck (только тест-режим Blatant)
@@ -1983,11 +1982,15 @@ State.ap = {
 	},
 }
 
--- Резолвим РОДНОЙ модуль M1 игры, чтобы бить его же публичным API Hold("Start")/Hold("Stop")
--- (это ровно то, что делает игровой обработчик мыши: играется анимация, идёт полный серверный
--- хендшейк HoldActivated→ServerCheck с ПРАВИЛЬНЫМ внутренним swingId u25). Наш прежний прямой
--- ServerCheck с выдуманным id сервер игнорировал (нет M1Hold/анимации/сессии) → атака «не работала».
--- Модули боёвки лежат в Hidden, поэтому: (1) путь-require, (2) глубокий поиск, (3) filtergc по ключам.
+-- Резолвим РОДНОЙ модуль M1 игры и его ЛОКАЛЬНУЮ tryM1(). Бьём через tryM1() напрямую —
+-- это ровно то, что делает игровой обработчик клика (v1.OnM1Activated просто вызывает tryM1):
+-- проигрывает ПРАВИЛЬНУЮ анимацию комбо (u19 1→4), сам проверяет ВСЕ кулдауны/атрибуты
+-- (Equip, Blocking, u21=AttackDuration 0.45с, u32=parry-lockout 0.15с, u33=block-lockout, стан…)
+-- и шлёт ServerCheck с ПРАВИЛЬНЫМ внутренним swingId u25. Никаких задержек/hold — мгновенно и легит.
+-- tryM1 возвращает true, если свинг реально прошёл (у нас есть точный сигнал успеха).
+-- Прежний прямой ServerCheck с выдуманным id сервер игнорировал (нет анимации/сессии). Hold-эмуляция
+-- тоже плоха — она ждёт серверный hold-хендшейк (встроенная задержка). Модули в Hidden →
+-- (1) путь-require, (2) глубокий поиск, (3) filtergc по ключам. tryM1 достаём debug.getupvalue.
 function State.ap.getM1()
 	if State.ap.m1 then return State.ap.m1 end
 	if State.ap.m1Tried then return nil end
@@ -2009,17 +2012,25 @@ function State.ap.getM1()
 	end
 	if mod then
 		local ok, tbl = pcall(require, mod)
-		if ok and type(tbl) == "table" and type(tbl.Hold) == "function" then State.ap.m1 = tbl end
+		if ok and type(tbl) == "table" and type(tbl.OnM1Activated) == "function" then State.ap.m1 = tbl end
 	end
 	-- filtergc-фолбэк: находим return-таблицу v1 по её характерному набору методов
 	if not State.ap.m1 and type(filtergc) == "function" then
 		pcall(function()
 			local t = filtergc("table",
 				{ Keys = { "Hold", "OnM1Activated", "ServerResponse", "OnHoldSwing" } }, true)
-			if type(t) == "table" and type(t.Hold) == "function" then State.ap.m1 = t end
+			if type(t) == "table" and type(t.OnM1Activated) == "function" then State.ap.m1 = t end
 		end)
 	end
-	if State.ap.m1 then diagPush("AUTOPLAY: M1 module resolved (legit attacks ready)")
+	-- достаём локальную tryM1(): её единственный upvalue #1 в OnM1Activated (даёт bool успеха)
+	if State.ap.m1 and type(debug) == "table" and type(debug.getupvalue) == "function" then
+		pcall(function()
+			local fn = debug.getupvalue(State.ap.m1.OnM1Activated, 1)
+			if type(fn) == "function" then State.ap.tryM1Fn = fn end
+		end)
+	end
+	if State.ap.m1 then diagPush("AUTOPLAY: M1 module resolved (legit attacks ready)"
+		.. (State.ap.tryM1Fn and " +tryM1" or " (OnM1Activated only)"))
 	else diagPush("AUTOPLAY: M1 module NOT found — attacks disabled") end
 	return State.ap.m1
 end
@@ -2075,35 +2086,37 @@ function State.ap.snapTo(hrp)
 	end
 end
 
--- послать один ЛЕГИТНЫЙ M1 по цели: снап ли��ом + эмуляция клика через родной модуль M1.
--- Hold("Start") → игра играет анимацию, шлёт HoldActivated, сервер отвечает и вызывает
--- OnM1Activated → tryM1 → ServerCheck(правильный u25). Hold("Stop") завершает удержание.
--- Это идентично реальному нажатию ЛКМ, поэтому урон засчитывается и всё синхронно с игрой.
+-- послать ЛЕГИТНЫЙ M1 по цели: снап лицом + прямой вызов родной tryM1() (или OnM1Activated).
+-- БЕЗ собственных лок/задержек — игровая tryM1 сама разрешит удар как только это допустимо
+-- (AttackDuration/lockout/стан). Наш nextM1At — лишь троттл ПОЛЛА, чтобы не звать tryM1 сотни
+-- раз в кадр; настоящий рейт держит игра. Поэтому добивание/перебивание бьёт МГНОВЕННО, как
+-- только сервер снимает лок (напр. 0.15с parry-lockout после нашего парри).
 function State.ap.fireM1(model, why)
 	local ap = State.ap
 	local now = os.clock()
-	if now < ap.nextM1At or now < ap.busyUntil or ap.holdActive then return false end
+	if now < ap.nextM1At then return false end
 	if not ap.canAttack() then return false end
 	local m1 = ap.getM1()
 	if not m1 then return false end
 	local hrp = model and model:FindFirstChild("HumanoidRootPart")
 	if not hrp then return false end
-	ap.snapTo(hrp)
-	local ok = pcall(function() m1.Hold("Start") end)
-	if not ok then return false end
-	ap.holdActive = true
-	local holdDur = Config.AP_HoldDur or 0.12
-	task.delay(holdDur, function()
-		pcall(function() m1.Hold("Stop") end)
-		State.ap.holdActive = false
-	end)
-	ap.nextM1At  = now + (Config.AP_M1Gap or 0.34)
-	ap.busyUntil = now + (Config.AP_Recovery or 0.42)
-	State.status     = "AUTO-M1"
-	State.flashUntil = now + 0.2
-	State.autoM1Count = (State.autoM1Count or 0) + 1
-	diagPush(("AUTOPLAY t=%.2f  M1 → %s  (%s)"):format(now, (model and model.Name) or "?", why or "?"))
-	return true
+	ap.snapTo(hrp)   -- сервер строит хитбокс по нашему LookVector в момент ServerCheck
+	ap.nextM1At = now + (Config.AP_PollGap or 0.05)   -- лёгкий троттл поллинга (не рейт-лимит удара)
+	local swung = false
+	if ap.tryM1Fn then
+		local ok, res = pcall(ap.tryM1Fn)   -- true = свинг реально прошёл
+		swung = ok and res == true
+	else
+		pcall(function() m1.OnM1Activated() end)   -- фолбэк: без сигнала успеха
+		swung = true
+	end
+	if swung then
+		State.status      = "AUTO-M1"
+		State.flashUntil  = now + 0.2
+		State.autoM1Count = (State.autoM1Count or 0) + 1
+		diagPush(("AUTOPLAY t=%.2f  M1 → %s  (%s)"):format(now, (model and model.Name) or "?", why or "?"))
+	end
+	return swung
 end
 
 -- RAW-удар БЕЗ анимации для тест-режима Blatant: прямой ServerCheck по Remotes.Server.
@@ -2130,16 +2143,16 @@ function State.ap.onPerfectParry(attackerName, kind)
 	State.ap.punishUntil = os.clock() + stun
 end
 
--- шаг добивания (каждый Heartbeat из schedulerStep, ТОЛЬКО когда нет угроз для блока)
+-- шаг добивания (каждый Heartbeat из schedulerStep, ТОЛЬКО когда нет угроз для блока).
+-- Спамим fireM1 весь стан-window — игровая tryM1 сама решит, когда реально ударить (снимет
+-- 0.15с parry-lockout → бьём сразу, потом каждые ~0.45с AttackDuration, пока враг в стане).
 function State.ap.step(now)
 	if not Config.AutoPlay or Config.AP_PunishOnParry == false then return end
 	local ap = State.ap
 	local tgt = ap.punishTgt
 	if not tgt then return end
 	local hum = tgt.Parent and tgt:FindFirstChildOfClass("Humanoid")
-	-- последний M1 должен УСПЕТЬ приземлиться в стан: режем окно на время долёта (delay+ping)
-	local landLead = (Config.AP_M1Delay or 0.32) + getPing() + 0.03
-	if (not hum) or hum.Health <= 0 or now > (ap.punishUntil - landLead) then
+	if (not hum) or hum.Health <= 0 or now > ap.punishUntil then
 		ap.punishTgt = nil
 		return
 	end
