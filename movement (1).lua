@@ -466,12 +466,16 @@ return function(Lib, Core)
     -- re-set them). tryM1 refuses while any of these are truthy on the character.
     local GATE_ATTRS = { "M1Cooldown", "M1", "CantAnything", "CannotAttack", "Stunned",
                          "Attacking", "Casting", "ComboCooldown" }
+    -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs крутится
+    -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
+    -- атрибут = до 8 closure/кадр = лишний GC. Персистентная fn не аллоцирует ничего.
+    local function _clearAttr(c, a) c:SetAttribute(a, nil) end
     local function clearGateAttrs()
         if not (Config.NoDelay_On and Config.NoDelay_Attrs) then return end
         local c = LocalPlayer.Character
         if not c then return end
         for _, a in ipairs(GATE_ATTRS) do
-            if c:GetAttribute(a) ~= nil then pcall(function() c:SetAttribute(a, nil) end) end
+            if c:GetAttribute(a) ~= nil then pcall(_clearAttr, c, a) end
         end
     end
 
@@ -527,15 +531,21 @@ return function(Lib, Core)
         end
         return sprintSingleton
     end
+    -- [V111] PERF: персистентные fn для pcall БЕЗ аллокации замыкания. _assertDesired крутится
+    -- КАЖДЫЙ Heartbeat пока Sprint включён — прежний `pcall(function() ... end)` = closure/кадр.
+    local function _desireOn(s)  s:SetSprintInputDesired(true)  end
+    local function _desireOff(s) s:SetSprintInputDesired(false) end
+    local function _startSprint(s) s:StartSprint() end
+    local function _stopSprint(s)  s:StopSprint()  end
     local function setSprint(on)
         local s = getSprint(); if not s then return false end
         if on then
-            pcall(function() s:SetSprintInputDesired(true) end)
-            pcall(function() s:StartSprint() end)
+            pcall(_desireOn, s)
+            pcall(_startSprint, s)
         else
-            pcall(function() s:SetSprintInputDesired(false) end)
+            pcall(_desireOff, s)
             -- StopSprint(self, playCooldown, fromCancel); no extra args = clean stop
-            pcall(function() s:StopSprint() end)
+            pcall(_stopSprint, s)
         end
         return true
     end
@@ -559,7 +569,7 @@ return function(Lib, Core)
         if Config.Sprint_On then
             local s = getSprint()
             if s and rawget(s, "_sprintInputDesired") ~= true then
-                pcall(function() s:SetSprintInputDesired(true) end)
+                pcall(_desireOn, s)
             end
         end
     end)
