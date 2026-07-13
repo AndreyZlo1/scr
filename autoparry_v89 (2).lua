@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -208,7 +206,7 @@ local Config = {
 	-- [V66] LIVE-таймер контакта для придержанных тяжёлых. Раньше remaining тикал
 	-- по стенным часам (contact0 - elapsed), а продление ����рабатывало ТОЛЬКО при
 	-- полном стойле анимации (ChargeStallMs). Если враг держит M2 плавно-замедленной
-	-- (TimePosition ползёт по чуть-чуть), стойл не детекти����������ся → contactAbs тикал к
+	-- (TimePosition ползёт по чуть-чуть), стойл не детекти������������ся → contactAbs тикал к
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
 	-- контакт считается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
@@ -261,7 +259,7 @@ local Config = {
 	AP_M1Delay        = 0.32,   -- CombatConfig M1.DefaultHitboxDelay (долёт нашего M1)
 	AP_M2Stun         = 1.0,    -- CombatConfig ParryStun.M2 (стан после M2-парри)
 	AP_M1Stun         = 0.5,    -- оценка стана после M1-парри (RecoveryLockout врага)
-	AP_PollGap        = 0.05,   -- [V99] троттл поллинга tryM1 (НЕ рейт-лимит; игра сама держит 0.45с)
+	AP_PollGap        = 0.03,   -- [V100] троттл поллинга tryM1 (НЕ рейт-лимит; игра сама держит 0.45с) — ниже = быстрее реакция
 	AP_FaceHold       = 0.35,   -- сколько держать лицо на цели после выстрела M1
 	AP_InterruptMargin= 0.05,   -- запас времени для решения «успеем перебить»
 
@@ -412,7 +410,7 @@ local Config = {
 	Key_LogDump   = Enum.KeyCode.L,
 	Key_Save      = Enum.KeyCode.P,
 	Key_ACScan    = Enum.KeyCode.O,
-	Key_DesyncSave = Enum.KeyCode.Semicolon,     -- [V75] ; → сохранить desync-дебаг в файл
+	Key_DesyncSave = Enum.KeyCode.Semicolon,     -- [V75] ; → сохр��нить desync-дебаг в файл
 	Key_DesyncScan = Enum.KeyCode.Quote,         -- [V75] ' → запустить raknet скан-сессию
 	Key_DesyncTest = Enum.KeyCode.LeftBracket,   -- [V76] [ → тест-режим: постоянно реплицировать АТАКУ пока стоишь
 	Key_DesyncMode = Enum.KeyCode.RightBracket,  -- ] → циклить: delay → firedelay → idlemask → prerun
@@ -1086,21 +1084,24 @@ local function willHitMe(th)
 		-- [V93] HeavyTrust (радиусное доверие тяжёлым) — ТОЛЬКО не в High. В High тяжёлый лунж,
 		-- который реально дойдёт, и так ловит предсказанный бокс (predA экстраполируется по
 		-- velocity к нам); летящий мимо — не должен парироваться. Радиус тут = ложняки.
-		if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust and mode ~= "High" then
+		if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
 			local heavyRange = Config.HeavyTrustRange or 14
 			if dist <= heavyRange then
 				local aV       = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
 				local toMeUnit = (dist > 0.05) and toMe or flatLook
 				local closing  = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit) -- >0 = идёт на нас
-				-- [V90.5] Low: доверяем по сближению ИЛИ грубому facing (щедро).
-				-- High: тяжёлый лунж доверяем ТОЛЬКО если он И сближается, И реально нацелен в нас
-				-- (predFacing в узком конусе HeavyHighFaceMin). Прежде в High хватало одного
-				-- closing → парри на любой хэви, летящий мимо в нашу сторону (ложняки). Теперь
-				-- лунж, направленный не в нас, в High не проходит — ловится только геометрией.
+				-- [V100] Low: доверяем по сближению ИЛИ грубому facing (щедро).
+				-- High: РАНЬШЕ требовалось И сближение, И facing (closingOk AND faceOk) → СТОЯЧИЙ,
+				-- но нацеленный на нас тяжёлый лунж (в логе spousespartner M2 dist=13, vlead=0)
+				-- отбраковывался как never-in-hitbox → мы ели размен. Дамп: у M2 больший/лунж-хитбокс
+				-- (server part child.Size + GetHitboxSizeMultiplier), а M2 закрывает дистанцию в
+				-- замахе. Теперь High доверяет тяжёлому, если он ЛИБО сближается, ЛИБО реально нацелен
+				-- в нас (facing-конус HeavyHighFaceMin). Лунж, направленный МИМО и не идущий на нас,
+				-- по-прежнему отсекается. Лишний блок ненаправлен и безвреден, пропущенный хэви — нет.
 				local closingOk = closing > (Config.HeavyClosingMin or 6)
 				local trustHeavy
 				if mode == "High" then
-					trustHeavy = closingOk and (faceDotPred >= (Config.HeavyHighFaceMin or 0.5))
+					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyHighFaceMin or 0.5))
 				else
 					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyFaceMin or -0.30))
 				end
@@ -2157,6 +2158,16 @@ function State.ap.step(now)
 		return
 	end
 	if ap.flatDist(tgt) > ap.reach() then return end   -- вне досягаемости — не бьём воздух
+	-- [V100] МГНОВЕННОЕ добивание: сразу после парри мы ещё держим guard (Blocking), а fireM1
+	-- самогейтится на Blocking→не бьёт → терялось ~0.12-0.2с окна стана. Т.к. угроз нет (step
+	-- вызван при #imminent==0) и цель застанена — безопасно уронить guard ЭТОТ кадр, чтобы
+	-- со следующего поллинга (через AP_PollGap) tryM1 уже свингнул. Экономит весь HoldAfter.
+	if State.blocking then
+		State.blocking, State.holdUntil = false, 0
+		stopBlockAnim()
+		pcall(sendDeactivate, true)
+		return
+	end
 	ap.fireM1(tgt, "punish")
 end
 
@@ -2828,7 +2839,7 @@ local function schedulerStep(now)
 	-- canDodgeNow()==true, а это ровно то, что ложно, когда мы залочены (в своей атаке /
 	-- софт-стане). Срабатывает только если: нормальный додж запрещён ��офт-состоянием
 	-- (canDodgeNow(false)=false), но форс бы прошёл (canDodgeNow(true)=true), мы не можем
-	-- блокнуть, и удар входит в окно. Тогда форсим дэш-инпут поверх игровой блокировки.
+	-- блокнуть, и удар входит в окно. Тогда форсим дэш-инпут поверх и��ровой блокировки.
 	if Config.SkillAddon and Config.SA_BlatantDodge and dodgeReady() and #imminent >= 1 then
 		local a  = imminent[1]
 		local dt = a.contactAbs - now
@@ -2980,7 +2991,9 @@ local function schedulerStep(now)
 	-- [V97] AutoPlay: перебивание ОДИНОЧНОЙ тяжёлой обычным M1 (вместо парри). Только вне
 	-- мультибоя и только когда наш удар гарантированно застанит их раньше их хитбокса (и��аче
 	-- парируем как обычно). iframe/hyperarmor-тяжёлые и грэбы сюда не проходят (tryInterruptHeavy).
-	if wantBlock and not multiThreat and not State.blocking then
+	-- [V100] boxing-counter имеет ПРИОРИТЕТ над AutoPlay-перебиванием: для boxing-стиля counter
+	-- (M2 с iframes) — это и есть лучший «панишинг», поэтому не даём M1-interrupt перехватить его.
+	if wantBlock and not multiThreat and not State.blocking and not shouldBoxingCounter(wantBlock) then
 		if State.ap.tryInterruptHeavy(wantBlock, now, wantBlock.contactAbs - now) then
 			setFaceGoal(wantBlock.attackerHRP, true, (wantBlock.contactAbs - now) + 0.1)
 			return
@@ -3084,9 +3097,12 @@ local function schedulerStep(now)
 		end
 	end
 
-	-- [V97] AutoPlay: добивание застаненного врага — ТОЛЬКО когда нет угроз для блока и мы не
-	-- держим guard (защита в приоритете). Окно/дистанция/долёт-в-стан проверяются в State.ap.step.
-	if Config.AutoPlay and not wantBlock and not State.blocking and #imminent == 0 then
+	-- [V100] AutoPlay: добивание застаненного врага — когда НЕТ угроз для блока. Убрали гейт
+	-- `not State.blocking`: step сам уронит guard первым кадром (враг застанен, угроз нет →
+	-- безопасно), а fireM1 самогейтится на Blocking. Так добивание стартует сразу после парри,
+	-- не дожидаясь истечения HoldAfter. Защита всё равно в приоритете: step идёт только при
+	-- #imminent==0 и not wantBlock, т.е. когда парировать/блокировать сейчас нечего.
+	if Config.AutoPlay and not wantBlock and #imminent == 0 then
 		State.ap.step(now)
 	end
 end
@@ -4107,7 +4123,7 @@ end
 -- не трогает па����еты (ни Drop, ни SetData), только считает PacketId. Максимально
 -- безопасно и мин��мально по работе на пакет — как в андетект-примере.
 -- [V79] КОРЕНЬ КРАША НАЙДЕН: send-хук исполняется на СЕТЕВОМ потоке игры, а НЕ на потоке
--- Luau VM. Luau VM однопоточный — любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
+-- Luau VM. Luau VM однопоточный �� любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
 -- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан дел��л
 -- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый ��овый pid → rehash на сетевом потоке
 -- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трога��т Lua-таблицы в
@@ -4165,7 +4181,7 @@ end
 
 -- [V80] RAKNET-ХУК ЖЁСТКО ОТКЛЮЧЁН. Причина (подтверждена анализом дампов игры):
 --   • В клиентских дампах НЕТ ни одного Lua-анти-чита, сканирующего хуки — значит краш
---     вызывает НЕ игровой скрипт, который можно "выпилить".
+--     вызывает НЕ игрово�� скрипт, который можно "выпилить".
 --   • Краш происходит В МОМЕНТ raknet.add_send_hook (мгновенно, до первого пакета) →
 --     это native-защита клиента Roblox (Hyperion/Byfron), а не Lua. Её нельзя убрать
 --     правкой игровых скриптов. Поэтому и "популяр��ый desync-скрипт" тоже крашил на F.
@@ -5314,4 +5330,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
