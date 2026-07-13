@@ -5463,15 +5463,16 @@ return function(_Lib, _Core)
 			set = function(v) Config.DodgeHeavy = v end,
 			Desc = "dodge EVERY heavy attack instead of blocking\nnot recommended — burns i-frames",
 		})
+        apDodge:Divider()
 		boolToggle(apDodge, "Dodge If Cant Parry", "Dodge If Cant Parry",
 			function() return Config.DodgeOnParryCooldown ~= false end,
 			function(v) Config.DodgeOnParryCooldown = v end)
-		apDodge:SubLabel({ Text = "dodge when block is on cooldown / cant parry in time\nOFF = eat the hit instead (unblockable must-dodge unaffected)" })
+		apDodge:SubLabel({ Text = "dodge when block is on cooldown" })
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		apDodge:SubLabel({ Text = "roll away from the attacker instead of a fixed direction" })
 		boolToggle(apDodge, "Face-Gate Block", "Face-Gate Block",
 			function() return Config.FaceGateBlock ~= false end, function(v) Config.FaceGateBlock = v end)
-		apDodge:SubLabel({ Text = "dont waste a block (and its 0.5s cooldown) pressing while facing away\nwait for the turn — block is directional, the server rejects back-facing parries" })
+		apDodge:SubLabel({ Text = "dont waste a block pressing while facing away" })
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Dodge Tuning" })
@@ -5486,7 +5487,7 @@ return function(_Lib, _Core)
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
 			Min = 6, Max = 24, Suffix = " st", Callback = function(v) Config.HeavyTrustRange = v end })
-		apDodge:SubLabel({ Text = "how close a heavy must be before we fully trust it (lunges are caught farther out automatically)" })
+		apDodge:SubLabel({ Text = "how close a heavy must be before we fully trust it" })
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Must-Dodge List" })
@@ -5587,15 +5588,14 @@ return function(_Lib, _Core)
 			Title = "AutoPlay", Flag = "AP_AutoPlay",
 			get = function() return Config.AutoPlay end,
 			set = function(v) Config.AutoPlay = v end,
-			Desc = "aggressive addon: auto-M1 a stunned enemy after ur perfect parry\nmaster switch for the stuff below",
+			Desc = "autoplay addon idk",
 		})
 
 		apPlay:Divider()
 		apPlay:Header({ Name = "Behaviour" })
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
-	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
-	apPlay:SubLabel({ Text = "note: our M1 always uses the fast custom builder (bypasses the 450ms throttle)" })
+	apPlay:SubLabel({ Text = "instant m1 after perfect parry" })
 
 	apPlay:Divider()
 			apPlay:Header({ Name = "Combo" })
@@ -5611,7 +5611,7 @@ return function(_Lib, _Core)
 			apPlay:SubLabel({ Text = "Follow = natural combo 1→2→3→4→1.  Fixed = always throw one chosen hit" })
 			slider(apPlay, { Name = "Fixed Combo Hit", Flag = "AP_FixedHit", Default = Config.AP_FixedHit or 1,
 				Min = 1, Max = 4, Callback = function(v) Config.AP_FixedHit = v end })
-			apPlay:SubLabel({ Text = "which hit of the 4-move combo to throw (only used in Fixed mode)" })
+			apPlay:SubLabel({ Text = "which hit of the 4-move combo to throw (fixed mode)" })
 			apPlay:Button({
 				Name = "Test Swing",
 				Callback = function()
@@ -5624,13 +5624,13 @@ return function(_Lib, _Core)
 					end
 				end,
 			})
-			apPlay:SubLabel({ Text = "fires one M1 right now with the combo animation the script would use (Fixed hit, or next in sequence)" })
+			apPlay:SubLabel({ Text = "fires one M1 rn" })
 
 		apPlay:Divider()
 			apPlay:Header({ Name = "Tuning" })
 			slider(apPlay, { Name = "M1 Rate", Flag = "AP_MaxPerSec", Default = Config.AP_MaxPerSec or 6,
 				Min = 3, Max = 8, Suffix = " /s", Callback = function(v) Config.AP_MaxPerSec = v end })
-			apPlay:SubLabel({ Text = "swings per second, spread evenly (fills the whole stun window)\n6 = safe server ceiling; 7-8 hits harder but is more detectable" })
+			apPlay:SubLabel({ Text = "swings per second, bypasses game limit (its 4)" })
 			slider(apPlay, { Name = "M1 Reach", Flag = "AP_BaseReach", Default = Config.AP_BaseReach or 5.5,
 				Min = 3, Max = 10, Precision = 1, Suffix = " st", Callback = function(v) Config.AP_BaseReach = v end })
 	apPlay:SubLabel({ Text = "scaled by ur character height automatically" })
@@ -5675,7 +5675,7 @@ return function(_Lib, _Core)
 		slider(apVis, { Name = "Visual FPS Cap", Flag = "AP_VizMaxFPS",
 			Default = Config.VizMaxFPS or 60, Min = 15, Max = 240, Suffix = " fps",
 			Callback = function(v) Config.VizMaxFPS = v end })
-		apVis:SubLabel({ Text = "caps how often the ESP redraws (not ur game fps)\nlower = more fps headroom; 60 looks perfectly smooth" })
+		apVis:SubLabel({ Text = "caps how often the visuals redraws" })
 
 		apVis:Divider()
 		apVis:Header({ Name = "Colors" })
