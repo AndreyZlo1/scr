@@ -1,5 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -148,9 +146,11 @@ local Config = {
 	UplinkMax     = 0.500,
 	PingSmooth    = 0.25,
 	PingCap       = 0.500,
-	-- [V93] peak-hold пинга: Data Ping проседает (в диаг видели ping=60 при реальных ~195) и
-	-- занижал компенсацию → LATE. Держим пик RTT это окно (сек), затем плавно распускаем к текущему.
-	PingPeakHold  = 1.5,
+	-- [V96] МЯГКИЙ peak-hold. Было 1.5с — держал случайный спайк как «пол» лишние ~секунды и
+	-- завышал lead (в логе ping латчил 180 при среднем ~120). Теперь короткий hold + частичный
+	-- вес пика (PingPeakWeight), чтобы спайк не уходил в lead целиком. Сглаживает без залипания.
+	PingPeakHold  = 0.4,
+	PingPeakWeight = 0.5,   -- сколько от (пик−EMA) добавлять к эффективному RTT (0=только EMA, 1=весь пик)
 
 	MoveLeadMax   = 0.045,
 	MoveSpeedFull = 22,
@@ -208,8 +208,10 @@ local Config = {
 	-- контакт считается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
 	-- (hitTL - tp) / max(liveSpeed, floor). При замедлении окно едет с ударом.
 	LiveHeavyTimer    = true,
-	LiveSpeedFloor    = 0.15,   -- ниже этой д����ли номин����ла скорость не сч����������������������������������та��м (антидел/0)
+	LiveSpeedFloor    = 0.15,   -- ниже этой доли номинала скорость не считаем (антидел/0)
 	LiveSpeedSmooth   = 0.35,   -- EMA-сглаживание измеренной скорости прогресса
+	LiveM1Timer       = true,   -- [V96] live-TP коррекция и для M1 (лечит скачки predErr на M1)
+	LiveM1SpeedFloor  = 0.45,   -- пол скорости для M1 выше (короткий трек → агрессивнее гасим шум)
 
 	-- [V66] ЭКСТРЕННЫЙ ДОДЖ двух угроз. Если 2-й контакт прилетает раньше, чем мы
 	-- физически успеваем развернуться к нему + перевзвести перфект, блок 2-го
@@ -579,6 +581,11 @@ local V93 = {
 	byOwner = {},                      -- Owner.Value → { part, ... } за текущий FrameId
 }
 
+-- [V96] Пинг = сглаженный RTT с МЯГКИМ peak-hold. Прежняя версия завышала: держала спайк
+-- PingPeakHold=1.5с как «пол», а потом uplink() ещё раз брал max(getPing, getPingRaw) — двойное
+-- усиление пика → на первых ударах комбо lead был раздут (в логе ping скакал 148→180 и латчил
+-- 180). Теперь: EMA как база, пик держим лишь короткий hold и быстро распускаем к EMA, а uplink
+-- НЕ добавляет второй max с сырым спайком. Это даёт стабильный lead около среднего RTT.
 local function getPing()
 	local raw = getPingRaw()
 	V93.pingEMA = V93.pingEMA + (raw - V93.pingEMA) * Config.PingSmooth
@@ -586,20 +593,21 @@ local function getPing()
 	if raw >= V93.pingPeak then
 		V93.pingPeak, V93.pingPeakAt = raw, now      -- новый пик — фиксируем мгновенно
 	else
-		local hold = Config.PingPeakHold or 1.5
+		local hold = Config.PingPeakHold or 0.4
 		local age = now - V93.pingPeakAt
 		if age >= hold then
-			-- окно удержания вышло: распускаем пик к EMA (не мгновенно, чтобы не дёргать lead)
-			V93.pingPeak = V93.pingPeak + (V93.pingEMA - V93.pingPeak) * math.min((age - hold) * 2, 1)
+			-- окно удержания вышло: быстро распускаем пик к EMA (не мгновенно, но и не залипая)
+			V93.pingPeak = V93.pingPeak + (V93.pingEMA - V93.pingPeak) * math.min((age - hold) * 6, 1)
 		end
 	end
-	return math.min(math.max(V93.pingEMA, V93.pingPeak), Config.PingCap)
+	-- эффективный RTT = EMA, приподнятый к пику лишь частично (не весь спайк идёт в lead)
+	local eff = V93.pingEMA + (V93.pingPeak - V93.pingEMA) * (Config.PingPeakWeight or 0.5)
+	return math.min(eff, Config.PingCap)
 end
 
 local function uplink()
-	-- getPing() уже держит пик RTT; берём максимум с сырым на случай резкого спайка вверх
-	local worst = math.max(getPing(), getPingRaw())
-	return math.clamp(worst * Config.UplinkFactor + Config.UplinkMargin, Config.UplinkMin, Config.UplinkMax)
+	-- опираемся на сглаженный getPing(); БЕЗ повторного max с сырым спайком (это и раздувало lead)
+	return math.clamp(getPing() * Config.UplinkFactor + Config.UplinkMargin, Config.UplinkMin, Config.UplinkMax)
 end
 
 local function localChar() return LocalPlayer.Character end
@@ -1123,6 +1131,14 @@ local function willHitMe(th)
 			local cphi, sphi = math.cos(phi), math.sin(phi)
 			local aimLook = Vector3.new(rawL.X * cphi - rawL.Z * sphi, 0, rawL.X * sphi + rawL.Z * cphi)
 			aimLook = (aimLook.Magnitude > 0.05) and aimLook.Unit or rawL
+			-- [V96] POINT-BLANK доверие (как в LOW-ветке): в упор враг физически достаёт хитбоксом
+			-- НЕЗАВИСИМО от facing, а серверный doворот довершится к контакту. Прежде High жёстко
+			-- резал ближние удары facing-гейтом → в логе валидные комбо-M1 (dist 3–6) падали в
+			-- `MISS never-in-hitbox` → NO-PRESS/поздний блок. Ниже PointBlank сразу доверяем.
+			if dist <= (Config.PointBlank or 3.0) then
+				th.trustedHit = true
+				return true
+			end
 			-- BACK-FACING gate по facing С УЧЁТОМ доворота: даже повернувшись на максимум своей
 			-- угловой скорости, враг не наводится на нас → этим свингом не достанет → мимо.
 			if aimLook:Dot(toMe) < (Config.HighFaceMin or 0.25) then
@@ -1989,7 +2005,20 @@ local function refreshContact(th)
 			th.maxTP = tp; th.trackSeen = true; th.lastAdvanceClock = now
 		end
 
-		if (th.kind == "M2" or th.kind == "SKILL") and playing then
+		-- [V96] Live-TP коррекция теперь И для M1 (раньше только M2/SKILL). M1 предсказывался
+		-- чистым обратным отсчётом contact0-elapsed, без учёта РЕАЛЬНОГО прогресса анимации → при
+		-- desync/ускорении атаки contactAbs уплывал (в логе predErr скакал от -290 до +138ms). Для
+		-- M1 окно короткое, поэтому корректируем через ту же live-скорость, но с более высоким полом
+		-- (M1 редко «придерживают», агрессивный пол убирает шум коротких треков).
+		if th.kind == "M1" and playing and Config.LiveM1Timer ~= false then
+			if tp < th.hitTL - 0.001 then
+				local nominal = math.max(th.initSpeed or 1, 0.05)
+				local floor   = nominal * (Config.LiveM1SpeedFloor or 0.45)
+				local sp      = math.max(th.liveSpeed or nominal, floor)
+				local liveRemain = (th.hitTL - tp) / sp
+				remaining = math.max(remaining, liveRemain)
+			end
+		elseif (th.kind == "M2" or th.kind == "SKILL") and playing then
 			if Config.LiveHeavyTimer and tp < th.hitTL - 0.001 then
 				-- реальная скорость прогресса, но не ниже пола (иначе деление на ~0
 				-- даёт бесконечность, а враг может резко доиграть). Пол = доля от
@@ -2411,7 +2440,7 @@ local function schedulerStep(now)
 				end
 				-- [V95] окно кандидата на поворот РАСШИРЕНО на RTT (up): хард-снап нужен за
 				-- (BlockFaceHardDt + up) до контакта, иначе на высоком пинге кандидат появлялся
-				-- бы слишком поздно и мы прессили бы блок ещё не довернувшись → сервер отклонял.
+				-- бы слишком поздно и мы прессили бы блок ещё не довернувшись → сервер от��лонял.
 				if dt <= (Config.FaceLeadWindow + up) and dt >= -Config.HoldAfter then
 					-- [V65] лицом к тому, кто бьёт СЛЕДУЮЩИМ среди ещё не прилетевших
 					-- ударов (contactAbs >= now). После блока быстро��о разворачиваемся
@@ -2470,10 +2499,12 @@ local function schedulerStep(now)
 					(clusterFirst.contactAbs - now) * 1000, (clusterLast.contactAbs - now) * 1000))
 		end
 
-		-- Pre-emptively fit one dodge to the first contact while every cluster contact is
-		-- inside the same real iframe interval. This is allowed even when block is available.
+		-- [V96] Pre-emptive кластер-додж под первый контакт, пока все контакты в одном iframe-окне.
+		-- ТЕПЕРЬ только если parry невозможен (not canBlockNow): по требованию юзера при доступном
+		-- блоке кластер держим guard'ом + мультиплекс-фейсингом (V95), а НЕ жжём додж. Раньше коммент
+		-- прямо гласил «allowed even when block is available» — это и был лишний додж не по делу.
 		if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
-			and dodgeReady() and canDodgeNow() then
+			and not canBlockNow() and dodgeReady() and canDodgeNow() then
 			local firstDt = clusterFirst.contactAbs - now
 			local iframeLo = Config.DodgeConfirm - 0.03
 			local iframeHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
@@ -2507,7 +2538,7 @@ local function schedulerStep(now)
 
 	-- [V91] BLATANT force-dodge — ОТДЕЛЬНАЯ ветка, потому что блок ниже требует
 	-- canDodgeNow()==true, а это ровно то, что ложно, когда мы залочены (в своей атаке /
-	-- софт-стане). Срабатывает только если: нормальный додж запрещён софт-состоянием
+	-- софт-стане). Срабатывает только если: нормальный додж запрещён ��офт-состоянием
 	-- (canDodgeNow(false)=false), но форс бы прошёл (canDodgeNow(true)=true), мы не можем
 	-- блокнуть, и удар входит в окно. Тогда форсим дэш-инпут поверх игровой блокировки.
 	if Config.SkillAddon and Config.SA_BlatantDodge and dodgeReady() and #imminent >= 1 then
@@ -2546,12 +2577,13 @@ local function schedulerStep(now)
 		if Config.OutnumberEscape and evasiveGranted() and coverable then
 			if performDodge(now, "outnumbered-escape") then return end
 		end
-		-- combo-эскейп: мы в стане и блок недоступен → додж единственная защита.
-		-- Фи��им если удар покрываем ИЛИ уже слишком близко (всё равно не сблокируем).
-		if Config.ComboEscapeDodge and not canBlockNow()
-		   and soonestDt <= coverHi then
-			if performDodge(now, "combo-escape") then return end
-		end
+			-- combo-эскейп: блок недоступен (кулдаун/стан) → додж единственная защита. [V96] ТЕПЕРЬ
+			-- строго по iframe-окну (coverable = dt в [coverLo, coverHi]). Раньше условие было
+			-- `soonestDt <= coverHi` БЕЗ нижней границы → додж жёгся когда удар был в упор (dt<coverLo),
+			-- iframes не успевали подняться → в логе `combo-escape ... fire→contact=0ms TOO EARLY`.
+			if Config.ComboEscapeDodge and not canBlockNow() and coverable then
+				if performDodge(now, "combo-escape") then return end
+			end
 		-- exposed-эскейп: мы в собственном действии (busy) и удар вход��т в окно.
 		if Config.ExposedEscapeDodge and (State.selfBusyUntil or 0) > now
 		   and soonestDt <= Config.ExposedDodgeWindow and coverable then
@@ -2565,35 +2597,38 @@ local function schedulerStep(now)
 		else
 			fireLead = Config.DodgeLead + Config.DodgeArmWindow
 		end
-		if soonestDt <= (fireLead + up) then
-			local overloaded, why = false, nil
-			-- A non-coverable multi cluster owns its strategy: keep one continuous guard.
-			-- Do not let legacy heavy/burst heuristics spend a late dodge mid-cluster.
-			if clusterStrategy ~= "HELD_GUARD" then
-				if clusterN >= 2 and clusterHeavy and Config.DodgeHeavy then
-					overloaded, why = true, "heavy+multi"
-				elseif clusterN >= 3 then
-					overloaded, why = true, ("%dx-burst"):format(clusterN)
+			if soonestDt <= (fireLead + up) then
+				local overloaded, why = false, nil
+				-- [V96] ОБЩЕЕ ПРАВИЛО (по требованию юзера): додж — резервная защита, а не основная.
+				-- Пока parry доступен (canBlockNow) — блокируем/перфектим ВСЁ, что блокируемо, и НЕ
+				-- тратим додж. Все эвристики ниже (heavy/multi/burst/guardbreak) выполняем только
+				-- когда блок реально невозможен прямо сейчас. Неблокируемые атаки идут выше отдельным
+				-- путём must-dodge (isMustDodge), он не завязан на это условие.
+				local blockUp = canBlockNow()
+				if not blockUp then
+					-- A non-coverable multi cluster owns its strategy: keep one continuous guard.
+					if clusterStrategy ~= "HELD_GUARD" then
+						if clusterN >= 2 and clusterHeavy and Config.DodgeHeavy then
+							overloaded, why = true, "heavy+multi"
+						elseif clusterN >= 3 then
+							overloaded, why = true, ("%dx-burst"):format(clusterN)
+						end
+					end
+					-- одиночная M2 при кулдауне блока: спарировать нельзя → уходим доджем
+					if a.kind == "M2" and clusterN == 1 and Config.DodgeHeavy and not overloaded then
+						overloaded, why = true, "heavy-dodge(no-block)"
+					end
 				end
-			end
-			-- "Dodge All Heavies": блэнкет-додж КАЖДОЙ одиночной M2. Это отдельно от Must-Dodge
-			-- (тот доджит только выбранные стили) — поведение намеренное, отражено в описании галки.
-			if a.kind == "M2" and clusterN == 1 and Config.DodgeHeavy and not overloaded then
-				local _, cornered = bestDodgeDir(now)
-				if cornered and canBlockNow() then
-					diagPush(("BLOCK>DODGE t=%.2f  %s  cornered → block heavy"):format(now, a.name or "?"))
-				else
-					overloaded, why = true, "heavy-dodge"
+				-- guardbreak-save: стамина на нуле → guard всё равно проломят, додж оправдан даже
+				-- если формально блок «доступен» (это и есть случай, когда parry не спасёт).
+				if not overloaded and Config.GuardbreakProtect then
+					local st = blockStamina()
+					if st and st <= Config.StaminaFloor then
+						overloaded, why = true, ("guardbreak-save(st=%.0f)"):format(st)
+					end
 				end
+				if overloaded then performDodge(now, why); return end
 			end
-			if not overloaded and Config.GuardbreakProtect then
-				local st = blockStamina()
-				if st and st <= Config.StaminaFloor then
-					overloaded, why = true, ("guardbreak-save(st=%.0f)"):format(st)
-				end
-			end
-			if overloaded then performDodge(now, why); return end
-		end
 	end
 
 	-- [V95] ЕДИНЫЙ АВТОРИТЕТ ПОВОРОТА. Раньше здесь напрямую дёргался faceToward (писал HRP в
@@ -3762,7 +3797,7 @@ end
 -- из add_send_hook и зва�� remove_send_hook(hookId) — передавал не-функцию в C++ →
 -- вылет. Теперь хук — ИМЕНОВАННАЯ фун��ция, снимается по ссылке. Скан read-only:
 -- не трогает па��еты (ни Drop, ни SetData), только считает PacketId. Максимально
--- безопасно и минимально по работе на пакет — как в андетект-примере.
+-- безопасно и мин��мально по работе на пакет — как в андетект-примере.
 -- [V79] КОРЕНЬ КРАША НАЙДЕН: send-хук исполняется на СЕТЕВОМ потоке игры, а НЕ на потоке
 -- Luau VM. Luau VM однопоточный — любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
 -- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан дел��л
@@ -3830,7 +3865,7 @@ end
 --     instances) раз в Heartbeat — это ОБЫЧНЫЙ RemoteEvent, а НЕ raknet. Значит desync
 --     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
 --     эта игра его не де��ектит, и он НЕ крашит). Это отдельная фича — включим по запросу.
-_ = raknetScanSendHook  -- функция сохранена в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
+_ = raknetScanSendHook  -- функция сохран��на в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
 _ = reportRaknetScan
 local function runRaknetScanSession()
 	aclog("[DESYNC-SCAN] ОТКЛЮЧЕНО: raknet-хук крашит native-защиту клиента (Hyperion), это не Lua-AC и не уби��ается правкой игры. Desync-путь чер��з Blink RemoteEvent (__namecall) — по запросу.")
@@ -3886,7 +3921,7 @@ end
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
 -- ПРОКСИ репликации, а не док��зательство тог��, что реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
--- ��ак пользоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
+-- ��ак по��ьзоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
 -- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬ��О реплицировался ему
 -- от твоего главного. Свингни ��а главном — и в дебаге второго аккаунта увидишь, что
@@ -4535,7 +4570,7 @@ end)
 --  chunk load (combat connections live but idle: Config.Enabled starts false).
 --  buildUI is a closure over all chunk locals above (Config, State, viz colors,
 --  styleOf, releaseBlock, vizHideAll, toggleDesyncTest, DesyncTest, statusPush…).
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════���═══════════════
 return function(_Lib, _Core)
 	local M = {}
 
@@ -4922,3 +4957,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
