@@ -341,11 +341,6 @@ local Config = {
 	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-платформенно.
 	RequireEquip      = true,
 
-	-- [V98] Blatant TEST режим: на каждую входящую угрозу шлём блок И RAW M1 (ServerCheck)
-	-- ОДНОВРЕМЕННО, без анимации. Для проверки реакции/приёма сервером. Палевно → по умолч. ВЫКЛ.
-	Blatant           = false,
-	BlatantWindow     = 0.30,   -- сек до контакта, в котором Blatant отрабатывает
-
 	RestrictZone      = true,
 	RestrictLongOnly  = true,
 	RestrictMinWindup = 0.30,
@@ -457,7 +452,7 @@ local Config = {
 	-- РАДИ БЛОКА не нужно. Из этого:
 	--  1) мультитаргет: одно нажатие покрывает всех в окне — не теряем "перебитых EDF";
 	--  2) поворот: делаем дешёвый ЧАСТИЧНЫЙ доворот к центроиду угроз (не жёсткий снап
-	--     к одному), что экономит CPU и не дёргает камеру;
+	--     к одному), что эконом��т CPU и не дёргает камеру;
 	--  3) dual-dodge "не успеем развернуться ко 2-му" больше не нужен — держим guard
 	--     на обоих. Додж только когда блок реально недоступен (стан/кд/гардбрейк).
 	-- OmniBlock оставлен: даёт мультитаргет-покрытие одним guard'ом и гейт dual-dodge.
@@ -890,7 +885,7 @@ end
 -- VictimHitConfirm вместе с нашим PerfectBlocking. То есть ИСТИННАЯ геометрия удара — сам
 -- парт, а не наши догадки про yaw/размах. High опирается на это:
 --   • если парт атакующего уже есть — проверяем пересечение с нами 1:1 как игра (авторитетно);
---   • пока парта нет — предсказываем бокс РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
+--   • пока парт�� нет — предсказываем бокс РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
 --     костылей (point-blank/heavy/drag/latch).
 -- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один раз за FrameId,
 -- чтобы не обходить папку по разу на каждую угрозу в мультибое. Всё состояние — в V93 (см. выше
@@ -1079,7 +1074,7 @@ local function willHitMe(th)
 	-- HeavyTrust/lunge/mid-face ниже; V101-broadphase ошибочно резал стоячий нацеленный хэви на
 	-- dist 24-30 → willHitMe=false → ни блока, ни interrupt → «стоим как вкопанный». Теперь хэви
 	-- всегда проходит дальше). Для M1: отказ только если враг за HighBroadRange И НЕ приближается
-	-- ни по velocity, ни по измеренной дельте позиции (ловит бег «туда-обратно с ударом на входе»).
+	-- ни по velocity, ни по измеренной дельте позиции (ловит бег «туда-обратно с у��аром на входе»).
 	if mode == "High" and not th.gtConfirmed and th.kind ~= "M2" and th.kind ~= "SKILL" then
 		local bdx = myHRP.Position.X - aHRP.Position.X
 		local bdz = myHRP.Position.Z - aHRP.Position.Z
@@ -1164,7 +1159,7 @@ local function willHitMe(th)
 	local faceDotPred = predLook:Dot(toMe)
 
 	-- [V88] SNAP-TURN FEINT: враг закоммитил свинг и АКТИВНО доворачивается на нас. Серверный
-	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спиной» = р��альная
+	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спин��й» = р��альная
 	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
 	-- текущий (rawDot) → он поворачивается в нашу сторону. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
@@ -1301,7 +1296,7 @@ local function willHitMe(th)
 					return false
 				end
 			end
-			-- дальность/глубина от origin а��акующего вдоль его facing: центр парта ≈ forward,
+			-- дальность/глубина от origin а��акующего вдоль его facing: центр пар��а ≈ forward,
 			-- полуглубина = realSz.Z/2 (фолбэк — старые Config-границы), полуширина = realSz.X/2.
 			local halfW   = (realSz and realSz.X * 0.5 or (Config.HitHalfWidth or 4)) + slack
 			local depthF  = (realSz and (forward + realSz.Z * 0.5) or (forward + (Config.HitboxDepth or 0))) + slack
@@ -1549,8 +1544,24 @@ local function indexAllAnims()
 			for _, styleFolder in ipairs(combat:GetChildren()) do
 				if styleFolder:IsA("Folder") then
 					for _, child in ipairs(styleFolder:GetChildren()) do
+						local lname     = child.Name:lower()
 						local defensive = looksDefensive(child.Name)
-						local kind = (not defensive) and kindFromName(child.Name) or nil
+						-- [V108] hurt-reaction / success flashes (1stEHit, M2EHit, M2Success, BlockHit)
+						-- are NOT incoming attacks — exclude them (иначе "M2EHit"/"M2Success" ловили "M2"
+						-- и парри срабатывал на реакцию/успех врага, а не на удар).
+						local reaction  = (lname:find("ehit") or lname:find("success")
+							or lname:find("blockhit")) ~= nil
+						local kind = nil
+						if not defensive and not reaction then
+							kind = kindFromName(child.Name)
+							-- [V108] СПЕЦ-АТАКИ (крит/финишер/«крутилка ногами» и т.п.) в имени НЕ содержат
+							-- M1/M2 (напр. Striker "Crit", Kure "6to15_CritStartup") → раньше kind=nil →
+							-- анимка падала в BenignIds → детект её ВООБЩЕ не видел. Ловим по имени как SKILL.
+							if not kind and (lname:find("crit") or lname:find("momentum")
+								or lname:find("slam") or lname:find("special") or lname:find("finisher")) then
+								kind = "SKILL"
+							end
+						end
 						local id = animIdOf(child)
 						if id and defensive then BlockIds[id] = true end
 						if kind and id then
@@ -1560,17 +1571,28 @@ local function indexAllAnims()
 				end
 			end
 		end
-		for _, d in ipairs(anims:GetDescendants()) do
-			if d:IsA("Animation") then
-				local id = tonumber(tostring(d.AnimationId):match("(%d+)"))
-				if id then
-					if looksDefensive(d.Name) or (d.Parent and looksDefensive(d.Parent.Name)) then
-						BlockIds[id] = true
+			for _, d in ipairs(anims:GetDescendants()) do
+				if d:IsA("Animation") then
+					local id = tonumber(tostring(d.AnimationId):match("(%d+)"))
+					if id then
+						if looksDefensive(d.Name) or (d.Parent and looksDefensive(d.Parent.Name)) then
+							BlockIds[id] = true
+						end
+						if not AttackIds[id] and not BlockIds[id] then
+							-- [V108] спец-атака (крит/финишер) где угодно в дереве → SKILL, НЕ benign,
+							-- чтобы детект её видел. Реакции/успехи (ehit/success) остаются benign.
+							local lname = d.Name:lower()
+							if not (lname:find("ehit") or lname:find("success"))
+								and (lname:find("crit") or lname:find("momentum")
+									or lname:find("slam") or lname:find("special") or lname:find("finisher")) then
+								AttackIds[id] = { kind = "SKILL", combo = nil }
+							else
+								BenignIds[id] = true
+							end
+						end
 					end
-					if not AttackIds[id] and not BlockIds[id] then BenignIds[id] = true end
 				end
 			end
-		end
 	end)
 	for id, v in pairs(LEGACY_ATTACKS) do
 		if not AttackIds[id] then AttackIds[id] = { kind = v.t, combo = nil } end
@@ -1620,7 +1642,7 @@ local function hitTimelineBase(info, combo)
 		-- NO-PRESS → Ragdoll-кас��ад). Конфиг для той же Capoeira даё�� ~441мс (ошибка 7мс).
 		-- Теперь марк��р — лишь MAX-страховка повер�� конфига: покрывает дли��ные и 2-хитовые
 		-- анимации (Boxing M2MultiHitCount=2, реальный значимый контакт ~749мс), где голый
-		-- конфиг первого удара занижает окно.
+		-- конфиг первого удара заниж��ет окно.
 		if info.hit and info.hit > 0 then
 			return math.max(cfgv, info.hit)
 		end
@@ -2178,7 +2200,6 @@ State.ap = {
 	nextM1At   = 0,      -- анти-спам ПОЛЛА (сам tryM1 гейтит настоящий рейт по AttackDuration 0.45с)
 	punishTgt  = nil,    -- модель врага, которого добиваем после парри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
-	blatantId  = 0,      -- счётчик для RAW ServerCheck (только тест-режим Blatant)
 	uninterruptible = { boxing = true, wrestling = true },  -- M2 с iframes/hyperarmor → только парри
 	busyAttrs = {
 		"Stunned", "Ragdoll", "Downed", "GuardBroken", "CantAnything",
@@ -2340,7 +2361,7 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 		local anims = ap.getAnims()
 		local v53   = anims and anims[combo] or nil
 		local newId = (debug.getupvalue(ap.tryM1Fn, ap.u25idx) or 0) + 1
-		-- шлём НАПРЯМУЮ: сервер строит M1-хитбокс по нашему LookVector в момент приёма ServerCheck
+		-- шлём НАПРЯМУЮ: сервер ст��оит M1-хитбокс по нашему LookVector в момент приёма ServerCheck
 		ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, newId)
 		ap.m1SendLast = now
 		ap.m1WinCount = (ap.m1WinCount or 0) + 1
@@ -2448,18 +2469,6 @@ function State.ap.fireM1(model, why)
 		diagPush(("AUTOPLAY t=%.2f  M1 → %s  (%s)"):format(now, (model and model.Name) or "?", why or "?"))
 	end
 	return swung
-end
-
--- RAW-удар БЕЗ анимации для тест-режима Blatant: прямой ServerCheck по Remotes.Server.
--- Легитимность не гарантируется (нет hold-сессии/анимации) — только для проверки реакции.
-function State.ap.fireM1Raw(model)
-	local ap = State.ap
-	local hrp = model and model:FindFirstChild("HumanoidRootPart")
-	if hrp then ap.snapTo(hrp) end
-	ap.blatantId = ap.blatantId + 1
-	pcall(function()
-		ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, ap.blatantId)
-	end)
 end
 
 -- [V105] ТЕСТ-СВИНГ для UI-кнопки: шлёт один M1 с анимацией комбо, которую использовал бы скрипт
@@ -3123,23 +3132,6 @@ local function schedulerStep(now)
 
 	table.sort(imminent, function(a, b) return a.contactAbs < b.contactAbs end)
 
-	-- [V98] BLATANT TEST режим: на ближайшую угрозу в окне BlatantWindow шлём блок И RAW M1
-	-- ОДНОВРЕМЕННО, без анимации. Чисто для теста реакции/приёма сервером — палевно.
-	if Config.Blatant and #imminent > 0 then
-		local th = imminent[1]
-		local dt = th.contactAbs - now
-		if dt <= (Config.BlatantWindow or 0.30) and dt >= -Config.HoldAfter then
-			if not th.blatantDone then
-				th.blatantDone = true
-				fireBlock(serverNow)                 -- парри
-				State.ap.fireM1Raw(th.attackerModel) -- RAW атака в тот же кадр
-				diagPush(("BLATANT t=%.2f  block+M1 → %s  dt=%+.0fms")
-					:format(now, (th.name or "?"), dt * 1000))
-			end
-			return
-		end
-	end
-
 	-- Multi-attacker clustering is based on distinct attackers and absolute contacts.
 	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
 	local cluster = {}
@@ -3769,7 +3761,7 @@ end)
 
 -- [V90.4] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ / HOLD BLOCK удалены по запросу: детект срабатывал по
 -- уже-приземлившемуся удару (реактивно), из-за чего мог держать guard и мешать. Парри теперь
--- полностью предиктивный (willHitMe по анимации/сервер-свингам), как и раньше.
+-- полностью предиктивный (willHitMe по анимации/сервер-свингам), как �� раньше.
 
 local function acAvailable(name)
 	local ok, v = pcall(function()
@@ -4621,7 +4613,7 @@ if type(getgenv) == "function" then getgenv().AP_RAKNET_SCAN = runRaknetScanSess
 
 -- [V74] DESYNC SELF-VERIFY. Как понять, работает ли desync ВООБЩЕ, без второго
 -- аккаунта: Animator.AnimationPlayed срабатывает на КАЖДЫЙ трек, который стартует на
--- нашем аниматоре — а это ровно то, что Roblox реплицирует другим клиентам. Значит
+-- нашем аниматоре — а это ровно то, что Roblox реплицируе�� другим клиентам. Значит
 -- если при свинге сюда прилетают И реальная атака, И decoy-idle — оба уходят в сеть,
 -- и чужой AnimationPlayed увидит оба трека. Э���� объективное доказательство, что
 -- decoy-overlay реально загрязняет чужой детект (а не только крутится локально).
@@ -4711,7 +4703,7 @@ local function observeOtherPlayer(name)
 end
 if type(getgenv) == "function" then getgenv().AP_OBSERVE = observeOtherPlayer end
 
--- [V75] сохранение desync-дебага в отдельный файл, чтобы слать мне.
+-- [V75] сохранение desync-дебага в отдельный файл, чтобы сла��ь мне.
 local function saveDesyncDebug()
 	local header = table.concat({
 		"===== AUTOPARRY DESYNC DEBUG (V75) =====",
@@ -4840,7 +4832,7 @@ task.spawn(function()
 		local a1 = (select(1, ...))
 		local ok, kind = pcall(classifyCombat, a1)
 		if ok and kind then
-			-- разовый confirm: доказывает, что __namecall ЛОВИТ игровой боевой FireServer.
+			-- разовы�� confirm: доказывает, что __namecall ЛОВИТ игровой боевой FireServer.
 			-- Если этой строки нет в диаге после свинга — хук не перехватывает FireServer
 			-- (тогда идём в raknet/replicatesignal), а не «firedelay сломан».
 			if not State.combatFireSeen then
@@ -5656,15 +5648,9 @@ return function(_Lib, _Core)
 		slider(apPlay, { Name = "Interrupt Margin", Flag = "AP_InterruptMargin",
 			Default = math.floor((Config.AP_InterruptMargin or 0.05) * 1000), Min = 0, Max = 150, Suffix = " ms",
 			Callback = function(v) Config.AP_InterruptMargin = v / 1000 end })
-		apPlay:SubLabel({ Text = "safety buffer\nhigher = only interrupt when clearly faster" })
+			apPlay:SubLabel({ Text = "safety buffer\nhigher = only interrupt when clearly faster" })
 
-		apPlay:Divider()
-		apPlay:Header({ Name = "Test" })
-		boolToggle(apPlay, "Blatant Test Mode", "Blatant Test Mode",
-			function() return Config.Blatant end, function(v) Config.Blatant = v end)
-		apPlay:SubLabel({ Text = "TEST ONLY: fires block + raw M1 at the same time, no animation\nvery obvious / detectable, and it SUPPRESSES boxing-counter — keep OFF for normal play" })
-
-		-- ── Section 4 — Visuals (Right box): ESP / overlay ──
+			-- ── Section 4 — Visuals (Right box): ESP / overlay ──
 		local apVis = AP:Section({ Side = "Right" })
 
 		apVis:Header({ Name = "Visuals" })
@@ -5839,4 +5825,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
