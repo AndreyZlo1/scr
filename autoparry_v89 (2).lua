@@ -77,7 +77,7 @@ local Config = {
 	-- доворачивается к нам). Ловим по ЗНАКУ доворота (facing приближается к нам между
 	-- кадрами), а не по мгновенной angY (шумной). Работает и в High, и в Low.
 	DragDetect    = true,
-	DragTurnMinDeg= 35,     -- град/с: доворот выше этого + приближение facing к нам = drag-угроза
+	DragTurnMinDeg= 35,     -- град/с: доворот в��ше этого + приближение facing к нам = drag-угроза
 	DragTrustRange= 13,     -- радиус (студы), где drag-довороту даём доверие
 	Key_Accuracy  = Enum.KeyCode.B,
 
@@ -166,9 +166,9 @@ local Config = {
 
 	-- [V103] FACE-GATE BLOCK: не жечь нажатие блока (и 0.5с BlockCooldown), пока смотрим спиной к
 	-- атакующему — блок направленный, сервер такой парри отклонит. Ждём доворота (applyFacing),
-	-- прессим при приемлемом facing ИЛИ когда времени уже нет (последний шанс). Дефолт ON.
+	-- прес��им при приемлемом facing ИЛИ когда времени уже нет (последний шанс). Дефолт ON.
 	FaceGateBlock = true,
-	FaceGateMin   = 0.2,       -- мин. faceDot (cos) до атакующего, при котором разрешаем нажатие
+	FaceGateMin   = 0.2,       -- мин. faceDot (cos) до атаку��щего, при котором разрешаем нажатие
 
 	-- [V93] ПОЛНЫЙ round-trip. Локальный атрибут PerfectBlocking СЕРВЕРНЫЙ: после нашего нажатия
 	-- он проходит нажатие→сервер (RTT/2) и реплик. атрибута назад (RTT/2) = ПОЛНЫЙ RTT, и лишь
@@ -273,7 +273,7 @@ local Config = {
 	RearmBudget        = 0.06,  -- запас на свежий Activated (сервер + throttle)
 	DualDodgeMaxGap     = 0.22, -- 2-й удар в пределах этого от 1-го = кандидат на dual
 
-	-- [V66] расширенная диагностика NO-PRESS/held-heavy (для точного разбора причин)
+	-- [V66] расшире��ная диагностика NO-PRESS/held-heavy (для точного разбора причин)
 	DeepDiag           = true,
 
 	BoxingCounter     = false,
@@ -300,10 +300,8 @@ local Config = {
 	-- [V97] AutoPlay addon — автоатака. По умолчанию ВЫКЛ (агрессивное поведение).
 	AutoPlay          = false,  -- мастер-тумблер аддона
 	AP_PunishOnParry  = true,   -- добивать M1 застаненного врага после идеального парри
-	AP_InterruptHeavy = true,   -- перебивать одиночную тяжёлую своим M1 (когда успеваем)
 	AP_BaseReach      = 5.5,    -- базовый реч нашего M1 (ForwardOffset 4 + запас), студы
 	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по росту
-	AP_M1Delay        = 0.32,   -- CombatConfig M1.DefaultHitboxDelay (долёт нашего M1)
 	-- [V107] РЕЙТ СВОЕГО M1. Раньше fireM1Custom слал через CombatRemoteClient.Fire, а тот держит
 	-- ClientSustainedMaxPerSecond["M1.ServerCheck"]=4 с ФРОНТ-ЛОАД окном: 4 свинга по 0.08с подряд,
 	-- потом ТИШИНА до конца 1-сек окна. Отсюда: (1) не быстрее 4/с, (2) анимация не успевает
@@ -312,26 +310,17 @@ local Config = {
 	-- ServerSustainedMax["M1.ServerCheck"]={low=6,mid=8}/сек, ServerMinInterval=0.08. Поэтому шлём
 	-- НАПРЯМУЮ (ServerRemote:FireServer, минуя клиентский кап 4) с РАВНОМЕРНЫМ шагом ~6/с: и быстрее,
 	-- и анимация видна (0.16с на свинг), и весь стан-window заполнен.
-	AP_MaxPerSec      = 6,      -- потолок свингов/сек (= server sustained low; выше = риск анти-чита)
-	AP_MinSendGap     = 0.09,   -- жёсткий минимум между свингами (> server min interval 0.08)
-	-- [V104] INTERRUPT тяжёлых. CUSTOM-FIRE шлёт ServerCheck мгновенно → сервер строит хитбокс в
-	-- момент приёма, поэтому «долёт» нашего M1 = только серверная обработка (proc, мал). M2HitboxDelay
-	-- врага 0.43..0.82с (�� разы больше окна парри) и удар перебиваем почти всю фазу → HeavyActiveGrace.
-	AP_InterruptM1Delay = 0.05,  -- серверная обработка нашего мгновенного ServerCheck (сек)
-	AP_HeavyActiveGrace = 0.14,  -- насколько долго тяжёлая ещё перебиваема ПОСЛЕ номинального контакта
-	-- [V105] перехват тяжёлой РАЗРЕШЁН и в мультибое, если следующая ДРУГАЯ угроза придёт не раньше,
-	-- чем через это время (успеем сбить тяжёлую и снова поднять guard). 0 = только одиночная угроза.
-	AP_InterruptMultiClear = 0.28,
+	-- [V110] потолок свингов/сек. Поднят 6→8 (юзер: «M1 медленный, атаковать раньше/чаще»).
+	-- 8 = ServerSustainedMax.mid для M1.ServerCheck (реальный серверный потолок); выше него сервер
+	-- считает нарушением (MonitoredKeys) → риск флага. Слайдер 3..8 в apPlay/Tuning: 6 = безопаснее.
+	AP_MaxPerSec      = 8,
+	AP_MinSendGap     = 0.08,   -- = server min interval (ClientMinInterval M1.ServerCheck=0.08)
 	AP_M2Stun         = 1.0,    -- CombatConfig ParryStun.M2 (стан после M2-парри)
 	AP_M1Stun         = 0.5,    -- оценка стана после M1-парри (RecoveryLockout врага)
 	AP_PollGap        = 0,      -- [V101] троттл поллинга tryM1 = 0 (пробуем КАЖДЫЙ кадр; настоящий
 	                            -- рейт держит игровая tryM1 по AttackDuration 0.45с). Максимальная
 	                            -- скорость реакции: как только сервер снимает parry-lockout 0.15с — бьём.
 	AP_FaceHold       = 0.35,   -- сколько держать лицо на цели после выстрела M1
-	AP_InterruptMargin= 0.05,   -- (legacy) запас времени для решения «успеем перебить»
-	AP_InterruptPingFactor = 1.0, -- [V104] доля RTT в честной модели: наш пакет летит up, их атаку мы
-	                            -- видим на up позже → в оценку входит полный RTT. Агрессивность даёт не
-	                            -- урезание пинга, а HeavyActiveGrace (долгая перебиваемая фаза тяжёлой).
 	-- [V101] Комбо-контроль AutoPlay. "Follow" (дефолт) — родная tryM1 сама циклит ��дары комбо
 	-- 1→2→3→4→1 (u19 = u19%4+1). "Fixed" — форсим один и тот же удар комбо (AP_FixedHit) через
 	-- debug.setupvalue(u19) прямо перед свингом. Полезно для стабильного стартового удара.
@@ -890,7 +879,7 @@ end
 -- парт, а не наши догадки про yaw/размах. High опирается на это:
 --   • если парт атакующего уже есть — проверяем пересечение с нами 1:1 как игра (авторитетно);
 --   • пока парт�� нет — предсказываем бокс РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
---     костылей (point-blank/heavy/drag/latch).
+--     к��стылей (point-blank/heavy/drag/latch).
 -- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один раз за FrameId,
 -- чтобы не обходить папку по разу на каждую угрозу в м��льтибое. Всё состояние — в V93 (см. выше
 -- про лимит 200 локалов), новых local тут не заводим.
@@ -1362,7 +1351,7 @@ local function willHitMe(th)
 
 	-- LOW: щедрое доверие ближнему бою (как V67), НО отбраковываем удары, явно
 	-- направленные не в нас (predFacing смотрит от нас и мы не в упор) — чтобы не
-	-- агри��ься на чужие атаки в замесе.
+	-- ��гри��ься на чужие атаки в замесе.
 	local trust = Config.HitTrustRange or 0
 	if trust > 0 and dist <= trust then
 		if dist <= (Config.PointBlank or 3.0) then th.trustedHit = true; th.trustLatch = true; return true end
@@ -2231,7 +2220,6 @@ State.ap = {
 	nextM1At   = 0,      -- анти-спам ПОЛЛА (сам tryM1 гейтит настоящий рейт по AttackDuration 0.45с)
 	punishTgt  = nil,    -- модель врага, которого добиваем после парри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
-	uninterruptible = { boxing = true, wrestling = true },  -- M2 с iframes/hyperarmor → только парри
 	busyAttrs = {
 		"Stunned", "Ragdoll", "Downed", "GuardBroken", "CantAnything",
 		"M1Cooldown", "ParryAttackLockout", "BlockAttackLockout", "GrappleWinnerStun",
@@ -2553,62 +2541,19 @@ function State.ap.step(now)
 		return
 	end
 	if ap.flatDist(tgt) > ap.reach() then return end   -- вне досягаемости — не бьём воздух
-	-- [V100] МГНОВЕННОЕ добивание: сразу после парри мы ещё держим guard (Blocking), а fireM1
-	-- самогейтится на Blocking→не бьёт → терялось ~0.12-0.2с окна стана. Т.к. угроз нет (step
-	-- вызван при #imminent==0) и цель застанена — безопасно уронить guard ЭТОТ кадр, чтобы
-	-- со следующего поллинга (через AP_PollGap) tryM1 уже свингнул. Экономит весь HoldAfter.
+	-- [V110] МГНОВЕННОЕ добивание в ТОМ ЖЕ кадре. Сразу после парри мы ещё держим guard (Blocking),
+	-- а fireM1 самогейтится на Blocking. Раньше step ронял guard и делал `return` → первый добив
+	-- терял ЦЕЛЫЙ Heartbeat (~16мс) + воспринимался как «медленный старт». Но sendDeactivate снимает
+	-- ЛОКАЛЬНЫЙ атрибут Blocking СИНХРОННО (c:SetAttribute("Blocking", nil)) → canAttack() проходит
+	-- уже в этом кадре. Поэтому НЕ делаем return — сразу бьём. Deactivated и ServerCheck уходят на
+	-- сервер по одному remote по порядку: сервер снимает guard, затем принимает M1. Угроз нет
+	-- (#imminent==0) и цель застанена → ронять guard безопасно.
 	if State.blocking then
 		State.blocking, State.holdUntil = false, 0
 		stopBlockAnim()
 		pcall(sendDeactivate, true)
-		return
 	end
 	ap.fireM1(tgt, "punish")
-end
-
--- решение перебить тяжёлую обычным M1: true → перебили (НЕ блокируем этот кадр), false → парируем.
--- remaining — сек до контакта их удара.
-function State.ap.tryInterruptHeavy(th, now, remaining, preSwing)
-	if not Config.AutoPlay or Config.AP_InterruptHeavy == false then return false end
-	if not th or th.kind ~= "M2" then return false end
-	local ap = State.ap
-	local st = (th.style or ""):lower()
-	if ap.uninterruptible[st] then return false end       -- iframe/hyperarmor → ТОЛЬКО парри
-	if isMustDodge(th) then return false end              -- грэб/анблок → додж, не перебить
-	-- [V98] анти-финт (юзер: драгер финтит → скрипт реагирует → мы в кулдауне → он бьёт снова).
-	-- Перебиваем ТОЛЬКО подтверждённый (trustedHit) реальный свинг. Финт/недокрут не trusted →
-	-- НЕ жжём наш M1, остаёмся в защите и просто парируем настоящий удар.
-	if not th.trustedHit then return false end
-	-- [V104] КОГДА УСПЕВАЕМ ПЕРЕБИТЬ (главная мысль юзера): тяжёлая M2 — это ДЛИННЫЙ замах.
-	-- РЕГИСТРАЦИЯ их удара по нам наступает через M2HitboxDelay = 0.43..0.82с (CombatConfig) — в
-	-- РАЗЫ больше окна perfect-parry (~0.10с). И удар остаётся ПЕРЕБИВАЕМЫМ почти всю эту фазу:
-	-- стаггер отменяет тяжёлую вплоть до самого damage-frame (он в конце замаха). Значит времени
-	-- сбить атаку своим M1 МНОГО — раньше мы это недооценивали и просто парировали.
-	--
-	-- Честная моде��ь времени (всё в кадре ОТ now, серверная сторона):
-	--   • Наш M1 (CUSTOM-FIRE) шлёт ServerCheck МГНОВЕННО → сервер строит хитбокс в момент приёма →
-	--     наш хит регистрируется ≈ up (пол-RTT долёт пакета) + маленькая обработка. Без custom-fire
-	--     добавляется клиентский долёт анимации (AP_M1Delay).
-	--   • Их damage-frame на сервере ≈ (remaining - up): их атаку мы видим с интерп-лагом ≈ up.
-	--   Успеваем, если наш_лэнд < их_дамаг:  up + proc  <  remaining - up + activeGrace
-	--   → remaining > 2*up + proc - activeGrace = getPing() + proc - activeGrace.
-	-- activeGrace (HeavyActiveGrace) — насколько долго тяжёлая ещё перебиваема ПОСЛЕ номинального
-	-- контакта (длинная active/recovery фаза). Это и даёт «много времени», о котором говорил юзер.
-	local proc      = ap.fireOK and (Config.AP_InterruptM1Delay or 0.05) or (Config.AP_M1Delay or 0.32)
-	local ourLand   = proc + getPing() * (Config.AP_InterruptPingFactor or 1.0)
-	local activeGrace = Config.AP_HeavyActiveGrace or 0.14
-	if remaining <= (ourLand - activeGrace) then return false end
-	if ap.flatDist(th.attackerModel) > ap.reach() then return false end
-	-- [V105] Если держим guard — сервер выставил атрибут Blocking, а canAttack его не пропустит
-	-- (M1 сквозь guard не идёт). Роняем guard ЭТОТ кадр и «съедаем» его (не блокируем, но и не
-	-- бьём) — атрибут снимется через сервер, а свинг пройдёт следующим кадром. Длинная фаза тяжёлой
-	-- (0.43..0.82с) это спокойно терпит. preSwing = releaseBlock() из call-site.
-	if State.blocking then
-		if preSwing then preSwing() end
-		return true   -- перехват в процессе: этот кадр НЕ блокируем, свинг — со след. кадра
-	end
-	if not ap.canAttack() then return false end
-	return ap.fireM1(th.attackerModel, "interrupt-heavy")
 end
 
 local function evasiveGranted()
@@ -3199,7 +3144,7 @@ local function schedulerStep(now)
 
 		-- [V96] Pre-emptive кластер-додж под первый контакт, пока все контакты в одном iframe-окне.
 		-- ТЕПЕРЬ только если parry невозможен (not canBlockNow): по требованию юзера при доступном
-		-- блоке кластер держим guard'ом + мультиплекс-фейсингом (V95), а НЕ жжём додж. Раньше коммент
+		-- блоке кластер держим guard'ом + мультип��екс-фейсингом (V95), а НЕ жжём додж. Раньше коммент
 		-- прямо гласил «allowed even when block is available» — это и был лишний додж не по делу.
 		if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
 			and Config.DodgeOnParryCooldown ~= false
@@ -3388,36 +3333,9 @@ local function schedulerStep(now)
 		end
 	end
 
-	-- [V105] AutoPlay: перебивание тяжёлой обычным M1 (вместо парри). Тяжёлая (M2) — ДЛИННЫЙ замах,
-	-- её damage-frame наступает намного позже окна парри, поэтому времени сбить её своим быстрым M1
-	-- много (tryInterruptHeavy решает по честной модели времени). Раньше гейт `not multiThreat` и
-	-- `not State.blocking` глушил перехват почти всегда → мы просто парировали перебиваемые тяжёлые.
-	-- Теперь:
-	--   • мультибой РАЗРЕШЁН, если следующая ДРУГАЯ угроза придёт не раньше InterruptMultiClear —
-	--     успеем сбить тяжёлую и снова поднять guard (иначе оставляем held-guard как раньше);
-	--   • если держим guard — роняем его прямо перед свингом (враг в тяжёлом замахе, безопасно).
-	-- boxing-counter (M2+iframes) по-прежнему в приоритете (это и есть лучший панишинг стиля).
-	if Config.AP_InterruptHeavy ~= false and wantBlock and not shouldBoxingCounter(wantBlock) then
-		local clearOk = true
-		if multiThreat then
-			-- ближайший контакт ДРУГОГО (не этого) атакующего
-			local nextOther
-			for _, th in ipairs(imminent) do
-				if th.attackerModel ~= wantBlock.attackerModel then
-					local dt = th.contactAbs - now
-					if dt > 0 and (not nextOther or dt < nextOther) then nextOther = dt end
-				end
-			end
-			-- разрешаем, только если после нашего перехвата останется запас до другой угрозы
-			clearOk = (not nextOther) or (nextOther >= (Config.AP_InterruptMultiClear or 0.28))
-		end
-		if clearOk and State.ap.tryInterruptHeavy(wantBlock, now, wantBlock.contactAbs - now, function()
-				if State.blocking then releaseBlock() end   -- уронить guard прямо перед свингом
-			end) then
-			setFaceGoal(wantBlock.attackerHRP, true, (wantBlock.contactAbs - now) + 0.1)
-			return
-		end
-	end
+	-- [V110] Interrupt Heavies УДАЛЁН (юзер: не срабатывал на тяжёлые вовсе и ломал парри —
+	-- скрипт ждал «перехвата», которого не было, вместо честного блока/доджа). Теперь тяжёлые
+	-- обрабатываются ТОЛЬКО обычным путём: must-dodge (грэбы) → block/perfect-parry. Надёжнее.
 
 	if wantBlock then
 		-- boxing-counter — только против ОДИНОЧНОЙ угрозы. В burst он шлёт н��шу M2
@@ -4320,7 +4238,7 @@ local function toggleDesyncTest()
 		-- снова (иначе обсервер показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
 		-- Держим трек доминирующим только пока движок ��ам не перебил его walk'ом. Важно:
-		-- полностью уде��жать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
+		-- полностью уд����жать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
 		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
 		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно пок��зывал
@@ -4456,7 +4374,7 @@ DZ.cycleDesyncMode = cycleDesyncMode
 end  -- do (DESYNC-РЕЖИМЫ)
 if type(getgenv) == "function" then getgenv().AP_DESYNC_MODE = DZ.cycleDesyncMode end
 
--- ═══════════════════ INVISIBLE + GHOST ═══════════════════
+-- ═��═════════════════ INVISIBLE + GHOST ═══════════════════
 -- Ед��нственный top-level локал IV (как DZ) — чтобы не упереться в лимит регистров.
 local IV = {}
 do
@@ -4784,7 +4702,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 
 	-- [V88] сюда доходит ТОЛЬКО delay: idlemask держится своим циклом, prerun — на FireServer.
 	if (Config.DesyncMode or "delay") ~= "delay" then return end
-	-- [V88] ФИКС "delay ломал [": [ и idlemask крутят СВОИ decoy-треки, у к��торых тоже
+	-- [V88] ФИКС "delay л��мал [": [ и idlemask крутят СВОИ decoy-треки, у к��торых тоже
 	-- срабатывает AnimationPlayed. Раньше delay-хук хватал их и делал Stop/replay → decoy
 	-- дёргался. Пропускаем наши собственные decoy-треки — трогаем только реальные атаки.
 	if track == _testTrack or track == _decoyTrack then return end
@@ -5626,20 +5544,17 @@ return function(_Lib, _Core)
 			Title = "AutoPlay", Flag = "AP_AutoPlay",
 			get = function() return Config.AutoPlay end,
 			set = function(v) Config.AutoPlay = v end,
-			Desc = "aggressive addon: auto-attacks stunned/interruptible enemies\nmaster switch for the stuff below",
+			Desc = "aggressive addon: auto-M1 a stunned enemy after ur perfect parry\nmaster switch for the stuff below",
 		})
 
 		apPlay:Divider()
 		apPlay:Header({ Name = "Behaviour" })
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
-		apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
-			boolToggle(apPlay, "Interrupt Heavies", "Interrupt Heavies",
-				function() return Config.AP_InterruptHeavy ~= false end, function(v) Config.AP_InterruptHeavy = v end)
-			apPlay:SubLabel({ Text = "stagger a heavy with a fast M1 instead of parrying it — heavies have a long windup so there's plenty of time\nworks in group fights too (if the next threat isn't too close); iframe/grab heavies still get parried" })
-			apPlay:SubLabel({ Text = "note: our M1 always uses the fast custom builder (bypasses the 450ms throttle) — no toggle needed" })
+	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
+	apPlay:SubLabel({ Text = "note: our M1 always uses the fast custom builder (bypasses the 450ms throttle)" })
 
-			apPlay:Divider()
+	apPlay:Divider()
 			apPlay:Header({ Name = "Combo" })
 			apPlay:Dropdown({
 				Name = "Combo Mode",
@@ -5675,13 +5590,9 @@ return function(_Lib, _Core)
 			apPlay:SubLabel({ Text = "swings per second, spread evenly (fills the whole stun window)\n6 = safe server ceiling; 7-8 hits harder but is more detectable" })
 			slider(apPlay, { Name = "M1 Reach", Flag = "AP_BaseReach", Default = Config.AP_BaseReach or 5.5,
 				Min = 3, Max = 10, Precision = 1, Suffix = " st", Callback = function(v) Config.AP_BaseReach = v end })
-			apPlay:SubLabel({ Text = "scaled by ur character height automatically" })
-		slider(apPlay, { Name = "Interrupt Margin", Flag = "AP_InterruptMargin",
-			Default = math.floor((Config.AP_InterruptMargin or 0.05) * 1000), Min = 0, Max = 150, Suffix = " ms",
-			Callback = function(v) Config.AP_InterruptMargin = v / 1000 end })
-			apPlay:SubLabel({ Text = "safety buffer\nhigher = only interrupt when clearly faster" })
+	apPlay:SubLabel({ Text = "scaled by ur character height automatically" })
 
-			-- ── Section 4 — Visuals (Right box): ESP / overlay ──
+	-- ── Section 4 — Visuals (Right box): ESP / overlay ──
 		local apVis = AP:Section({ Side = "Right" })
 
 		apVis:Header({ Name = "Visuals" })
@@ -5856,4 +5767,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
