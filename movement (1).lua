@@ -109,11 +109,19 @@ return function(Lib, Core)
         -- (CombatRemoteClient.Fire("M2","ServerCheck")). Server still caps REAL M2 damage.
         NoM2CD_On = false,
 
-        -- Dodge tweaks (patches the game Evasive module's own upvalues + drives it)
-        Dodge_On         = false,   -- master: resolve Evasive module + enable our trigger
-        Dodge_Everywhere = false,   -- fire in ANY state (grant + clear inline state gates)
+        -- M2 Cooldown Spoof (advanced) — __namecall hook on GetAttribute/SetAttribute:
+        --   • GetAttribute("M2Cooldown") on our char → ALWAYS false  (bypass: game's gate at
+        --     M2.lua:897 `== true` never trips, so the client thinks M2 is always ready).
+        --   • SetAttribute("M2Cooldown", …) from the GAME (not us) → blocked = READ-ONLY:
+        --     nothing in game logic can flip the flag back on.
+        M2Spoof_On = false,
+
+        -- Dodge tweaks — patched DIRECTLY into the game Evasive module's own upvalues, so the
+        -- player's OWN natural dodges use these values (no manual trigger).
+        Dodge_On         = false,   -- master: resolve Evasive module + apply patches each frame
+        Dodge_Everywhere = false,   -- grant dodge in ANY state (OutnumberedEvasiveGrant + gates)
         Dodge_Speed      = 0,       -- 0 = game DashSpeed, else exact studs/sec (setupvalue)
-        Dodge_Cooldown   = 0,       -- 0 = game cooldown, else OUR min spacing between dodges (s)
+        Dodge_Cooldown   = 0,       -- 0 = game cooldown, else patched onto the module's Cooldown
 
         -- Anti-Ragdoll / Auto-getup — force getup while Ragdoll is active and NOT a managed
         -- ragdoll (Downed / carried / dead). Best-effort: server owns the real ragdoll state.
@@ -690,87 +698,68 @@ return function(Lib, Core)
     end
 
     -- ══════════════════════════ DODGE TWEAKS ════════════════════════════════
-    -- Custom Speed  = patch the Evasive module's DashSpeed upvalue (setupvalue).
-    -- Everywhere    = set the OutnumberedEvasiveGrant attribute (Evasive()'s canDodge returns
-    --                 true on that path, line 245) + clear the state attributes it rejects on.
-    -- Custom CD     = zero the module's runtime cooldown timers (u5/u6/u7/u8) so its own gate
-    --                 can't block us; OUR _lastDodge spacing becomes the real cooldown.
-    -- Honest ceiling: the SERVER still owns i-frames — a dash fired in an invalid state moves
-    -- you but may not grant invulnerability.
-    -- Map u1.Evasive's upvalues ONCE. Verified upvalue list (Evasive.lua line 506) contains the
-    -- module-level locals DashSpeed / DashDuration / Cooldown / ServerConfirmTimeout (matched by
-    -- their CombatConfig values) plus the runtime cooldown/stun timers u4/u5/u6/u7/u8 (all start
-    -- at 0, mutate at runtime). We patch DashSpeed for custom speed, and zero the runtime timers
-    -- to bypass the module's own cooldown for custom-CD / everywhere.
-    local _evMapped, _evSpeedIdx, _evSpeedBase, _evTimerIdx = false, nil, nil, {}
+    -- Applied DIRECTLY to the game's Evasive module — the player dodges with THEIR OWN input,
+    -- and these patches change how that native dodge behaves (no manual trigger):
+    --   Custom Speed    = setupvalue on the module local `DashSpeed`.
+    --   Custom Cooldown = setupvalue on the module local `Cooldown` (Evasive.lua:20) → the
+    --                     player's own dodge now recharges at the slider value instead of ~1.5s.
+    --   Everywhere      = keep OutnumberedEvasiveGrant asserted (canDodge grant path, line 245)
+    --                     + clear the state attributes Evasive() rejects on, so the native dodge
+    --                     input works while attacking / stunned / etc.
+    -- Honest ceiling: the SERVER still owns i-frames and the authoritative EvasiveCooldownRemaining
+    -- sync — a dodge in an invalid state moves you, and a cooldown below the server's may re-sync.
+    --
+    -- Map u1.Evasive's upvalues ONCE (Evasive.lua:506 list has module locals DashSpeed / Cooldown /
+    -- DashDuration / ServerConfirmTimeout, matched by their CombatConfig values).
+    local _evMapped, _evSpeedIdx, _evSpeedBase, _evCdIdx, _evCdBase = false, nil, nil, nil, nil
     local function mapEvasive()
-        if _evMapped then return _evSpeedIdx ~= nil or #_evTimerIdx > 0 end
+        if _evMapped then return _evSpeedIdx ~= nil or _evCdIdx ~= nil end
         local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return false end
         if not hasDebugUpvalues() then return false end
         local ok, ups = pcall(debug.getupvalues, ev.Evasive)
         if not (ok and type(ups) == "table") then return false end
         local cfg = getCombatConfig()
         local ev2 = cfg and cfg.Evasive
-        local named = {}   -- config-sourced numeric constants we must NOT treat as timers
-        if ev2 then
-            for _, key in ipairs({ "DashSpeed", "DashDuration", "Cooldown" }) do
-                if type(ev2[key]) == "number" then named[ev2[key]] = key end
-            end
-        end
-        -- ServerConfirmTimeout lives under CombatConfig.ClientPredict.Evasive (not cfg.Evasive)
-        local cp = cfg and cfg.ClientPredict and cfg.ClientPredict.Evasive
-        if cp and type(cp.ServerConfirmTimeout) == "number" then
-            named[cp.ServerConfirmTimeout] = "ServerConfirmTimeout"
-        end
+        local speedVal = ev2 and type(ev2.DashSpeed) == "number" and ev2.DashSpeed or nil
+        local cdVal    = ev2 and type(ev2.Cooldown)  == "number" and ev2.Cooldown  or nil
         for i, v in pairs(ups) do
             if type(v) == "number" then
-                local asName = named[v]
-                if asName == "DashSpeed" and not _evSpeedIdx then
+                if speedVal and not _evSpeedIdx and math.abs(v - speedVal) < 1e-4 then
                     _evSpeedIdx, _evSpeedBase = i, v
-                elseif asName == nil then
-                    -- not a known config constant → runtime timer (u4..u8), safe to zero
-                    _evTimerIdx[#_evTimerIdx + 1] = i
+                elseif cdVal and not _evCdIdx and math.abs(v - cdVal) < 1e-4 then
+                    _evCdIdx, _evCdBase = i, v
                 end
             end
         end
         _evMapped = true
         return true
     end
-    local function applyDodgeSpeed()
-        local ev = getEvasive(); if not ev then return end
-        if not mapEvasive() or not _evSpeedIdx then return end
-        local target = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
-        if target then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, target) end
-    end
     -- state attributes Evasive() rejects on unless the OutnumberedEvasiveGrant path is taken
     local DODGE_STATE_GATES = { "Ragdoll", "Blocking", "CombatAttacking", "Greenzone",
                                 "RpCombatLocked", "Downed", "Stunned", "GuardBroken" }
-    local _lastDodge = 0
-    local function fireDodge()
+    -- Runs each frame while Dodge is enabled — keeps the module patched to the live slider values.
+    local function driveDodge()
         if not Config.Dodge_On then return end
         local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return end
-        local now = os.clock()
-        local cd  = (Config.Dodge_Cooldown and Config.Dodge_Cooldown > 0) and Config.Dodge_Cooldown or 0
-        -- OUR spacing (custom cooldown). 0 = defer entirely to the game's internal cooldown.
-        if cd > 0 and (now - _lastDodge) < cd then return end
-        mapEvasive()
-        local char = LocalPlayer.Character
-        if Config.Dodge_Everywhere and char then
-            pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", true) end)
-            for _, a in ipairs(DODGE_STATE_GATES) do
-                if char:GetAttribute(a) ~= nil then pcall(function() char:SetAttribute(a, nil) end) end
+        if not mapEvasive() then return end
+        if _evSpeedIdx then
+            local target = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
+            if target then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, target) end
+        end
+        if _evCdIdx then
+            local target = (Config.Dodge_Cooldown and Config.Dodge_Cooldown > 0) and Config.Dodge_Cooldown or _evCdBase
+            if target then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, target) end
+        end
+        if Config.Dodge_Everywhere then
+            local char = LocalPlayer.Character
+            if char then
+                if char:GetAttribute("OutnumberedEvasiveGrant") ~= true then
+                    pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", true) end)
+                end
+                for _, a in ipairs(DODGE_STATE_GATES) do
+                    if char:GetAttribute(a) ~= nil then pcall(function() char:SetAttribute(a, nil) end) end
+                end
             end
-        end
-        -- Custom cooldown OR everywhere → clear the module's runtime cooldown timers so its own
-        -- gate can't block our faster cadence (our _lastDodge spacing is the real limiter).
-        if (cd > 0 or Config.Dodge_Everywhere) and #_evTimerIdx > 0 then
-            for _, i in ipairs(_evTimerIdx) do pcall(debug.setupvalue, ev.Evasive, i, 0) end
-        end
-        applyDodgeSpeed()
-        _lastDodge = now
-        pcall(function() ev.Evasive() end)
-        if Config.Dodge_Everywhere and char then
-            task.defer(function() pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", nil) end) end)
         end
     end
 
@@ -818,6 +807,49 @@ return function(Lib, Core)
         return true
     end
 
+    -- ══════════════ M2 COOLDOWN SPOOF (read-only + bypass) ═══════════════════
+    -- Advanced: a single __namecall metamethod hook (installed ONCE, gated by Config.M2Spoof_On).
+    --   • GetAttribute("M2Cooldown") on our character → return false. The game's gate at
+    --     M2.lua:897 tests `== true`, so it can never see a cooldown → M2 always "ready" (BYPASS).
+    --   • SetAttribute("M2Cooldown", …) from the GAME (not the executor) → swallowed, so game
+    --     logic can never flip the flag back on → the value is effectively READ-ONLY.
+    -- checkcaller() lets OUR own writes through; game/other writes are blocked. Wrapped in
+    -- newcclosure when available so the hook presents as a native C closure (anti-detect).
+    local _m2HookDone = false
+    local function installM2Spoof()
+        if _m2HookDone then return true end
+        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+            return false
+        end
+        local canCheckCaller = type(checkcaller) == "function"
+        local oldNamecall
+        local handler = function(self, ...)
+            if Config.M2Spoof_On then
+                local ok, method = pcall(getnamecallmethod)
+                if ok and (method == "GetAttribute" or method == "SetAttribute") then
+                    local key = ...
+                    if key == "M2Cooldown" and self == LocalPlayer.Character then
+                        if method == "GetAttribute" then
+                            return false                        -- spoof read → never on cooldown
+                        elseif not canCheckCaller or not checkcaller() then
+                            return                              -- block game write → read-only
+                        end
+                    end
+                end
+            end
+            return oldNamecall(self, ...)
+        end
+        if type(newcclosure) == "function" then
+            local okc, wrapped = pcall(newcclosure, handler)
+            if okc then handler = wrapped end
+        end
+        local ok, ref = pcall(hookmetamethod, game, "__namecall", handler)
+        if not ok or not ref then return false end
+        oldNamecall = ref
+        _m2HookDone = true
+        return true
+    end
+
     -- ═══════════════════════ ANTI-RAGDOLL / AUTO-GETUP ══════════════════════
     -- While Ragdoll is active and it's NOT a managed ragdoll (Downed / carried / gripped —
     -- legit states we must not fight), force getup and clear the local Ragdoll attribute.
@@ -858,6 +890,7 @@ return function(Lib, Core)
         driveNoDelay()
         driveInfStamina()   -- hold _staminaSeenPositive=false → endless sprint (no attr writes)
         driveNoM2CD()       -- zero client M2 lockouts + clear M2Cooldown attr
+        driveDodge()        -- patch DashSpeed/Cooldown upvalues directly (native dodge uses them)
         driveAntiRagdoll()  -- force getup out of non-managed ragdolls
         -- keep sprint desired asserted (game clears it after combat cancels)
         if Config.Sprint_On then
@@ -1055,13 +1088,16 @@ return function(Lib, Core)
             end)
         sSpr:SubLabel({ Text = "Keeps sprint speed through combat locks" })
 
-        -- Infinite Sprint lives in the Sprint section (same subsystem)
-        feature(sSpr, {
-            Title = "Infinite Sprint", Flag = "MV_InfStamina",
+        -- ─────────────── Section: Infinite Stamina (Right) ───────────────
+        local sStam = MV:Section({ Side = "Right" })
+        sStam:Header({ Name = "Infinite Stamina" })
+        feature(sStam, {
+            Title = "Infinite Stamina", Flag = "MV_InfStamina",
             get = function() return Config.InfStamina_On end,
             set = function(v) Config.InfStamina_On = v end,
-            Desc = "endless sprint via client stamina-gate flag\nNEVER writes the Stamina attribute (undetectable)",
+            Desc = "endless sprint via the client stamina-gate flag\nNEVER writes the Stamina attribute (undetectable)",
         })
+        sStam:SubLabel({ Text = "Holds the sprint controller's stamina gate open — sprint never drains out" })
 
         -- ─────────────── Section 6: Dodge (Left) ───────────────
         local sDodge = MV:Section({ Side = "Left" })
@@ -1078,7 +1114,7 @@ return function(Lib, Core)
                     notify("Dodge", "needs debug.getupvalues/setupvalue")
                 end
             end,
-            Desc = "patches the game's Evasive module\nuse the keybind below to dodge on demand",
+            Desc = "patches the game's Evasive module directly\nyour OWN dodge input uses these values",
         })
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
@@ -1086,19 +1122,11 @@ return function(Lib, Core)
         sDodge:SubLabel({ Text = "Everywhere = grants dodge in any state (attack/stun/etc). i-frames still server-owned." })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
             Min = 0, Max = 150, Suffix = " studs", Callback = function(v)
-                Config.Dodge_Speed = v; applyDodgeSpeed() end })
+                Config.Dodge_Speed = v; driveDodge() end })
         slider(sDodge, { Name = "Custom Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
             Min = 0, Max = 5, Precision = 2, Suffix = " s", Callback = function(v)
-                Config.Dodge_Cooldown = v end })
-        sDodge:SubLabel({ Text = "Speed 0 = game default · Cooldown 0 = game default (our min spacing otherwise)" })
-        ctx.keybind(sDodge, {
-            Name = "Dodge Now",
-            Flag = ctx.flag("MV_DodgeFire_KB"),
-            Toggle = function()
-                if not Config.Dodge_On then notify("Dodge", "enable Dodge first"); return end
-                fireDodge()
-            end,
-        })
+                Config.Dodge_Cooldown = v; driveDodge() end })
+        sDodge:SubLabel({ Text = "Applied directly to your dodge · Speed 0 = game default · Cooldown 0 = game default" })
 
         -- ─────────────── Section 7: No M2 Cooldown (Left) ───────────────
         local sM2 = MV:Section({ Side = "Left" })
@@ -1117,6 +1145,20 @@ return function(Lib, Core)
                 end
             end,
             Desc = "zeros client M2 attempt-lockouts + clears M2Cooldown attr\nServer still caps REAL M2 damage",
+        })
+        feature(sM2, {
+            Title = "Read-Only Cooldown Spoof", Flag = "MV_M2Spoof",
+            get = function() return Config.M2Spoof_On end,
+            set = function(v)
+                if v then
+                    if not installM2Spoof() then
+                        notify("M2 Spoof", "executor lacks hookmetamethod/getnamecallmethod")
+                        return
+                    end
+                end
+                Config.M2Spoof_On = v
+            end,
+            Desc = "advanced __namecall hook: spoofs GetAttribute(\"M2Cooldown\")→false (bypass)\nand blocks game writes to it (locks the value read-only)",
         })
         ctx.keybind(sM2, {
             Name = "M2 Now (direct fire)",
