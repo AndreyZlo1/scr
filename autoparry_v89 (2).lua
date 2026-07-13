@@ -300,6 +300,16 @@ local Config = {
 	AP_BaseReach      = 5.5,    -- базовый реч нашего M1 (ForwardOffset 4 + запас), студы
 	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по росту
 	AP_M1Delay        = 0.32,   -- CombatConfig M1.DefaultHitboxDelay (долёт нашего M1)
+	-- [V107] РЕЙТ СВОЕГО M1. Раньше fireM1Custom слал через CombatRemoteClient.Fire, а тот держит
+	-- ClientSustainedMaxPerSecond["M1.ServerCheck"]=4 с ФРОНТ-ЛОАД окном: 4 свинга по 0.08с подряд,
+	-- потом ТИШИНА до конца 1-сек окна. Отсюда: (1) не быстрее 4/с, (2) анимация не успевает
+	-- проиграться (4 свинга втиснуты в 0.24с → рестарт каждые 80мс = «сбивается»), (3) в окне стана
+	-- (M2=1.0с) бьём 4 раза в первой четверти и молчим остаток. Настоящий серверный потолок —
+	-- ServerSustainedMax["M1.ServerCheck"]={low=6,mid=8}/сек, ServerMinInterval=0.08. Поэтому шлём
+	-- НАПРЯМУЮ (ServerRemote:FireServer, минуя клиентский кап 4) с РАВНОМЕРНЫМ шагом ~6/с: и быстрее,
+	-- и анимация видна (0.16с на свинг), и весь стан-window заполнен.
+	AP_MaxPerSec      = 6,      -- потолок свингов/сек (= server sustained low; выше = риск анти-чита)
+	AP_MinSendGap     = 0.09,   -- жёсткий минимум между свингами (> server min interval 0.08)
 	-- [V104] INTERRUPT тяжёлых. CUSTOM-FIRE шлёт ServerCheck мгновенно → сервер строит хитбокс в
 	-- момент приёма, поэтому «долёт» нашего M1 = только серверная обработка (proc, мал). M2HitboxDelay
 	-- врага 0.43..0.82с (�� разы больше окна парри) и удар перебиваем почти всю фазу → HeavyActiveGrace.
@@ -461,7 +471,7 @@ local Config = {
 	VizHitbox     = true,   -- бокс хитбокса цели
 	VizRestrict   = true,   -- зона ограничения (keep-out)
 	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
-	VizRingScale  = 1.0,    -- множитель радиуса кольца (0.4–2.5)
+	VizRingScale  = 1.0,    -- множител�� радиуса кольца (0.4–2.5)
 	VizRange      = 100,    -- дальность (студы), на которой ищется/рисуется цель
 	Debug         = true,
 
@@ -2039,7 +2049,7 @@ local function shouldBoxingCounter(th)
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
 	-- [V63] ГЛА��НЫЙ ФИКС: counter реально доступен только когда M2 НЕ на cooldown.
 	-- Дамп (CombatConfig.M2): RecoveryLockout=0.5, Cooldown=7 (base); boxing даёт
-	-- iframes ТОЛЬКО при успешном запуске M2. Раньше проверя��ся лишь клие��тский
+	-- iframes ТОЛЬКО при успешном за��уске M2. Раньше проверя��ся лишь клие��тский
 	-- таймер BoxingCounterMinGap=0.45 — он врал: скрипт слал M2 когда сервер ещё
 	-- на cooldown → FireServer вхолостую, iframes НЕ выдавались, а блок в этот
 	-- момент пропускался (COUNTER→NO-PRESS/LATE/refused:CantAnything в логах →
@@ -2296,7 +2306,7 @@ end
 -- (M1.ServerCheck: min 80мс, sustained 4/с): он вернёт false, если рано, и тогда мы НЕ двигаем u25
 -- → последовательность серверу цела (без «дыр»). combo: Fixed → ровно AP_FixedHit, иначе 1→4.
 -- wantCombo (опц.) — принудительный номер удара для тест-свинга.
-function State.ap.fireM1Custom(char, model, wantCombo)
+function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 	local ap = State.ap
 	if not (ap.fireOK and ap.tryM1Fn) then return false end
 	local ok = false
@@ -2316,12 +2326,24 @@ function State.ap.fireM1Custom(char, model, wantCombo)
 		else
 			combo = ((debug.getupvalue(ap.tryM1Fn, ap.comboIdx) or 0) % 4) + 1
 		end
+		-- [V107] РЕЙТ-ГАРД: равномерный ~AP_MaxPerSec/с (по умолчанию 6 = server sustained low).
+		-- Раньше слали через ap.crc.Fire, а он режет 4/с ФРОНТ-ЛОАДОМ (4 подряд → тишина). Теперь
+		-- шлём НАПРЯМУЮ в ServerRemote (минуя клиентский кап) со своим равномерным шагом → быстрее,
+		-- анимация успевает, и весь стан-window заполнен. Тест-свинг (ignoreRate) шлёт всегда.
+		if not ignoreRate then
+			local rate = math.max(1, Config.AP_MaxPerSec or 6)
+			local gap  = math.max(Config.AP_MinSendGap or 0.09, (1 / rate) * 0.97)
+			if (now - (ap.m1SendLast or 0)) < gap then return end      -- ещё рано — не шлём
+			if (now - (ap.m1WinStart or 0)) >= 1 then ap.m1WinStart, ap.m1WinCount = now, 0 end
+			if (ap.m1WinCount or 0) >= rate then return end            -- окно 1с исчерпано
+		end
 		local anims = ap.getAnims()
 		local v53   = anims and anims[combo] or nil
 		local newId = (debug.getupvalue(ap.tryM1Fn, ap.u25idx) or 0) + 1
-		-- сперва отправляем — Fire сам решает по РЕАЛЬНОМУ рейт-лимиту (80мс/4-в-сек). false = рано.
-		local sent = ap.crc.Fire("M1", "ServerCheck", newId)
-		if not sent then return end   -- НЕ двигаем состояние → нет дыры в id-последовательности
+		-- шлём НАПРЯМУЮ: сервер строит M1-хитбокс по нашему LookVector в момент приёма ServerCheck
+		ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, newId)
+		ap.m1SendLast = now
+		ap.m1WinCount = (ap.m1WinCount or 0) + 1
 		-- фиксируем состояние ровно как игровой tryM1 (для клиентской сверки с ServerResponse)
 		debug.setupvalue(ap.tryM1Fn, ap.comboIdx, combo)
 		debug.setupvalue(ap.tryM1Fn, ap.u25idx, newId)
@@ -2364,7 +2386,7 @@ function State.ap.reach()
 	return base
 end
 
--- flat-дистанция до модели с ПИНГ-ПРЕДИКТОМ её позиции (сервер видит врага впереди нашего экрана)
+-- flat-дистанция до модели с ПИНГ-ПРЕДИКТОМ е�� позиции (сервер видит врага впереди нашего экрана)
 function State.ap.flatDist(model)
 	local myHRP = localHRP()
 	local hrp = model and model:FindFirstChild("HumanoidRootPart")
@@ -2458,7 +2480,7 @@ function State.ap.testSwing()
 	end
 	local ok = false
 	if ap.fireOK then
-		ok = ap.fireM1Custom(char, nil, combo)
+		ok = ap.fireM1Custom(char, nil, combo, true)   -- ignoreRate: одиночный тест шлём всегда
 	elseif ap.tryM1Fn then
 		local r; local s = pcall(function() r = ap.tryM1Fn() end); ok = s and r == true
 	end
@@ -3334,7 +3356,7 @@ local function schedulerStep(now)
 		State.multiThreatFrames = (State.multiThreatFrames or 0) + 1
 		-- [V92] ЛАТЧ УДЕРЖАНИЯ КЛАСТЕРА. Баг «2-я атака проходит»: как только 1-й атакующий
 		-- отрабатывал, multiThreat падал до false (остался 1 враг) → guard отпускался по
-		-- КОРОТКОМУ одиночному holdUntil, ровно за ~20мс до уд��ра выжившего (diag t=73.07
+		-- КОРОТКОМУ одиночному holdUntil, ровно за ~20мс до уд����ра выжившего (diag t=73.07
 		-- PERFECT → t=73.35 LATE NO-PRESS). Теперь при обнаружении кластера ЗАПОМИНАЕМ самый
 		-- поздний контакт + грейс и держи�� guard до него, сколько бы угроз ни осталось потом.
 		if farContact then
@@ -3499,7 +3521,7 @@ local function schedulerStep(now)
 
 	-- [V100] AutoPlay: добивание застаненного врага — когда НЕТ угроз для блока. Убрали гейт
 	-- `not State.blocking`: step сам уронит guard первым кадром (враг застанен, угроз нет →
-	-- безопасно), а fireM1 самогейтится на Blocking. Так добивание стартует ср��зу после парри,
+	-- безопасно), а fireM1 самоге��тится на Blocking. Так добивание стартует ср��зу после парри,
 	-- не дожидаясь истечения HoldAfter. Защита всё равно в приоритете: step идёт только при
 	-- #imminent==0 и not wantBlock, т.е. когда парировать/блокировать сейчас нечего.
 	if Config.AutoPlay and not wantBlock and #imminent == 0 then
@@ -4200,7 +4222,7 @@ end
 
 local _decoyAnim, _decoyTrack, _decoyId
 local function getIdleDecoy(animator)
-	-- id родного idle игры, иначе конфиг-фолбэк
+	-- id родного idle игры, иначе к��нфиг-фолбэк
 	local id = captureIdleId(animator) or Config.DesyncDecoyId or 507766388
 	if _decoyId ~= id then
 		_decoyId    = id
@@ -4732,7 +4754,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	local busy = _desyncBusyUntil[track]
 	if busy and now < busy then return end
 
-	-- [V74] если идёт скан-��ессия — метим следующие ~220мс ��ак "окно атаки" (near).
+	-- [V74] если идёт скан-��ессия — метим следующие ~220мс ����ак "окно атаки" (near).
 	if RaknetScan.active then
 		RaknetScan.window = now + (Config.DesyncRaknetWindowMs or 220) / 1000
 	end
@@ -4859,7 +4881,7 @@ task.spawn(function()
 	AnimLib.desyncHooked = true
 	dbg("combat hook active")
 	-- [V74] raknet-скан БОЛЬШЕ НЕ стартует при загрузке (это в��шало клиент). Запускай
-	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в бою.
+	-- вручную по команде getgenv().AP_RAKNET_SCAN() когда стоишь в б��ю.
 end)
 
 -- [V90] firedelay/prerun теперь обрабатываю��ся ЕДИНСТ��ЕННЫМ владельцем — __namecall-хуком
@@ -5624,10 +5646,13 @@ return function(_Lib, _Core)
 			apPlay:SubLabel({ Text = "fires one M1 right now with the combo animation the script would use (Fixed hit, or next in sequence)" })
 
 		apPlay:Divider()
-		apPlay:Header({ Name = "Tuning" })
-		slider(apPlay, { Name = "M1 Reach", Flag = "AP_BaseReach", Default = Config.AP_BaseReach or 5.5,
-			Min = 3, Max = 10, Precision = 1, Suffix = " st", Callback = function(v) Config.AP_BaseReach = v end })
-		apPlay:SubLabel({ Text = "scaled by ur character height automatically" })
+			apPlay:Header({ Name = "Tuning" })
+			slider(apPlay, { Name = "M1 Rate", Flag = "AP_MaxPerSec", Default = Config.AP_MaxPerSec or 6,
+				Min = 3, Max = 8, Suffix = " /s", Callback = function(v) Config.AP_MaxPerSec = v end })
+			apPlay:SubLabel({ Text = "swings per second, spread evenly (fills the whole stun window)\n6 = safe server ceiling; 7-8 hits harder but is more detectable" })
+			slider(apPlay, { Name = "M1 Reach", Flag = "AP_BaseReach", Default = Config.AP_BaseReach or 5.5,
+				Min = 3, Max = 10, Precision = 1, Suffix = " st", Callback = function(v) Config.AP_BaseReach = v end })
+			apPlay:SubLabel({ Text = "scaled by ur character height automatically" })
 		slider(apPlay, { Name = "Interrupt Margin", Flag = "AP_InterruptMargin",
 			Default = math.floor((Config.AP_InterruptMargin or 0.05) * 1000), Min = 0, Max = 150, Suffix = " ms",
 			Callback = function(v) Config.AP_InterruptMargin = v / 1000 end })
