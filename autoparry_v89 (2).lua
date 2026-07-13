@@ -208,8 +208,18 @@ local Config = {
 	-- или {all=true}. Для таких угроз скрипт доджит НАЗАД в i-frame ок��������������������������������о вместо бесполезного
 	-- блока. Расширяется без правки кода: допиши сюда стиль/тип, который пробивает твой блок.
 	MustDodge       = true,
+	-- [V106] авто-детект грэб-M2 по CombatConfig (M2Grab*/M2Slam*-атрибуты стиля). Ловит Kure и
+	-- любые будущие грэб-стили без ручного пополнения MustDodgeStyles. false = только ручной список.
+	MustDodgeAutoGrab = true,
 	MustDodgeStyles = {
 		wrestling = { M2 = true },  -- Wrestling M2 = гарантированный захват (M2GrabTargetForwardOffset), блок не спасает
+		-- [V106] Kure M2 = КОМАНДНЫЙ ГРЭБ/СЛЭМ (CombatConfig.Styles.kure: M2GrabAllowRagdollCombo,
+		-- M2GrabTargetForwardOffset=2.7, M2GrabLockDuration=0.5, M2GrabSlamDelay=0.3). Проходит
+		-- СКВОЗЬ блок, а на попадании ставит M2SlamParryWindowDisableDuration=2с → парри выключено
+		-- 2 сек и весь последующий Kure-комбо прилетает не заблокированным (в логе — каскад
+		-- Stunned/CantAnything). Раньше скрипт пытался блокировать/перебивать этот грэб → слэм.
+		-- Теперь Kure M2 = только додж назад в i-frame, как Wrestling M2.
+		kure = { M2 = true },
 	},
 
 	IFrameDur     = 0.30,
@@ -617,8 +627,8 @@ end
 -- контексте (обработчики remote/AnimationPlayed, schedulerStep) этот путь систематически
 -- фейлил pcall → возвращался хардкод 0.06 = ровно те самые 60ms. Из-за этого планировщик
 -- (pressAt = contact - lead - up - velLead, где up=uplink() зависит от getPingRaw) компенсировал
--- ~68ms вместо реальных 111–345ms → блок стабильно опаздывал (LATE) на любом заметном пинге.
--- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса игрока,
+-- ~68ms вместо реальных 111–345ms → ��лок стабильно опаздывал (LATE) на любом заметном пинге.
+-- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса ��грока,
 -- доступен в ЛЮБОМ контексте, не бросает; возвращает one-way в секундах → RTT = ×2). Stats
 -- Data Ping (уже RTT в мс) — как второй источник; берём МАКСИМУМ (перекомпенсация безопаснее
 -- недокомпенсации для парри). Если оба недоступны — отдаём последнее валидное значение, а НЕ
@@ -692,7 +702,7 @@ local function getPing()
 end
 
 local function uplink()
-	-- опираемся на сглаженный getPing(); БЕЗ повторного max с сырым спайком (это и раздувало lead)
+	-- опираемся на сглаженный getPing(); БЕЗ пов��орного max с сырым спайком (это и раздувало lead)
 	return math.clamp(getPing() * Config.UplinkFactor + Config.UplinkMargin, Config.UplinkMin, Config.UplinkMax)
 end
 
@@ -1990,7 +2000,7 @@ local function sendBoxingCounter(th, keepGuard)
 		-- прицеливания — сервер строит хитбокс по нашему HRP LookVector в момент
 		-- ServerCheck. Экстраполяция по скорости на ближней дистанции разворачивала
 		-- HRP вбок (в логе face=0.51 BACK!) и counter уходил мимо. Короткий
-		-- boxing-хитбокс требует, чтобы мы смотрели ТОЧНО на врага сейчас.
+		-- boxing-хитбокс требует, чтобы мы смотре��и ТОЧНО на врага сейчас.
 		-- мгновенный точный снап прямо сейчас (counter стреляет в этот кадр, серверу нужен
 		-- наш LookVector немедленно), + держим цель в едином канале весь BoxingFaceLockDur
 		local d = flatDirTo(myHRP.Position, aHRP.Position)
@@ -2079,6 +2089,32 @@ local function isMustDodge(th)
 	if not Config.MustDodge then return false end
 	local byStyle = Config.MustDodgeStyles and Config.MustDodgeStyles[st]
 	if byStyle and (byStyle[th.kind] or byStyle.all) then return true end
+	-- [V106] АВТО-ДЕТЕКТ грэб-M2 по CombatConfig (без новых top-level локалов — лимит 200/функция;
+	-- кэш держим на GameData, детект инлайн). Командный грэб/слэм (Wrestling, Kure, …) проходит
+	-- СКВОЗЬ блок и на попадании вырубает парри (M2SlamParryWindowDisableDuration) → только додж.
+	-- Опознаём стиль по конфигу: любой M2Grab*/M2Slam*-атрибут ⇒ M2 этого стиля = грэб. Так новые
+	-- грэб-стили ловятся без ручного пополнения MustDodgeStyles.
+	if th.kind == "M2" and Config.MustDodgeAutoGrab ~= false and st ~= "" then
+		GameData.grabCache = GameData.grabCache or {}
+		local cached = GameData.grabCache[st]
+		if cached == nil then
+			cached = false
+			loadGameModules()
+			if GameData.cfg then
+				pcall(function()
+					local sc = GameData.cfg.GetStyleConfig and GameData.cfg.GetStyleConfig(st) or nil
+					if sc then
+						cached = (sc.M2GrabAllowRagdollCombo == true)
+							or (type(sc.M2GrabTargetForwardOffset) == "number")
+							or (type(sc.M2GrabLockDuration) == "number")
+							or (type(sc.M2SlamParryWindowDisableDuration) == "number")
+					end
+				end)
+			end
+			GameData.grabCache[st] = cached
+		end
+		if cached then return true end
+	end
 	local aModel = th.attackerModel
 	if aModel then
 		local ok, grab = pcall(function()
@@ -2621,7 +2657,7 @@ local function refreshContact(th)
 		elseif (th.kind == "M2" or th.kind == "SKILL") and playing then
 			if Config.LiveHeavyTimer and tp < th.hitTL - 0.001 then
 				-- реальная скорость прогресса, но не ниже пола (иначе деление на ~0
-				-- даёт бесконечность, а враг может резко доиграть). Пол = доля от
+				-- да��т бесконечность, а враг может резко доиграть). Пол = доля от
 				-- н��ми����л��ной скорости трека.
 				local nominal = math.max(th.initSpeed or 1, 0.05)
 				local floor   = nominal * (Config.LiveSpeedFloor or 0.15)
@@ -4222,7 +4258,7 @@ local function toggleDesyncTest()
 		local track, id = getTestDecoy(animator)
 		if not track then DesyncTest.on = false; return end
 		SelfVerify.decoyId = "rbxassetid://" .. tostring(id)
-		-- максимальный приорите��, чтобы перебивать walk/run (Movement) — берём Action4 если есть
+		-- ма��симальный приорите��, чтобы перебивать walk/run (Movement) — берём Action4 если есть
 		local topPrio = Enum.AnimationPriority.Action
 		pcall(function() topPrio = Enum.AnimationPriority.Action4 end)
 		local wgt = Config.DesyncClientVisible and 1 or 0.03
@@ -5455,7 +5491,7 @@ return function(_Lib, _Core)
 			local STYLES = {
 				"Default","Basic","Boxing","Bulky","Dirty","Hakari","Karate","Kure",
 				"MuayThai","SkyGaoLang","Variant","Taekwondo","Wild","WingChun",
-				"Wrestling","Capoeira","Slugger",
+				"Wrestling","Capoeira","Slugger","Striker",
 			}
 			local KINDS = { { label = "M1", key = "M1" }, { label = "M2 (Heavy)", key = "M2" } }
 			local mdOptions, mdDefault = {}, {}
