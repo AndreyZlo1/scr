@@ -1,4 +1,3 @@
--- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
 
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
@@ -80,7 +79,7 @@ local Config = {
 		HeavyClosingMin  = 6,      -- скорость сближения (студ/с) выше этой = выпад на нас, доверяем даже спиной
 		-- [V101] ДЛИННЫЙ ВЫПАД (ло��: digmyswaga M2(MuayThai) dist=26 → never-in-hitbox MISS). Стили
 		-- вроде MuayThai/Karate имеют M2 с длинным дэшем (M2HitboxDelay 0.6с), закрывающим 20+ студов
-		-- в замахе. Обычный HeavyTrustRange(14) отсекал их по дистанции → скрипт не ре����гировал.
+		-- в замахе. Обычный HeavyTrustRange(14) отсекал их по дистанции → скрипт не ре������гировал.
 		-- Ловим ДВУМЯ путя��и: (1) реальный дэш на нас (сильное сближение по velocity ИЛИ по дельте
 		-- позиции — второе ловит CFrame-твин-дэши, где velocity=0), доверяем до HeavyLungeRange
 		-- независимо от текущей дистанции; (2) на средней дистанции (heavyRange..HeavyFaceRange) —
@@ -151,13 +150,6 @@ local Config = {
 	M2WidenHold   = 0.10,
 	ChargeStallMs = 45,
 	ReleaseGap    = 0.40,
-
-	-- [V103] HEAVY PREFER-BLOCK: тяжёлую (M2/SKILL) поднимаем guard РАНО и держим сквозь весь
-	-- длинный замах — гарантированный блок вместо рискованного тап-перфекта, который мажет по
-	-- predErr и даёт съесть удар. Perfect (и стан) — бонус, если тайминг совпал. Дефолт ON.
-	HeavyPreferBlock = true,
-	HeavyGuardLead   = 0.22,   -- за сколько до контакта поднять guard на тяжёлую (сек)
-	HeavyGuardHold   = 0.12,   -- доп. удержание guard после контакта тяжёлой (сек)
 
 	-- [V103] FACE-GATE BLOCK: не жечь нажатие блока (и 0.5с BlockCooldown), пока смотрим спиной к
 	-- атакующему — блок направленный, сервер такой парри отклонит. Ждём доворота (applyFacing),
@@ -289,16 +281,21 @@ local Config = {
 	AP_BaseReach      = 5.5,    -- базовый реч нашего M1 (ForwardOffset 4 + запас), студы
 	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по росту
 	AP_M1Delay        = 0.32,   -- CombatConfig M1.DefaultHitboxDelay (долёт нашего M1)
+	-- [V104] INTERRUPT тяжёлых. CUSTOM-FIRE шлёт ServerCheck мгновенно → сервер строит хитбокс в
+	-- момент приёма, поэтому «долёт» нашего M1 = только серверная обработка (proc, мал). M2HitboxDelay
+	-- врага 0.43..0.82с (в разы больше окна парри) и удар перебиваем почти всю фазу → HeavyActiveGrace.
+	AP_InterruptM1Delay = 0.05,  -- серверная обработка нашего мгновенного ServerCheck (сек)
+	AP_HeavyActiveGrace = 0.14,  -- насколько долго тяжёлая ещё перебиваема ПОСЛЕ номинального контакта
 	AP_M2Stun         = 1.0,    -- CombatConfig ParryStun.M2 (стан после M2-парри)
 	AP_M1Stun         = 0.5,    -- оценка стана после M1-парри (RecoveryLockout врага)
 	AP_PollGap        = 0,      -- [V101] троттл поллинга tryM1 = 0 (пробуем КАЖДЫЙ кадр; настоящий
 	                            -- рейт держит игровая tryM1 по AttackDuration 0.45с). Максимальная
 	                            -- скорость реакции: как только сервер снимает parry-lockout 0.15с — бьём.
 	AP_FaceHold       = 0.35,   -- сколько держать лицо на цели после выстрела M1
-	AP_InterruptMargin= 0.05,   -- запас времени для решения «успеем перебить»
-	AP_InterruptPingFactor = 0.5, -- [V103] доля RTT в оценке долёта нашего M1 (се��вер видит хит через
-	                            -- ~пол-RTT). 0.5 = честный запас → перебиваем типовые M2 (434-535мс),
-	                            -- а не парируем их тайтовым таймингом. 1.0 = старое пессимистичное.
+	AP_InterruptMargin= 0.05,   -- (legacy) запас времени для решения «успеем перебить»
+	AP_InterruptPingFactor = 1.0, -- [V104] доля RTT в честной модели: наш пакет летит up, их атаку мы
+	                            -- видим на up позже → в оценку входит полный RTT. Агрессивность даёт не
+	                            -- урезание пинга, а HeavyActiveGrace (долгая перебиваемая фаза тяжёлой).
 	-- [V101] Комбо-контроль AutoPlay. "Follow" (дефолт) — родная tryM1 сама циклит ��дары комбо
 	-- 1→2→3→4→1 (u19 = u19%4+1). "Fixed" — форсим один и тот же удар комбо (AP_FixedHit) через
 	-- debug.setupvalue(u19) прямо перед свингом. Полезно для стабильного стартового удара.
@@ -373,7 +370,7 @@ local Config = {
 	-- требуемое «смотреть 0.5 секунд на врага» перед тяжёлой контратакой вместо доджа.
 	BoxingPreFace     = 0.5,
 	-- [V63] DEPRECATED. Velocity-lead прицел оказался ВРЕДНЫМ: на близкой дистанции
-	-- экстраполяция разворачивала HRP вбок (в логах face=0.51 BACK!) и counter уходил
+	-- экстраполяция разворачивала HRP вбок (в логах face=0.51 BACK!) �� counter уходил
 	-- ��имо. Boxing-M2 хитбокс серверный и строится по нашему ТЕКУЩЕМУ LookVector, так
 	-- что нужен прямой снап на врага (см. sendBoxingCounter/enforceFaceLock). Поле
 	-- оставлено = 0 для обратной совместимости; НЕ используется в прицеливании.
@@ -944,7 +941,7 @@ local function hitboxGeom(th)
 	-- [V67] кап смещения от velocity: у стрейфящего врага полная ��кс��раполяция
 	-- уводит центр хитбокса вбок и ломает willHitMe (ложный негатив в упор).
 	local lead = Vector3.new(aV.X * tHit, 0, aV.Z * tHit)
-	-- [V91] РАЗДЕЛЬНЫЙ кап: сближение (toward us) ведём до WillHitCloseCap (лунж/наскок реально
+	-- [V91] РАЗДЕЛЬНЫЙ кап: сближение (toward us) ведём до WillHitCloseCap (лунж/��аскок реально
 	-- закрывает дистанцию — иначе бокс отсекал их как far → High-миссы), strafe — до
 	-- WillHitLatCap (узко, иначе центр бокса уезжает вбок → ложный негатив в упор).
 	local meG = localHRP()
@@ -1118,7 +1115,7 @@ local function willHitMe(th)
 	local angY  = safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0
 	-- [V92] в High жёсткий кап доворота (спиной-стоящий не «долетает» предиктом до нас)
 	local capR  = math.rad((mode == "High" and (Config.RotPredMaxDegHigh or 55)) or (Config.RotPredMaxDeg or 120))
-	-- [V91] РОБАСТНЫЙ предикт ротации. Физический angY шумит и часто =0 между physics-степами
+	-- [V91] РОБАСТНЫЙ предикт ротации. Физический angY шумит и часто =0 меж��у physics-степами
 	-- → predLook НЕ доворачивался на доворачивающегося врага → High-бокс уходил мимо (миссы
 	-- never-in-hitbox). Берём МАКС из физической и ИЗМЕРЕННОЙ (кадр-к-кадру) скорости доворота;
 	-- знак измеренной — из наблюдённого поворота prevLook→rawL (θ = -(px·rz − pz·rx)).
@@ -2171,7 +2168,7 @@ function State.ap.getM1()
 		end)
 		-- [V101] combo-индекс u19 — module-upvalue tryM1: `u19 = u19 % 4 + 1` перед свингом.
 		-- Чтобы форсить фиксированный удар k (1..4), ставим u19 = k-1 → tryM1 сделает u19=k.
-		-- Ищем нужный upvalue: единственный ЦЕЛЫЙ в диапазоне [0,4] (тайминги — дробные 0.15/0.45).
+		-- Ищем н��жный upvalue: единственный ЦЕЛЫЙ в диапазоне [0,4] (тайминги — дробные 0.15/0.45).
 			if State.ap.tryM1Fn and type(debug.setupvalue) == "function" then
 				pcall(function()
 					for i = 1, 30 do
@@ -2240,7 +2237,7 @@ end
 -- НЕ трогаем scheduleM1SwingTimers → лока нет. Настоящий серверный потолок (M1.ServerCheck: min
 -- 80мс, sustained 4/с у клиента, burst) держит сам CombatRemoteClient.Fire — он вернёт false, если
 -- рано, и тогда мы НЕ двигаем u25 (последовательность серверу цела, без «дыр»). Анимация та же
--- (getM1Animations[combo]) — визуально легитно. Свои безопасн��е гейты — через canAttack.
+-- (getM1Animations[combo]) — визуально легитно. Сво�� безопасн��е гейты — через canAttack.
 function State.ap.fireM1Custom(char, model)
 	local ap = State.ap
 	if not (ap.fireOK and ap.tryM1Fn) then return false end
@@ -2259,10 +2256,14 @@ function State.ap.fireM1Custom(char, model)
 		debug.setupvalue(ap.tryM1Fn, ap.u26idx, newId)
 		ap.u27tbl[newId] = combo
 		ap.u28tbl[newId] = v53
-		-- анимация свинга (визуал; сервер валидирует по ServerCheck, но анимация = легитность)
-		local spd = 1
-		pcall(function() spd = ap.getSpeed(char, combo) or 1 end)
-		pcall(ap.playSwing, char, combo, spd, false)
+		-- [V104] анимация свинга — В ФОНЕ (task.spawn). Хит уже ушёл (ServerCheck выше), поэтому
+		-- анимация чисто косметическая; если playM1SwingAnimation где-то йелдит (WaitForChild и т.п.),
+		-- это НЕ должно задерживать горячий путь шедулера. Максимальная скорость = мгновенный удар.
+		task.spawn(function()
+			local spd = 1
+			pcall(function() spd = ap.getSpeed(char, combo) or 1 end)
+			pcall(ap.playSwing, char, combo, spd, false)
+		end)
 		ok = true
 	end)
 	return ok
@@ -2456,16 +2457,25 @@ function State.ap.tryInterruptHeavy(th, now, remaining)
 	-- Перебиваем ТОЛЬКО подтверждённый (trustedHit) реальный свинг. Финт/недокрут не trusted →
 	-- НЕ жжём наш M1, остаёмся в защите и просто парируем настоящий удар.
 	if not th.trustedHit then return false end
-	-- [V103] КОГДА МЫ УСПЕВАЕМ ПЕРЕБИТЬ. Тяжёлая (M2) — это ДЛИННЫЙ замах со своим таймингом; окно
-	-- perfect-parry — лишь узкий срез в конце. Пока их удар долетает (remaining), у нас есть весь их
-	-- замах, чтобы всадить свой M1 и застанить их РАНЬШЕ. Наш свинг долетает на СЕРВЕРЕ примерно
-	-- через (hitboxDelay + ПОЛ-RTT) — сервер видит наш хит спустя пол-пинга, не полный (прежняя
-	-- формула с полным ping была слишком пессимистична → почти все M2 (434-535мс) не проходили порог
-	-- → мы их парировали вместо перебивания). Их контакт на сервере ≈ remaining - пол-RTT (сервер
-	-- впереди нашего экрана), поэтому пол-пинга взаимно сокращается и запас честный.
-	local pingTerm = getPing() * (Config.AP_InterruptPingFactor or 0.5)
-	local ourLand  = (Config.AP_M1Delay or 0.32) + pingTerm + (Config.AP_InterruptMargin or 0.05)
-	if remaining <= ourLand then return false end
+	-- [V104] КОГДА УСПЕВАЕМ ПЕРЕБИТЬ (главная мысль юзера): тяжёлая M2 — это ДЛИННЫЙ замах.
+	-- РЕГИСТРАЦИЯ их удара по нам наступает через M2HitboxDelay = 0.43..0.82с (CombatConfig) — в
+	-- РАЗЫ больше окна perfect-parry (~0.10с). И удар остаётся ПЕРЕБИВАЕМЫМ почти всю эту фазу:
+	-- стаггер отменяет тяжёлую вплоть до самого damage-frame (он в конце замаха). Значит времени
+	-- сбить атаку своим M1 МНОГО — раньше мы это недооценивали и просто парировали.
+	--
+	-- Честная модель времени (всё в кадре ОТ now, серверная сторона):
+	--   • Наш M1 (CUSTOM-FIRE) шлёт ServerCheck МГНОВЕННО → сервер строит хитбокс в момент приёма →
+	--     наш хит регистрируется ≈ up (пол-RTT долёт пакета) + маленькая обработка. Без custom-fire
+	--     добавляется клиентский долёт анимации (AP_M1Delay).
+	--   • Их damage-frame на сервере ≈ (remaining - up): их атаку мы видим с интерп-лагом ≈ up.
+	--   Успеваем, если наш_лэнд < их_дамаг:  up + proc  <  remaining - up + activeGrace
+	--   → remaining > 2*up + proc - activeGrace = getPing() + proc - activeGrace.
+	-- activeGrace (HeavyActiveGrace) — насколько долго тяжёлая ещё перебиваема ПОСЛЕ номинального
+	-- контакта (длинная active/recovery фаза). Это и даёт «много времени», о котором говорил юзер.
+	local proc      = ap.fireOK and (Config.AP_InterruptM1Delay or 0.05) or (Config.AP_M1Delay or 0.32)
+	local ourLand   = proc + getPing() * (Config.AP_InterruptPingFactor or 1.0)
+	local activeGrace = Config.AP_HeavyActiveGrace or 0.14
+	if remaining <= (ourLand - activeGrace) then return false end
 	if ap.flatDist(th.attackerModel) > ap.reach() then return false end
 	if not ap.canAttack() then return false end
 	return ap.fireM1(th.attackerModel, "interrupt-heavy")
@@ -2675,7 +2685,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- [V70] PURE-MATH: никаких калибратор��в. Предикт = таймлай�� анимации + живой
 	-- TimePosition, и точка. (V68-residual удалён: один придерж��нный M2 отравлял EMA
 	-- и задирал hitTL всех последующих M2 с 600→730мс → no-window NO-PRESS. База 600мс
-	-- почти идеальна против реальных ~585мс.)
+	-- почти идеальна про��ив реальных ~585мс.)
 	-- [V71] множитель скорости атаки АТАКУЮЩЕГО (по его росту) — делит задержку удара.
 	-- track.Speed для чужих игроков ��еплицируется как 1.0, по��тому берём из роста.
 	local aMult    = attackSpeedMult(model)
@@ -2956,18 +2966,6 @@ local function schedulerStep(now)
 		if Config.M2WidenWindow and th.kind == "M2" then
 			lead = lead + Config.M2WidenFront
 			hold = hold + Config.M2WidenHold
-		end
-		-- [V103] HEAVY PREFER-BLOCK (юзер: «скрипт парирует тяжёлую даже ту, что мог просто
-		-- отбить»). Тяжёлая (M2/SKILL) — ДЛИННЫЙ замах; окно perfect-parry лишь узкий срез в конце,
-		-- и промах по нему (predErr) = съеденный удар. Блок же (Blocking) ставится ЛОКАЛЬНО мгновенно
-		-- и держится всю фазу → гарантированно гасит удар. Поэтому для тяжёлых поднимаем guard РАНО
-		-- (HeavyGuardLead) и держим сквозь контакт: даже если perfect-тайминг не сложился, удар
-		-- заблокирован, а не пропущен. Perfect (и его стан) — бонус, если попали в окно. Грэбы/
-		-- must-dodge сюда не попадают (их отсекает must-dodge раньше). Применяем и к одиночным, и к
-		-- мультибою: ранний guard-raise совместим с held-guard путём (тот тоже держит guard).
-		if Config.HeavyPreferBlock ~= false and (th.kind == "M2" or th.kind == "SKILL") then
-			lead = math.max(lead, Config.HeavyGuardLead or 0.22)
-			hold = math.max(hold, (Config.HoldAfter or 0.12) + (Config.HeavyGuardHold or 0.12))
 		end
 		-- Hakari addon: the momentum (double) M2 uses a slower hitbox delay (0.62 vs 0.59),
 		-- so its contact lands slightly later than a normal M2 — widen both edges a touch.
@@ -4667,7 +4665,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	State.desyncFires = (State.desyncFires or 0) + 1
 
 	-- DELAY: анимацию замаха скрываем сразу и переигры��аем через mag мс (визуал стартует
-	-- позже). FireServer/урон НЕ трогаем — они уходят вовремя (отдельный __namecall-хук).
+	-- позже). FireServer/урон НЕ трогаем — они уходят вовремя (отд��льный __namecall-хук).
 	local animId = id
 	local mag = desyncMag()
 	pcall(function() track:Stop(0) end)
@@ -4779,7 +4777,7 @@ end)
 
 -- [V90] firedelay/prerun теперь обрабатываю��ся ЕДИНСТ��ЕННЫМ владельцем — __namecall-хуком
 -- на Remotes.Server:FireServer (выше). Отдельный хук на CombatRemoteClient.Fire УДАЛЁН: он
--- (а) патчил таблицу по пути ReplicatedStorage.Shared.Network, которая может ��ыть декоем, пока
+-- (а) патчи�� таблицу по пути ReplicatedStorage.Shared.Network, которая может ��ыть декоем, пока
 -- реальный модуль лежит в Hidden, и (б) при работающем namecall-хуке давал ДВОЙНУЮ задержку
 -- (модуль держал → origFire → Server:FireServer → namecall держал снова). RemoteEvent
 -- Remotes.Server реплицируется и всегда достижим, поэтому перехват на нём надёжнее модульного.
@@ -5378,9 +5376,6 @@ return function(_Lib, _Core)
 		apDodge:SubLabel({ Text = "dodge when block is on cooldown / cant parry in time\nOFF = eat the hit instead (unblockable must-dodge unaffected)" })
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		apDodge:SubLabel({ Text = "roll away from the attacker instead of a fixed direction" })
-		boolToggle(apDodge, "Prefer Block on Heavies", "Prefer Block on Heavies",
-			function() return Config.HeavyPreferBlock ~= false end, function(v) Config.HeavyPreferBlock = v end)
-		apDodge:SubLabel({ Text = "heavies are long — raise guard early n hold instead of gambling on a tight perfect-parry\nguaranteed block; perfect (and its stun) is a bonus if the timing lands" })
 		boolToggle(apDodge, "Face-Gate Block", "Face-Gate Block",
 			function() return Config.FaceGateBlock ~= false end, function(v) Config.FaceGateBlock = v end)
 		apDodge:SubLabel({ Text = "dont waste a block (and its 0.5s cooldown) pressing while facing away\nwait for the turn — block is directional, the server rejects back-facing parries" })
