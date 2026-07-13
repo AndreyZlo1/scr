@@ -92,6 +92,32 @@ return function(Lib, Core)
         -- Sprint
         Sprint_On     = false,    -- AutoSprint (hold sprint on)
         Sprint_Bypass = false,    -- keep sprint speed through combat locks (SetSpeed hook)
+
+        -- No Slowdown: respect "cannot move" states (grapple/ragdoll/carry/anchor).
+        -- FIX for the reported bug — while immobile, NONE of our speed writes fire, so we
+        -- never fight the game's HRP anchor/snap (that was the rubberband during grapples).
+        NS_RespectImmobile = true,
+
+        -- Infinite Sprint — hold the client sprint singleton's _staminaSeenPositive at false.
+        -- Both stamina cutoffs (StartSprint + render loop) require that flag TRUE to stop
+        -- sprinting on Stamina<=0. Keeping it false = endless sprint. We NEVER touch the
+        -- Stamina attribute (server-authoritative, would be detectable) — pure client field.
+        InfStamina_On = false,
+
+        -- No M2 Cooldown — zero the client attempt-lockout upvalues in M2.OnM2Activated,
+        -- clear the M2Cooldown gate attribute each frame, and expose a direct-fire trigger
+        -- (CombatRemoteClient.Fire("M2","ServerCheck")). Server still caps REAL M2 damage.
+        NoM2CD_On = false,
+
+        -- Dodge tweaks (patches the game Evasive module's own upvalues + drives it)
+        Dodge_On         = false,   -- master: resolve Evasive module + enable our trigger
+        Dodge_Everywhere = false,   -- fire in ANY state (grant + clear inline state gates)
+        Dodge_Speed      = 0,       -- 0 = game DashSpeed, else exact studs/sec (setupvalue)
+        Dodge_Cooldown   = 0,       -- 0 = game cooldown, else OUR min spacing between dodges (s)
+
+        -- Anti-Ragdoll / Auto-getup — force getup while Ragdoll is active and NOT a managed
+        -- ragdoll (Downed / carried / dead). Best-effort: server owns the real ragdoll state.
+        AntiRagdoll_On = false,
     }
 
     -- ═════════════════════════ Character helpers ════════════════════════════
@@ -106,6 +132,41 @@ return function(Lib, Core)
         local root = c:FindFirstChild("HumanoidRootPart") or (hum and hum.RootPart)
         if not hum or not root or hum.Health <= 0 then return nil end
         return c, hum, root
+    end
+
+    -- ═══════════════════ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ════════════
+    -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
+    -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
+    -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
+    -- speed restore fought that anchor → the "changes speed when it shouldn't" rubberband.
+    -- These are states where the player is NOT meant to move at all, verified in the dump:
+    --   • HRP.Anchored              → grapple root-lock (Grapple.lua)
+    --   • attr Grappling            → M2.lua wrestling/grapple gate
+    --   • attr Ragdoll / Downed     → RagdollServiceClient managed ragdoll
+    --   • States.BeingCarried / BeingGripped (Value ~= nil)  → carry / grip
+    --   • HRP.CarryWeld / GripWeld  → physical carry/grip weld (RagdollServiceClient.isCarriedOrGripped)
+    -- While ANY is active we suppress every speed write so the game's lock wins cleanly.
+    local IMMOBILE_ATTRS = { "Grappling", "Ragdoll", "Downed" }
+    local function isImmobile(char, root)
+        if not Config.NS_RespectImmobile then return false end
+        char = char or getChar(); if not char then return false end
+        if not root then
+            root = char:FindFirstChild("HumanoidRootPart")
+        end
+        if root and root.Anchored then return true end
+        for _, a in ipairs(IMMOBILE_ATTRS) do
+            if char:GetAttribute(a) == true then return true end
+        end
+        local states = char:FindFirstChild("States")
+        if states then
+            local bc = states:FindFirstChild("BeingCarried")
+            local bg = states:FindFirstChild("BeingGripped")
+            if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return true end
+        end
+        if root and (root:FindFirstChild("CarryWeld") or root:FindFirstChild("GripWeld")) then
+            return true
+        end
+        return false
     end
 
     -- ══════════════════════════ Move-vector math ════════════════════════════
@@ -135,7 +196,10 @@ return function(Lib, Core)
     -- Velocity→ set horizontal AssemblyLinearVelocity, keep gravity on Y.
     local function stepSpeed(dt)
         if not Config.Speed_On then return end
-        local _, hum, root = getParts(); if not hum then return end
+        local char, hum, root = getParts(); if not hum then return end
+        -- FIX: never shove the root while the game has us locked/anchored (grapple, ragdoll,
+        -- carry, grip) — that write-fight was the erratic speed the user reported.
+        if isImmobile(char, root) then return end
         local moveDir = hum.MoveDirection
         if moveDir.Magnitude < 1e-3 then return end
         local speed = Config.Speed_Value
@@ -195,8 +259,10 @@ return function(Lib, Core)
             if flyActive then stopFlyPhysics(); clearFlyInput() end
             return
         end
-        local _, hum, root = getParts()
+        local char, hum, root = getParts()
         if not hum then return end
+        -- FIX: while grappled/ragdolled/carried the game anchors us; don't fly-fight it.
+        if isImmobile(char, root) then return end
         if not flyActive then flyActive = true; bindFlyInput() end
 
         -- Face-camera: PlatformStand + look along camera (also gives 3D via pitch).
@@ -292,6 +358,12 @@ return function(Lib, Core)
             if type(speed) == "number" and (Config.NS_On or Config.Sprint_Bypass) then
                 local char = ownerChar(inst)
                 if char and char == LocalPlayer.Character then
+                    -- FIX: if the game has us in a no-move state (grapple/ragdoll/carry/anchor),
+                    -- let its speed write through UNTOUCHED. Restoring speed here is exactly what
+                    -- made movement go weird during grapples — suppress our override instead.
+                    if isImmobile(char, nil) then
+                        return orig(inst, speed, ...)
+                    end
                     -- which slowdown-causing state is active right now?
                     local inAttack = char:GetAttribute("M1") == true or char:GetAttribute("M2") == true
                         or char:GetAttribute("M1Hold") == true or char:GetAttribute("PendingM2") == true
@@ -557,6 +629,225 @@ return function(Lib, Core)
         clearGateAttrs()
     end
 
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- COMBAT MODULE RESOLVERS — require the game's OWN cached modules → LIVE upvalues
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- require() on a ModuleScript the game already required returns the SAME cached table,
+    -- so Evasive.Evasive / M2.OnM2Activated are the live functions and debug.setupvalue
+    -- patches the very upvalues the combat system reads. No filtergc heap sweep needed.
+    local function tryRequire(pathParts)
+        local node = ReplicatedStorage
+        for _, name in ipairs(pathParts) do
+            if not node then return nil end
+            node = node:FindFirstChild(name)
+        end
+        if not node then return nil end
+        local ok, mod = pcall(require, node)
+        return ok and mod or nil
+    end
+    local _evasiveMod, _m2Mod, _combatRemote, _combatConfig
+    local function getEvasive()
+        if _evasiveMod == nil then
+            _evasiveMod = tryRequire({ "CombatSystemClient", "Combat", "Base", "Evasive" }) or false
+        end
+        return _evasiveMod or nil
+    end
+    local function getM2()
+        if _m2Mod == nil then
+            _m2Mod = tryRequire({ "CombatSystemClient", "Combat", "Base", "M2" }) or false
+        end
+        return _m2Mod or nil
+    end
+    local function getCombatRemote()
+        if _combatRemote == nil then
+            _combatRemote = tryRequire({ "Shared", "Network", "CombatRemoteClient" }) or false
+        end
+        return _combatRemote or nil
+    end
+    local function getCombatConfig()
+        if _combatConfig == nil then
+            _combatConfig = tryRequire({ "Shared", "Config", "CombatConfig" }) or false
+        end
+        return _combatConfig or nil
+    end
+    local function hasDebugUpvalues()
+        return type(debug) == "table" and type(debug.getupvalues) == "function"
+            and type(debug.setupvalue) == "function"
+    end
+
+    -- ══════════════════ INFINITE SPRINT (stamina, client field) ═════════════
+    -- The game only STOPS sprint on Stamina<=0 when the sprint singleton's
+    -- _staminaSeenPositive is TRUE (StartSprint gate @ line 2072 + render loop @ 2170).
+    -- Held at false → sprint never dies. Written on Heartbeat (after the game's RenderStep,
+    -- which only re-latches it true when Stamina>0), so on a drained frame it stays false.
+    -- We NEVER touch the Stamina ATTRIBUTE (server-authoritative → detectable). Pure client.
+    local function driveInfStamina()
+        if not Config.InfStamina_On then return end
+        local s = getSprint(); if not s then return end
+        if rawget(s, "_staminaSeenPositive") ~= false then
+            pcall(function() s._staminaSeenPositive = false end)
+        end
+    end
+
+    -- ══════════════════════════ DODGE TWEAKS ════════════════════════════════
+    -- Custom Speed  = patch the Evasive module's DashSpeed upvalue (setupvalue).
+    -- Everywhere    = set the OutnumberedEvasiveGrant attribute (Evasive()'s canDodge returns
+    --                 true on that path, line 245) + clear the state attributes it rejects on.
+    -- Custom CD     = zero the module's runtime cooldown timers (u5/u6/u7/u8) so its own gate
+    --                 can't block us; OUR _lastDodge spacing becomes the real cooldown.
+    -- Honest ceiling: the SERVER still owns i-frames — a dash fired in an invalid state moves
+    -- you but may not grant invulnerability.
+    -- Map u1.Evasive's upvalues ONCE. Verified upvalue list (Evasive.lua line 506) contains the
+    -- module-level locals DashSpeed / DashDuration / Cooldown / ServerConfirmTimeout (matched by
+    -- their CombatConfig values) plus the runtime cooldown/stun timers u4/u5/u6/u7/u8 (all start
+    -- at 0, mutate at runtime). We patch DashSpeed for custom speed, and zero the runtime timers
+    -- to bypass the module's own cooldown for custom-CD / everywhere.
+    local _evMapped, _evSpeedIdx, _evSpeedBase, _evTimerIdx = false, nil, nil, {}
+    local function mapEvasive()
+        if _evMapped then return _evSpeedIdx ~= nil or #_evTimerIdx > 0 end
+        local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return false end
+        if not hasDebugUpvalues() then return false end
+        local ok, ups = pcall(debug.getupvalues, ev.Evasive)
+        if not (ok and type(ups) == "table") then return false end
+        local cfg = getCombatConfig()
+        local ev2 = cfg and cfg.Evasive
+        local named = {}   -- config-sourced numeric constants we must NOT treat as timers
+        if ev2 then
+            for _, key in ipairs({ "DashSpeed", "DashDuration", "Cooldown" }) do
+                if type(ev2[key]) == "number" then named[ev2[key]] = key end
+            end
+        end
+        -- ServerConfirmTimeout lives under CombatConfig.ClientPredict.Evasive (not cfg.Evasive)
+        local cp = cfg and cfg.ClientPredict and cfg.ClientPredict.Evasive
+        if cp and type(cp.ServerConfirmTimeout) == "number" then
+            named[cp.ServerConfirmTimeout] = "ServerConfirmTimeout"
+        end
+        for i, v in pairs(ups) do
+            if type(v) == "number" then
+                local asName = named[v]
+                if asName == "DashSpeed" and not _evSpeedIdx then
+                    _evSpeedIdx, _evSpeedBase = i, v
+                elseif asName == nil then
+                    -- not a known config constant → runtime timer (u4..u8), safe to zero
+                    _evTimerIdx[#_evTimerIdx + 1] = i
+                end
+            end
+        end
+        _evMapped = true
+        return true
+    end
+    local function applyDodgeSpeed()
+        local ev = getEvasive(); if not ev then return end
+        if not mapEvasive() or not _evSpeedIdx then return end
+        local target = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
+        if target then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, target) end
+    end
+    -- state attributes Evasive() rejects on unless the OutnumberedEvasiveGrant path is taken
+    local DODGE_STATE_GATES = { "Ragdoll", "Blocking", "CombatAttacking", "Greenzone",
+                                "RpCombatLocked", "Downed", "Stunned", "GuardBroken" }
+    local _lastDodge = 0
+    local function fireDodge()
+        if not Config.Dodge_On then return end
+        local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return end
+        local now = os.clock()
+        local cd  = (Config.Dodge_Cooldown and Config.Dodge_Cooldown > 0) and Config.Dodge_Cooldown or 0
+        -- OUR spacing (custom cooldown). 0 = defer entirely to the game's internal cooldown.
+        if cd > 0 and (now - _lastDodge) < cd then return end
+        mapEvasive()
+        local char = LocalPlayer.Character
+        if Config.Dodge_Everywhere and char then
+            pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", true) end)
+            for _, a in ipairs(DODGE_STATE_GATES) do
+                if char:GetAttribute(a) ~= nil then pcall(function() char:SetAttribute(a, nil) end) end
+            end
+        end
+        -- Custom cooldown OR everywhere → clear the module's runtime cooldown timers so its own
+        -- gate can't block our faster cadence (our _lastDodge spacing is the real limiter).
+        if (cd > 0 or Config.Dodge_Everywhere) and #_evTimerIdx > 0 then
+            for _, i in ipairs(_evTimerIdx) do pcall(debug.setupvalue, ev.Evasive, i, 0) end
+        end
+        applyDodgeSpeed()
+        _lastDodge = now
+        pcall(function() ev.Evasive() end)
+        if Config.Dodge_Everywhere and char then
+            task.defer(function() pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", nil) end) end)
+        end
+    end
+
+    -- ═══════════════════════════ NO M2 COOLDOWN ═════════════════════════════
+    -- Zero the client attempt-lockout upvalues in M2.OnM2Activated (all numeric upvalues here
+    -- are the u125/u126/u127 lockout timers + LocalAttemptLockoutSeconds → safe to 0; the lone
+    -- boolean is the "ready" flag → true), clear the server M2Cooldown attribute each frame,
+    -- and expose a direct fire that skips ALL client gates. Server still caps REAL M2.
+    -- Map once (getupvalues is heavy → don't run it every frame). Verified upvalue list of
+    -- OnM2Activated: u125/u126/u127 (os.clock lockout deadlines) + LocalAttemptLockoutSeconds
+    -- are the ONLY numbers → force 0; u122 is the ready flag (boolean) → force true. Every
+    -- other upvalue is a module/table copy and is left alone.
+    local _m2NumIdx, _m2BoolIdx, _m2Mapped = {}, {}, false
+    local function mapM2Lockouts()
+        if _m2Mapped then return true end
+        local m2 = getM2(); if not m2 or type(m2.OnM2Activated) ~= "function" then return false end
+        if not hasDebugUpvalues() then return false end
+        local ok, ups = pcall(debug.getupvalues, m2.OnM2Activated)
+        if not (ok and type(ups) == "table") then return false end
+        for i, v in pairs(ups) do
+            if type(v) == "number" then _m2NumIdx[#_m2NumIdx + 1] = i
+            elseif type(v) == "boolean" then _m2BoolIdx[#_m2BoolIdx + 1] = i end
+        end
+        _m2Mapped = true
+        return true
+    end
+    local function patchM2Lockouts()
+        if not mapM2Lockouts() then return false end
+        local m2 = getM2(); if not m2 then return false end
+        for _, i in ipairs(_m2NumIdx)  do pcall(debug.setupvalue, m2.OnM2Activated, i, 0) end
+        for _, i in ipairs(_m2BoolIdx) do pcall(debug.setupvalue, m2.OnM2Activated, i, true) end
+        return true
+    end
+    local function driveNoM2CD()
+        if not Config.NoM2CD_On then return end
+        patchM2Lockouts()
+        local c = LocalPlayer.Character; if not c then return end
+        if c:GetAttribute("M2Cooldown") ~= nil then
+            pcall(function() c:SetAttribute("M2Cooldown", nil) end)
+        end
+    end
+    local function fireM2Direct()
+        local cr = getCombatRemote(); if not cr or type(cr.Fire) ~= "function" then return false end
+        pcall(function() cr.Fire("M2", "ServerCheck") end)
+        return true
+    end
+
+    -- ═══════════════════════ ANTI-RAGDOLL / AUTO-GETUP ══════════════════════
+    -- While Ragdoll is active and it's NOT a managed ragdoll (Downed / carried / gripped —
+    -- legit states we must not fight), force getup and clear the local Ragdoll attribute.
+    -- RagdollServiceClient sustains ragdoll on Heartbeat via the attribute + ChangeState;
+    -- we counter it each frame. Best-effort — the server owns authoritative ragdoll.
+    local function driveAntiRagdoll()
+        if not Config.AntiRagdoll_On then return end
+        local char, hum = getParts()
+        if not hum then return end
+        if char:GetAttribute("Ragdoll") ~= true then return end
+        if char:GetAttribute("Downed") == true then return end
+        local states = char:FindFirstChild("States")
+        if states then
+            local bc = states:FindFirstChild("BeingCarried")
+            local bg = states:FindFirstChild("BeingGripped")
+            if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return end
+        end
+        pcall(function() char:SetAttribute("Ragdoll", nil) end)
+        pcall(function()
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+            hum.PlatformStand = false
+            local st = hum:GetState()
+            if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown
+               or st == Enum.HumanoidStateType.Physics then
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+        end)
+    end
+
     -- ═════════════════════════ MASTER LOOPS ═════════════════════════════════
     PreStep:Connect(function(dt)
         dt = (typeof(dt) == "number" and dt > 0) and dt or (1 / 60)
@@ -565,6 +856,9 @@ return function(Lib, Core)
     end)
     PostStep:Connect(function()
         driveNoDelay()
+        driveInfStamina()   -- hold _staminaSeenPositive=false → endless sprint (no attr writes)
+        driveNoM2CD()       -- zero client M2 lockouts + clear M2Cooldown attr
+        driveAntiRagdoll()  -- force getup out of non-managed ragdolls
         -- keep sprint desired asserted (game clears it after combat cancels)
         if Config.Sprint_On then
             local s = getSprint()
@@ -760,6 +1054,89 @@ return function(Lib, Core)
                 end
             end)
         sSpr:SubLabel({ Text = "Keeps sprint speed through combat locks" })
+
+        -- Infinite Sprint lives in the Sprint section (same subsystem)
+        feature(sSpr, {
+            Title = "Infinite Sprint", Flag = "MV_InfStamina",
+            get = function() return Config.InfStamina_On end,
+            set = function(v) Config.InfStamina_On = v end,
+            Desc = "endless sprint via client stamina-gate flag\nNEVER writes the Stamina attribute (undetectable)",
+        })
+
+        -- ─────────────── Section 6: Dodge (Left) ───────────────
+        local sDodge = MV:Section({ Side = "Left" })
+        sDodge:Header({ Name = "Dodge" })
+        feature(sDodge, {
+            Title = "Dodge", Flag = "MV_Dodge",
+            get = function() return Config.Dodge_On end,
+            set = function(v)
+                Config.Dodge_On = v
+                if v and not getEvasive() then
+                    notify("Dodge", "Evasive module not found yet")
+                    Config.Dodge_On = false
+                elseif v and not hasDebugUpvalues() then
+                    notify("Dodge", "needs debug.getupvalues/setupvalue")
+                end
+            end,
+            Desc = "patches the game's Evasive module\nuse the keybind below to dodge on demand",
+        })
+        boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
+            function() return Config.Dodge_Everywhere end,
+            function(v) Config.Dodge_Everywhere = v end)
+        sDodge:SubLabel({ Text = "Everywhere = grants dodge in any state (attack/stun/etc). i-frames still server-owned." })
+        slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
+            Min = 0, Max = 150, Suffix = " studs", Callback = function(v)
+                Config.Dodge_Speed = v; applyDodgeSpeed() end })
+        slider(sDodge, { Name = "Custom Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
+            Min = 0, Max = 5, Precision = 2, Suffix = " s", Callback = function(v)
+                Config.Dodge_Cooldown = v end })
+        sDodge:SubLabel({ Text = "Speed 0 = game default · Cooldown 0 = game default (our min spacing otherwise)" })
+        ctx.keybind(sDodge, {
+            Name = "Dodge Now",
+            Flag = ctx.flag("MV_DodgeFire_KB"),
+            Toggle = function()
+                if not Config.Dodge_On then notify("Dodge", "enable Dodge first"); return end
+                fireDodge()
+            end,
+        })
+
+        -- ─────────────── Section 7: No M2 Cooldown (Left) ───────────────
+        local sM2 = MV:Section({ Side = "Left" })
+        sM2:Header({ Name = "No M2 Cooldown" })
+        feature(sM2, {
+            Title = "No M2 Cooldown", Flag = "MV_NoM2CD",
+            get = function() return Config.NoM2CD_On end,
+            set = function(v)
+                Config.NoM2CD_On = v
+                if v then
+                    if not getM2() then
+                        notify("No M2 CD", "M2 module not found yet"); Config.NoM2CD_On = false
+                    elseif not hasDebugUpvalues() then
+                        notify("No M2 CD", "needs debug upvalue API")
+                    end
+                end
+            end,
+            Desc = "zeros client M2 attempt-lockouts + clears M2Cooldown attr\nServer still caps REAL M2 damage",
+        })
+        ctx.keybind(sM2, {
+            Name = "M2 Now (direct fire)",
+            Flag = ctx.flag("MV_M2Fire_KB"),
+            Toggle = function()
+                if not fireM2Direct() then notify("M2", "CombatRemoteClient not found") end
+            end,
+        })
+        sM2:SubLabel({ Text = "Direct fire skips ALL client gates (sends M2/ServerCheck straight to server)" })
+
+        -- ─────────────── Section 8: Anti-Ragdoll (Right) ───────────────
+        local sAR = MV:Section({ Side = "Right" })
+        sAR:Header({ Name = "Anti-Ragdoll" })
+        feature(sAR, {
+            Title = "Anti-Ragdoll", Flag = "MV_AntiRagdoll",
+            get = function() return Config.AntiRagdoll_On end,
+            set = function(v) Config.AntiRagdoll_On = v end,
+            Desc = "auto-getup out of ragdolls each frame\nskips managed ones (downed / carried / gripped)",
+        })
+        sAR:SubLabel({ Text = "Best-effort: server owns authoritative ragdoll state" })
 
         uiReady = true
     end
