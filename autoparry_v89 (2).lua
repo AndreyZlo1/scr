@@ -107,6 +107,19 @@ local Config = {
 		-- (сближающиеся/лунж) проходят дальше — точность High не страдает.
 		HighBroadRange    = 28,     -- [V105] за этим радиусом + враг НЕ приближается → мгновенный reject
 		                            -- (24→28: враг, вышедший за радиус и снова зашедший, больше не режется рано)
+		-- [V114] M1 APPROACH-TRUST. КОРЕНЬ жалобы «враг в ~10 studs подходит во время замаха → скрипт
+		-- не успевает; когда всегда в радиусе — парри норм». В High лёгкий M1 доверялся ТОЛЬКО когда
+		-- предсказательный бокс (predA+forward) уже накрывал нас. У ВБЕГАЮЩЕГО врага closing≈0 в начале
+		-- замаха (сперва замах, step-in в середине) → бокс накрывает поздно → willHitMe=false почти до
+		-- контакта → press в упор (в логе pressDt=0ms LATE). HeavyTrust решает это для M2/SKILL, но для
+		-- M1 такого пути НЕ было. Фикс: committed M1, НАЦЕЛЕННЫЙ в нас (faceDotPred) и который НА МОМЕНТ
+		-- контакта окажется в пределах досягаемости (radial predict по closing) → доверяем СРАЗУ, не
+		-- дожидаясь бокса → press планируется заранее → PERFECT. Ложняков нет: стоячий whiff (closing≈0,
+		-- dist-at-contact = dist > reach) НЕ триггерит; смотрящий мимо отсекается faceDotPred.
+		M1ApproachTrust    = true,
+		M1ApproachRange    = 14,    -- макс. текущая дистанция, на которой рассматриваем approach-trust для M1
+		M1ApproachFaceMin  = 0.30,  -- предсказанный facing·toMe (нацелен в нас) — иначе чужой/мимо-удар
+		M1ApproachReachPad = 3.0,   -- запас к forward: dist-на-контакте ≤ forward+pad ⇒ долетит
 
 	-- [V70] residual-калибратор УДАЛЁН. Предикт чисто математический. resAvg в
 	-- логе остаётся только как диагностика точности, в hitTL не подаётся.
@@ -164,7 +177,7 @@ local Config = {
 	-- [V113] M2 таймлайн систематически НЕДООЦЕНИВАЕТ контакт (в логе: pred=534ms, meas≈592ms,
 	-- predErr стабильно +55..+66ms по всем стилям). Причина: keyframe-маркер «hit» у M2-анимаций
 	-- стоит РАНЬШЕ реального damage-frame + серверный M2HitboxDelay длиннее клиентского предикта.
-	-- Из-за этого весь график нажатия сдвигался ~58мс раньше → блок долетал true+151ms (за краем
+	-- Из-за этого весь график нажатия сдвигался ~58мс раньше → блок долета�� true+151ms (за краем
 	-- окна [50,150] → normal-block вместо perfect). Сдвигаем расчётный контакт M2 позже на этот
 	-- стабильный биас → нажатие попадает в центр перфект-окна. Только M2 (у M1 predErr≈0).
 	M2ContactBias = 0.055,
@@ -566,7 +579,7 @@ local State = {
 	guardUp      = false,   -- ИСТИННОЕ серверное состояние guard: true когда серверу отправлен
 	                        -- Activated и ещё не отправлен Deactivated. Отдельно от blocking
 	                        -- (внутреннее намерение), чтобы гарантированно снимать guard даже
-	                        -- если blocking сброшен в обход releaseBlock (dodge/counter/outcome).
+	                        -- если blocking ��брошен в обход releaseBlock (dodge/counter/outcome).
 	holdUntil    = 0,
 	status       = "ARMED",
 	lastThreat   = nil,
@@ -1292,6 +1305,39 @@ local function willHitMe(th)
 			end
 		end
 
+		-- [V114] M1 APPROACH-TRUST: аналог HeavyTrust, но для ЛЁГКОГО M1 и с более узкими рамками.
+		-- Ловит «враг в ~10 studs, во время замаха подходит и бьёт» — раньше High-бокс накрывал нас
+		-- поздно (closing≈0 в начале замаха) → willHitMe=false почти до контакта → LATE (pressDt=0).
+		-- Доверяем, как только committed-M1 НАЦЕЛЕН в нас И по прогнозу окажется в досягаемости на
+		-- момент контакта. НЕ латчим (в High каждый кадр перерешаем — финт/отмена мгновенно сбросят).
+		if th.kind == "M1" and Config.M1ApproachTrust ~= false
+		   and dist <= (Config.M1ApproachRange or 14) then
+			local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
+			local toMeUnit = (dist > 0.05) and toMe or flatLook
+			local velClose = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit)   -- сближение по velocity
+			local measClose = 0                                          -- измеренное кадр-к-кадру
+			if th.prevPos and th.prevPosT then
+				local dtp = os.clock() - th.prevPosT
+				if dtp > 1e-3 and dtp < 0.5 then
+					local pdx   = th.prevPos.X - myHRP.Position.X
+					local pdz   = th.prevPos.Z - myHRP.Position.Z
+					local prevD = math.sqrt(pdx * pdx + pdz * pdz)
+					measClose = (prevD - dist) / dtp
+				end
+			end
+			local closing       = math.max(velClose, measClose, 0)
+			local distAtContact = dist - closing * tHit          -- где он будет к контакту
+			local reach         = forward + (Config.M1ApproachReachPad or 3.0)
+			local faceMin       = (mode == "High")
+				and (Config.M1ApproachFaceMin or Config.HighFaceMin or 0.30)
+				or (Config.HeavyFaceMin or -0.30)
+			-- нацелен в нас И (уже в досягаемости ИЛИ по прогнозу долетит к контакту)
+			if faceDotPred >= faceMin and distAtContact <= reach then
+				th.trustedHit = true
+				return true
+			end
+		end
+
 		if mode == "High" then
 			-- [V93] HIGH = GROUND-TRUTH. Решает не «рядом и п��имерно смотрит», а реальная игровая
 			-- геометрия удара.
@@ -1353,7 +1399,7 @@ local function willHitMe(th)
 			-- РЕАЛЬНО успеет повернуть за tHit (rotRate = макс физической и измеренной кадр-к-кадру
 			-- угловой скорости). Поворачиваем rawL к нам не больше, чем позволяет скорость:
 			--   • доворачивается быстро → aimLook смотрит на нас → парируем ВОВРЕМЯ (взвод заранее);
-			--   • стоит спиной без вращения → maxTurn≈0 → aimLook≈спина → aimDot низкий → мимо.
+			--   • стоит спиной б��з вращения → maxTurn≈0 → aimLook≈спина → aimDot низкий → мимо.
 			local dotRT   = rawL.X * toMe.X + rawL.Z * toMe.Z
 			local crossRT = rawL.X * toMe.Z - rawL.Z * toMe.X
 			local angToUs = math.atan2(crossRT, dotRT)          -- знаковый угол rawL→toMe
@@ -2401,7 +2447,7 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 			combo = ((debug.getupvalue(ap.tryM1Fn, ap.comboIdx) or 0) % 4) + 1
 		end
 		-- [V107] РЕЙТ-ГАРД: равномерный ~AP_MaxPerSec/с (по умолчанию 6 = server sustained low).
-		-- Раньше слали через ap.crc.Fire, а он режет 4/с ФРОНТ-ЛОАДОМ (4 подряд → тишина). Теперь
+		-- ��аньше слали через ap.crc.Fire, а он режет 4/с ФРОНТ-ЛОАДОМ (4 подряд → тишина). Теперь
 		-- шлём НАПРЯМУЮ в ServerRemote (минуя клиентский кап) со своим равномерным шагом → быстрее,
 		-- анимация успевает, и весь стан-window заполнен. Тест-свинг (ignoreRate) шлёт всегда.
 		if not ignoreRate then
@@ -3045,7 +3091,7 @@ local function schedulerStep(now)
 			-- [V66] POST-MORTEM: угроза уходит. Если на неё ни разу не нажали и не
 			-- задоджили — это независимый пропуск. Логируем ТОЧН��Ю прич��ну, чтобы
 			-- закрыть "скрипт проёбывает атаку" по фактам, а не догадкам.
-			-- [V69] при ненаправленном блоке угроза, вошедшая в окно, покрыта поднятым
+			-- [V69] при ненаправленном блоке угроза, ��ошедшая в окно, покрыта поднятым
 			-- guard'ом (один блок = защита от всех). Это НЕ промах — раньше логировалось
 			-- лож��ым "перебит EDF". Считаем отдельно, чтобы не путать с реа��ьными потерями.
 			local coveredByGuard = th.coveredByHeldGuard == true
@@ -3349,7 +3395,7 @@ local function schedulerStep(now)
 		-- и не терять кадры на лерп. Иначе (одиночная, далеко) — плавный трекинг.
 		local hardWin = (Config.BlockFaceHardDt or 0.30) + up
 		local hard = (dtc <= hardWin) or (Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2))
-		-- держим цель до контакта + грейс (перекрывает ��ам момент оверлапа и пару кадров после)
+		-- держим цель до контакта + грейс (перекрывает ��ам момент оверлапа и пару ��адров после)
 		setFaceGoal(turnTo.attackerHRP, hard, math.max(dtc, 0) + (Config.HoldAfter or 0.12) + 0.06)
 		State.vizTarget = { hrp = turnTo.attackerHRP, model = turnTo.attackerModel }
 	else
@@ -3455,7 +3501,7 @@ local function schedulerStep(now)
 		end
 		-- [V103] FACING-ГЕЙТ НАЖАТИЯ (юзер: миссы из-за ЛОЖНЫХ срабатываний → парри на КД). Блок в
 		-- этой игре НАПРАВЛЕННЫЙ: сервер отклоняет парри, если жертва смотрит спиной к атакующему
-		-- (в логах face=-0.99 BACK! на проваленных парри). Но локально нажатие всё равно жжёт
+		-- (в логах face=-0.99 BACK! на проваленных парри). Но ло��ально нажатие всё равно жжёт
 		-- BlockCooldown 0.5с → следующий РЕАЛЬНЫЙ удар уже не заблокировать. Поэтому если мы ещё
 		-- смотрим в сторону (faceDot < HighFaceMin) И есть время довернуться (applyFacing крутит нас
 		-- каждый кадр) — НЕ жжём нажатие в этот кадр, ждём разворота. Прессим, только когда facing
@@ -5883,4 +5929,3 @@ return function(_Lib, _Core)
 
 	return M
 end
-
