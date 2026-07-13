@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -32,7 +34,9 @@ local Config = {
 	-- и strafe → лунж/наскок с dist=10+ отсекался как «far» (High-миссы never-in-hitbox).
 	-- Теперь: сближение (toward us) ведём щедрее (реальный наскок закрывает дистанцию),
 	-- боковую (strafe) компоненту жёстко капим (иначе центр бокса уезжает вбок).
-	WillHitCloseCap = 6.5,  -- [V102] студы: макс. предикт в сторону сближения (выше — ловим вбегающих)
+	WillHitCloseCap = 12,   -- [V109] студы: макс. предикт в сторону сближения (6.5→12: ловим ВБЕГАЮЩИХ
+	                        -- врагов, чей наскок за время замаха закрывает 8-12 студов; доп. clamp по
+	                        -- фактической дистанции в hitboxGeom не даёт predA проскочить за нас)
 	WillHitLatCap   = 1.5,  -- студы: макс. предикт боковой (strafe) составляющей
 
 	-- [V68] ДВА РЕЖИМА ТОЧНОСТИ (переключение клавишей B).
@@ -355,7 +359,7 @@ local Config = {
 	-- [V88] Режимы desync (цикл клавишей ]):
 	--   delay     — визуал твоего замаха задержан на DesyncDelayMs; FireServer уходит вовремя.
 	--   firedelay — визуал идёт ��овремя; только M1/M2 ServerCheck уходит позже на DesyncDelayMs.
-	--   idlemask  — постоянный спуф IDLE, пока ты атакуешь.
+	--   idlemask  — постоянный спуф IDLE, пока ты атакуеш����.
 	--   prerun    — фейк-атака (как [) СРАЗУ + реальный FireServer задержан на DesyncDelayMs.
 	DesyncMode     = "delay",
 	DesyncDelayMs  = 140,          -- единая задержка delay/firedelay/prerun (мс)
@@ -888,7 +892,7 @@ end
 --   • пока парт�� нет — предсказываем бокс РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
 --     костылей (point-blank/heavy/drag/latch).
 -- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один раз за FrameId,
--- чтобы не обходить папку по разу на каждую угрозу в мультибое. Всё состояние — в V93 (см. выше
+-- чтобы не обходить папку по разу на каждую угрозу в м��льтибое. Всё состояние — в V93 (см. выше
 -- про лимит 200 локалов), новых local тут не заводим.
 local function hitboxIndex()
 	if V93.hbFrame == FrameId then return V93.byOwner end
@@ -986,7 +990,18 @@ local function hitboxGeom(th)
 			local latVec   = lead - toMeG * (lead:Dot(toMeG))  -- боковая составляющая (по velocity)
 			local latCap   = Config.WillHitLatCap or 1.5
 			if latVec.Magnitude > latCap then latVec = latVec.Unit * latCap end
-			closeAmt = math.clamp(closeAmt, 0, Config.WillHitCloseCap or 6.5)
+			-- [V109] КОРЕНЬ High-бага «враг подходит и бьёт — скрипт не вовремя, как будто вне
+			-- радиуса»: closeAmt капился жёстко WillHitCloseCap(6.5). Реально ВБЕГАЮЩИЙ враг за
+			-- время замаха (tHit до ~0.45с при скорости бега 16-28 студ/с) закрывает 8-12 студов —
+			-- 6.5 обрезал → predA НЕ доводился до нас → geom-бокс мимо → willHitMe=false → NO-PRESS,
+			-- а когда враг физически в радиусе, контакт уже неминуем → LATE. Поднял cap до 12. НО
+			-- предикт НЕ должен «проскакивать» за нас (иначе центр бокса уедет за спину) → clamp
+			-- дополнительно по фактической дистанции до нас (останавливаем predA чуть НЕ доходя).
+			-- Ложняков не добавляет: в High всё ещё держат facing-гейт (aimLook·toMe) и реальный
+			-- размер парта — вбегающий, но целящийся НЕ в нас, отсекается по facing.
+			local distToMe = Vector3.new(aPos.X - meG.Position.X, 0, aPos.Z - meG.Position.Z).Magnitude
+			local closeCap = math.min(Config.WillHitCloseCap or 12, distToMe * 0.95)
+			closeAmt = math.clamp(closeAmt, 0, closeCap)
 			lead = toMeG * closeAmt + latVec
 		else
 			local cap = Config.WillHitVelCap or 2.0
@@ -1163,7 +1178,7 @@ local function willHitMe(th)
 	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
 	-- текущий (rawDot) → он поворачивается в нашу сторону. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
-	-- [V90] DRAG/SNAP-TURN — ловим по ЗНАКУ доворота (facing приближается к нам между кадрами),
+	-- [V90] DRAG/SNAP-TURN — ловим по ЗНАКУ д��вор��та (facing приближается к нам между кадрами),
 	-- а не по мгновенной angY (она шумная и часто 0 между physics-степами → старый детект
 	-- пропускал «закрученные» атаки). Два независимых источника доворота, любого достаточно:
 	--   • physics-предикт: predLook уже развёрнут к нам сильнее текущего (faceDotPred > rawDot)
@@ -1543,6 +1558,14 @@ local function indexAllAnims()
 		if combat then
 			for _, styleFolder in ipairs(combat:GetChildren()) do
 				if styleFolder:IsA("Folder") then
+					-- [V109] СТИЛЕВАЯ папка = содержит канонические удары (M2 / 1stM1 / 2ndM1). Так мы
+					-- отличаем боевой стиль (Karate/Boxing/Kure/Striker/…) от НЕ-атакующих папок
+					-- Combat (Dodges = дэши, Grappling = грэб-секвенции): их авто-классифицировать в
+					-- атаки НЕЛЬЗЯ (ложные срабатывания на дэш/захват). Проверка по составу папки —
+					-- независима от точного имени папки в рантайме.
+					local isStyleFolder = styleFolder:FindFirstChild("M2") ~= nil
+						or styleFolder:FindFirstChild("1stM1") ~= nil
+						or styleFolder:FindFirstChild("2ndM1") ~= nil
 					for _, child in ipairs(styleFolder:GetChildren()) do
 						local lname     = child.Name:lower()
 						local defensive = looksDefensive(child.Name)
@@ -1551,21 +1574,27 @@ local function indexAllAnims()
 						-- и парри срабатывал на реакцию/успех врага, а не на удар).
 						local reaction  = (lname:find("ehit") or lname:find("success")
 							or lname:find("blockhit")) ~= nil
+						-- idle / walk / run / dash — не атаки (в стилевой папке есть Idle/Walk)
+						local benignMove = (lname == "idle" or lname == "walk" or lname == "run"
+							or lname:find("dash")) ~= nil
 						local kind = nil
-						if not defensive and not reaction then
+						if not defensive and not reaction and not benignMove then
 							kind = kindFromName(child.Name)
-							-- [V108] СПЕЦ-АТАКИ (крит/финишер/«крутилка ногами» и т.п.) в имени НЕ содержат
-							-- M1/M2 (напр. Striker "Crit", Kure "6to15_CritStartup") → раньше kind=nil →
-							-- анимка падала в BenignIds → детект её ВООБЩЕ не видел. Ловим по имени как SKILL.
-							if not kind and (lname:find("crit") or lname:find("momentum")
-								or lname:find("slam") or lname:find("special") or lname:find("finisher")) then
-								kind = "SKILL"
-							end
+							-- [V109] КОРЕНЬ «тяжёлой/скилла нет в логе, скрипт её не видит»: ЛЮБОЙ удар
+							-- внутри боевого стиля с НЕСТАНДАРТНЫМ именем (не M1/M2 — напр. Striker "Crit",
+							-- Kure "6to15_CritStartup" или будущая «крутилка ногами») раньше давал kind=nil →
+							-- анимка проваливалась в BenignIds (loop2) → детект ГЛУШИЛ её насовсем → нет
+							-- угрозы → ни блока, ни доджа, ни interrupt (юзер: «скрипт даже не атакует»).
+							-- Теперь любая не-защитная / не-реакционная / не-idle анимка боевого стиля = SKILL.
+							-- Ловится по keyframe-таймлайну (hitTimelineBase). Ложняков нет: реакции/блок/
+							-- idle/walk/dash уже исключены, а папка гарантированно боевая (есть M1/M2).
+							-- Список keyword'ов больше не нужен — покрываем ВСЕ текущие и будущие спец-удары.
+							if not kind and isStyleFolder then kind = "SKILL" end
 						end
 						local id = animIdOf(child)
 						if id and defensive then BlockIds[id] = true end
 						if kind and id then
-							AttackIds[id] = { kind = kind, combo = comboFromName(child.Name) }
+							AttackIds[id] = { kind = kind, combo = (kind == "M1") and comboFromName(child.Name) or nil }
 						end
 					end
 				end
@@ -1678,7 +1707,9 @@ function styleForward(style, kind)
 		local ok, f = pcall(function() return GameData.cfg.GetStyleHitboxForwardOffset(style, kind) end)
 		if ok and type(f) == "number" then return f end
 	end
-	return (kind == "M2") and Config.M2Forward or Config.M1Forward
+	-- [V109] SKILL/спец-удары (крит, «крутилка ногами» и т.п.) обычно тяжёлые и длиннорукие →
+	-- фолбэк на M2Forward (дальний вылет), а не короткий M1Forward. Меньше риск недооценить дистанцию.
+	return (kind == "M2" or kind == "SKILL") and Config.M2Forward or Config.M1Forward
 end
 
 local function velLead(hrp)
@@ -2029,7 +2060,7 @@ local function sendBoxingCounter(th, keepGuard)
 	if myHRP and aHRP and aHRP.Parent then
 		-- [V63] ПРЯМОЙ снап на текущую позицию в��ага, без velocity-lead.
 		-- Дамп (M2_ModuleScript.OnM2Activated): у boxing-M2 нет клиентского
-		-- прицеливания — сервер строит хитбокс по нашему HRP LookVector в момент
+		-- прицел��вания — сервер строит хитбокс по нашему HRP LookVector в момент
 		-- ServerCheck. Экстраполяция по скорости на ближней дистанции разворачивала
 		-- HRP вбок (в логе face=0.51 BACK!) и counter уходил мимо. Короткий
 		-- boxing-хитбокс требует, чтобы мы смотре��и ТОЧНО на врага сейчас.
@@ -2177,7 +2208,7 @@ State.ap = {
 	m1         = nil,    -- кэш РОДНОГО модуля M1 игры (return-таблица v1 с .OnM1Activated)
 	tryM1Fn    = nil,    -- сам локальный tryM1() (upvalue #1 в OnM1Activated) — даёт bool успеха
 	comboIdx   = nil,    -- upvalue-индекс u19 (combo-счётчик) в tryM1 — для Fixed-режима и custom-fire
-	m1Tried    = false,  -- уже пытались резолвить модуль (не спамить резолв каждый кадр)
+	m1Tried    = false,  -- уже пытались резолвить модуль (не спамить резолв каждый кад��)
 	-- [V105] CUSTOM FIRE: свой быстрый M1 в обход 450мс-троттла игры. Разметка upvalue tryM1
 	-- ЯКОРИТСЯ на CombatRemoteClient (единственный upvalue-table с полем .Fire) и все прочие индексы
 	-- берутся ФИКСИРОВАННЫМ смещением от него + строгая проверка типов (см. getM1). Точный порядок
@@ -2323,7 +2354,7 @@ end
 -- tryM1 после каждого свинга зовёт scheduleM1SwingTimers → u21=false на AttackDuration(0.45с) →
 -- следующий удар только через 0.45с. Мы повторяем ХВОСТ tryM1 (выбор combo, u25++/u27/u28,
 -- анимация, CombatRemoteClient.Fire), НЕ трогаем scheduleM1SwingTimers, и СНИМАЕМ клиентские локи
--- (u21=true, u32/u33=0) → троттла нет. Единственный настоящий потолок — сам CombatRemoteClient.Fire
+-- (u21=true, u32/u33=0) → троттла нет. Единственный настоя��ий потолок — сам CombatRemoteClient.Fire
 -- (M1.ServerCheck: min 80мс, sustained 4/с): он вернёт false, если рано, и тогда мы НЕ двигаем u25
 -- → последовательность серверу цела (без «дыр»). combo: Fixed → ровно AP_FixedHit, иначе 1→4.
 -- wantCombo (опц.) — принудительный номер удара для тест-свинга.
@@ -2554,7 +2585,7 @@ function State.ap.tryInterruptHeavy(th, now, remaining, preSwing)
 	-- стаггер отменяет тяжёлую вплоть до самого damage-frame (он в конце замаха). Значит времени
 	-- сбить атаку своим M1 МНОГО — раньше мы это недооценивали и просто парировали.
 	--
-	-- Честная модель времени (всё в кадре ОТ now, серверная сторона):
+	-- Честная моде��ь времени (всё в кадре ОТ now, серверная сторона):
 	--   • Наш M1 (CUSTOM-FIRE) шлёт ServerCheck МГНОВЕННО → сервер строит хитбокс в момент приёма →
 	--     наш хит регистрируется ≈ up (пол-RTT долёт пакета) + маленькая обработка. Без custom-fire
 	--     добавляется клиентский долёт анимации (AP_M1Delay).
@@ -3233,7 +3264,7 @@ local function schedulerStep(now)
 		-- (TOO EARLY/TOO LATE) были у GRANT-доджей (outnumbered-escape), которые
 		-- жглись по факту выдачи эв��йда, а не по удару: если удар ближе 180мс —
 		-- iframes не успевали (hit before window), если фитил�� заранее — окно
-		-- закрывалось за 1мс до удара. Теперь escape-доджи привязаны к контакту.
+		-- закрывалось за 1м�� до удара. Теперь escape-доджи привязаны к контакту.
 		local coverLo = Config.DodgeConfirm - 0.03
 		local coverHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
 		local function dodgeCovers(dt) return dt >= coverLo and dt <= coverHi end
@@ -3347,7 +3378,7 @@ local function schedulerStep(now)
 		State.multiThreatMax   = math.max(State.multiThreatMax or 0, State.multiThreatN)
 		State.multiThreatFrames = (State.multiThreatFrames or 0) + 1
 		-- [V92] ЛАТЧ УДЕРЖАНИЯ КЛАСТЕРА. Баг «2-я атака проходит»: как только 1-й атакующий
-		-- отрабатывал, multiThreat падал до false (остался 1 враг) → guard отпускался по
+		-- отрабатывал, multiThreat ��адал до false (остался 1 враг) → guard отпускался по
 		-- КОРОТКОМУ одиночному holdUntil, ровно за ~20мс до уд����ра выжившего (diag t=73.07
 		-- PERFECT → t=73.35 LATE NO-PRESS). Теперь при обнаружении кластера ЗАПОМИНАЕМ самый
 		-- поздний контакт + грейс и держи�� guard до него, сколько бы угроз ни осталось потом.
@@ -3446,7 +3477,7 @@ local function schedulerStep(now)
 			-- «времени нет» = до контакта меньше, чем нужно на нажатие+RTT (тогда прессим как есть)
 			local lastResort = dtc <= ((Config.PerfectLead or 0.0625) + up + 0.02)
 			if fd ~= nil and fd < faceFloor and not lastResort then
-				-- держим цель поворота на этого атакующего и ЖДЁМ — нажатие в этот кадр пропускаем
+				-- держим ��ель поворота на этого атакующего и ЖДЁМ — нажатие в этот кадр пропускаем
 				setFaceGoal(wantBlock.attackerHRP, true, math.max(dtc, 0) + (Config.HoldAfter or 0.12) + 0.06)
 				if not wantBlock.faceWaitLogged then
 					wantBlock.faceWaitLogged = true
@@ -4598,7 +4629,7 @@ end
 --     вызывает НЕ игрово�� скрипт, который можно "выпилить".
 --   • Краш происходит В МОМЕНТ raknet.add_send_hook (мгновенно, до первого пакета) →
 --     это native-защита клиента Roblox (Hyperion/Byfron), а не Lua. Её нельзя убрать
---     правкой игровых скриптов. Поэтому и "популяр��ый desync-скрипт" тоже крашил на F.
+--     правкой игровых скриптов. Поэтому и "популяр��ый desync-скрипт" тоже крашил ��а F.
 --   • Сеть игры = Blink: бой/движение шлётся через BLINK_RELIABLE_REMOTE:FireServer(buffer,
 --     instances) раз в Heartbeat — это ОБ��Ч��ЫЙ RemoteEvent, а НЕ raknet. Значит desync
 --     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
@@ -5325,7 +5356,7 @@ task.spawn(function()
 	while true do task.wait(3); scanAnimators() end
 end)
 
--- ═══════════════════════════════════════════════���═══════════════════════════
+-- ══════════════════════════════���════════════════���═══════════════════════════
 --  LOADER MODULE WRAPPER  (Syllinse Project integration)
 --  The loader does: local h = chunk(); if type(h)=="function" then h = h(Lib, Core) end
 --  and then calls h.start() and h.buildUI(ctx). Everything above already ran at
@@ -5500,7 +5531,7 @@ return function(_Lib, _Core)
 		apDodge:Header({ Name = "Must-Dodge List" })
 		do
 			-- В игре есть только M1 и M2 (боевые модули: M1, M2, Grapple, Evasive, Block —
-			-- отдельного Skill-каста нет). Поэтому предлагаем ровно два типа; grab/slam —
+			-- отдельного Skill-каста нет). Поэт��му предлагаем ровно два типа; grab/slam —
 			-- это M2 соответствующего стиля (Wrestling/Dirty).
 			local STYLES = {
 				"Default","Basic","Boxing","Bulky","Dirty","Hakari","Karate","Kure",
@@ -5825,3 +5856,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
