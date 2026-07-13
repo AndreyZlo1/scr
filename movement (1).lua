@@ -104,12 +104,13 @@ return function(Lib, Core)
         -- Stamina attribute (server-authoritative, would be detectable) — pure client field.
         InfStamina_On = false,
 
-        -- Dodge tweaks — patched DIRECTLY into the game Evasive module's own upvalues, so the
-        -- player's OWN natural dodges use these values (no manual trigger).
-        Dodge_On         = false,   -- master: resolve Evasive module + apply patches each frame
-        Dodge_Everywhere = false,   -- grant dodge in ANY state (OutnumberedEvasiveGrant + gates)
-        Dodge_Speed      = 0,       -- 0 = game DashSpeed, else exact studs/sec (setupvalue)
-        Dodge_Cooldown   = 0,       -- 0 = game cooldown, else patched onto the module's Cooldown
+        -- Dodge tweaks — applied to the game Evasive module (config field + module upvalue), so
+        -- the player's OWN natural dodges use these values. Defaults = the real in-game numbers,
+        -- so leaving the sliders alone behaves EXACTLY like vanilla (we only write when changed).
+        Dodge_On         = false,   -- master: resolve Evasive module + apply patches
+        Dodge_Everywhere = false,   -- dodge in ANY state (hook hides the action-lock attributes)
+        Dodge_Speed      = 30,      -- game default DashSpeed (studs/sec)
+        Dodge_Cooldown   = 1.5,     -- game default Evasive.Cooldown (seconds)
 
         -- Anti-Ragdoll / Auto-getup — force getup while Ragdoll is active and NOT a managed
         -- ragdoll (Downed / carried / dead). Best-effort: server owns the real ragdoll state.
@@ -130,7 +131,7 @@ return function(Lib, Core)
         return c, hum, root
     end
 
-    -- ═══════════════════ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════���═
+    -- ═══════════════════ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
     -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
     -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
     -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
@@ -284,7 +285,7 @@ return function(Lib, Core)
         end
     end
 
-    -- ═══════════════════ HOOK-BASED FEATURES ═════════════���════════════��═════
+    -- ═══════════════════ HOOK-BASED FEATURES ════════��════���════════════��═════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
     -- when the production bytecode ships with stripped function debug-names, which
     -- is why {Name=...} lookups silently returned nil before.
@@ -665,114 +666,103 @@ return function(Lib, Core)
     -- Held at false → sprint never dies. Written on Heartbeat (after the game's RenderStep,
     -- which only re-latches it true when Stamina>0), so on a drained frame it stays false.
     -- We NEVER touch the Stamina ATTRIBUTE (server-authoritative → detectable). Pure client.
+    local function _clearStaminaSeen(s) s._staminaSeenPositive = false end
     local function driveInfStamina()
         if not Config.InfStamina_On then return end
         local s = getSprint(); if not s then return end
         if rawget(s, "_staminaSeenPositive") ~= false then
-            pcall(function() s._staminaSeenPositive = false end)
+            pcall(_clearStaminaSeen, s)   -- reused fn ref → no per-frame closure allocation
         end
     end
 
+    -- Cached local character — updated on CharacterAdded. Used by the combat __namecall hook so
+    -- the hot path is a cheap pointer compare instead of an Instance property index per call.
+    local _myChar = LocalPlayer.Character
+
     -- ══════════════════════════ DODGE TWEAKS ════════════════════════════════
-    -- Applied DIRECTLY to the game's Evasive module — the player dodges with THEIR OWN input,
-    -- and these patches change how that native dodge behaves (no manual trigger):
-    --   Custom Speed    = setupvalue on the module local `DashSpeed`.
-    --   Custom Cooldown = setupvalue on the module local `Cooldown` (Evasive.lua:20) → the
-    --                     player's own dodge now recharges at the slider value instead of ~1.5s.
-    --   Everywhere      = keep OutnumberedEvasiveGrant asserted (canDodge grant path, line 245)
-    --                     + clear the state attributes Evasive() rejects on, so the native dodge
-    --                     input works while attacking / stunned / etc.
-    -- Honest ceiling: the SERVER still owns i-frames and the authoritative EvasiveCooldownRemaining
-    -- sync — a dodge in an invalid state moves you, and a cooldown below the server's may re-sync.
+    -- Applied to the game's Evasive module so the player's OWN dodge uses these values.
+    -- COOLDOWN BUG ROOT CAUSE: the cooldown is read from ONE OF TWO sources depending on the
+    -- equipped style (Evasive.lua:84-91 & 769-777) — GetStyleEvasiveCooldown reads the CONFIG
+    -- TABLE (Evasive.Cooldown * styleMult), otherwise it falls back to the module `Cooldown`
+    -- upvalue. Patching only the upvalue worked for SOME styles and not others → the
+    -- "sometimes changes, sometimes not". Fix: write BOTH the config field AND the upvalue.
+    -- DashSpeed (line 701) drives the dash velocity from the upvalue; we patch both there too.
+    -- Values default to the real in-game numbers and we ONLY write when a slider differs from
+    -- them (dirty-flag), so leaving defaults = untouched vanilla and there's no per-frame churn.
+    -- Honest ceiling: syncCooldownFromServer (Evasive.lua:64) re-applies the authoritative
+    -- EvasiveCooldownRemaining attribute, so a cooldown below the server's may re-sync.
     --
-    -- Map u1.Evasive's upvalues ONCE (Evasive.lua:506 list has module locals DashSpeed / Cooldown /
-    -- DashDuration / ServerConfirmTimeout, matched by their CombatConfig values).
-    local _evMapped, _evSpeedIdx, _evSpeedBase, _evCdIdx, _evCdBase = false, nil, nil, nil, nil
+    -- DODGE-EVERYWHERE: Evasive() has unconditional early-returns (Evasive.lua:590-617) on
+    -- CombatAttacking / Blocking / Stunned / GuardBroken / Greenzone / RpCombatLocked /
+    -- CantAnything. While attacking, the combat system re-asserts CombatAttacking every frame,
+    -- so clearing the attribute from a loop LOSES the race. The combat __namecall hook (below)
+    -- hides these attributes synchronously on the read the game itself makes → reliable.
+    local DODGE_SPOOF_SET = {
+        CombatAttacking = true, Blocking = true, GuardBroken = true,
+        Stunned = true, Greenzone = true, RpCombatLocked = true, CantAnything = true,
+    }
+    -- Map Evasive base values ONCE: config-table defaults + (if debug API present) the upvalue
+    -- indices for DashSpeed / Cooldown (Evasive.lua:506 upvalue list).
+    local _evMapped, _evSpeedIdx, _evCdIdx = false, nil, nil
+    local _evSpeedBase, _evCdBase = nil, nil
+    local _appliedSpeed, _appliedCd = nil, nil
     local function mapEvasive()
-        if _evMapped then return _evSpeedIdx ~= nil or _evCdIdx ~= nil end
+        if _evMapped then return true end
         local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return false end
-        if not hasDebugUpvalues() then return false end
-        local ok, ups = pcall(debug.getupvalues, ev.Evasive)
-        if not (ok and type(ups) == "table") then return false end
         local cfg = getCombatConfig()
         local ev2 = cfg and cfg.Evasive
-        local speedVal = ev2 and type(ev2.DashSpeed) == "number" and ev2.DashSpeed or nil
-        local cdVal    = ev2 and type(ev2.Cooldown)  == "number" and ev2.Cooldown  or nil
-        for i, v in pairs(ups) do
-            if type(v) == "number" then
-                if speedVal and not _evSpeedIdx and math.abs(v - speedVal) < 1e-4 then
-                    _evSpeedIdx, _evSpeedBase = i, v
-                elseif cdVal and not _evCdIdx and math.abs(v - cdVal) < 1e-4 then
-                    _evCdIdx, _evCdBase = i, v
+        _evSpeedBase = ev2 and type(ev2.DashSpeed) == "number" and ev2.DashSpeed or nil
+        _evCdBase    = ev2 and type(ev2.Cooldown)  == "number" and ev2.Cooldown  or nil
+        if hasDebugUpvalues() then
+            local ok, ups = pcall(debug.getupvalues, ev.Evasive)
+            if ok and type(ups) == "table" then
+                for i, v in pairs(ups) do
+                    if type(v) == "number" then
+                        if _evSpeedBase and not _evSpeedIdx and math.abs(v - _evSpeedBase) < 1e-4 then
+                            _evSpeedIdx = i
+                        elseif _evCdBase and not _evCdIdx and math.abs(v - _evCdBase) < 1e-4 then
+                            _evCdIdx = i
+                        end
+                    end
                 end
             end
         end
         _evMapped = true
         return true
     end
-    -- ── DODGE-EVERYWHERE (dodge while attacking / blocking / stunned) ──
-    -- The Evasive() executor has TWO gate layers (verified in Evasive.lua):
-    --   1) canDodge grant path (line 245/529): OutnumberedEvasiveGrant==true bypasses the
-    --      cooldown gate — we assert that attribute each frame.
-    --   2) UNCONDITIONAL early-returns (lines 590-617): GuardBroken / CantAnything / Blocking /
-    --      CombatAttacking / Stunned / Greenzone / RpCombatLocked — the grant does NOT bypass
-    --      these. While you attack, the combat system re-sets CombatAttacking=true every frame,
-    --      so clearing the attribute from PostStep LOSES the race (game reads it before we clear).
-    -- Fix: a __namecall hook on GetAttribute that returns nil for these action-lock states, on
-    -- OUR character, only while Dodge_Everywhere is on. This is read synchronously by the same
-    -- call the executor makes, so there is no race. Physical states (Ragdoll/Downed) are left
-    -- alone — dodging is about cancelling combat locks, not overriding physics.
-    local DODGE_SPOOF_SET = {
-        CombatAttacking = true, Blocking = true, GuardBroken = true,
-        Stunned = true, Greenzone = true, RpCombatLocked = true, CantAnything = true,
-    }
-    local _dodgeHookDone = false
-    local function installDodgeSpoof()
-        if _dodgeHookDone then return true end
-        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
-            return false
-        end
-        local oldNamecall
-        local handler = function(self, ...)
-            if Config.Dodge_On and Config.Dodge_Everywhere then
-                local ok, method = pcall(getnamecallmethod)
-                if ok and method == "GetAttribute" and self == LocalPlayer.Character then
-                    local key = ...
-                    if DODGE_SPOOF_SET[key] then return nil end   -- action lock → invisible
-                end
-            end
-            return oldNamecall(self, ...)
-        end
-        if type(newcclosure) == "function" then
-            local okc, wrapped = pcall(newcclosure, handler)
-            if okc then handler = wrapped end
-        end
-        local ok, ref = pcall(hookmetamethod, game, "__namecall", handler)
-        if not ok or not ref then return false end
-        oldNamecall = ref
-        _dodgeHookDone = true
-        return true
-    end
-    -- Runs each frame while Dodge is enabled — keeps the module patched to the live slider values.
+    -- Cheap per-frame keeper: writes only when the desired value actually changed.
     local function driveDodge()
         if not Config.Dodge_On then return end
-        local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return end
         if not mapEvasive() then return end
-        if _evSpeedIdx then
-            local target = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
-            if target then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, target) end
+        local ev  = getEvasive()
+        local cfg = getCombatConfig()
+        local wantSpeed = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
+        if wantSpeed and wantSpeed ~= _appliedSpeed then
+            if cfg and cfg.Evasive then cfg.Evasive.DashSpeed = wantSpeed end
+            if _evSpeedIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, wantSpeed) end
+            _appliedSpeed = wantSpeed
         end
-        if _evCdIdx then
-            local target = (Config.Dodge_Cooldown and Config.Dodge_Cooldown > 0) and Config.Dodge_Cooldown or _evCdBase
-            if target then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, target) end
+        local wantCd = (Config.Dodge_Cooldown and Config.Dodge_Cooldown > 0) and Config.Dodge_Cooldown or _evCdBase
+        if wantCd and wantCd ~= _appliedCd then
+            if cfg and cfg.Evasive then cfg.Evasive.Cooldown = wantCd end
+            if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, wantCd) end
+            _appliedCd = wantCd
         end
-        if Config.Dodge_Everywhere then
-            installDodgeSpoof()  -- idempotent; the hook does the actual gate bypass
-            local char = LocalPlayer.Character
-            if char and char:GetAttribute("OutnumberedEvasiveGrant") ~= true then
-                pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", true) end)
-            end
+    end
+    -- Restore the game's own numbers (called when Dodge is toggled off).
+    local function restoreDodge()
+        if not _evMapped then return end
+        local ev  = getEvasive()
+        local cfg = getCombatConfig()
+        if _evSpeedBase then
+            if cfg and cfg.Evasive then cfg.Evasive.DashSpeed = _evSpeedBase end
+            if _evSpeedIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, _evSpeedBase) end
         end
+        if _evCdBase then
+            if cfg and cfg.Evasive then cfg.Evasive.Cooldown = _evCdBase end
+            if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, _evCdBase) end
+        end
+        _appliedSpeed, _appliedCd = nil, nil
     end
 
     -- ═══════════════════════ ANTI-RAGDOLL / AUTO-GETUP ══════════════════════
@@ -802,18 +792,30 @@ return function(Lib, Core)
         if hum and hum.Health <= 0 then return true end
         return false
     end
-    local _ragdollHookDone = false
-    local function installRagdollSpoof()
-        if _ragdollHookDone then return true end
+    -- ── CONSOLIDATED COMBAT __namecall HOOK (dodge-everywhere + anti-ragdoll) ──
+    -- ONE hook instead of two: a __namecall hook taxes EVERY namecall in the game, so two
+    -- layered hooks doubled the per-call cost (that was a big chunk of the FPS drop). This
+    -- single hook fast-paths on a cheap pointer compare (self == _myChar) BEFORE calling
+    -- getnamecallmethod, so ~all traffic (not on our character) pays only one comparison.
+    local _combatHookDone = false
+    local function installCombatHook()
+        if _combatHookDone then return true end
         if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
             return false
         end
         local oldNamecall
         local handler = function(self, ...)
-            if Config.AntiRagdoll_On and self == LocalPlayer.Character then
-                local ok, method = pcall(getnamecallmethod)
-                if ok and method == "GetAttribute" and (...) == "Ragdoll" then
-                    if not isManagedRagdoll(self) then return nil end  -- hide non-managed ragdoll
+            -- cheapest possible gate first: only our character's reads can ever be spoofed
+            if self == _myChar then
+                local dodgeEV = Config.Dodge_On and Config.Dodge_Everywhere
+                local ragEV   = Config.AntiRagdoll_On
+                if (dodgeEV or ragEV) and getnamecallmethod() == "GetAttribute" then
+                    local key = ...
+                    if ragEV and key == "Ragdoll" then
+                        if not isManagedRagdoll(self) then return nil end   -- hide ragdoll
+                    elseif dodgeEV and DODGE_SPOOF_SET[key] then
+                        return nil                                          -- hide action-lock
+                    end
                 end
             end
             return oldNamecall(self, ...)
@@ -825,13 +827,13 @@ return function(Lib, Core)
         local ok, ref = pcall(hookmetamethod, game, "__namecall", handler)
         if not ok or not ref then return false end
         oldNamecall = ref
-        _ragdollHookDone = true
+        _combatHookDone = true
         return true
     end
     -- Fallback getup for executors without hookmetamethod (best-effort, may flicker).
     local function driveAntiRagdoll()
         if not Config.AntiRagdoll_On then return end
-        if _ragdollHookDone then return end   -- hook path handles it cleanly; don't double-drive
+        if _combatHookDone then return end   -- hook path handles it cleanly; don't double-drive
         local char, hum = getParts()
         if not hum then return end
         if char:GetAttribute("Ragdoll") ~= true then return end
@@ -870,14 +872,15 @@ return function(Lib, Core)
     end)
 
     -- Reset transient state on respawn.
-    LocalPlayer.CharacterAdded:Connect(function()
+    LocalPlayer.CharacterAdded:Connect(function(char)
+        _myChar = char       -- keep the hook's fast-path pointer compare valid after respawn
         flyActive = false
         clearFlyInput()
         task.wait(0.5)
         if Config.Sprint_On then setSprint(true) end
     end)
 
-    -- ═══════════════════���═══════════ UI ═════════════════════════════════════
+    -- ═══════════════════���══════════�� UI ═════════════════════════════════════
     local M = {}
 
     function M.start()
@@ -1074,27 +1077,36 @@ return function(Lib, Core)
             Title = "Dodge", Flag = "MV_Dodge",
             get = function() return Config.Dodge_On end,
             set = function(v)
-                Config.Dodge_On = v
-                if v and not getEvasive() then
-                    notify("Dodge", "Evasive module not found yet")
+                if v then
+                    if not getEvasive() then
+                        notify("Dodge", "Evasive module not found yet"); Config.Dodge_On = false; return
+                    end
+                    Config.Dodge_On = true
+                    driveDodge()          -- apply current slider values immediately
+                else
                     Config.Dodge_On = false
-                elseif v and not hasDebugUpvalues() then
-                    notify("Dodge", "needs debug.getupvalues/setupvalue")
+                    restoreDodge()        -- put the game's own numbers back
                 end
             end,
-            Desc = "patches the game's Evasive module directly\nyour OWN dodge input uses these values",
+            Desc = "tweaks your OWN dodge (speed + cooldown)\ndefaults match the game exactly",
         })
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
-            function(v) Config.Dodge_Everywhere = v end)
-        sDodge:SubLabel({ Text = "Everywhere = dodge even while attacking / blocking / stunned (hook hides the action-locks). i-frames still server-owned." })
+            function(v)
+                Config.Dodge_Everywhere = v
+                if v and not installCombatHook() then
+                    notify("Dodge Everywhere", "executor lacks hookmetamethod/getnamecallmethod")
+                    Config.Dodge_Everywhere = false
+                end
+            end)
+        sDodge:SubLabel({ Text = "Everywhere = dodge even while attacking / blocking / stunned. i-frames still server-owned." })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
-            Min = 0, Max = 150, Suffix = " studs", Callback = function(v)
+            Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
-        slider(sDodge, { Name = "Custom Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
+        slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
             Min = 0, Max = 5, Precision = 2, Suffix = " s", Callback = function(v)
                 Config.Dodge_Cooldown = v; driveDodge() end })
-        sDodge:SubLabel({ Text = "Applied directly to your dodge · Speed 0 = game default · Cooldown 0 = game default" })
+        sDodge:SubLabel({ Text = "Defaults (30 studs · 1.5s) = the game's own values → leave them for vanilla feel" })
 
         -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
@@ -1104,7 +1116,7 @@ return function(Lib, Core)
             get = function() return Config.AntiRagdoll_On end,
             set = function(v)
                 Config.AntiRagdoll_On = v
-                if v then installRagdollSpoof() end  -- hides the Ragdoll attr → game self-getups
+                if v then installCombatHook() end  -- hides the Ragdoll attr → game self-getups
             end,
             Desc = "hides the Ragdoll attribute from the game's own sustain loop\nskips managed ones (downed / carried / gripped / dead)",
         })
