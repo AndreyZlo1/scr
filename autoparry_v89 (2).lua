@@ -74,17 +74,17 @@ local Config = {
 	-- [V90.4] High = чисто геометрический dual-box (predLook + rawL), без radius/facing-доверия
 	-- (см. willHitMe). Никаких HighFaceMin/HighReachPad больше нет — они и делали High как Low.
 	-- [V90] DRAG/SNAP-TURN детект (закрученные атаки: враг смотрит мимо, бьёт, резко
-	-- доворачивается к нам). Ловим по ЗНАКУ доворота (facing приближается к нам между
+	-- доворачивается к нам). Ловим по ЗНАКУ довор��та (facing приближается к нам между
 	-- кадрами), а не по мгновенной angY (шумной). Работает и в High, и в Low.
 	DragDetect    = true,
-	DragTurnMinDeg= 35,     -- град/с: доворот в����ше этого + приближение facing к нам = drag-угроза
+	DragTurnMinDeg= 35,     -- град/с: доворот в������ше этого + приближение facing к нам = drag-угроза
 	DragTrustRange= 13,     -- радиус (студы), где drag-довороту даём доверие
 	Key_Accuracy  = Enum.KeyCode.B,
 
 	-- [V89] HEAVY-ПРИОРИТЕТ. Тяжёлые (M2) и скиллы — выпады, атакующий закрывает дистанцию в
 	-- замахе, а velCap=2.0 обрезал predA → geom-бокс отбраковывал их как "never-in-hitbox"
 	-- (в диаг ровно так пропала Capoeira M2 → Ragdoll-каскад → провал мультибоя). Тяжёлый в
-	-- расширенном радиусе, если смотрит ~на нас ИЛИ реально сближается, считаем угрозой сразу.
+	-- расширенном радиусе, если смотрит ~на нас ��ЛИ реально сближается, считаем угрозой сразу.
 		HeavyTrust       = true,
 		HeavyTrustRange  = 14,     -- радиус (студы), в котором тяжёлым/скиллам даём безусловное доверие
 		HeavyFaceMin     = -0.30,  -- бракуем тяжёлый, только если predFacing·toMe < этого И он не сближается
@@ -161,6 +161,13 @@ local Config = {
 	M2WidenWindow = false,
 	M2WidenFront  = 0.22,
 	M2WidenHold   = 0.10,
+	-- [V113] M2 таймлайн систематически НЕДООЦЕНИВАЕТ контакт (в логе: pred=534ms, meas≈592ms,
+	-- predErr стабильно +55..+66ms по всем стилям). Причина: keyframe-маркер «hit» у M2-анимаций
+	-- стоит РАНЬШЕ реального damage-frame + серверный M2HitboxDelay длиннее клиентского предикта.
+	-- Из-за этого весь график нажатия сдвигался ~58мс раньше → блок долетал true+151ms (за краем
+	-- окна [50,150] → normal-block вместо perfect). Сдвигаем расчётный контакт M2 позже на этот
+	-- стабильный биас → нажатие попадает в центр перфект-окна. Только M2 (у M1 predErr≈0).
+	M2ContactBias = 0.055,
 	ChargeStallMs = 45,
 	ReleaseGap    = 0.40,
 
@@ -280,6 +287,16 @@ local Config = {
 	BoxingCounterReach= 8,
 	BoxingCounterLead = 0.16,
 	BoxingCounterMinGap = 0.45,
+	-- [V113] COMBO-GUARD для boxing-counter (КОРЕНЬ «плохо реагирует на Boxing M1»). Counter шлёт
+	-- нашу M2 и РОНЯЕТ guard; после M2 мы в RecoveryLockout ~0.5с и блокировать НЕЛЬЗЯ. Boxing-комбо
+	-- идут ~0.5с друг за другом → СЛЕДУЮЩИЙ удар комбо прилетает пока мы в M2-recovery → его нечем
+	-- парировать (в логе устойчивый паттерн COUNTER → next hit true-120ms MISS). Фикс: НЕ контрим,
+	-- если от ТОГО ЖЕ атакующего есть следующий удар в пределах M2RecoveryLockout после текущего —
+	-- тогда надёжнее держать обычный perfect-block (он в логе даёт чистые PERFECT). Counter остаётся
+	-- для ОДИНОЧНЫХ/последних ударов, где после него никто сразу не бьёт.
+	BoxingCounterComboGuard = true,
+	M2RecoveryLockout = 0.5,   -- CombatConfig.M2 RecoveryLockout — сколько после нашей M2 нельзя блок
+	BoxingComboGapMargin = 0.2,-- запас к recovery: свинги врага чаще (recovery+margin) = комбо → не контрим
 
 	-- Skill Addons: per-style combat behaviors that plug into the parry brain.
 	-- Each maps to a REAL mechanic found in CombatConfig, not a placeholder.
@@ -361,8 +378,8 @@ local Config = {
 	AntiDecoyGap   = 0.12,       -- мин. интервал между настоящими свингами одного врага (сек)
 	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
 	DesyncSendHz      = 0,        -- Anti-AutoParry decoy re-sends per second; 0 = auto (track length)
-	-- Invisible desync: реплицируем контортну��ый/опущенный корень на сервер (другие тебя не видят),
-	-- локально каждый RenderStep возвращаем на место (ты видишь себя ��орма��ьно).
+	-- Invisible desync: реплицируем ��онтортну��ый/опущенный корень на сервер (другие тебя не видят),
+	-- локально каждый RenderStep возвращаем на место (ты ��идишь себя ��орма��ьно).
 	InvisibleOn    = false,
 	InvisibleHeight= 0,           -- ДОП. студы поверх базового з��хо������онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая ани��ация для лучшего скрытия
@@ -462,7 +479,7 @@ local Config = {
 	VizRingScale  = 1.0,    -- множител�� радиуса кольца (0.4–2.5)
 	VizRange      = 100,    -- дальность (студы), на которой ищется/рисуется цель
 	-- [V111] PERF: потолок частоты ПЕРЕРИСОВКИ визуалов. ESP чисто косметика — при 120+ реальных
-	-- fps перерисовывать кольцо(40 сег)+конус каждый кадр (≈140 WorldToViewportPoint + 140 записей
+	-- fps перери��овыват�� кольцо(40 сег)+конус каждый кадр (≈140 WorldToViewportPoint + 140 записей
 	-- Drawing) = САМАЯ дорогая всегда-активная работа. Кап 60 → дровинги живут между апдейтами
 	-- (не скрываются), ESP визуально гладкий, а нагрузка на высоком fps падает вдвое+.
 	VizMaxFPS     = 60,
@@ -684,7 +701,7 @@ local V93 = {
 	pingCacheVal   = 0.08,
 }
 
--- [V96] Пинг = сглаженный RTT с МЯГКИМ peak-hold. Прежняя версия завышала: держала спайк
+-- [V96] Пинг = сглаженный RTT с МЯГКИМ peak-hold. Прежняя верси�� завышала: держала спайк
 -- PingPeakHold=1.5с как «пол», а потом uplink() ещё раз брал max(getPing, getPingRaw) — двойное
 -- усиление пика → на первых ударах комбо lead был раздут (в логе ping скакал 148→180 и латчил
 -- 180). Теперь: EMA как база, пик держим лишь короткий hold и быстро распускаем к EMA, а uplink
@@ -1080,7 +1097,7 @@ local function willHitMe(th)
 	-- раньше удаляет ветка th.feinted в scheduler.
 	local mode = Config.AccuracyMode or "Low"
 
-	-- [V93] В High доверяемся ТОЛЬКО ground-truth (реальный парт) и чистой геометрии; latch из
+	-- [V93] В High доверяемся ТОЛЬКО ground-truth (реальный парт) и ч��стой геометр��и; latch из
 	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипал» бы на угрозах,
 	-- которые в нас не попадают. Свой latch в High ставит лишь подтверждённое пересечение
 	-- реального игрового хитбокса (th.gtConfirmed) в ветке ниже.
@@ -1188,7 +1205,7 @@ local function willHitMe(th)
 	-- а не по мгновенной angY (она шумная и часто 0 между physics-степами → старый детект
 	-- пропускал «закрученные» атаки). Два независимых источника доворота, любого достаточно:
 	--   • physics-предикт: predLook уже развёрнут к нам сильнее текущего (faceDotPred > rawDot)
-	--   • измеренный доворот за прошлый кадр: facing реально стал ближе к нам (prevLook→rawL)
+	--   • измеренный ��оворот за прошлый кадр: facing реально стал ближе к нам (prevLook→rawL)
 	-- Порог скорости — DragTurnMinDeg (ниже прежних ~69°/с, ловим снап раньше). Дальность —
 	-- DragTrustRange (шире обычного trust: drag часто начинают с�� средней дистанции).
 	local turningToward = false
@@ -1296,7 +1313,7 @@ local function willHitMe(th)
 			-- ── Шаг 2: парта ещё нет (мы во взводе ДО контакта) → предсказательная геометрия,
 			-- но РЕАЛЬНЫМ размером бокса (кэш RealHitboxSize по типу атаки, обучается с живых
 			-- партов; фолбэк — Config для самого первого свинга). Два origin'а (predA/predLook и
-			-- aPos/rawL), их объединение. Никаких trust-радиусов — только «мы внутри замаха».
+			-- aPos/rawL), их объединение. Никаких trust-ра��иусов — только «мы внутри замаха».
 			-- [V105] движ-слак: расширяем бокс на вклад относительной планарной скорости (враг + мы),
 			-- компенсируя рассинхрон отрисованной (прошлой) и серверной (будущей) позиции у движущихся.
 			local slack   = Config.HighSlack or 0.6
@@ -1328,7 +1345,7 @@ local function willHitMe(th)
 				local fside  = math.abs(ox * (-look.Z) + oz * look.X)
 				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
 			end
-			-- [V94] AIM-AWARE предикт facing к МОМЕНТУ contact. Серверный хитбокс строится по yaw
+			-- [V94] AIM-AWARE пр��дикт facing к МОМЕ��ТУ contact. Серверный хитбокс строится по yaw
 			-- атакующего в момент удара (дамп VictimHitboxService). Прежний predLook капался жёстко
 			-- на RotPredMaxDegHigh=55° → враг, доворачивающийся к нам со спины/сбоку, «не долетал»
 			-- предиктом → back-facing gate его резал → MISS/поздний ответ (жалоба «бьёт и
@@ -1367,7 +1384,7 @@ local function willHitMe(th)
 		end
 
 	-- LOW: щедрое доверие ближнему бою (как V67), НО отбраковываем удары, явно
-	-- направленные не в нас (predFacing смотрит от нас и мы не в упор) — чтобы не
+	-- направленные не в на�� (predFacing смотрит от нас и мы не в упор) — чтобы не
 	-- ��гри��ься на чужие атаки в замесе.
 	local trust = Config.HitTrustRange or 0
 	if trust > 0 and dist <= trust then
@@ -2197,7 +2214,7 @@ local function isMustDodge(th)
 end
 
 -- ============================ AutoPlay addon (V99) ============================
--- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Факты из дампа (CombatConfig.ClientPredict.M1):
+-- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Факты из ��ампа (CombatConfig.ClientPredict.M1):
 --   • ParryStun.M2 = 1.0с                    — жертва M2-парри з��станена 1с (окно добивания);
 --   • AttackDuration = 0.45с                 — реальный рейт M1 (tryM1 сам гейтит по нему, u21);
 --   • LocalParryAttackLockoutSeconds = 0.15с — после НАШЕГО парри tryM1 залочен 0.15с (u32);
@@ -2293,7 +2310,7 @@ function State.ap.getM1()
 			-- был НЕВЕРЕН: u32/u33 (parry/block-lockout timestamps) на старте = 0 → попадали под
 			-- фильтр и comboIdx резолвился в u32, а от него все смещения съезжали → fireOK=false и
 			-- combo Fixed не работал. CombatRemoteClient — ЕДИНСТВЕННЫЙ upvalue-table с полем .Fire
-			-- (function), поэтому это надёжный якорь. От него все индексы — фиксированным смещением,
+			-- (function), поэтому это надёжный якорь. О�� него все индексы — фиксированным смещением,
 			-- каждый проверяем по типу. Совпал весь профиль → включаем custom-fire.
 			if State.ap.tryM1Fn and type(debug.setupvalue) == "function" then
 				pcall(function()
@@ -2422,7 +2439,7 @@ end
 function State.ap.canAttack()
 	local c = localChar()
 	if not c then return false end
-	if c:GetAttribute("Equip") ~= true then return false end   -- руки не одеты → бить нельзя
+	if c:GetAttribute("Equip") ~= true then return false end   -- ��уки не одеты → бить нельзя
 	if c:GetAttribute("Blocking") == true then return false end -- держим guard → M1 не пройдёт
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
 	for _, a in ipairs(State.ap.busyAttrs) do
@@ -2811,6 +2828,20 @@ local function onAttack(attackerHRP, info, model, id, track)
 	}
 	Threats[#Threats+1] = th
 
+	-- [V113] Трекинг КАДЕНСА свингов по атакующему (для boxing combo-guard). Запоминаем интервал
+	-- между двумя последними свингами этого врага: короткий интервал = активная комбо-цепочка.
+	-- Поля на State (таблица — без новых top-level локалов, лимит 200/функция не тронут).
+	do
+		local key = model or attackerHRP or name
+		if key then
+			State.lastSwingBy = State.lastSwingBy or {}
+			State.swingGapBy  = State.swingGapBy or {}
+			local prev = State.lastSwingBy[key]
+			if prev then State.swingGapBy[key] = nowClock - prev end
+			State.lastSwingBy[key] = nowClock
+		end
+	end
+
 	local rec = { clock = nowClock, detectServer = nowServer, type = info.t, style = info.s,
 	              id = id, contact = remaining0, pingRaw = getPingRaw(), combo = combo,
 	              speed = speed, matched = false, th = th }
@@ -3067,8 +3098,15 @@ local function schedulerStep(now)
 			lead = lead + w
 			hold = hold + w
 		end
-				local pressAt = th.contactAbs - lead - up - th.velLead
-				local holdEnd = th.contactAbs + hold
+					-- [V113] M2 контакт-биас: сдвигаем РАСЧЁТНЫЙ момент контакта позже на стабильный
+					-- недооценённый остаток (см. Config.M2ContactBias) — только для M2. Влияет лишь на
+					-- локальный график нажатия (pressAt/holdEnd), не трогает th.contactAbs (facing и пр.).
+					local cAbs = th.contactAbs
+					if th.kind == "M2" and (Config.M2ContactBias or 0) > 0 then
+						cAbs = cAbs + Config.M2ContactBias
+					end
+					local pressAt = cAbs - lead - up - th.velLead
+					local holdEnd = cAbs + hold
 				-- [V66] диаг-трекинг: минимальный зазор до момента нажатия и факт
 				-- входа в окно — для точного post-mortem причины пропуска.
 				local dtToPress = pressAt - now
@@ -3226,7 +3264,7 @@ local function schedulerStep(now)
 		-- (TOO EARLY/TOO LATE) были у GRANT-доджей (outnumbered-escape), которые
 		-- жглись по факту выдачи эв��йда, а не по удару: если удар ближе 180мс —
 		-- iframes не успевали (hit before window), если фитил�� заранее — окно
-		-- закрывалось за 1м�� до удара. Теперь escape-доджи привязаны к контакту.
+		-- закрывалось за 1м�� до ��дара. Теперь escape-д��джи привязаны к контакту.
 		local coverLo = Config.DodgeConfirm - 0.03
 		local coverHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
 		local function dodgeCovers(dt) return dt >= coverLo and dt <= coverHi end
@@ -3361,6 +3399,25 @@ local function schedulerStep(now)
 		-- держим непрерывный guard (гарантированн��й normal-block, нулевые дыры).
 		local allowCounter = shouldBoxingCounter(wantBlock)
 			and not (Config.BoxingCounterSolo and multiThreat)
+		-- [V113] COMBO-GUARD: counter шлёт нашу M2 и роняет guard → M2 RecoveryLockout (~0.5с) не даёт
+		-- заблокировать следующий удар. Если враг бьёт в БЫСТРОМ комбо-темпе (интервал между его
+		-- свингами ≤ recovery+margin), то следующий удар прилетит пока мы в M2-recovery → его нечем
+		-- парировать (лог: устойчивый COUNTER → next hit true-120ms MISS). В таком темпе НЕ контрим —
+		-- держим надёжный perfect-block всей цепочки (в логе он даёт чистые PERFECT). Counter остаётся
+		-- для изолированных/редких ударов (медленный каденс = после удара пауза, guard успеет встать).
+		if allowCounter and Config.BoxingCounterComboGuard ~= false then
+			local key = wantBlock.attackerModel or wantBlock.attackerHRP or wantBlock.name
+			local gap = key and State.swingGapBy and State.swingGapBy[key]
+			local thresh = (Config.M2RecoveryLockout or 0.5) + (Config.BoxingComboGapMargin or 0.2)
+			if gap and gap > 0 and gap <= thresh then
+				allowCounter = false
+				if not wantBlock.comboGuardLogged then
+					wantBlock.comboGuardLogged = true
+					diagPush(("NOCOUNTER t=%.2f %s combo cadence %.0fms≤%.0fms → block instead")
+						:format(now, wantBlock.name or "?", gap * 1000, thresh * 1000))
+				end
+			end
+		end
 		if allowCounter then
 			-- [V89] РАННИЙ HARD FACE-LOCK. Проблема ротации при boxing-аддоне: раньше взгляд
 			-- на врага включался Т��ЛЬКО в момент выстрела counter'а (contactAbs - BoxingCounterLead
@@ -3477,7 +3534,7 @@ local function schedulerStep(now)
 		end
 	end
 
-	-- [V100] AutoPlay: добивание застаненного врага — когда НЕТ угроз для блока. Убрали гейт
+	-- [V100] AutoPlay: добивани�� застаненного врага — к��гда НЕТ угроз для блока. Убрали гейт
 	-- `not State.blocking`: step сам уронит guard первым кадром (враг застанен, угроз нет →
 	-- безопасно), а fireM1 самоге��тится на Blocking. Так добивание стартует ср��зу после парри,
 	-- не дожидаясь истечения HoldAfter. Защита всё равно в приоритете: step идёт только при
@@ -4844,7 +4901,7 @@ end)
 
 -- [V90] firedelay/prerun теперь обрабатываю��ся ЕДИНСТ��ЕННЫМ владельцем — __namecall-хуком
 -- на Remotes.Server:FireServer (выше). Отдельный хук на CombatRemoteClient.Fire УДАЛЁН: он
--- (а) патчи�� таблицу по пути ReplicatedStorage.Shared.Network, которая может ��ы��ь декоем, пока
+-- (а) патчи�� таблицу по пути ReplicatedStorage.Shared.Network, к��торая может ��ы��ь декоем, пока
 -- реальный модуль лежит в Hidden, и (б) при работающем namecall-хуке давал ДВОЙНУЮ задержку
 -- (модуль держал → origFire → Server:FireServer → namecall держал снова). RemoteEvent
 -- Remotes.Server реплицируется и всегда достижим, поэтому перехват на нём надёжнее модульного.
@@ -4970,8 +5027,11 @@ local RING_B    = Color3.fromRGB(122, 214, 255)
 local CONE_SAFE = Color3.fromRGB(96, 214, 140)
 local CONE_HIT  = Color3.fromRGB(255, 84, 84)
 local RESTRICT_COL = Color3.fromRGB(255, 72, 72)
-local RING_SEG  = 40
-local CONE_SEG  = 18
+-- [V112] PERF: RING 40→24, CONE 18→12. Каждый сегмент = 2 WorldToViewportPoint (+запись Drawing).
+-- 40+18 давало ~140 WTV/кадр отрисовки; 24+12 = ~90 (−35%) при визуально идентичном кольце/конусе
+-- (24 сег на круг = 15°/сегмент — глазу гладко). Это всегда-активная работа → режем в корне.
+local RING_SEG  = 24
+local CONE_SEG  = 12
 local CONE_FILL = 0.32
 local VIZ_CONE_HALF = math.rad(64)
 local VIZ_CONE_PAD  = 5.0
@@ -5068,6 +5128,15 @@ end
 -- лимит 200 живых локалов на функцию — модуль впритык).
 Viz.bboxRaw = function(m) return m:GetBoundingBox() end
 Viz.bbModel, Viz.bbClock, Viz.bbC, Viz.bbS = nil, -1, nil, nil
+-- [V112] PERF: ПЕРСИСТЕНТНЫЕ scratch-буферы для точек кольца/конуса. Раньше drawFlatRing делал
+-- `wpts={}` и drawTargetHitbox — `wArc={}`,`a2d={}`,`az={}` НА КАЖДЫЙ кадр отрисовки = 4 таблицы +
+-- ~100 Vector2/Vector3 аллокаций/кадр → GC-дёрганье (главная оставшаяся причина «лагает»). Теперь
+-- переиспользуем таблицы (индексы просто перезаписываются, размер сегментов константный). Держим
+-- полями Viz (НЕ новые local — лимит 200 локалов на giant-функцию).
+Viz.ringPts = {}
+Viz.coneW   = {}
+Viz.cone2d  = {}
+Viz.coneZ   = {}
 Viz.bboxOf = function(model)
 	local nowc = os.clock()
 	if model == Viz.bbModel and (nowc - Viz.bbClock) < 0.004 then return Viz.bbC, Viz.bbS end
@@ -5092,7 +5161,7 @@ local function drawFlatRing(cam, model, hrp, hot)
 	local t = Viz.t * spd
 	local cx, cz = hrp.Position.X, hrp.Position.Z
 	local pulse = 1 + math.sin(t * 3.0) * 0.05
-	local wpts = {}
+	local wpts = Viz.ringPts   -- [V112] переиспользуемый буфер, без аллокации таблицы/кадр
 	for i = 0, RING_SEG - 1 do
 		local a = i / RING_SEG * math.pi * 2
 		local r = radius * pulse * (1 + math.sin(a * 4 + t * 5) * 0.03)
@@ -5138,13 +5207,13 @@ local function drawTargetHitbox(cam, model, hrp)
 			end
 		end
 
-	local wArc = {}
+	local wArc = Viz.coneW   -- [V112] переиспользуемые буферы, без аллокации таблиц/кадр
 	for i = 0, CONE_SEG do
 		local ang = -half + (i / CONE_SEG) * (half * 2)
 		wArc[i] = origin + rotY(flook, ang) * reach
 	end
 	local o2d, oz = proj(cam, origin)
-	local a2d, az = {}, {}
+	local a2d, az = Viz.cone2d, Viz.coneZ
 	for i = 0, CONE_SEG do a2d[i], az[i] = proj(cam, wArc[i]) end
 	for i = 0, CONE_SEG - 1 do
 		if oz > NEAR and az[i] > NEAR and az[i + 1] > NEAR then
@@ -5463,16 +5532,15 @@ return function(_Lib, _Core)
 			set = function(v) Config.DodgeHeavy = v end,
 			Desc = "dodge EVERY heavy attack instead of blocking\nnot recommended — burns i-frames",
 		})
-        apDodge:Divider()
 		boolToggle(apDodge, "Dodge If Cant Parry", "Dodge If Cant Parry",
 			function() return Config.DodgeOnParryCooldown ~= false end,
 			function(v) Config.DodgeOnParryCooldown = v end)
-		apDodge:SubLabel({ Text = "dodge when block is on cooldown" })
+		apDodge:SubLabel({ Text = "dodge when block is on cooldown / cant parry in time\nOFF = eat the hit instead (unblockable must-dodge unaffected)" })
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		apDodge:SubLabel({ Text = "roll away from the attacker instead of a fixed direction" })
 		boolToggle(apDodge, "Face-Gate Block", "Face-Gate Block",
 			function() return Config.FaceGateBlock ~= false end, function(v) Config.FaceGateBlock = v end)
-		apDodge:SubLabel({ Text = "dont waste a block pressing while facing away" })
+		apDodge:SubLabel({ Text = "dont waste a block (and its 0.5s cooldown) pressing while facing away\nwait for the turn — block is directional, the server rejects back-facing parries" })
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Dodge Tuning" })
@@ -5487,7 +5555,7 @@ return function(_Lib, _Core)
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
 			Min = 6, Max = 24, Suffix = " st", Callback = function(v) Config.HeavyTrustRange = v end })
-		apDodge:SubLabel({ Text = "how close a heavy must be before we fully trust it" })
+		apDodge:SubLabel({ Text = "how close a heavy must be before we fully trust it (lunges are caught farther out automatically)" })
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Must-Dodge List" })
@@ -5588,14 +5656,15 @@ return function(_Lib, _Core)
 			Title = "AutoPlay", Flag = "AP_AutoPlay",
 			get = function() return Config.AutoPlay end,
 			set = function(v) Config.AutoPlay = v end,
-			Desc = "autoplay addon idk",
+			Desc = "aggressive addon: auto-M1 a stunned enemy after ur perfect parry\nmaster switch for the stuff below",
 		})
 
 		apPlay:Divider()
 		apPlay:Header({ Name = "Behaviour" })
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
-	apPlay:SubLabel({ Text = "instant m1 after perfect parry" })
+	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
+	apPlay:SubLabel({ Text = "note: our M1 always uses the fast custom builder (bypasses the 450ms throttle)" })
 
 	apPlay:Divider()
 			apPlay:Header({ Name = "Combo" })
@@ -5611,7 +5680,7 @@ return function(_Lib, _Core)
 			apPlay:SubLabel({ Text = "Follow = natural combo 1→2→3→4→1.  Fixed = always throw one chosen hit" })
 			slider(apPlay, { Name = "Fixed Combo Hit", Flag = "AP_FixedHit", Default = Config.AP_FixedHit or 1,
 				Min = 1, Max = 4, Callback = function(v) Config.AP_FixedHit = v end })
-			apPlay:SubLabel({ Text = "which hit of the 4-move combo to throw (fixed mode)" })
+			apPlay:SubLabel({ Text = "which hit of the 4-move combo to throw (only used in Fixed mode)" })
 			apPlay:Button({
 				Name = "Test Swing",
 				Callback = function()
@@ -5624,13 +5693,13 @@ return function(_Lib, _Core)
 					end
 				end,
 			})
-			apPlay:SubLabel({ Text = "fires one M1 rn" })
+			apPlay:SubLabel({ Text = "fires one M1 right now with the combo animation the script would use (Fixed hit, or next in sequence)" })
 
 		apPlay:Divider()
 			apPlay:Header({ Name = "Tuning" })
 			slider(apPlay, { Name = "M1 Rate", Flag = "AP_MaxPerSec", Default = Config.AP_MaxPerSec or 6,
 				Min = 3, Max = 8, Suffix = " /s", Callback = function(v) Config.AP_MaxPerSec = v end })
-			apPlay:SubLabel({ Text = "swings per second, bypasses game limit (its 4)" })
+			apPlay:SubLabel({ Text = "swings per second, spread evenly (fills the whole stun window)\n6 = safe server ceiling; 7-8 hits harder but is more detectable" })
 			slider(apPlay, { Name = "M1 Reach", Flag = "AP_BaseReach", Default = Config.AP_BaseReach or 5.5,
 				Min = 3, Max = 10, Precision = 1, Suffix = " st", Callback = function(v) Config.AP_BaseReach = v end })
 	apPlay:SubLabel({ Text = "scaled by ur character height automatically" })
@@ -5675,7 +5744,7 @@ return function(_Lib, _Core)
 		slider(apVis, { Name = "Visual FPS Cap", Flag = "AP_VizMaxFPS",
 			Default = Config.VizMaxFPS or 60, Min = 15, Max = 240, Suffix = " fps",
 			Callback = function(v) Config.VizMaxFPS = v end })
-		apVis:SubLabel({ Text = "caps how often the visuals redraws" })
+		apVis:SubLabel({ Text = "caps how often the ESP redraws (not ur game fps)\nlower = more fps headroom; 60 looks perfectly smooth" })
 
 		apVis:Divider()
 		apVis:Header({ Name = "Colors" })
