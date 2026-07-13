@@ -77,7 +77,7 @@ local Config = {
 	-- доворачивается к нам). Ловим по ЗНАКУ доворота (facing приближается к нам между
 	-- кадрами), а не по мгновенной angY (шумной). Работает и в High, и в Low.
 	DragDetect    = true,
-	DragTurnMinDeg= 35,     -- град/с: доворот в��ше этого + приближение facing к нам = drag-угроза
+	DragTurnMinDeg= 35,     -- град/с: доворот в����ше этого + приближение facing к нам = drag-угроза
 	DragTrustRange= 13,     -- радиус (студы), где drag-довороту даём доверие
 	Key_Accuracy  = Enum.KeyCode.B,
 
@@ -166,9 +166,9 @@ local Config = {
 
 	-- [V103] FACE-GATE BLOCK: не жечь нажатие блока (и 0.5с BlockCooldown), пока смотрим спиной к
 	-- атакующему — блок направленный, сервер такой парри отклонит. Ждём доворота (applyFacing),
-	-- прес��им при приемлемом facing ИЛИ когда времени уже нет (последний шанс). Дефолт ON.
+	-- пр��с��им при приемлемом facing ИЛИ когда времени уже нет (последний шанс). Дефолт ON.
 	FaceGateBlock = true,
-	FaceGateMin   = 0.2,       -- мин. faceDot (cos) до атаку��щего, при котором разрешаем нажатие
+	FaceGateMin   = 0.2,       -- мин. faceDot (cos) до а��аку��щего, при котором разрешаем нажатие
 
 	-- [V93] ПОЛНЫЙ round-trip. Локальный атрибут PerfectBlocking СЕРВЕРНЫЙ: после нашего нажатия
 	-- он проходит нажатие→сервер (RTT/2) и реплик. атрибута назад (RTT/2) = ПОЛНЫЙ RTT, и лишь
@@ -273,7 +273,7 @@ local Config = {
 	RearmBudget        = 0.06,  -- запас на свежий Activated (сервер + throttle)
 	DualDodgeMaxGap     = 0.22, -- 2-й удар в пределах этого от 1-го = кандидат на dual
 
-	-- [V66] расшире��ная диагностика NO-PRESS/held-heavy (для точного разбора причин)
+	-- [V66] р��сшире��ная диагностика NO-PRESS/held-heavy (для точного разбора причин)
 	DeepDiag           = true,
 
 	BoxingCounter     = false,
@@ -361,8 +361,8 @@ local Config = {
 	AntiDecoyGap   = 0.12,       -- мин. интервал между настоящими свингами одного врага (сек)
 	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
 	DesyncSendHz      = 0,        -- Anti-AutoParry decoy re-sends per second; 0 = auto (track length)
-	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
-	-- локально каждый RenderStep возвращаем на место (ты видишь себя ��ормально).
+	-- Invisible desync: реплицируем контортну��ый/опущенный корень на сервер (другие тебя не видят),
+	-- локально каждый RenderStep возвращаем на место (ты видишь себя ��орма��ьно).
 	InvisibleOn    = false,
 	InvisibleHeight= 0,           -- ДОП. студы поверх базового з��хо������онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая ани��ация для лучшего скрытия
@@ -461,6 +461,11 @@ local Config = {
 	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
 	VizRingScale  = 1.0,    -- множител�� радиуса кольца (0.4–2.5)
 	VizRange      = 100,    -- дальность (студы), на которой ищется/рисуется цель
+	-- [V111] PERF: потолок частоты ПЕРЕРИСОВКИ визуалов. ESP чисто косметика — при 120+ реальных
+	-- fps перерисовывать кольцо(40 сег)+конус каждый кадр (≈140 WorldToViewportPoint + 140 записей
+	-- Drawing) = САМАЯ дорогая всегда-активная работа. Кап 60 → дровинги живут между апдейтами
+	-- (не скрываются), ESP визуально гладкий, а нагрузка на высоком fps падает вдвое+.
+	VizMaxFPS     = 60,
 	Debug         = true,
 
 	Key_Toggle    = Enum.KeyCode.K,
@@ -635,7 +640,7 @@ local _lastGoodPing = 0.08
 local function getPingRaw()
 	local best
 
-	-- Источник A: Player:GetNetworkPing() — one-way (сек). RTT ≈ ��2.
+	-- Источник A: Player:GetNetworkPing() — one-way (сек). RTT ≈ ×2.
 	local okA, oneWay = pcall(function() return LocalPlayer:GetNetworkPing() end)
 	if okA and type(oneWay) == "number" and oneWay > 0 then
 		best = oneWay * 2
@@ -673,6 +678,10 @@ local V93 = {
 	hbChar = nil,
 	hbFrame = -1,
 	byOwner = {},                      -- Owner.Value → { part, ... } за текущий FrameId
+	-- [V111] PERF: кэш getPing по времени (пересчёт не чаще ~раза в кадр). Держим полями V93,
+	-- НЕ отдельными local — лимит 200 живых локалов на функцию (модуль впритык).
+	pingCacheClock = -1,
+	pingCacheVal   = 0.08,
 }
 
 -- [V96] Пинг = сглаженный RTT с МЯГКИМ peak-hold. Прежняя версия завышала: держала спайк
@@ -680,10 +689,17 @@ local V93 = {
 -- усиление пика → на первых ударах комбо lead был раздут (в логе ping скакал 148→180 и латчил
 -- 180). Теперь: EMA как база, пик держим лишь короткий hold и быстро распускаем к EMA, а uplink
 -- НЕ добавляет второй max с сырым спайком. Это даёт стабильный lead около среднего RTT.
+-- [V111] PERF: getPing() зовётся из uplink() (schedulerStep) И applyFacing (RenderStepped)
+-- каждый кадр. Пинг — сглаженный EMA, менять его чаще раза в кадр смысла нет. Мемоизируем по
+-- времени (пересчёт не чаще ~1 раза в 4мс = раз в кадр даже при 240 fps): убирает повторный
+-- getPingRaw+EMA в том же кадре. Побочно EMA обновляется ровно раз/кадр → стабильнее.
 local function getPing()
+	local nowc = os.clock()
+	if (nowc - V93.pingCacheClock) < 0.004 then return V93.pingCacheVal end
+	V93.pingCacheClock = nowc
 	local raw = getPingRaw()
 	V93.pingEMA = V93.pingEMA + (raw - V93.pingEMA) * Config.PingSmooth
-	local now = os.clock()
+	local now = nowc
 	if raw >= V93.pingPeak then
 		V93.pingPeak, V93.pingPeakAt = raw, now      -- новый пик — фиксируем мгновенно
 	else
@@ -694,9 +710,10 @@ local function getPing()
 			V93.pingPeak = V93.pingPeak + (V93.pingEMA - V93.pingPeak) * math.min((age - hold) * 6, 1)
 		end
 	end
-	-- эффективный RTT = EMA, приподнятый к пику лишь частично (не весь спайк идёт �� lead)
+	-- эффективный RTT = EMA, приподнятый к пику лишь частично (не весь спайк идёт в lead)
 	local eff = V93.pingEMA + (V93.pingPeak - V93.pingEMA) * (Config.PingPeakWeight or 0.5)
-	return math.min(eff, Config.PingCap)
+	V93.pingCacheVal = math.min(eff, Config.PingCap)
+	return V93.pingCacheVal
 end
 
 local function uplink()
@@ -915,7 +932,7 @@ local function hitboxIndex()
 end
 
 -- Точная (как в игре) проверка: пересекает ли РЕАЛЬНЫЙ парт атакующего наш персонаж.
--- true — есть парт и он в нас; false — парт(ы) есть, но мимо; nil — активного парта нет.
+-- true — есть парт и он в нас; false — па��т(ы) есть, но мимо; nil — активного парта нет.
 local function realHitboxHitsMe(ownerName)
 	if not ownerName then return nil end
 	local lst = hitboxIndex()[ownerName]
@@ -1165,7 +1182,7 @@ local function willHitMe(th)
 	-- [V88] SNAP-TURN FEINT: враг закоммитил свинг и АКТИВНО доворачивается на нас. Серверный
 	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спин��й» = р��альная
 	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
-	-- текущий (rawDot) → он поворачивается в нашу сторону. Работает и в High, и в Low.
+	-- текущий (rawDot) → он поворачивается в нашу сторо��у. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
 	-- [V90] DRAG/SNAP-TURN — ловим по ЗНАКУ д��вор��та (facing приближается к нам между кадрами),
 	-- а не по мгновенной angY (она шумная и часто 0 между physics-степами → старый детект
@@ -3070,7 +3087,7 @@ local function schedulerStep(now)
 					-- не становилась целью → NO-PRESS → полный хит (твой клип). Теперь
 					-- снача��а берём угрозы без нажати�� (unpressed), сред��� ��их — с самым
 					-- ранним дедлайном. Так после блока быстрого heavy получает своё
-					-- собственное нажатие (guard держится → блок тяжёлой).
+					-- собственное нажатие (guard держится → бло�� тяжёлой).
 					local take = false
 					if not wantBlock then
 						take = true
@@ -3229,7 +3246,7 @@ local function schedulerStep(now)
 				   and not canBlockNow() and coverable then
 					if performDodge(now, "combo-escape") then return end
 				end
-		-- exposed-эскейп: мы в собственном действии (busy) и удар вход��т в окно.
+		-- exposed-эскейп: мы в собственном действии (busy) и удар вход���т в окно.
 		if Config.ExposedEscapeDodge and (State.selfBusyUntil or 0) > now
 		   and soonestDt <= Config.ExposedDodgeWindow and coverable then
 			if performDodge(now, "exposed-escape") then return end
@@ -3448,7 +3465,7 @@ local function schedulerStep(now)
 		-- [V62] пока в кластере есть незакрытые угрозы — не отпуск��ем guard даже
 		-- е��ли ближайший holdUntil истёк (иначе дыра между волнами burst).
 		-- [V92] guard держим пока: (а) активен мультиугрозный кластер прямо сейчас, ИЛИ
-		-- (б) не истёк ЛАТЧ кластера (State.multiHoldUntil) — даже если остался 1 атакующий,
+		-- (б) не истёк ЛАТЧ кластера (State.multiHoldUntil) ��� даже если остался 1 атакующий,
 		-- это выживший из кластера, и его удар ещё летит. Так вторая волна бо��ьше не проходит.
 		local keepForCluster = (multiThreat and farContact
 			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0)))
@@ -4185,7 +4202,7 @@ local SelfVerify = { conn = nil, lastLog = {}, decoyId = nil }
 -- [V76] ТЕСТ-РЕЖИМ "наоборот": пока ты стоишь в idle, ПОСТОЯННО проигрываем АТАКУ как
 -- decoy (низкий локальный ��ес, тебе почти незаметно). Смысл: на обсер��ере (твоя мобила)
 -- должно НЕПРЕРЫВНО показывать ATTACK, хотя ты ничего не жмёшь. Если показывает —
--- значит decoy реально ��ходит в репликацию и хук подмены рабочий. Тумблер по клавише.
+-- значит decoy реально ��ходит в репликацию и хук подмены ра��очий. Тумблер по клавише.
 local _testAnim, _testTrack, _testId
 local DesyncTest = { on = false }
 local function pickAttackId()
@@ -4235,7 +4252,7 @@ local function toggleDesyncTest()
 		-- нашу по весу/событию AnimationPlayed → обсервер свалив��лся на WALK. Тут мы каждые
 		-- ~0.35с ПЕРЕУТВЕРЖДАЕМ атаку: если её вырубили/понизили вес — перезапускаем, чем
 		-- держим её постоянно доминирующей и заставляем AnimationPlayed по ней срабатывать
-		-- снова (иначе обсервер показал бы последнюю walk-анимацию).
+		-- снова (иначе обсерв��р показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
 		-- Держим трек доминирующим только пока движок ��ам не перебил его walk'ом. Важно:
 		-- полностью уд����жать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
@@ -4480,7 +4497,7 @@ end
 --   packet:Drop()          -- отбросить (заблокировать) пакет  (НЕ return false!)
 --   raknet.add_send_hook(fn) / raknet.remove_send_hook(fn)   -- снятие по ССЫЛКЕ на fn!
 --   raknet.add_recv_hook(fn) / raknet.remove_recv_hook(fn)
--- Старый код: (1) ��итал packet.id / packet.size — таких полей нет; (2) хранил "hookId"
+-- Старый код: (1) ��итал packet.id / packet.size �� таких полей нет; (2) хранил "hookId"
 -- из add_send_hook и зва�� remove_send_hook(hookId) — передавал не-функцию в C++ →
 -- вылет. Теперь хук — ИМЕНОВАННАЯ фун��ция, снимается по ссылке. Скан read-only:
 -- не трогает па����еты (ни Drop, ни SetData), только считает PacketId. Максимально
@@ -4613,7 +4630,7 @@ end
 -- Тогда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬ��О реплицировался ему
 -- от твоего главного. Свингни ��а главном — �� в дебаге второго аккаунта увидишь, что
 -- ему пришло: реальная атака, decoy-idle, или (если raknet-rewrite заработает) только idle.
--- Это и есть объективная проверка desync с ��очки зрения противника.
+-- Это и есть объективная проверка desync с ��очк�� зрения противника.
 local Observers = {}
 local function observeOtherPlayer(name)
 	local target = Players:FindFirstChild(name)
@@ -4714,7 +4731,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	pcall(function() local s = track.Speed; if type(s) == "number" and s > 0.05 then origSpeed = s end end)
 	State.desyncFires = (State.desyncFires or 0) + 1
 
-	-- DELAY: анимацию замаха скрываем сразу и переигры��аем через mag мс (визуал стартует
+	-- DELAY: анимацию замаха скрываем сразу и переигры����аем через mag мс (визуал стартует
 	-- позже). FireServer/урон НЕ трогаем — они уходят вовремя (отд��льный __namecall-хук).
 	local animId = id
 	local mag = desyncMag()
@@ -5045,14 +5062,31 @@ local function pickTarget()
 	return best, bestHrp
 end
 
+-- [V111] PERF: чтение bbox через персистентную fn (без closure/кадр) + 1-кадровый кэш. drawFlatRing
+-- и footYOf оба тянут bbox цели каждый кадр — раньше каждый делал pcall(function()...GetBoundingBox
+-- ()...end) (замыкание + отдельный вызов). Всё состояние/функции держим полями Viz (НЕ новые local:
+-- лимит 200 живых локалов на функцию — модуль впритык).
+Viz.bboxRaw = function(m) return m:GetBoundingBox() end
+Viz.bbModel, Viz.bbClock, Viz.bbC, Viz.bbS = nil, -1, nil, nil
+Viz.bboxOf = function(model)
+	local nowc = os.clock()
+	if model == Viz.bbModel and (nowc - Viz.bbClock) < 0.004 then return Viz.bbC, Viz.bbS end
+	local ok, c, s = pcall(Viz.bboxRaw, model)
+	if ok and typeof(c) == "CFrame" and typeof(s) == "Vector3" then
+		Viz.bbModel, Viz.bbClock, Viz.bbC, Viz.bbS = model, nowc, c, s
+		return c, s
+	end
+	return nil
+end
+
 local function drawFlatRing(cam, model, hrp, hot)
 	local footY = hrp.Position.Y - 2.8
 	local radius = 3.2
-	pcall(function()
-		local c, s = model:GetBoundingBox()
-		footY  = c.Y - s.Y * 0.5 + 0.08
-		radius = math.clamp(math.max(s.X, s.Z) * 0.75, 2.4, 6)
-	end)
+	local bc, bs = Viz.bboxOf(model)
+	if bc and bs then
+		footY  = bc.Y - bs.Y * 0.5 + 0.08
+		radius = math.clamp(math.max(bs.X, bs.Z) * 0.75, 2.4, 6)
+	end
 	radius = radius * (Config.VizRingScale or 1.0)   -- [V90] пользовательский размер кольца
 	local spd = Config.VizRingSpeed or 1.0           -- [V90] пользовательская скорость анимации
 	local t = Viz.t * spd
@@ -5074,7 +5108,8 @@ end
 
 local function footYOf(model, hrp)
 	local y = hrp.Position.Y - 2.8
-	pcall(function() local c, s = model:GetBoundingBox(); y = c.Y - s.Y * 0.5 + 0.05 end)
+	local bc, bs = Viz.bboxOf(model)
+	if bc and bs then y = bc.Y - bs.Y * 0.5 + 0.05 end
 	return y
 end
 local function drawTargetHitbox(cam, model, hrp)
@@ -5171,7 +5206,15 @@ local function vizUpdate(dt)
 	-- [module] AutoParry visuals belong to AutoParry: hide them the instant the feature
 	-- is disabled, not just when ShowVisuals is off.
 	if not (Config.Enabled and Config.ShowVisuals and cam) then vizHideAll(); return end
-	Viz.t += dt
+	Viz.t += dt   -- анимационные часы идут КАЖДЫЙ кадр (дёшево) → фаза кольца плавная даже при троттле
+
+	-- [V111] PERF-ТРОТТЛ: тяжёлую перерисовку (пулы + ~280 операций проекции/Drawing) делаем не
+	-- чаще VizMaxFPS. Между апдейтами НЕ трогаем пулы (begin/finish не зовём) → дровинги остаются
+	-- видимыми на прошлых позициях; при 120+ fps это срезает основную всегда-активную нагрузку.
+	local nowc     = os.clock()
+	local interval = 1 / math.clamp(Config.VizMaxFPS or 60, 15, 240)
+	if (nowc - (Viz.lastDraw or 0)) < interval then return end
+	Viz.lastDraw = nowc
 
 	LinePool:begin(); TriPool:begin()
 	local model, hrp = pickTarget()
@@ -5209,7 +5252,7 @@ local function applyFacing()
 	local c = localChar()
 	local hum = c and c:FindFirstChildOfClass("Humanoid")
 	if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceHum = hum end
-	-- [V97] PING-SCALED предикт позиции цели ВОЗВРАЩЁН. В V95 я убрал velocity-lead (думая, что
+	-- [V97] PING-SCALED предикт позиции цели ВОЗВРАЩЁН. В V95 я убрал velocity-lead (ду��ая, что
 	-- сервер валидирует по факт. позиции) — но это ломало facing на резко движущемся/рывкающем
 	-- враге (в логе face=0.14/-0.58 BACK! на LATE-миссах). Причина: на нашем экране другой игрок
 	-- отрисован в ПРОШЛОМ (интерп-лаг + ping), а ��ервер держит его ВПЕРЕДИ. При рывке рассинхрон
@@ -5629,6 +5672,10 @@ return function(_Lib, _Core)
 		slider(apVis, { Name = "Render Distance", Flag = "AP_VizRange",
 			Default = Config.VizRange or 100, Min = 20, Max = 250, Suffix = " studs",
 			Callback = function(v) Config.VizRange = v end })
+		slider(apVis, { Name = "Visual FPS Cap", Flag = "AP_VizMaxFPS",
+			Default = Config.VizMaxFPS or 60, Min = 15, Max = 240, Suffix = " fps",
+			Callback = function(v) Config.VizMaxFPS = v end })
+		apVis:SubLabel({ Text = "caps how often the ESP redraws (not ur game fps)\nlower = more fps headroom; 60 looks perfectly smooth" })
 
 		apVis:Divider()
 		apVis:Header({ Name = "Colors" })
@@ -5767,3 +5814,4 @@ return function(_Lib, _Core)
 
 	return M
 end
+
