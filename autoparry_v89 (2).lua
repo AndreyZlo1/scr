@@ -121,18 +121,8 @@ local Config = {
 		M1ApproachFaceMin  = 0.30,  -- предсказанный facing·toMe (нацелен в нас) — иначе чужой/мимо-удар
 		M1ApproachReachPad = 3.0,   -- запас к forward: dist-на-контакте ≤ forward+pad ⇒ долетит
 
-	-- [V115] АДАПТИВНАЯ per-(kind,style) коррекция контакта (замена и V70-калибратора, и flat
-	-- M2ContactBias). Данные из лога доказали: ошибка таймлайна СТАБИЛЬНА внутри (kind,style), но
-	-- РАЗНАЯ по знаку между ними — M1(Basic) meas≈+20ms, M2(Basic) meas≈-65ms. Плоский биас чинил
-	-- одно и ломал другое. Теперь на КАЖДЫЙ (kind,style) копим окно недавних predErr, берём МЕДИАНУ
-	-- (робастна к выбросам — held/charged M2 не отравляет, в отличие от EMA V70), с отбраковкой
-	-- выброса, минимумом сэмплов и жёстким клампом применяемой коррекции. rec.contact хранит СЫРОЙ
-	-- предикт → predErr всегда меряет истинную ошибку модели → нет петли самоотравления.
-	AdaptivePredict = true,   -- вкл. адаптивную коррекцию
-	AdaptiveMinN    = 3,      -- минимум сэмплов (kind,style) до применения коррекции
-	AdaptiveWindow  = 8,      -- размер кольца недавних сэмплов (старые аутэйджатся → адаптация к смене стиля)
-	AdaptiveMaxCorr = 0.12,   -- жёсткий кламп |коррекции| (сек) — даже кривой оценщик не уведёт press дико
-	AdaptiveOutlier = 0.15,   -- сэмпл, отклоняющийся > этого от текущей медианы, ОТБРАСЫВАЕТСЯ (held/charged)
+	-- [V116] Адаптивная калибрация УДАЛЕНА (отравляла между врагами — см. коммент у press-схемы).
+	-- Предикт чисто математический; resAvg в логе — только диагностика точности, в press НЕ подаётся.
 	TurnWindow    = true,
 	TurnBaseDeg   = 42,
 	TurnCloseDeg  = 90,
@@ -146,7 +136,7 @@ local Config = {
 
 	ComboEscape        = true,
 	ComboEscapeDodge   = true,
-	-- [V97] Мастер-тумблер доджа «когда parry невозможен» (блок в кулдауне/стан). OFF = скрипт
+	-- [V97] Мастер-тумблер доджа «когда parry невозможен» (блок в кул��ауне/стан). OFF = скрипт
 	-- НЕ уходит доджем в такие моменты (юзер: иногда лучше съесть удар, чем палить додж). НЕ влияет
 	-- на must-dodge (неблокируемые атаки — их всё равно нельзя блокнуть) и guardbreak-save.
 	DodgeOnParryCooldown = true,
@@ -211,13 +201,15 @@ local Config = {
 	-- getPingRaw. Теперь тянем до 0.5с. На умеренном пинге (60–150) это ни на что не влияет (там
 	-- клампы не достигаются), а на 300–450ms пинге даёт полный round-trip lead.
 	UplinkMax     = 0.500,
-	PingSmooth    = 0.25,
 	PingCap       = 0.500,
-	-- [V96] МЯГКИЙ peak-hold. Было 1.5с — держал случайный спайк как «пол» лишние ~секунды и
-	-- завышал lead (в логе ping латчил 180 при среднем ~120). Теперь короткий hold + частичный
-	-- вес пика (PingPeakWeight), чтобы спайк не уходил в lead целиком. Сглаживает без залипания.
-	PingPeakHold  = 0.4,
-	PingPeakWeight = 0.5,   -- сколько от (пик−EMA) добавлять к эффекти��н��м�� RTT (0=только EMA, 1=весь пик)
+	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ (замена EMA+peak-hold). Peak-hold ЛАТЧИЛ случайный спайк
+	-- (в логе header ping=224 при combat-ping=158) → uplink раздувался → жали СЛИШКОМ РАНО. Медиана
+	-- окна последних сэмплов игнорирует одиночные выбросы (и вверх, и вниз) и отслеживает ИСТИННЫЙ
+	-- устойчивый RTT: один спайк-кадр среди 24 сэмплов не сдвигает медиану вообще, а реально
+	-- выросший пинг поднимает её за <1с. Никакого залипания, никакой петли обучения.
+	PingWindow    = 24,     -- размер кольца сэмплов (24 × PingSampleGap ≈ 0.72с окна)
+	PingSampleGap = 0.03,   -- как часто класть новый сырой сэмпл (сек) — не чаще ~раза в 2 кадра
+	PingSmooth    = 0.25,   -- (устар., оставлен для совместимости конфигов — в медиане не исп.)
 
 	MoveLeadMax   = 0.045,
 	MoveSpeedFull = 22,
@@ -246,7 +238,7 @@ local Config = {
 		-- [V106] Kure M2 = КОМАНДНЫЙ ГРЭБ/СЛЭМ (CombatConfig.Styles.kure: M2GrabAllowRagdollCombo,
 		-- M2GrabTargetForwardOffset=2.7, M2GrabLockDuration=0.5, M2GrabSlamDelay=0.3). Проходит
 		-- СКВОЗЬ блок, а на попадании ставит M2SlamParryWindowDisableDuration=2с → парри выключено
-		-- 2 сек и весь последующий Kure-комбо прилетает не заблокированным (в логе — каскад
+		-- 2 сек �� весь последующий Kure-комбо прилетает не заблокированным (в логе — каскад
 		-- Stunned/CantAnything). Раньше скрипт пытался блокировать/перебивать этот грэб → слэм.
 		-- Теперь Kure M2 = только додж назад в i-frame, как Wrestling M2.
 		kure = { M2 = true },
@@ -340,7 +332,7 @@ local Config = {
 	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по росту
 	-- [V107] РЕЙТ СВОЕГО M1. Раньше fireM1Custom слал через CombatRemoteClient.Fire, а тот держит
 	-- ClientSustainedMaxPerSecond["M1.ServerCheck"]=4 с ФРОНТ-ЛОАД окном: 4 свинга по 0.08с подряд,
-	-- потом ТИШИНА до конца 1-сек окна. Отсюда: (1) не быстрее 4/с, (2) анимация не успевает
+	-- потом ТИШИНА до конца 1-сек окна. Отсюда: (1) не быстрее 4/с, (2) ан��мация не успевает
 	-- проиграться (4 свинга втиснуты в 0.24с → рестарт каждые 80мс = «сбивается»), (3) в окне стана
 	-- (M2=1.0с) бьём 4 раза в первой четверти и молчим остаток. Настоящий серверный потолок —
 	-- ServerSustainedMax["M1.ServerCheck"]={low=6,mid=8}/сек, ServerMinInterval=0.08. Поэтому шлём
@@ -469,7 +461,7 @@ local Config = {
 	FaceLeadMax   = 4,      -- студы: кап упрежде��ия
 	-- [V97] PING-SCALED предикт facing (applyFacing). ��преждение = vel * (ping * FacePingLead),
 	-- т.к. рассинхрон позиции врага прямо пропорционален латентности. FaceLeadCap — верхний предел
-	-- по времени (сек), FaceLeadMaxStuds — по расстоянию (антиперелёт при рывке).
+	-- по времени (сек), FaceLeadMaxStuds — по расстояни�� (антиперелёт при рывке).
 	FacePingLead  = 1.0,
 	FaceLeadCap   = 0.22,
 	FaceLeadMaxStuds = 7,
@@ -702,11 +694,14 @@ end
 -- Оригинал был впритык к лимиту, поэтому каждое новое состояние держим полями ОДНОЙ таблицы
 -- (=1 локал), а не десятком отдельных local — иначе CompileError "Out of local registers".
 local V93 = {
-	pingEMA = 0.08,
-	-- peak-hold: держим недавний ПИК RTT, т.к. Data Ping пилообразно прос��дает (в диаг видели
-	-- ping=60 при реальных ~195) и на провале мы бы недокомпенсировали → LATE-блок.
-	pingPeak = 0.08,
-	pingPeakAt = 0,
+	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Кольцо сырых сэмплов RTT; getPing() = медиана окна.
+	-- Медиана игнорирует одиночные спайки/провалы Data Ping (пилообразный шум) и отслеживает
+	-- устойчивый RTT — без залипания на пике (прежний peak-hold) и без петли обучения.
+	pingBuf   = {},   -- кольцевой буфер сырых сэмплов (сек)
+	pingBufN  = 0,    -- сколько сэмплов накоплено (≤ PingWindow)
+	pingBufI  = 0,    -- индекс записи (0-based, крутится по PingWindow)
+	pingSampleClock = -1,   -- когда клали последний сэмпл
+	pingMedTmp = {},  -- scratch для сортировки медианы (переиспользуется)
 	-- ground-truth хитбоксы:
 	hbFolder = nil,
 	sizes = {},                        -- ["M1"]/["M2"] → Vector3 реального размера парта
@@ -720,35 +715,39 @@ local V93 = {
 	pingCacheVal   = 0.08,
 }
 
--- [V96] Пинг = сглаженный RTT с МЯГКИМ peak-hold. Прежняя верси�� завышала: держала спайк
--- PingPeakHold=1.5с как «пол», а потом uplink() ещё раз брал max(getPing, getPingRaw) — двойное
--- усиление пика → на первых ударах комбо lead был раздут (в логе ping скакал 148→180 и латчил
--- 180). Теперь: EMA как база, пик держим лишь короткий hold и быстро распускаем к EMA, а uplink
--- НЕ добавляет второй max с сырым спайком. Это даёт стабильный lead около среднего RTT.
--- [V111] PERF: getPing() зовётся из uplink() (schedulerStep) И applyFacing (RenderStepped)
--- каждый кадр. Пинг — сглаженный EMA, менять его чаще раза в кадр смысла нет. Мемоизируем по
--- времени (пересчёт не чаще ~1 раза в 4мс = раз в кадр даже при 240 fps): убирает повторный
--- getPingRaw+EMA в том же кадре. Побочно EMA обновляется ровно раз/кадр → стабильнее.
+-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Прежний EMA+peak-hold ЛАТЧИЛ спайк (в логе header ping=224
+-- при combat-ping=158) → uplink раздувался → жали СЛИШКОМ РАНО. Медиана окна последних сырых
+-- сэмплов игнорирует одиночные выбросы В ОБЕ СТОРОНЫ (Data Ping пилит вверх и вниз) и отслеживает
+-- устойчивый RTT: один спайк-кадр среди 24 сэмплов НЕ сдвигает медиану, а реально выросший пинг
+-- поднимает её за <1с. Это принципиальная оценка центральной тенденции, не костыль и не обучение.
+-- [V111] PERF: getPing() зовётся из uplink() (schedulerStep) И applyFacing (RenderStepped) каждый
+-- кадр → мемоизируем: новый сырой сэмпл кладём не чаще PingSampleGap, медиану пересчитываем только
+-- при добавлении сэмпла, между добавлениями отдаём кэш.
 local function getPing()
 	local nowc = os.clock()
-	if (nowc - V93.pingCacheClock) < 0.004 then return V93.pingCacheVal end
-	V93.pingCacheClock = nowc
-	local raw = getPingRaw()
-	V93.pingEMA = V93.pingEMA + (raw - V93.pingEMA) * Config.PingSmooth
-	local now = nowc
-	if raw >= V93.pingPeak then
-		V93.pingPeak, V93.pingPeakAt = raw, now      -- новый пик — фиксируем мгновенно
-	else
-		local hold = Config.PingPeakHold or 0.4
-		local age = now - V93.pingPeakAt
-		if age >= hold then
-			-- окно удержания вышло: быстро распускаем пик к EMA (не мгновенно, но и не залипая)
-			V93.pingPeak = V93.pingPeak + (V93.pingEMA - V93.pingPeak) * math.min((age - hold) * 6, 1)
-		end
+	if (nowc - V93.pingSampleClock) < (Config.PingSampleGap or 0.03) then
+		return V93.pingCacheVal
 	end
-	-- эффективный RTT = EMA, приподнятый к пику лишь частично (не весь спайк идёт в lead)
-	local eff = V93.pingEMA + (V93.pingPeak - V93.pingEMA) * (Config.PingPeakWeight or 0.5)
-	V93.pingCacheVal = math.min(eff, Config.PingCap)
+	V93.pingSampleClock = nowc
+
+	-- добавляем сырой сэмпл в кольцо
+	local raw = getPingRaw()
+	local win = math.max(3, Config.PingWindow or 24)
+	V93.pingBufI = (V93.pingBufI % win) + 1
+	V93.pingBuf[V93.pingBufI] = raw
+	if V93.pingBufN < win then V93.pingBufN = V93.pingBufN + 1 end
+
+	-- медиана окна (n ≤ 24 → дёшево, и только раз в PingSampleGap, не per-frame)
+	local n = V93.pingBufN
+	local tmp = V93.pingMedTmp
+	for i = 1, n do tmp[i] = V93.pingBuf[i] end
+	for i = n + 1, #tmp do tmp[i] = nil end
+	table.sort(tmp)
+	local med
+	if n % 2 == 1 then med = tmp[(n + 1) // 2]
+	else med = (tmp[n // 2] + tmp[n // 2 + 1]) * 0.5 end
+
+	V93.pingCacheVal = math.min(med, Config.PingCap)
 	return V93.pingCacheVal
 end
 
@@ -757,46 +756,10 @@ local function uplink()
 	return math.clamp(getPing() * Config.UplinkFactor + Config.UplinkMargin, Config.UplinkMin, Config.UplinkMax)
 end
 
--- [V115] АДАПТИВНЫЙ per-(kind,style) корректор контакта. Функции — поля V93 (НЕ новые top-level
--- local: лимит 200 живых локалов в giant-функции). ResidByKS[key] = { s=ring, idx, n, corr, seen }.
--- errSec = predErr в секундах (measured − raw-pred). corr прибавляется к предсказанному контакту:
--- errSec>0 (реально позже) → press позже; errSec<0 (реально раньше) → press раньше. Медиана окна
--- робастна к выбросам (held/charged M2 не отравляет), + явная отбраковка + мин.сэмплы + кламп.
-function V93.adaptCorr(th)
-	if Config.AdaptivePredict == false or not th or not th.ksKey then return 0 end
-	local ks = ResidByKS[th.ksKey]
-	return (ks and ks.corr) or 0
-end
-function V93.adaptRecord(key, errSec)
-	local ks = ResidByKS[key]
-	if not ks then ks = { s = {}, idx = 0, n = 0, corr = 0, seen = 0 }; ResidByKS[key] = ks end
-	ks.seen = ks.seen + 1
-	local minN = Config.AdaptiveMinN or 3
-	-- отбраковка выброса: если оценка уже есть и сэмпл далеко от неё — не пишем (held/charged/десинк)
-	if ks.n >= minN and math.abs(errSec - ks.corr) > (Config.AdaptiveOutlier or 0.15) then
-		return ks.corr, ks.seen
-	end
-	local win = math.max(2, Config.AdaptiveWindow or 8)
-	ks.idx = (ks.idx % win) + 1
-	ks.s[ks.idx] = errSec
-	if ks.n < win then ks.n = ks.n + 1 end
-	-- медиана окна (окно ≤8 → дёшево; только на исходе, НЕ per-frame)
-	local tmp = V93.adaptTmp; if not tmp then tmp = {}; V93.adaptTmp = tmp end
-	for i = 1, ks.n do tmp[i] = ks.s[i] end
-	for i = ks.n + 1, #tmp do tmp[i] = nil end
-	table.sort(tmp)
-	local m = ks.n
-	local med
-	if m % 2 == 1 then med = tmp[math.floor((m + 1) / 2)]
-	else med = (tmp[math.floor(m / 2)] + tmp[math.floor(m / 2) + 1]) * 0.5 end
-	if ks.n >= minN then
-		local cap = Config.AdaptiveMaxCorr or 0.12
-		ks.corr = math.clamp(med, -cap, cap)
-	else
-		ks.corr = 0
-	end
-	return ks.corr, ks.seen
-end
+-- [V116] Адаптивный корректор контакта УДАЛЁН. Отравлял между врагами: медиана predErr копилась
+-- по (kind,style), но реальная ошибка доминируется ПИНГОМ конкретного игрока и выбросами (held-
+-- анимации) — обучившись на одном враге, скрипт ломал тайминг по второму. Предикт снова чисто
+-- математический (таймлайн анимации + живой TimePosition), ResidByKS теперь только диагностика.
 
 local function localChar() return LocalPlayer.Character end
 
@@ -832,7 +795,7 @@ local function canBlockNow()
 	if not c then return false, "no-char" end
 	-- [V98] руки не одеты (кнопка T / unequip) → сервер НЕ примет ни блок, ни парри
 	-- (Block.lua:80 требует Equip==true). Кросс-платформенно через атрибут Equip, без T-хука.
-	-- Не реагируем вообще, чтобы не жечь бесполезные пресс���� когда физически не можем блокировать.
+	-- Не реагируем вообще, чтобы не жечь бесполезные пресс���� когда физически не ��ожем блокировать.
 	if Config.RequireEquip ~= false and c:GetAttribute("Equip") ~= true then
 		return false, "Unequip"
 	end
@@ -1043,7 +1006,7 @@ local function hitboxGeom(th)
 	local tHit = math.clamp((th.contactAbs or now) - now, 0, 0.6)
 	local aPos = aHRP.Position
 	local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-	-- [V67] кап смещения от velocity: у стрейфящего врага полная ��кс��раполяция
+	-- [V67] кап смещения от velocity: у стрейф��щего врага полная ��кс��раполяция
 	-- уводит центр хитбокса вбок и ломает willHitMe (ложный негатив в упор).
 	local lead = Vector3.new(aV.X * tHit, 0, aV.Z * tHit)
 	-- [V91] РАЗДЕЛЬНЫЙ кап: сближение (toward us) ведём до WillHitCloseCap (лунж/��аскок реально
@@ -1151,7 +1114,7 @@ local function willHitMe(th)
 	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > maxDY then return false end
 
 	-- [V88] LATCH: как только закоммиченный свинг хоть раз признан у��розой (в упор, лицом
-	-- или через доворот-на-нас), держим true до конца жизни угрозы. Это чинит финты с
+	-- или че��ез доворот-на-нас), держим true до конца жизни угрозы. Это чинит финты с
 	-- разворотом: враг бьёт спиной и доворачивается — раньше поздний кадр с "смотрит мимо"
 	-- сбрасывал willHitMe и парри отменялся. Настоящий финт-кэнсел сюда не попадает: его
 	-- раньше удаляет ветка th.feinted в scheduler.
@@ -1168,7 +1131,7 @@ local function willHitMe(th)
 	end
 
 	-- [V102] BROADPHASE (High): ДЕШЁВЫЙ ранний отказ ДО дорогого hitboxGeom. Только для ЛЁГКИХ
-	-- M1 — тяжёлые (M2/SKILL) НИКОГДА не режем здесь (у них своя расширенная логика доверия
+	-- M1 — ��яжёлые (M2/SKILL) НИКОГДА не режем здесь (у них своя расширенная логика доверия
 	-- HeavyTrust/lunge/mid-face ниже; V101-broadphase ошибочно резал стоячий нацеленный хэви на
 	-- dist 24-30 → willHitMe=false → ни блока, ни interrupt → «стоим как вкопанный». Теперь хэви
 	-- всегда проходит дальше). Для M1: отказ только если враг за HighBroadRange И НЕ приближается
@@ -1676,7 +1639,7 @@ local function indexAllAnims()
 				if styleFolder:IsA("Folder") then
 					-- [V109] СТИЛЕВАЯ папка = содержит канонические удары (M2 / 1stM1 / 2ndM1). Так мы
 					-- отличаем боевой стиль (Karate/Boxing/Kure/Striker/…) от НЕ-атакующих папок
-					-- Combat (Dodges = дэши, Grappling = грэб-секвенции): их авто-классифицировать в
+					-- Combat (Dodges = дэши, Grappling = грэб-секвенции): и�� авто-классифицировать в
 					-- атаки НЕЛЬЗЯ (ложные срабатывания на дэш/захват). Проверка по составу папки —
 					-- независима от точного имени папки в рантайме.
 					local isStyleFolder = styleFolder:FindFirstChild("M2") ~= nil
@@ -2270,7 +2233,7 @@ local function isMustDodge(th)
 	if byStyle and (byStyle[th.kind] or byStyle.all) then return true end
 	-- [V106] АВТО-ДЕТЕКТ грэб-M2 по CombatConfig (без новых top-level локалов — лимит 200/функция;
 	-- кэш держим на GameData, детект инлайн). Командный грэб/слэм (Wrestling, Kure, …) проходит
-	-- СКВОЗЬ блок и на попадании вырубает парри (M2SlamParryWindowDisableDuration) → только додж.
+	-- СКВОЗЬ блок и на попадании выруба��т парри (M2SlamParryWindowDisableDuration) → только додж.
 	-- Опознаём стиль по конфигу: любой M2Grab*/M2Slam*-атрибут ⇒ M2 этого стиля = грэб. Так новые
 	-- грэб-стили ловятся без ручного пополнения MustDodgeStyles.
 	if th.kind == "M2" and Config.MustDodgeAutoGrab ~= false and st ~= "" then
@@ -2307,7 +2270,7 @@ local function isMustDodge(th)
 end
 
 -- ============================ AutoPlay addon (V99) ============================
--- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Факты из ��ампа (CombatConfig.ClientPredict.M1):
+-- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Фа��ты из ��ампа (CombatConfig.ClientPredict.M1):
 --   • ParryStun.M2 = 1.0с                    — жертва M2-парри з��станена 1с (окно добивания);
 --   • AttackDuration = 0.45с                 — реальный рейт M1 (tryM1 сам гейтит по нему, u21);
 --   • LocalParryAttackLockoutSeconds = 0.15с — после НАШЕГО парри tryM1 залочен 0.15с (u32);
@@ -2358,7 +2321,7 @@ State.ap = {
 -- проигрывает ПРАВИЛЬНУЮ анимацию комбо (u19 1→4), сам проверяет ВСЕ кулдауны/атрибуты
 -- (Equip, Blocking, u21=AttackDuration 0.45с, u32=parry-lockout 0.15с, u33=block-lockout, стан…)
 -- и шлёт ServerCheck с ПРАВИЛЬНЫМ внутренним swingId u25. Никаких задержек/hold — мгновенно и легит.
--- tryM1 возвращает true, если свинг реально прошёл (у нас есть точный сигнал успеха).
+-- tryM1 возвращает true, если свинг реально прошёл (у н��с есть точный сигнал успеха).
 -- Прежний прямой ServerCheck с выдуманным id сервер игнорировал (нет анимации/сессии). Hold-эмуляция
 -- тоже плоха — она ждёт серверный hold-хендшейк (встроенная задержка). Модули в Hidden →
 -- (1) путь-require, (2) глубокий поиск, (3) filtergc по ключам. tryM1 достаём debug.getupvalue.
@@ -2532,7 +2495,7 @@ end
 function State.ap.canAttack()
 	local c = localChar()
 	if not c then return false end
-	if c:GetAttribute("Equip") ~= true then return false end   -- ��уки не одеты → бить нельзя
+	if c:GetAttribute("Equip") ~= true then return false end   -- ��уки не одеты ��� бить нельзя
 	if c:GetAttribute("Blocking") == true then return false end -- держим guard → M1 не пройдёт
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
 	for _, a in ipairs(State.ap.busyAttrs) do
@@ -2909,7 +2872,6 @@ local function onAttack(attackerHRP, info, model, id, track)
 	local nowServer = Workspace:GetServerTimeNow()
 	local th = {
 		name = name, kind = info.t, style = info.s, mom = info.mom, id = id,
-		ksKey = tostring(info.t) .. ":" .. tostring(info.s or "?"),  -- [V115] ключ адаптива, 1 раз
 		track = track, hitTL = hitTL, initTP = already, initSpeed = speed,
 		detectClock = nowClock, detectServer = nowServer, contact0 = remaining0,
 		contactAbs = nowClock + remaining0, velLead = vlead,
@@ -3192,13 +3154,11 @@ local function schedulerStep(now)
 			lead = lead + w
 			hold = hold + w
 		end
-					-- [V115] АДАПТИВНАЯ коррекция: сдвигаем РАСЧЁТНЫЙ контакт на выученный per-(kind,style)
-					-- остаток (медиана окна, знак сам под стиль). Влияет ТОЛЬКО на локальный график
-					-- нажатия (pressAt/holdEnd), th.contactAbs не трогаем (facing/прочее — по сырому).
-					-- Ключ th.ksKey закэширован при создании threat → без аллокации per-frame.
-					local cAbs = th.contactAbs + V93.adaptCorr(th)
-					local pressAt = cAbs - lead - up - th.velLead
-					local holdEnd = cAbs + hold
+					-- [V116] ЧИСТО МАТЕМАТИЧЕСКИЙ предикт: press строго от сырого contactAbs (таймлайн
+					-- анимации + живой TimePosition). Никакой выученной коррекции — она отравляла между
+					-- врагами. Компенсация задержки — только физическая (lead + uplink + velLead).
+					local pressAt = th.contactAbs - lead - up - th.velLead
+					local holdEnd = th.contactAbs + hold
 				-- [V66] диаг-трекинг: минимальный зазор до момента нажатия и факт
 				-- входа в окно — для точного post-mortem причины пропуска.
 				local dtToPress = pressAt - now
@@ -3547,7 +3507,7 @@ local function schedulerStep(now)
 		end
 		-- [V103] FACING-ГЕЙТ НАЖАТИЯ (юзер: миссы из-за ЛОЖНЫХ срабатываний → парри на КД). Блок в
 		-- этой игре НАПРАВЛЕННЫЙ: сервер отклоняет парри, если жертва смотрит спиной к атакующему
-		-- (в логах face=-0.99 BACK! на проваленных парри). Но ло��ально нажатие всё равно жжёт
+		-- (в логах face=-0.99 BACK! на проваленных парри). Но ло��ально на��атие всё равно жжёт
 		-- BlockCooldown 0.5с → следующий РЕАЛЬНЫЙ удар уже не заблокировать. Поэтому если мы ещё
 		-- смотрим в сторону (faceDot < HighFaceMin) И есть время довернуться (applyFacing крутит нас
 		-- каждый кадр) — НЕ жжём нажатие в этот кадр, ждём разворота. Прессим, только когда facing
@@ -3709,13 +3669,14 @@ local function onOutcome(attacker, result, kind, eventClock)
 	local predErr  = (measured - rec.contact) * 1000
 	State.lastErrMs = predErr
 
-	-- [V115] адаптив: записываем СЫРУЮ ошибку (predErr в сек) в per-(kind,style) окно; получаем
-	-- применяемую коррекцию (медиана, клампнута). resAvg в логе = ПРИМЕНЯЕМАЯ коррекция (не сырое
-	-- среднее) — так виднее, что реально уходит в press. n = сколько исходов всего по ключу.
+	-- [V116] ЧИСТО ДИАГНОСТИЧЕСКИЙ per-(kind,style) средний predErr — в предикт НЕ подаётся
+	-- (адаптивная калибрация удалена: отравляла между врагами — обучалась на одном, ломала второго).
+	-- Показываем скользящее среднее ошибки модели только для наблюдения точности в логе.
 	local ksKey = tostring(kind) .. ":" .. tostring(rec.style or "?")
-	local corrApplied, resN = V93.adaptRecord(ksKey, predErr / 1000)
-	local resAvg = (corrApplied or 0) * 1000
-	local resNShown = resN or 0
+	local ks = ResidByKS[ksKey]; if not ks then ks = { sum = 0, n = 0 }; ResidByKS[ksKey] = ks end
+	ks.sum = ks.sum + predErr; ks.n = ks.n + 1
+	local resAvg = ks.sum / ks.n
+	local resNShown = ks.n
 
 	local upAtPress = math.clamp((rec.pingRaw or 0) * Config.UplinkFactor + Config.UplinkMargin,
 	                             Config.UplinkMin, Config.UplinkMax) * 1000
@@ -3756,7 +3717,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 		bucket[result] = (bucket[result] or 0) + 1
 	end
 
-	diagPush(("OUT    t=%.2f  %s  %s(c%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms corr=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
+	diagPush(("OUT    t=%.2f  %s  %s(c%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms resAvg=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
 		:format(eventClock, attacker, kind, rec.combo or 0, result, measured*1000, rec.contact*1000,
 		        predErr, resAvg, resNShown, gapStr, pressStr, hint, reasonStr, faceStr, faceFlag, rec.speed or 1, (rec.pingRaw or 0)*1000))
 end
@@ -4659,7 +4620,7 @@ end
 -- нового ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан дел��л
 -- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый ��овый pid → rehash на сетевом потоке
 -- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трога��т Lua-таблицы в
--- хуке — только C-операции над пакетом. Поэтому он и не крашит.
+-- хуке — только C-операции над пакетом. Поэтому он и ��е крашит.
 -- ФИКС: ��чётчики — ПРЕДВЫДЕЛЕННЫЙ массив на 256 слотов (0..255), в хуке тольк�� IN-PLACE
 -- инкремент существующего числового слота (без новых ключей, без rehash, без аллокации).
 -- Это безопасно даже с чужого потока (максимум — безобидная гонка знач��ния счётчика).
@@ -4695,7 +4656,7 @@ local function reportRaknetScan()
 	end
 	table.sort(cand, function(a, b) return (a.near / (a.far + 1)) > (b.near / (b.far + 1)) end)
 	if #cand == 0 then
-		aclog("[DESYNC-SCAN] 0 пакетов поймано — либо raknet-хук не видит трафик в этой сборке, л��бо не св��нгал во время сессии.")
+		aclog("[DESYNC-SCAN] 0 пакетов поймано — либо raknet-хук не видит трафик в этой сбо��ке, л��бо не св��нгал во время сессии.")
 		desyncPush("[SCAN] 0 packets captured (hook saw no traffic, or no swing during session)")
 		return
 	end
@@ -5090,7 +5051,7 @@ local function summary()
 	return table.concat({
 		"===== AUTOPARRY V71 DIAG =====",
 		("player=%s  ping=%.0fms  uplink=%.0fms  mode=%s  autoface=%s"):format(LocalPlayer.Name, getPingRaw()*1000, uplink()*1000, Config.Mode, tostring(Config.AutoFace)),
-		("model: anim timeline + live TimePosition + ADAPTIVE per-(kind,style) median correction; lead=%.0fms hold=%.0fms window=[%.0f,%.0f]ms")
+		("model: PURE anim timeline + live TimePosition (NO calibration) | ping=robust median; lead=%.0fms hold=%.0fms window=[%.0f,%.0f]ms")
 			:format(Config.PerfectLead*1000, Config.HoldAfter*1000, Config.PerfectMin*1000, Config.PerfectWindow*1000),
 		("outcomes: PERFECT=%d  BLOCK=%d  HIT=%d  GUARDBREAK=%d  total=%d"):format(t.PERFECT or 0, t.EARLY or 0, t.LATE or 0, t.GUARDBREAK or 0, total),
 		("attacks=%d  presses=%d  dodges=%d  outnumbered-escapes=%d  desync-anims=%d  ac-muted=%d  kicks-blocked=%d  reports-blocked=%d"):format(State.parryCount, State.fireCount, State.dodgeCount, State.grantEscapes or 0, State.desyncFires or 0, State.acMuted or 0, State.kicksBlocked or 0, State.reportsBlocked or 0),
