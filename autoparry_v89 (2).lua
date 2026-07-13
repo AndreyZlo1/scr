@@ -1,3 +1,5 @@
+-- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
+
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
@@ -206,7 +208,7 @@ local Config = {
 	-- [V66] LIVE-таймер контакта для придержанных тяжёлых. Раньше remaining тикал
 	-- по стенным часам (contact0 - elapsed), а продление ����рабатывало ТОЛЬКО при
 	-- полном стойле анимации (ChargeStallMs). Если враг держит M2 плавно-замедленной
-	-- (TimePosition ползёт по чуть-чуть), стойл не детекти����ся → contactAbs тикал к
+	-- (TimePosition ползёт по чуть-чуть), стойл не детекти��������ся → contactAbs тикал к
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
 	-- контакт считается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
@@ -263,6 +265,16 @@ local Config = {
 	AP_Recovery       = 0.42,   -- наш attack-lockout после M1 (RecoveryLockout 0.4 + запас)
 	AP_FaceHold       = 0.35,   -- сколько держать лицо на цели после выстрела M1
 	AP_InterruptMargin= 0.05,   -- запас времени для решения «успеем перебить»
+	AP_HoldDur        = 0.12,   -- [V98] длительность удержания Hold("Start")→Hold("Stop") (эмуляция клика ЛКМ)
+
+	-- [V98] реагировать только когда руки одеты (Equip==true). Иначе сервер всё равно
+	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-платформенно.
+	RequireEquip      = true,
+
+	-- [V98] Blatant TEST режим: на каждую входящую угрозу шлём блок И RAW M1 (ServerCheck)
+	-- ОДНОВРЕМЕННО, без анимации. Для проверки реакции/приёма сервером. Палевно → по умолч. ВЫКЛ.
+	Blatant           = false,
+	BlatantWindow     = 0.30,   -- сек до контакта, в котором Blatant отрабатывает
 
 	RestrictZone      = true,
 	RestrictLongOnly  = true,
@@ -292,7 +304,7 @@ local Config = {
 	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
 	DesyncSendHz      = 0,        -- Anti-AutoParry decoy re-sends per second; 0 = auto (track length)
 	-- Invisible desync: реплицируем контортнутый/опущенный корень на сервер (другие тебя не видят),
-	-- локально каждый RenderStep возвращаем на место (ты видишь себя нормально).
+	-- локально каждый RenderStep возвращаем на место (ты видишь себя ��ормально).
 	InvisibleOn    = false,
 	InvisibleHeight= 0,           -- ДОП. студы поверх базового з��хо������онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая ани��ация для лучшего скрытия
@@ -302,7 +314,7 @@ local Config = {
 	DesyncScanSecs = 5,
 	DesyncRaknetWindowMs = 220,
 	-- [V74] self-verify: подписка на свой Animator.AnimationPlayed.
-	-- ВЫКЛ по умолчанию — забивал диаг стро��ами [VERIFY]/[DESYNC-VERIFY] на каждый трек.
+	-- ВЫКЛ по умолчанию — забивал диаг с��ро��ами [VERIFY]/[DESYNC-VERIFY] на каждый трек.
 	DesyncSelfVerify = false,
 
 	BoxingFaceLockDur = 0.55,
@@ -551,7 +563,7 @@ local function aclog(...)
 end
 
 -- [V94] РОБАСТНЫЙ пинг. КОРНЕВОЙ БАГ (диаг: header ping=111/345, а все строки боя ping=60):
--- прежняя реализация лезла ТОЛЬКО в Stats.Network.ServerStatsItem["Data Ping"], и в combat-
+-- прежняя реализация лезла ТОЛЬКО в Stats.Network.ServerStatsItem["Data Ping"], и �� combat-
 -- контексте (обработчики remote/AnimationPlayed, schedulerStep) этот путь систематически
 -- фейлил pcall → возвращался хардкод 0.06 = ровно те самые 60ms. Из-за этого планировщик
 -- (pressAt = contact - lead - up - velLead, где up=uplink() зависит от getPingRaw) компенсировал
@@ -666,6 +678,12 @@ local HARD_BLOCKERS = { "BlockCooldown", "Ragdoll", "Downed", "Greenzone",
 local function canBlockNow()
 	local c = localChar()
 	if not c then return false, "no-char" end
+	-- [V98] руки не одеты (кнопка T / unequip) → сервер НЕ примет ни блок, ни парри
+	-- (Block.lua:80 требует Equip==true). Кросс-платформенно через атрибут Equip, без T-хука.
+	-- Не реагируем вообще, чтобы не жечь бесполезные пресс��� когда физически не можем блокировать.
+	if Config.RequireEquip ~= false and c:GetAttribute("Equip") ~= true then
+		return false, "Unequip"
+	end
 	for _, attr in ipairs(HARD_BLOCKERS) do
 		if c:GetAttribute(attr) == true then return false, attr end
 	end
@@ -727,7 +745,7 @@ local function flatDirTo(fromPos, targetPos)
 end
 
 -- [V62] упрежда����щая позиция цели: экстраполируем по горизонтальной скорости.
--- На близкой дистанции угловая скорость стрейфа максимальна, п��этому целимся
+-- На близкой дистанции угловая скорость стрейфа макси��альна, п��этому целимся
 -- туда, где враг БУДЕТ через BoxingAimLead секунд, а не где он сейчас.
 local function aimPosOf(targetHRP, lead)
 	if not targetHRP then return nil end
@@ -790,7 +808,7 @@ local function attackerYawRate(aHRP, flatLook)
 	return rate, prevLook
 end
 
--- ─────────────────────────────────────────────────────────────────────────────
+-- ─────���───────────────────────────────────────────────────────────────────────
 -- [V93] GROUND-TRUTH ХИТБОКСЫ — фундамент нового High-режима.
 -- Игровой VictimHitboxServiceClient (декомпилирован из дампа) каждый Heartbeat идёт по
 -- workspace.Hitboxes: активный удар = BasePart с детьми Owner/AttackName (StringValue) и
@@ -801,7 +819,7 @@ end
 --   • если парт атакующего уже есть — проверяем пересечение с нами 1:1 как игра (авторитетно);
 --   • пока парта нет — предсказываем бокс РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
 --     костылей (point-blank/heavy/drag/latch).
--- Пер-кадровый индекс живых партов по в��адельцу (Owner.Value). Скан один раз за FrameId,
+-- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один раз за FrameId,
 -- чтобы не обходить папку по разу на каждую угрозу в мультибое. Всё состояние — в V93 (см. выше
 -- про лимит 200 локалов), новых local тут не заводим.
 local function hitboxIndex()
@@ -1950,11 +1968,14 @@ end
 -- Всё состояние И функции держим на State.ap — модуль впритык к лимиту 200 локалов на функцию,
 -- поэтому НИ ОДНОГО нового top-level local (это переполняло регистры → CompileError).
 State.ap = {
-	swingId    = 0,      -- монотонный id свинга (аналог u25 в M1.lua)
+	m1         = nil,    -- кэш РОДНОГО модуля M1 игры (return-таблица v1 с .Hold/.OnM1Activated)
+	m1Tried    = false,  -- уже пытались резолвить модуль (не спамить резолв каждый кадр)
+	holdActive = false,  -- сейчас держим M1.Hold("Start") и ждём авто-Stop
 	nextM1At   = 0,      -- локальный анти-спам между нашими M1
-	busyUntil  = 0,      -- наш attack-lockout после M1 (RecoveryLockout)
+	busyUntil  = 0,      -- наш attack-lockout после M1 (пока идёт свинг+recovery)
 	punishTgt  = nil,    -- модель врага, которого добиваем после парри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
+	blatantId  = 0,      -- счётчик для RAW ServerCheck (только тест-режим Blatant)
 	uninterruptible = { boxing = true, wrestling = true },  -- M2 с iframes/hyperarmor → только парри
 	busyAttrs = {
 		"Stunned", "Ragdoll", "Downed", "GuardBroken", "CantAnything",
@@ -1962,11 +1983,53 @@ State.ap = {
 	},
 }
 
+-- Резолвим РОДНОЙ модуль M1 игры, чтобы бить его же публичным API Hold("Start")/Hold("Stop")
+-- (это ровно то, что делает игровой обработчик мыши: играется анимация, идёт полный серверный
+-- хендшейк HoldActivated→ServerCheck с ПРАВИЛЬНЫМ внутренним swingId u25). Наш прежний прямой
+-- ServerCheck с выдуманным id сервер игнорировал (нет M1Hold/анимации/сессии) → атака «не работала».
+-- Модули боёвки лежат в Hidden, поэтому: (1) путь-require, (2) глубокий поиск, (3) filtergc по ключам.
+function State.ap.getM1()
+	if State.ap.m1 then return State.ap.m1 end
+	if State.ap.m1Tried then return nil end
+	State.ap.m1Tried = true
+	local mod
+	pcall(function()
+		local csc = ReplicatedStorage:FindFirstChild("CombatSystemClient")
+		local base = csc and csc:FindFirstChild("Combat")
+		base = base and base:FindFirstChild("Base")
+		mod = base and base:FindFirstChild("M1")
+	end)
+	if not mod then
+		pcall(function()
+			for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+				if d.Name == "M1" and d:IsA("ModuleScript")
+				   and d.Parent and d.Parent.Name == "Base" then mod = d; break end
+			end
+		end)
+	end
+	if mod then
+		local ok, tbl = pcall(require, mod)
+		if ok and type(tbl) == "table" and type(tbl.Hold) == "function" then State.ap.m1 = tbl end
+	end
+	-- filtergc-фолбэк: находим return-таблицу v1 по её характерному набору методов
+	if not State.ap.m1 and type(filtergc) == "function" then
+		pcall(function()
+			local t = filtergc("table",
+				{ Keys = { "Hold", "OnM1Activated", "ServerResponse", "OnHoldSwing" } }, true)
+			if type(t) == "table" and type(t.Hold) == "function" then State.ap.m1 = t end
+		end)
+	end
+	if State.ap.m1 then diagPush("AUTOPLAY: M1 module resolved (legit attacks ready)")
+	else diagPush("AUTOPLAY: M1 module NOT found — attacks disabled") end
+	return State.ap.m1
+end
+
 -- можем ли физически атаковать прямо сейчас (по атрибутам своего перса)
 function State.ap.canAttack()
 	local c = localChar()
 	if not c then return false end
-	if c:GetAttribute("Equip") == false then return false end
+	if c:GetAttribute("Equip") ~= true then return false end   -- руки не одеты → бить нельзя
+	if c:GetAttribute("Blocking") == true then return false end -- держим guard → M1 не пройдёт
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
 	for _, a in ipairs(State.ap.busyAttrs) do
 		if c:GetAttribute(a) then return false end
@@ -2001,24 +2064,39 @@ function State.ap.flatDist(model)
 	        - Vector3.new(aim.X, 0, aim.Z)).Magnitude
 end
 
--- послать один M1 по цели: жёсткий предиктивный снап лицом + ServerCheck
-function State.ap.fireM1(model, why)
-	local ap = State.ap
-	local now = os.clock()
-	if now < ap.nextM1At or now < ap.busyUntil then return false end
-	if not ap.canAttack() then return false end
-	local hrp = model and model:FindFirstChild("HumanoidRootPart")
-	if not hrp then return false end
-	-- сервер с��роит M1-хитбокс по нашему LookVector в момент ServerCheck → смотрим ТОЧНО на
-	-- цель сейчас (+предиктивный facing держит applyFacing на будущие кадры хитбокс-окна)
+-- снап лицом ТОЧНО на цель прямо сейчас + держим предиктивный facing на окно хитбокса.
+-- Сервер строит M1-хитбокс по нашему LookVector в момент ServerCheck.
+function State.ap.snapTo(hrp)
 	setFaceGoal(hrp, true, Config.AP_FaceHold or 0.35)
 	local myHRP = localHRP()
 	if myHRP then
 		local d = flatDirTo(myHRP.Position, hrp.Position)
 		if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
 	end
-	ap.swingId = ap.swingId + 1
-	ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, ap.swingId)
+end
+
+-- послать один ЛЕГИТНЫЙ M1 по цели: снап ли��ом + эмуляция клика через родной модуль M1.
+-- Hold("Start") → игра играет анимацию, шлёт HoldActivated, сервер отвечает и вызывает
+-- OnM1Activated → tryM1 → ServerCheck(правильный u25). Hold("Stop") завершает удержание.
+-- Это идентично реальному нажатию ЛКМ, поэтому урон засчитывается и всё синхронно с игрой.
+function State.ap.fireM1(model, why)
+	local ap = State.ap
+	local now = os.clock()
+	if now < ap.nextM1At or now < ap.busyUntil or ap.holdActive then return false end
+	if not ap.canAttack() then return false end
+	local m1 = ap.getM1()
+	if not m1 then return false end
+	local hrp = model and model:FindFirstChild("HumanoidRootPart")
+	if not hrp then return false end
+	ap.snapTo(hrp)
+	local ok = pcall(function() m1.Hold("Start") end)
+	if not ok then return false end
+	ap.holdActive = true
+	local holdDur = Config.AP_HoldDur or 0.12
+	task.delay(holdDur, function()
+		pcall(function() m1.Hold("Stop") end)
+		State.ap.holdActive = false
+	end)
 	ap.nextM1At  = now + (Config.AP_M1Gap or 0.34)
 	ap.busyUntil = now + (Config.AP_Recovery or 0.42)
 	State.status     = "AUTO-M1"
@@ -2026,6 +2104,18 @@ function State.ap.fireM1(model, why)
 	State.autoM1Count = (State.autoM1Count or 0) + 1
 	diagPush(("AUTOPLAY t=%.2f  M1 → %s  (%s)"):format(now, (model and model.Name) or "?", why or "?"))
 	return true
+end
+
+-- RAW-удар БЕЗ анимации для тест-режима Blatant: прямой ServerCheck по Remotes.Server.
+-- Легитимность не гарантируется (нет hold-сессии/анимации) — только для проверки реакции.
+function State.ap.fireM1Raw(model)
+	local ap = State.ap
+	local hrp = model and model:FindFirstChild("HumanoidRootPart")
+	if hrp then ap.snapTo(hrp) end
+	ap.blatantId = ap.blatantId + 1
+	pcall(function()
+		ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, ap.blatantId)
+	end)
 end
 
 -- триггер добивания: из onOutcome при result=="PERFECT". attackerName — имя игрока.
@@ -2067,6 +2157,10 @@ function State.ap.tryInterruptHeavy(th, now, remaining)
 	local st = (th.style or ""):lower()
 	if ap.uninterruptible[st] then return false end       -- iframe/hyperarmor → ТОЛЬКО парри
 	if isMustDodge(th) then return false end              -- грэб/анблок → додж, не перебить
+	-- [V98] анти-финт (юзер: драгер финтит → скрипт реагирует → мы в кулдауне → он бьёт снова).
+	-- Перебиваем ТОЛЬКО подтверждённый (trustedHit) реальный свинг. Финт/недокрут не trusted →
+	-- НЕ жжём наш M1, остаёмся в защите и просто парируем настоящий удар.
+	if not th.trustedHit then return false end
 	-- наш M1 бьёт через (delay+ping); их удар — через remaining. Перебиваем ТОЛЬКО если наш удар
 	-- застанит их РАНЬШЕ их хитбокса. Их атака быстрее нашей → не успеем → парируем (return false).
 	local ourLand = (Config.AP_M1Delay or 0.32) + getPing() + (Config.AP_InterruptMargin or 0.05)
@@ -2628,6 +2722,23 @@ local function schedulerStep(now)
 
 	table.sort(imminent, function(a, b) return a.contactAbs < b.contactAbs end)
 
+	-- [V98] BLATANT TEST режим: на ближайшую угрозу в окне BlatantWindow шлём блок И RAW M1
+	-- ОДНОВРЕМЕННО, без анимации. Чисто для теста реакции/приёма сервером — палевно.
+	if Config.Blatant and #imminent > 0 then
+		local th = imminent[1]
+		local dt = th.contactAbs - now
+		if dt <= (Config.BlatantWindow or 0.30) and dt >= -Config.HoldAfter then
+			if not th.blatantDone then
+				th.blatantDone = true
+				fireBlock(serverNow)                 -- парри
+				State.ap.fireM1Raw(th.attackerModel) -- RAW атака в тот же кадр
+				diagPush(("BLATANT t=%.2f  block+M1 → %s  dt=%+.0fms")
+					:format(now, (th.name or "?"), dt * 1000))
+			end
+			return
+		end
+	end
+
 	-- Multi-attacker clustering is based on distinct attackers and absolute contacts.
 	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
 	local cluster = {}
@@ -2854,7 +2965,7 @@ local function schedulerStep(now)
 	end
 
 	-- [V97] AutoPlay: перебивание ОДИНОЧНОЙ тяжёлой обычным M1 (вместо парри). Только вне
-	-- мультибоя и только когда наш удар гарантированно застанит их раньше их хитбокса (иначе
+	-- мультибоя и только когда наш удар гарантированно застанит их раньше их хитбокса (и��аче
 	-- парируем как обычно). iframe/hyperarmor-тяжёлые и грэбы сюда не проходят (tryInterruptHeavy).
 	if wantBlock and not multiThreat and not State.blocking then
 		if State.ap.tryInterruptHeavy(wantBlock, now, wantBlock.contactAbs - now) then
@@ -3682,7 +3793,7 @@ local SelfVerify = { conn = nil, lastLog = {}, decoyId = nil }
 -- [V76] ТЕСТ-РЕЖИМ "наоборот": пока ты стоишь в idle, ПОСТОЯННО проигрываем АТАКУ как
 -- decoy (низкий локальный ��ес, тебе почти незаметно). Смысл: на обсер��ере (твоя мобила)
 -- должно НЕПРЕРЫВНО показывать ATTACK, хотя ты ничего не жмёшь. Если показывает —
--- значит decoy реально уходит в репликацию и хук подмены рабочий. Тумблер по клавише.
+-- значит decoy реально ��ходит в репликацию и хук подмены рабочий. Тумблер по клавише.
 local _testAnim, _testTrack, _testId
 local DesyncTest = { on = false }
 local function pickAttackId()
@@ -4033,7 +4144,7 @@ local function reportRaknetScan()
 		lines[#lines + 1] = ("PacketId=%d (0x%X) near=%d far=%d ratio=%.2f")
 			:format(c.id, c.id, c.near, c.far, c.near / (c.far + 1))
 	end
-	aclog("[DESYNC-SCAN] candidates (near=в окне атаки, far=фон; высокий ratio = вероятный анимационный/боевой пакет):\n  " ..
+	aclog("[DESYNC-SCAN] candidates (near=�� окне атаки, far=фон; высокий ratio = вероятный анимационный/боевой пакет):\n  " ..
 		(table.concat(lines, "\n  ")))
 	desyncPush("[SCAN] raknet candidates (near=in attack window, far=background, high ratio=likely anim/combat packet):")
 	for _, l in ipairs(lines) do desyncPush("[SCAN]   " .. l) end
@@ -4103,7 +4214,7 @@ end
 
 -- [V75] КРОСС-КЛИЕНТНАЯ ПРОВЕРКА (отвечает на "как это видят другие игроки").
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
--- ПРОКСИ репликации, а не док��зательство тог��, ��то реально приходит врагу. Единственн��й
+-- ��РОКСИ репликации, а не док��зательство тог��, ��то реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
 -- ��ак по��ьзоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
 -- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
@@ -4290,7 +4401,7 @@ task.spawn(function()
 			if kind == "attack" then
 				State.selfBusyUntil = now + Config.SelfBusyDur
 				-- FIREDELAY/PRERUN: задерживаем САМ боевой паке�� (ServerCheck), анимацию не
-				-- трогаем. Гейт строго по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
+				-- трогаем. Гейт стро��о по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
 				-- трогаем — иначе рассинхрон чарджа). Перехват на RemoteEvent Remotes.Server —
 				-- он доступен (в отличие от модуля CombatRemoteClient, который может лежать в Hidden).
 				local func = a1.Func
@@ -4390,7 +4501,7 @@ RunService.Heartbeat:Connect(function()
 	-- counter, onOutcome LATE/GUARDBREAK) сбрасывают State.blocking напрямую, НЕ отправляя
 	-- Deactivated → сервер продолжал держать guard до ручного нажатия. Тут гарантируем:
 	-- если серверу отправлен Activated (guardUp), но намерения блокировать больше нет —
-	-- принудительно снимаем guard. Идемпотентно и безопасно (force обходит рейт-гейт).
+	-- принудительно снимаем guard. Идемпотентно и безопасно (force обходит рей��-гейт).
 	if State.guardUp and not State.blocking then
 		pcall(sendDeactivate, true)
 	end
@@ -4710,7 +4821,7 @@ local function applyFacing()
 	local lead   = math.clamp(getPing() * (Config.FacePingLead or 1.0), 0, Config.FaceLeadCap or 0.22)
 	if lead > 0 then
 		-- прямое чтение свойства (goalHRP уже проверен на .Parent) — БЕЗ pcall-замыкания,
-		-- иначе каждый RenderStepped-кадр боя аллоцировался бы новый closure (лишний GC).
+		-- иначе кажды�� RenderStepped-кадр боя аллоцировался бы новый closure (лишний GC).
 		local vel = goalHRP.AssemblyLinearVelocity
 		local off = Vector3.new(vel.X, 0, vel.Z) * lead
 		local mx  = Config.FaceLeadMaxStuds or 7
@@ -4740,7 +4851,7 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 -- [V95] applyFacing (единый аппликатор поворота) — в RenderStepped: должен переигрывать
--- AutoRotate/шифтлок каждый рендер-кадр как последний писатель HRP. Пока нет активной цели
+-- AutoRotate/шифтлок каждый ренд��р-кадр как последний писатель HRP. Пока нет активной цели
 -- поворота — он дёшево выходит и держит AutoRotate включённым (визуал/движение не трогаются).
 RunService.RenderStepped:Connect(function()
 	pcall(applyFacing)
@@ -4909,12 +5020,10 @@ return function(_Lib, _Core)
 			set = function(v) Config.DodgeHeavy = v end,
 			Desc = "dodge EVERY heavy attack, recommend disable ts",
 		})
-		feature(apDodge, {
-			Title = "Dodge When Parry On Cooldown", Flag = "AP_DodgeParryCd",
-			get = function() return Config.DodgeOnParryCooldown ~= false end,
-			set = function(v) Config.DodgeOnParryCooldown = v end,
-			Desc = "dodge when block is on cooldown / cant parry in time; OFF = eat the hit instead. does not affect unblockable must-dodge",
-		})
+		boolToggle(apDodge, "Dodge If Cant Parry", "Dodge If Cant Parry",
+			function() return Config.DodgeOnParryCooldown ~= false end,
+			function(v) Config.DodgeOnParryCooldown = v end)
+		apDodge:SubLabel({ Text = "dodge when block is on cooldown / cant parry in time\nOFF = eat the hit instead (unblockable must-dodge unaffected)" })
         apDodge:Divider()
 		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
 		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
@@ -5021,6 +5130,10 @@ return function(_Lib, _Core)
 			Default = math.floor((Config.AP_InterruptMargin or 0.05) * 1000), Min = 0, Max = 150, Suffix = " ms",
 			Callback = function(v) Config.AP_InterruptMargin = v / 1000 end })
 		apPlay:SubLabel({ Text = "safety buffer\nhigher = only interrupt when clearly faster" })
+		apPlay:Divider()
+		boolToggle(apPlay, "Blatant Test Mode", "Blatant Test Mode",
+			function() return Config.Blatant end, function(v) Config.Blatant = v end)
+		apPlay:SubLabel({ Text = "TEST ONLY: fires block + raw M1 at the same time, no animation\nvery obvious / detectable — use to check server reaction" })
 
 		-- Section 4 — Visuals (own box, own Enabled)
 		local apVis = AP:Section({ Side = "Right" })
