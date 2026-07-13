@@ -84,7 +84,7 @@ local Config = {
 	-- [V89] HEAVY-ПРИОРИТЕТ. Тяжёлые (M2) и скиллы — выпады, атакующий закрывает дистанцию в
 	-- замахе, а velCap=2.0 обрезал predA → geom-бокс отбраковывал их как "never-in-hitbox"
 	-- (в диаг ровно так пропала Capoeira M2 → Ragdoll-каскад → провал мультибоя). Тяжёлый в
-	-- расширенном радиусе, если смотрит ~на нас ��ЛИ реально сближается, считаем угрозой сразу.
+	-- расширенно�� радиусе, если смотрит ~на нас ��ЛИ реально сближается, считаем угрозой сразу.
 		HeavyTrust       = true,
 		HeavyTrustRange  = 14,     -- радиус (студы), в котором тяжёлым/скиллам даём безусловное доверие
 		HeavyFaceMin     = -0.30,  -- бракуем тяжёлый, только если predFacing·toMe < этого И он не сближается
@@ -121,8 +121,18 @@ local Config = {
 		M1ApproachFaceMin  = 0.30,  -- предсказанный facing·toMe (нацелен в нас) — иначе чужой/мимо-удар
 		M1ApproachReachPad = 3.0,   -- запас к forward: dist-на-контакте ≤ forward+pad ⇒ долетит
 
-	-- [V70] residual-калибратор УДАЛЁН. Предикт чисто математический. resAvg в
-	-- логе остаётся только как диагностика точности, в hitTL не подаётся.
+	-- [V115] АДАПТИВНАЯ per-(kind,style) коррекция контакта (замена и V70-калибратора, и flat
+	-- M2ContactBias). Данные из лога доказали: ошибка таймлайна СТАБИЛЬНА внутри (kind,style), но
+	-- РАЗНАЯ по знаку между ними — M1(Basic) meas≈+20ms, M2(Basic) meas≈-65ms. Плоский биас чинил
+	-- одно и ломал другое. Теперь на КАЖДЫЙ (kind,style) копим окно недавних predErr, берём МЕДИАНУ
+	-- (робастна к выбросам — held/charged M2 не отравляет, в отличие от EMA V70), с отбраковкой
+	-- выброса, минимумом сэмплов и жёстким клампом применяемой коррекции. rec.contact хранит СЫРОЙ
+	-- предикт → predErr всегда меряет истинную ошибку модели → нет петли самоотравления.
+	AdaptivePredict = true,   -- вкл. адаптивную коррекцию
+	AdaptiveMinN    = 3,      -- минимум сэмплов (kind,style) до применения коррекции
+	AdaptiveWindow  = 8,      -- размер кольца недавних сэмплов (старые аутэйджатся → адаптация к смене стиля)
+	AdaptiveMaxCorr = 0.12,   -- жёсткий кламп |коррекции| (сек) — даже кривой оценщик не уведёт press дико
+	AdaptiveOutlier = 0.15,   -- сэмпл, отклоняющийся > этого от текущей медианы, ОТБРАСЫВАЕТСЯ (held/charged)
 	TurnWindow    = true,
 	TurnBaseDeg   = 42,
 	TurnCloseDeg  = 90,
@@ -174,13 +184,9 @@ local Config = {
 	M2WidenWindow = false,
 	M2WidenFront  = 0.22,
 	M2WidenHold   = 0.10,
-	-- [V113] M2 таймлайн систематически НЕДООЦЕНИВАЕТ контакт (в логе: pred=534ms, meas≈592ms,
-	-- predErr стабильно +55..+66ms по всем стилям). Причина: keyframe-маркер «hit» у M2-анимаций
-	-- стоит РАНЬШЕ реального damage-frame + серверный M2HitboxDelay длиннее клиентского предикта.
-	-- Из-за этого весь график нажатия сдвигался ~58мс раньше → блок долета�� true+151ms (за краем
-	-- окна [50,150] → normal-block вместо perfect). Сдвигаем расчётный контакт M2 позже на этот
-	-- стабильный биас → нажатие попадает в центр перфект-окна. Только M2 (у M1 predErr≈0).
-	M2ContactBias = 0.055,
+	-- [V115] flat M2ContactBias УДАЛЁН — заменён адаптивной per-(kind,style) коррекцией (см. выше
+	-- AdaptivePredict). Плоский +55ms был верным для Boxing M2, но НЕВЕРНЫМ по знаку для Basic M2
+	-- (в логе Basic M2 meas≈-65ms) → все Basic M2 уходили в LATE. Адаптив разруливает знак сам.
 	ChargeStallMs = 45,
 	ReleaseGap    = 0.40,
 
@@ -341,7 +347,7 @@ local Config = {
 	-- НАПРЯМУЮ (ServerRemote:FireServer, минуя клиентский кап 4) с РАВНОМЕРНЫМ шагом ~6/с: и быстрее,
 	-- и анимация видна (0.16с на свинг), и весь стан-window заполнен.
 	-- [V110] потолок свингов/сек. Поднят 6→8 (юзер: «M1 медленный, атаковать раньше/чаще»).
-	-- 8 = ServerSustainedMax.mid для M1.ServerCheck (реальный серверный потолок); выше него сервер
+	-- 8 = ServerSustainedMax.mid для M1.ServerCheck (реальный серверный потолок); выше него ��ервер
 	-- считает нарушением (MonitoredKeys) → риск флага. Слайдер 3..8 в apPlay/Tuning: 6 = безопаснее.
 	AP_MaxPerSec      = 8,
 	AP_MinSendGap     = 0.08,   -- = server min interval (ClientMinInterval M1.ServerCheck=0.08)
@@ -749,6 +755,47 @@ end
 local function uplink()
 	-- опираемся на сглаженный getPing(); БЕЗ пов��орного max с сырым спайком (это и раздувало lead)
 	return math.clamp(getPing() * Config.UplinkFactor + Config.UplinkMargin, Config.UplinkMin, Config.UplinkMax)
+end
+
+-- [V115] АДАПТИВНЫЙ per-(kind,style) корректор контакта. Функции — поля V93 (НЕ новые top-level
+-- local: лимит 200 живых локалов в giant-функции). ResidByKS[key] = { s=ring, idx, n, corr, seen }.
+-- errSec = predErr в секундах (measured − raw-pred). corr прибавляется к предсказанному контакту:
+-- errSec>0 (реально позже) → press позже; errSec<0 (реально раньше) → press раньше. Медиана окна
+-- робастна к выбросам (held/charged M2 не отравляет), + явная отбраковка + мин.сэмплы + кламп.
+function V93.adaptCorr(th)
+	if Config.AdaptivePredict == false or not th or not th.ksKey then return 0 end
+	local ks = ResidByKS[th.ksKey]
+	return (ks and ks.corr) or 0
+end
+function V93.adaptRecord(key, errSec)
+	local ks = ResidByKS[key]
+	if not ks then ks = { s = {}, idx = 0, n = 0, corr = 0, seen = 0 }; ResidByKS[key] = ks end
+	ks.seen = ks.seen + 1
+	local minN = Config.AdaptiveMinN or 3
+	-- отбраковка выброса: если оценка уже есть и сэмпл далеко от неё — не пишем (held/charged/десинк)
+	if ks.n >= minN and math.abs(errSec - ks.corr) > (Config.AdaptiveOutlier or 0.15) then
+		return ks.corr, ks.seen
+	end
+	local win = math.max(2, Config.AdaptiveWindow or 8)
+	ks.idx = (ks.idx % win) + 1
+	ks.s[ks.idx] = errSec
+	if ks.n < win then ks.n = ks.n + 1 end
+	-- медиана окна (окно ≤8 → дёшево; только на исходе, НЕ per-frame)
+	local tmp = V93.adaptTmp; if not tmp then tmp = {}; V93.adaptTmp = tmp end
+	for i = 1, ks.n do tmp[i] = ks.s[i] end
+	for i = ks.n + 1, #tmp do tmp[i] = nil end
+	table.sort(tmp)
+	local m = ks.n
+	local med
+	if m % 2 == 1 then med = tmp[math.floor((m + 1) / 2)]
+	else med = (tmp[math.floor(m / 2)] + tmp[math.floor(m / 2) + 1]) * 0.5 end
+	if ks.n >= minN then
+		local cap = Config.AdaptiveMaxCorr or 0.12
+		ks.corr = math.clamp(med, -cap, cap)
+	else
+		ks.corr = 0
+	end
+	return ks.corr, ks.seen
 end
 
 local function localChar() return LocalPlayer.Character end
@@ -2862,6 +2909,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	local nowServer = Workspace:GetServerTimeNow()
 	local th = {
 		name = name, kind = info.t, style = info.s, mom = info.mom, id = id,
+		ksKey = tostring(info.t) .. ":" .. tostring(info.s or "?"),  -- [V115] ключ адаптива, 1 раз
 		track = track, hitTL = hitTL, initTP = already, initSpeed = speed,
 		detectClock = nowClock, detectServer = nowServer, contact0 = remaining0,
 		contactAbs = nowClock + remaining0, velLead = vlead,
@@ -3144,13 +3192,11 @@ local function schedulerStep(now)
 			lead = lead + w
 			hold = hold + w
 		end
-					-- [V113] M2 контакт-биас: сдвигаем РАСЧЁТНЫЙ момент контакта позже на стабильный
-					-- недооценённый остаток (см. Config.M2ContactBias) — только для M2. Влияет лишь на
-					-- локальный график нажатия (pressAt/holdEnd), не трогает th.contactAbs (facing и пр.).
-					local cAbs = th.contactAbs
-					if th.kind == "M2" and (Config.M2ContactBias or 0) > 0 then
-						cAbs = cAbs + Config.M2ContactBias
-					end
+					-- [V115] АДАПТИВНАЯ коррекция: сдвигаем РАСЧЁТНЫЙ контакт на выученный per-(kind,style)
+					-- остаток (медиана окна, знак сам под стиль). Влияет ТОЛЬКО на локальный график
+					-- нажатия (pressAt/holdEnd), th.contactAbs не трогаем (facing/прочее — по сырому).
+					-- Ключ th.ksKey закэширован при создании threat → без аллокации per-frame.
+					local cAbs = th.contactAbs + V93.adaptCorr(th)
 					local pressAt = cAbs - lead - up - th.velLead
 					local holdEnd = cAbs + hold
 				-- [V66] диаг-трекинг: минимальный зазор до момента нажатия и факт
@@ -3423,7 +3469,7 @@ local function schedulerStep(now)
 	if multiThreat then
 		State.multiThreatMax   = math.max(State.multiThreatMax or 0, State.multiThreatN)
 		State.multiThreatFrames = (State.multiThreatFrames or 0) + 1
-		-- [V92] ЛАТЧ УДЕРЖАНИЯ КЛАСТЕРА. Баг «2-я атака проходит»: как только 1-й атакующий
+		-- [V92] ЛАТЧ УДЕРЖАНИЯ КЛАСТЕРА. Баг «2-я атака ��роходит»: как только 1-й атакующий
 		-- отрабатывал, multiThreat ��адал до false (остался 1 враг) → guard отпускался по
 		-- КОРОТКОМУ одиночному holdUntil, ровно за ~20мс до уд����ра выжившего (diag t=73.07
 		-- PERFECT → t=73.35 LATE NO-PRESS). Теперь при обнаружении кластера ЗАПОМИНАЕМ самый
@@ -3663,10 +3709,13 @@ local function onOutcome(attacker, result, kind, eventClock)
 	local predErr  = (measured - rec.contact) * 1000
 	State.lastErrMs = predErr
 
+	-- [V115] адаптив: записываем СЫРУЮ ошибку (predErr в сек) в per-(kind,style) окно; получаем
+	-- применяемую коррекцию (медиана, клампнута). resAvg в логе = ПРИМЕНЯЕМАЯ коррекция (не сырое
+	-- среднее) — так виднее, что реально уходит в press. n = сколько исходов всего по ключу.
 	local ksKey = tostring(kind) .. ":" .. tostring(rec.style or "?")
-	local ks = ResidByKS[ksKey]; if not ks then ks = { sum = 0, n = 0 }; ResidByKS[ksKey] = ks end
-	ks.sum = ks.sum + predErr; ks.n = ks.n + 1
-	local resAvg = ks.sum / ks.n   -- [V70] чисто ди��гностика, в предикт НЕ подаётся
+	local corrApplied, resN = V93.adaptRecord(ksKey, predErr / 1000)
+	local resAvg = (corrApplied or 0) * 1000
+	local resNShown = resN or 0
 
 	local upAtPress = math.clamp((rec.pingRaw or 0) * Config.UplinkFactor + Config.UplinkMargin,
 	                             Config.UplinkMin, Config.UplinkMax) * 1000
@@ -3707,9 +3756,9 @@ local function onOutcome(attacker, result, kind, eventClock)
 		bucket[result] = (bucket[result] or 0) + 1
 	end
 
-	diagPush(("OUT    t=%.2f  %s  %s(c%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms resAvg=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
+	diagPush(("OUT    t=%.2f  %s  %s(c%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms corr=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
 		:format(eventClock, attacker, kind, rec.combo or 0, result, measured*1000, rec.contact*1000,
-		        predErr, resAvg, ks.n, gapStr, pressStr, hint, reasonStr, faceStr, faceFlag, rec.speed or 1, (rec.pingRaw or 0)*1000))
+		        predErr, resAvg, resNShown, gapStr, pressStr, hint, reasonStr, faceStr, faceFlag, rec.speed or 1, (rec.pingRaw or 0)*1000))
 end
 
 local hooked = setmetatable({}, { __mode = "k" })
@@ -4386,7 +4435,7 @@ local function toggleDesyncTest()
 				if nowc >= nextReplay or not _testTrack.IsPlaying then
 					nextReplay = nowc + replayInterval()
 					_testTrack:Stop(0)
-					_testTrack:Play(0.05)          -- свежий AnimationPlayed → возобновляем стейт атаки
+					_testTrack:Play(0.05)          -- свежий AnimationPlayed → возобновл��ем стейт атаки
 					_testTrack:AdjustWeight(wgt, 0)
 				end
 				if _testTrack.WeightCurrent < wgt * 0.5 then _testTrack:AdjustWeight(wgt, 0.1) end
@@ -5041,7 +5090,7 @@ local function summary()
 	return table.concat({
 		"===== AUTOPARRY V71 DIAG =====",
 		("player=%s  ping=%.0fms  uplink=%.0fms  mode=%s  autoface=%s"):format(LocalPlayer.Name, getPingRaw()*1000, uplink()*1000, Config.Mode, tostring(Config.AutoFace)),
-		("model: PURE-MATH predict (anim timeline + live TimePosition, NO calibration); lead=%.0fms hold=%.0fms window=[%.0f,%.0f]ms")
+		("model: anim timeline + live TimePosition + ADAPTIVE per-(kind,style) median correction; lead=%.0fms hold=%.0fms window=[%.0f,%.0f]ms")
 			:format(Config.PerfectLead*1000, Config.HoldAfter*1000, Config.PerfectMin*1000, Config.PerfectWindow*1000),
 		("outcomes: PERFECT=%d  BLOCK=%d  HIT=%d  GUARDBREAK=%d  total=%d"):format(t.PERFECT or 0, t.EARLY or 0, t.LATE or 0, t.GUARDBREAK or 0, total),
 		("attacks=%d  presses=%d  dodges=%d  outnumbered-escapes=%d  desync-anims=%d  ac-muted=%d  kicks-blocked=%d  reports-blocked=%d"):format(State.parryCount, State.fireCount, State.dodgeCount, State.grantEscapes or 0, State.desyncFires or 0, State.acMuted or 0, State.kicksBlocked or 0, State.reportsBlocked or 0),
