@@ -104,18 +104,6 @@ return function(Lib, Core)
         -- Stamina attribute (server-authoritative, would be detectable) — pure client field.
         InfStamina_On = false,
 
-        -- No M2 Cooldown — zero the client attempt-lockout upvalues in M2.OnM2Activated,
-        -- clear the M2Cooldown gate attribute each frame, and expose a direct-fire trigger
-        -- (CombatRemoteClient.Fire("M2","ServerCheck")). Server still caps REAL M2 damage.
-        NoM2CD_On = false,
-
-        -- M2 Cooldown Spoof (advanced) — __namecall hook on GetAttribute/SetAttribute:
-        --   • GetAttribute("M2Cooldown") on our char → ALWAYS false  (bypass: game's gate at
-        --     M2.lua:897 `== true` never trips, so the client thinks M2 is always ready).
-        --   • SetAttribute("M2Cooldown", …) from the GAME (not us) → blocked = READ-ONLY:
-        --     nothing in game logic can flip the flag back on.
-        M2Spoof_On = false,
-
         -- Dodge tweaks — patched DIRECTLY into the game Evasive module's own upvalues, so the
         -- player's OWN natural dodges use these values (no manual trigger).
         Dodge_On         = false,   -- master: resolve Evasive module + apply patches each frame
@@ -142,7 +130,7 @@ return function(Lib, Core)
         return c, hum, root
     end
 
-    -- ═══════════════════ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ════════════
+    -- ═══════════════════ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════���═
     -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
     -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
     -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
@@ -296,7 +284,7 @@ return function(Lib, Core)
         end
     end
 
-    -- ═══════════════════ HOOK-BASED FEATURES ══════════════════════════��═════
+    -- ═══════════════════ HOOK-BASED FEATURES ═════════════���════════════��═════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
     -- when the production bytecode ships with stripped function debug-names, which
     -- is why {Name=...} lookups silently returned nil before.
@@ -653,24 +641,12 @@ return function(Lib, Core)
         local ok, mod = pcall(require, node)
         return ok and mod or nil
     end
-    local _evasiveMod, _m2Mod, _combatRemote, _combatConfig
+    local _evasiveMod, _combatConfig
     local function getEvasive()
         if _evasiveMod == nil then
             _evasiveMod = tryRequire({ "CombatSystemClient", "Combat", "Base", "Evasive" }) or false
         end
         return _evasiveMod or nil
-    end
-    local function getM2()
-        if _m2Mod == nil then
-            _m2Mod = tryRequire({ "CombatSystemClient", "Combat", "Base", "M2" }) or false
-        end
-        return _m2Mod or nil
-    end
-    local function getCombatRemote()
-        if _combatRemote == nil then
-            _combatRemote = tryRequire({ "Shared", "Network", "CombatRemoteClient" }) or false
-        end
-        return _combatRemote or nil
     end
     local function getCombatConfig()
         if _combatConfig == nil then
@@ -734,9 +710,49 @@ return function(Lib, Core)
         _evMapped = true
         return true
     end
-    -- state attributes Evasive() rejects on unless the OutnumberedEvasiveGrant path is taken
-    local DODGE_STATE_GATES = { "Ragdoll", "Blocking", "CombatAttacking", "Greenzone",
-                                "RpCombatLocked", "Downed", "Stunned", "GuardBroken" }
+    -- ── DODGE-EVERYWHERE (dodge while attacking / blocking / stunned) ──
+    -- The Evasive() executor has TWO gate layers (verified in Evasive.lua):
+    --   1) canDodge grant path (line 245/529): OutnumberedEvasiveGrant==true bypasses the
+    --      cooldown gate — we assert that attribute each frame.
+    --   2) UNCONDITIONAL early-returns (lines 590-617): GuardBroken / CantAnything / Blocking /
+    --      CombatAttacking / Stunned / Greenzone / RpCombatLocked — the grant does NOT bypass
+    --      these. While you attack, the combat system re-sets CombatAttacking=true every frame,
+    --      so clearing the attribute from PostStep LOSES the race (game reads it before we clear).
+    -- Fix: a __namecall hook on GetAttribute that returns nil for these action-lock states, on
+    -- OUR character, only while Dodge_Everywhere is on. This is read synchronously by the same
+    -- call the executor makes, so there is no race. Physical states (Ragdoll/Downed) are left
+    -- alone — dodging is about cancelling combat locks, not overriding physics.
+    local DODGE_SPOOF_SET = {
+        CombatAttacking = true, Blocking = true, GuardBroken = true,
+        Stunned = true, Greenzone = true, RpCombatLocked = true, CantAnything = true,
+    }
+    local _dodgeHookDone = false
+    local function installDodgeSpoof()
+        if _dodgeHookDone then return true end
+        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+            return false
+        end
+        local oldNamecall
+        local handler = function(self, ...)
+            if Config.Dodge_On and Config.Dodge_Everywhere then
+                local ok, method = pcall(getnamecallmethod)
+                if ok and method == "GetAttribute" and self == LocalPlayer.Character then
+                    local key = ...
+                    if DODGE_SPOOF_SET[key] then return nil end   -- action lock → invisible
+                end
+            end
+            return oldNamecall(self, ...)
+        end
+        if type(newcclosure) == "function" then
+            local okc, wrapped = pcall(newcclosure, handler)
+            if okc then handler = wrapped end
+        end
+        local ok, ref = pcall(hookmetamethod, game, "__namecall", handler)
+        if not ok or not ref then return false end
+        oldNamecall = ref
+        _dodgeHookDone = true
+        return true
+    end
     -- Runs each frame while Dodge is enabled — keeps the module patched to the live slider values.
     local function driveDodge()
         if not Config.Dodge_On then return end
@@ -751,90 +767,53 @@ return function(Lib, Core)
             if target then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, target) end
         end
         if Config.Dodge_Everywhere then
+            installDodgeSpoof()  -- idempotent; the hook does the actual gate bypass
             local char = LocalPlayer.Character
-            if char then
-                if char:GetAttribute("OutnumberedEvasiveGrant") ~= true then
-                    pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", true) end)
-                end
-                for _, a in ipairs(DODGE_STATE_GATES) do
-                    if char:GetAttribute(a) ~= nil then pcall(function() char:SetAttribute(a, nil) end) end
-                end
+            if char and char:GetAttribute("OutnumberedEvasiveGrant") ~= true then
+                pcall(function() char:SetAttribute("OutnumberedEvasiveGrant", true) end)
             end
         end
     end
 
-    -- ═══════════════════════════ NO M2 COOLDOWN ═════════════════════════════
-    -- Zero the client attempt-lockout upvalues in M2.OnM2Activated (all numeric upvalues here
-    -- are the u125/u126/u127 lockout timers + LocalAttemptLockoutSeconds → safe to 0; the lone
-    -- boolean is the "ready" flag → true), clear the server M2Cooldown attribute each frame,
-    -- and expose a direct fire that skips ALL client gates. Server still caps REAL M2.
-    -- Map once (getupvalues is heavy → don't run it every frame). Verified upvalue list of
-    -- OnM2Activated: u125/u126/u127 (os.clock lockout deadlines) + LocalAttemptLockoutSeconds
-    -- are the ONLY numbers → force 0; u122 is the ready flag (boolean) → force true. Every
-    -- other upvalue is a module/table copy and is left alone.
-    local _m2NumIdx, _m2BoolIdx, _m2Mapped = {}, {}, false
-    local function mapM2Lockouts()
-        if _m2Mapped then return true end
-        local m2 = getM2(); if not m2 or type(m2.OnM2Activated) ~= "function" then return false end
-        if not hasDebugUpvalues() then return false end
-        local ok, ups = pcall(debug.getupvalues, m2.OnM2Activated)
-        if not (ok and type(ups) == "table") then return false end
-        for i, v in pairs(ups) do
-            if type(v) == "number" then _m2NumIdx[#_m2NumIdx + 1] = i
-            elseif type(v) == "boolean" then _m2BoolIdx[#_m2BoolIdx + 1] = i end
+    -- ═══════════════════════ ANTI-RAGDOLL / AUTO-GETUP ══════════════════════
+    -- Verified in RagdollServiceClient: while attr Ragdoll==true the game runs a Heartbeat that
+    -- calls sustainClientRagdoll (GettingUp=false + ChangeState(Ragdoll) + PlatformStand=true).
+    -- Clearing the attribute from our own loop LOSES the race — the server re-replicates
+    -- Ragdoll=true and their Heartbeat re-sustains the same frame → flicker.
+    --
+    -- Robust fix: a __namecall hook on GetAttribute that reports Ragdoll as nil on OUR character,
+    -- synchronously with every read the ragdoll code makes. onRagdollChanged / the sustain
+    -- Heartbeat / isManagedRagdoll then all see "no ragdoll" → the game runs its OWN clean getup
+    -- (u7) and never re-sustains, even if the server keeps the attribute set. We EXEMPT managed
+    -- ragdolls (Downed / carried / gripped / dead) so carry & downed states are untouched.
+    local function isManagedRagdoll(char, hum)
+        if char:GetAttribute("Downed") == true then return true end
+        local states = char:FindFirstChild("States")
+        if states then
+            local bc = states:FindFirstChild("BeingCarried")
+            local bg = states:FindFirstChild("BeingGripped")
+            if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return true end
         end
-        _m2Mapped = true
-        return true
-    end
-    local function patchM2Lockouts()
-        if not mapM2Lockouts() then return false end
-        local m2 = getM2(); if not m2 then return false end
-        for _, i in ipairs(_m2NumIdx)  do pcall(debug.setupvalue, m2.OnM2Activated, i, 0) end
-        for _, i in ipairs(_m2BoolIdx) do pcall(debug.setupvalue, m2.OnM2Activated, i, true) end
-        return true
-    end
-    local function driveNoM2CD()
-        if not Config.NoM2CD_On then return end
-        patchM2Lockouts()
-        local c = LocalPlayer.Character; if not c then return end
-        if c:GetAttribute("M2Cooldown") ~= nil then
-            pcall(function() c:SetAttribute("M2Cooldown", nil) end)
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root and (root:FindFirstChild("CarryWeld") or root:FindFirstChild("GripWeld")) then
+            return true
         end
+        hum = hum or char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then return true end
+        return false
     end
-    local function fireM2Direct()
-        local cr = getCombatRemote(); if not cr or type(cr.Fire) ~= "function" then return false end
-        pcall(function() cr.Fire("M2", "ServerCheck") end)
-        return true
-    end
-
-    -- ══════════════ M2 COOLDOWN SPOOF (read-only + bypass) ═══════════════════
-    -- Advanced: a single __namecall metamethod hook (installed ONCE, gated by Config.M2Spoof_On).
-    --   • GetAttribute("M2Cooldown") on our character → return false. The game's gate at
-    --     M2.lua:897 tests `== true`, so it can never see a cooldown → M2 always "ready" (BYPASS).
-    --   • SetAttribute("M2Cooldown", …) from the GAME (not the executor) → swallowed, so game
-    --     logic can never flip the flag back on → the value is effectively READ-ONLY.
-    -- checkcaller() lets OUR own writes through; game/other writes are blocked. Wrapped in
-    -- newcclosure when available so the hook presents as a native C closure (anti-detect).
-    local _m2HookDone = false
-    local function installM2Spoof()
-        if _m2HookDone then return true end
+    local _ragdollHookDone = false
+    local function installRagdollSpoof()
+        if _ragdollHookDone then return true end
         if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
             return false
         end
-        local canCheckCaller = type(checkcaller) == "function"
         local oldNamecall
         local handler = function(self, ...)
-            if Config.M2Spoof_On then
+            if Config.AntiRagdoll_On and self == LocalPlayer.Character then
                 local ok, method = pcall(getnamecallmethod)
-                if ok and (method == "GetAttribute" or method == "SetAttribute") then
-                    local key = ...
-                    if key == "M2Cooldown" and self == LocalPlayer.Character then
-                        if method == "GetAttribute" then
-                            return false                        -- spoof read → never on cooldown
-                        elseif not canCheckCaller or not checkcaller() then
-                            return                              -- block game write → read-only
-                        end
-                    end
+                if ok and method == "GetAttribute" and (...) == "Ragdoll" then
+                    if not isManagedRagdoll(self) then return nil end  -- hide non-managed ragdoll
                 end
             end
             return oldNamecall(self, ...)
@@ -846,27 +825,17 @@ return function(Lib, Core)
         local ok, ref = pcall(hookmetamethod, game, "__namecall", handler)
         if not ok or not ref then return false end
         oldNamecall = ref
-        _m2HookDone = true
+        _ragdollHookDone = true
         return true
     end
-
-    -- ═══════════════════════ ANTI-RAGDOLL / AUTO-GETUP ══════════════════════
-    -- While Ragdoll is active and it's NOT a managed ragdoll (Downed / carried / gripped —
-    -- legit states we must not fight), force getup and clear the local Ragdoll attribute.
-    -- RagdollServiceClient sustains ragdoll on Heartbeat via the attribute + ChangeState;
-    -- we counter it each frame. Best-effort — the server owns authoritative ragdoll.
+    -- Fallback getup for executors without hookmetamethod (best-effort, may flicker).
     local function driveAntiRagdoll()
         if not Config.AntiRagdoll_On then return end
+        if _ragdollHookDone then return end   -- hook path handles it cleanly; don't double-drive
         local char, hum = getParts()
         if not hum then return end
         if char:GetAttribute("Ragdoll") ~= true then return end
-        if char:GetAttribute("Downed") == true then return end
-        local states = char:FindFirstChild("States")
-        if states then
-            local bc = states:FindFirstChild("BeingCarried")
-            local bg = states:FindFirstChild("BeingGripped")
-            if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return end
-        end
+        if isManagedRagdoll(char, hum) then return end
         pcall(function() char:SetAttribute("Ragdoll", nil) end)
         pcall(function()
             hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
@@ -889,7 +858,6 @@ return function(Lib, Core)
     PostStep:Connect(function()
         driveNoDelay()
         driveInfStamina()   -- hold _staminaSeenPositive=false → endless sprint (no attr writes)
-        driveNoM2CD()       -- zero client M2 lockouts + clear M2Cooldown attr
         driveDodge()        -- patch DashSpeed/Cooldown upvalues directly (native dodge uses them)
         driveAntiRagdoll()  -- force getup out of non-managed ragdolls
         -- keep sprint desired asserted (game clears it after combat cancels)
@@ -1119,7 +1087,7 @@ return function(Lib, Core)
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
             function(v) Config.Dodge_Everywhere = v end)
-        sDodge:SubLabel({ Text = "Everywhere = grants dodge in any state (attack/stun/etc). i-frames still server-owned." })
+        sDodge:SubLabel({ Text = "Everywhere = dodge even while attacking / blocking / stunned (hook hides the action-locks). i-frames still server-owned." })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
             Min = 0, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
@@ -1128,57 +1096,19 @@ return function(Lib, Core)
                 Config.Dodge_Cooldown = v; driveDodge() end })
         sDodge:SubLabel({ Text = "Applied directly to your dodge · Speed 0 = game default · Cooldown 0 = game default" })
 
-        -- ─────────────── Section 7: No M2 Cooldown (Left) ───────────────
-        local sM2 = MV:Section({ Side = "Left" })
-        sM2:Header({ Name = "No M2 Cooldown" })
-        feature(sM2, {
-            Title = "No M2 Cooldown", Flag = "MV_NoM2CD",
-            get = function() return Config.NoM2CD_On end,
-            set = function(v)
-                Config.NoM2CD_On = v
-                if v then
-                    if not getM2() then
-                        notify("No M2 CD", "M2 module not found yet"); Config.NoM2CD_On = false
-                    elseif not hasDebugUpvalues() then
-                        notify("No M2 CD", "needs debug upvalue API")
-                    end
-                end
-            end,
-            Desc = "zeros client M2 attempt-lockouts + clears M2Cooldown attr\nServer still caps REAL M2 damage",
-        })
-        feature(sM2, {
-            Title = "Read-Only Cooldown Spoof", Flag = "MV_M2Spoof",
-            get = function() return Config.M2Spoof_On end,
-            set = function(v)
-                if v then
-                    if not installM2Spoof() then
-                        notify("M2 Spoof", "executor lacks hookmetamethod/getnamecallmethod")
-                        return
-                    end
-                end
-                Config.M2Spoof_On = v
-            end,
-            Desc = "advanced __namecall hook: spoofs GetAttribute(\"M2Cooldown\")→false (bypass)\nand blocks game writes to it (locks the value read-only)",
-        })
-        ctx.keybind(sM2, {
-            Name = "M2 Now (direct fire)",
-            Flag = ctx.flag("MV_M2Fire_KB"),
-            Toggle = function()
-                if not fireM2Direct() then notify("M2", "CombatRemoteClient not found") end
-            end,
-        })
-        sM2:SubLabel({ Text = "Direct fire skips ALL client gates (sends M2/ServerCheck straight to server)" })
-
-        -- ─────────────── Section 8: Anti-Ragdoll (Right) ───────────────
+        -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
         sAR:Header({ Name = "Anti-Ragdoll" })
         feature(sAR, {
             Title = "Anti-Ragdoll", Flag = "MV_AntiRagdoll",
             get = function() return Config.AntiRagdoll_On end,
-            set = function(v) Config.AntiRagdoll_On = v end,
-            Desc = "auto-getup out of ragdolls each frame\nskips managed ones (downed / carried / gripped)",
+            set = function(v)
+                Config.AntiRagdoll_On = v
+                if v then installRagdollSpoof() end  -- hides the Ragdoll attr → game self-getups
+            end,
+            Desc = "hides the Ragdoll attribute from the game's own sustain loop\nskips managed ones (downed / carried / gripped / dead)",
         })
-        sAR:SubLabel({ Text = "Best-effort: server owns authoritative ragdoll state" })
+        sAR:SubLabel({ Text = "Hook path is flicker-free; falls back to a per-frame getup without hookmetamethod." })
 
         uiReady = true
     end
