@@ -42,9 +42,8 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 return function(Lib, Core)
-    local Players          = game:GetService("Players")
-    local RunService       = game:GetService("RunService")
-    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Players    = game:GetService("Players")
+    local RunService = game:GetService("RunService")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -57,43 +56,23 @@ return function(Lib, Core)
         Offset = 0,
     }
 
-    -- ── Engine acquisition — freeze-proof ────────────────────────────────────
-    -- The game exposes RhythmServiceClient as a SINGLETON (its ModuleScript ends
-    -- with `return u12:Get()`), and that singleton holds ._session — the live
-    -- RhythmPlaySession (== the "engine": _active / _now / _handleLanePress).
+    -- ── Engine acquisition — filtergc for the client singleton ───────────────
+    -- IMPORTANT: we canNOT require the module. RhythmServiceClient lives under
+    -- ReplicatedStorage.Shared.Services, and that folder is DESTROYED right after
+    -- bootstrap (the module itself errors "require during bootstrap before
+    -- Shared.Services is destroyed" — see RhythmServiceClient:99-103). So the
+    -- Instance path is dead at runtime and require() can't reach it.
     --
-    -- The freeze the user saw was the GC scan (getgc/filtergc) running on a timer
-    -- even while nothing was going on. Two rules kill it for good:
-    --   • GATE: never scan unless the minigame UI (PlayerGui.RhythmServiceUI) is
-    --     actually open. That's a single cheap FindFirstChild — at idle we do zero
-    --     GC work, so no stutter when you're just walking around.
-    --   • CACHE FOREVER: the singleton never dies, so once we have it we never scan
-    --     again (not even between songs). require() is tried first (cached module =
-    --     no sweep); filtergc(filterOne) is only a one-time fallback if require is
-    --     blocked, and it only runs while the minigame is open.
+    -- But the RhythmServiceClient SINGLETON object still lives in memory forever
+    -- (held by UserInputService connections + janitors). We grab it once with
+    -- filtergc(filterOne) — cheap, stops at the first match, no full-heap copy
+    -- like the old getgc(true) that froze — then cache it FOREVER. Its ._session
+    -- field is the live play session (the engine); it's recreated per song, so we
+    -- read it fresh each frame. Signature keys are non-nil direct fields:
+    -- _startPlaySeq (=0), _characterJanitor, _janitor (RhythmServiceClient:117-129).
+    -- NB: _session is nil at construction, so it is NOT a usable match key.
     local rawgetFn = rawget
 
-    local function playerGui()
-        return LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui") or nil
-    end
-    -- Cheap gate: is the rhythm minigame actually on screen right now?
-    local function minigameOpen()
-        local pg = playerGui()
-        return pg ~= nil and pg:FindFirstChild("RhythmServiceUI") ~= nil
-    end
-
-    local function tryRequire(pathParts)
-        local node = ReplicatedStorage
-        for _, name in ipairs(pathParts) do
-            if not node then return nil end
-            node = node:FindFirstChild(name)
-        end
-        if not node then return nil end
-        local ok, mod = pcall(require, node)
-        return ok and mod or nil
-    end
-
-    -- Does this table look like the RhythmServiceClient singleton?
     local function looksLikeClient(o)
         if type(o) ~= "table" then return false end
         local ok, yes = pcall(function()
@@ -105,34 +84,18 @@ return function(Lib, Core)
     end
 
     local _client            -- cached singleton (forever, once found)
-    local _requireTried      -- we only attempt require ONCE (cheap, but no point spamming)
     local _lastScan = 0
-    local SCAN_GAP = 2.0     -- min seconds between filtergc fallbacks while searching
+    local SCAN_GAP = 1.0     -- min seconds between scans while still searching
     local function getClient()
         if _client then return _client end
-
-        -- 1) require the cached module → returns the singleton (u12:Get()).
-        --    Cheap when it works; if the executor blocks it we just move on.
-        if not _requireTried then
-            _requireTried = true
-            local svc = tryRequire({ "Shared", "Services", "RhythmService", "RhythmServiceClient" })
-            if looksLikeClient(svc) then _client = svc; return _client end
-            if type(svc) == "table" and type(svc.Get) == "function" then
-                local ok, inst = pcall(svc.Get, svc)
-                if ok and looksLikeClient(inst) then _client = inst; return _client end
-            end
-        end
-
-        -- 2) filtergc fallback — ONLY while the minigame is open, throttled. This is
-        --    the only potentially heavy call, and it's confined to when you're
-        --    actually playing (and runs at most once before it caches forever).
-        if not minigameOpen() then return nil end
         if type(filtergc) ~= "function" then return nil end
+        -- Throttle scans until found. The singleton exists from client startup, so
+        -- this normally succeeds on the very first scan and then never runs again.
         local nowClock = os.clock()
         if nowClock - _lastScan < SCAN_GAP then return nil end
         _lastScan = nowClock
         local ok, res = pcall(filtergc, "table",
-            { Keys = { "_characterJanitor", "_janitor", "_startPlaySeq" } }, true)
+            { Keys = { "_startPlaySeq", "_characterJanitor", "_janitor" } }, true)
         if ok and looksLikeClient(res) then _client = res end
         return _client
     end
