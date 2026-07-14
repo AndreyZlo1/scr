@@ -12,11 +12,13 @@
 --  HOW IT WORKS — everything below is derived from the game's OWN decompiled
 --  RhythmEngine (verified against the dump, no guessing):
 --
---    • The minigame runs an OO engine instance (RhythmEngine, `u21.new`). We grab
---      the LIVE instance from the GC (getgc) by its field signature (_liveNotes,
---      _active, _windows, _lanes, _judgeCounts + methods _now/_handleLanePress).
---      The instance is re-created per song, so we cache it and re-scan only when
---      the cached one is gone/destroyed — never every frame.
+--    • RhythmServiceClient is a SINGLETON — its ModuleScript ends with
+--      `return u12:Get()`, so require() hands us the singleton directly (cached,
+--      no side effects). The singleton's ._session field is the LIVE play session
+--      (== the engine: _active / _now / _handleLanePress), or nil when no song is
+--      running. We cache the singleton once and just read ._session per frame.
+--      NO getgc heap sweep (that was the freeze); a filtergc(filterOne) grab is
+--      only used as a one-time fallback if the module path was stripped after boot.
 --
 --    • Notes on screen live in engine._active. Each has: t (target hit time, in
 --      the engine's own audio-clock seconds), lane, len (0 = tap, >0 = hold),
@@ -40,8 +42,9 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 return function(Lib, Core)
-    local Players    = game:GetService("Players")
-    local RunService = game:GetService("RunService")
+    local Players          = game:GetService("Players")
+    local RunService       = game:GetService("RunService")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -54,78 +57,93 @@ return function(Lib, Core)
         Offset = 0,
     }
 
-    -- ── Executor GC access (for grabbing the live engine instance) ───────────
-    -- We only rely on getgc (getreg is NOT an equivalent). getgcFn stays nil on
-    -- executors without it, and the module simply no-ops there.
-    local getgcFn  = getgc
+    -- ── Engine acquisition — NO getgc (that was the freeze) ──────────────────
+    -- The game exposes RhythmServiceClient as a SINGLETON: its ModuleScript ends
+    -- with `return u12:Get()`, so require() hands us the singleton directly. That
+    -- singleton holds ._session — the live RhythmPlaySession (== the "engine" with
+    -- _active / _now / _handleLanePress). No song → _session is nil (cheap check).
+    --
+    -- Old code swept the WHOLE GC with getgc(true) every 0.5s while idle, copying
+    -- the entire heap into a Lua table each time → massive stutter. Now:
+    --   1) require the cached module ONCE (FindFirstChild + cached require = cheap),
+    --   2) if the path was stripped after boot, fall back to filtergc(filterOne)
+    --      ONCE to grab the singleton by field signature (like the movement module),
+    --   3) cache the singleton forever (it never dies) and just read ._session/frame.
     local rawgetFn = rawget
 
-    -- Field signature that uniquely identifies a RhythmEngine instance.
-    local function looksLikeEngine(o)
-        local ok, yes = pcall(function()
-            return rawgetFn(o, "_liveNotes") ~= nil
-               and rawgetFn(o, "_active") ~= nil
-               and rawgetFn(o, "_windows") ~= nil
-               and rawgetFn(o, "_lanes") ~= nil
-               and rawgetFn(o, "_judgeCounts") ~= nil
-        end)
-        if not (ok and yes) then return false end
-        if rawgetFn(o, "_destroyed") == true then return false end
-        local mok, hasM = pcall(function()
-            return type(o._handleLanePress) == "function"
-               and type(o._handleLaneRelease) == "function"
-               and type(o._now) == "function"
-        end)
-        return mok and hasM
+    local function tryRequire(pathParts)
+        local node = ReplicatedStorage
+        for _, name in ipairs(pathParts) do
+            if not node then return nil end
+            node = node:FindFirstChild(name)
+        end
+        if not node then return nil end
+        local ok, mod = pcall(require, node)
+        return ok and mod or nil
     end
 
-    -- Scan the GC once for a live engine instance. Only called on a throttle when
-    -- we don't already hold a valid reference (see acquireEngine).
-    local function scanForEngine()
-        if type(getgcFn) ~= "function" then return nil end
-        local ok, gc = pcall(getgcFn, true)
-        if not ok or type(gc) ~= "table" then
-            ok, gc = pcall(getgcFn)
-            if not ok or type(gc) ~= "table" then return nil end
+    -- Does this table look like the RhythmServiceClient singleton?
+    local function looksLikeClient(o)
+        if type(o) ~= "table" then return false end
+        local ok, yes = pcall(function()
+            return rawgetFn(o, "_characterJanitor") ~= nil
+               and rawgetFn(o, "_janitor") ~= nil
+               and rawgetFn(o, "_startPlaySeq") ~= nil
+        end)
+        return ok and yes
+    end
+
+    local _client, _lastClientTry = nil, 0
+    local CLIENT_RETRY = 1.0   -- seconds between acquisition attempts while we have none
+    local function getClient()
+        if _client then return _client end
+        local nowClock = os.clock()
+        if nowClock - _lastClientTry < CLIENT_RETRY then return nil end
+        _lastClientTry = nowClock
+
+        -- 1) require the cached module → returns the singleton (u12:Get()).
+        local svc = tryRequire({ "Shared", "Services", "RhythmService", "RhythmServiceClient" })
+        if looksLikeClient(svc) then
+            _client = svc
+            return _client
         end
-        for i = 1, #gc do
-            local o = gc[i]
-            if type(o) == "table" and looksLikeEngine(o) then
-                return o
-            end
+        -- some builds may return the class instead of the instance → call :Get().
+        if type(svc) == "table" and type(svc.Get) == "function" then
+            local ok, inst = pcall(svc.Get, svc)
+            if ok and looksLikeClient(inst) then _client = inst; return _client end
+        end
+
+        -- 2) fallback: filtergc for the singleton by signature, ONE match only
+        -- (filterOne = true → never sweeps/collects the whole heap → no freeze).
+        if type(filtergc) == "function" then
+            local ok, res = pcall(filtergc, "table",
+                { Keys = { "_characterJanitor", "_janitor", "_startPlaySeq" } }, true)
+            if ok and looksLikeClient(res) then _client = res; return _client end
         end
         return nil
     end
 
-    -- Cached engine + validity check. Re-scans at most every RESCAN_INTERVAL while
-    -- no valid engine is held; once held, we skip scanning entirely (cheap).
-    local RESCAN_INTERVAL = 0.5
-    local _engine, _lastScan = nil, 0
-    local function engineValid(e)
-        if type(e) ~= "table" then return false end
-        local ok, alive = pcall(function()
-            return e._destroyed ~= true and type(e._active) == "table"
-        end)
-        return ok and alive
-    end
-    local function acquireEngine()
-        if engineValid(_engine) then return _engine end
-        _engine = nil
-        local nowClock = os.clock()
-        if nowClock - _lastScan < RESCAN_INTERVAL then return nil end
-        _lastScan = nowClock
-        local e = scanForEngine()
-        if e then _engine = e end
-        return _engine
+    -- Read the live engine (play session) off the singleton; nil when no song.
+    local function getEngine()
+        local client = getClient()
+        if not client then return nil end
+        local e = client._session
+        if type(e) ~= "table" then return nil end
+        if type(e._active) ~= "table" or type(e._now) ~= "function"
+           or type(e._handleLanePress) ~= "function" then
+            return nil
+        end
+        return e
     end
 
     -- ── The autoplay step (one pass over the on-screen notes) ────────────────
+    local _laneHolding, _pressHold, _pressTap = {}, {}, {}   -- reused scratch tables
     local function step()
         if not Config.AutoRythm_On then return end
-        local engine = acquireEngine()
+        local engine = getEngine()
         if not engine then return end
 
-        local okNow, now = pcall(function() return engine:_now() end)
+        local okNow, now = pcall(engine._now, engine)
         if not okNow or type(now) ~= "number" then return end
 
         local active = engine._active
@@ -133,40 +151,42 @@ return function(Lib, Core)
         local lanes  = engine._lanes or 0
         local offset = (Config.Offset or 0) / 1000
 
+        -- Reused scratch tables (cleared each frame → no per-frame allocation).
+        table.clear(_laneHolding); table.clear(_pressHold); table.clear(_pressTap)
+
         -- First figure out which lanes currently have a hold in progress — we must
         -- never tap-release those (it would EARLY_RELEASE and wreck the hold).
-        local laneHolding = {}
         for _, note in ipairs(active) do
-            if note.holding then laneHolding[note.lane] = true end
+            if note.holding then _laneHolding[note.lane] = true end
         end
 
-        -- Decide presses this frame.
-        local pressHold, pressTap = {}, {}
+        -- Decide presses this frame. A note is due when now >= its hit time. Pressing
+        -- exactly then means at most ONE frame of lateness (~16ms ≪ 43ms PERFECT window).
         for _, note in ipairs(active) do
             local lane = note.lane
             if type(lane) == "number" and lane >= 1 and lane <= lanes then
-                local len = note.len or 0
                 if not note.hit and not note.attempted and now >= note.t + offset then
-                    if len > 0 then
-                        if not note.holding then pressHold[lane] = true end
+                    if (note.len or 0) > 0 then
+                        if not note.holding then _pressHold[lane] = true end
                     else
-                        pressTap[lane] = true
+                        _pressTap[lane] = true
                     end
                 end
             end
         end
 
-        -- Holds: press once, DO NOT release (engine auto-finalizes at t+len = PERFECT).
-        for lane in pairs(pressHold) do
-            pcall(function() engine:_handleLanePress(lane) end)
+        -- Holds: press ONCE and DO NOT release. The engine auto-finalizes the held
+        -- note at t+len with fraction ≈ 1.0 → PERFECT (RhythmEngine._step:1582). A
+        -- manual early release would score EARLY_RELEASE and tank the grade.
+        -- (pcall(fn, engine, lane) forwards args → no per-frame closure allocation.)
+        for lane in pairs(_pressHold) do
+            pcall(engine._handleLanePress, engine, lane)
         end
-        -- Taps: quick press + release. Skip lanes that just started / are holding.
-        for lane in pairs(pressTap) do
-            if not pressHold[lane] and not laneHolding[lane] then
-                pcall(function()
-                    engine:_handleLanePress(lane)
-                    engine:_handleLaneRelease(lane)
-                end)
+        -- Taps: quick press + release. Skip lanes that are mid-hold or just pressed.
+        for lane in pairs(_pressTap) do
+            if not _pressHold[lane] and not _laneHolding[lane] then
+                pcall(engine._handleLanePress, engine, lane)
+                pcall(engine._handleLaneRelease, engine, lane)
             end
         end
     end
