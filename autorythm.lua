@@ -61,7 +61,6 @@ return function(Lib, Core)
     -- ── Runtime config (MacLib restores flags through the config manager) ────
     local Config = {
         AutoRythm_On = false,
-        AutoRythm_Debug = false,   -- when on, prints hold-note diagnostics to the console
 
         -- Timing nudge (ms). 0 = frame-perfect. Negative = press earlier, positive
         -- = later. Only change for audio/display latency; PERFECT window is ±43ms.
@@ -81,7 +80,14 @@ return function(Lib, Core)
             Scale      = 100,    -- % of the board the drawing occupies (10-100)
             AlignX     = 50,     -- horizontal placement: 0 = left, 50 = center, 100 = right
             AlignY     = 50,     -- vertical placement: 0 = top, 50 = middle, 100 = bottom
-            Debug      = false,  -- print step-by-step diagnostics to the console
+        },
+
+        Collector = {
+            Auto     = false,  -- keep gathering world items into a pile every tick
+            Follow   = false,  -- pile follows the character (mobile dump / "carry all")
+            Radius   = 6,      -- studs: how far in front of you the pile sits
+            Spread   = 4,      -- studs: pile spread (bigger = looser heap)
+            Range    = 0,      -- studs: only collect items within this range (0 = all)
         },
     }
 
@@ -202,21 +208,6 @@ return function(Lib, Core)
     local _allowRelease = {}               -- lane -> true when WE authorize a release
     local _lastEngine
 
-    -- ── Debug logging for the hold path ────────────────────────────────────────
-    -- Toggle in-game with the "AutoRythm Debug" switch (Config.AutoRythm_Debug).
-    -- Output goes to the executor console (print). Share the HOLD lines so we can
-    -- see exactly what the engine does with our synthetic hold presses.
-    local _dbgHoldLast = setmetatable({}, { __mode = "k" })  -- weak: note -> last log time
-    local function rlog(fmt, ...)
-        if not Config.AutoRythm_Debug then return end
-        local ok, msg = pcall(string.format, fmt, ...)
-        print("[AutoRythm] " .. (ok and msg or fmt))
-    end
-    local function _inActive(active, note)
-        for i = 1, #active do if active[i] == note then return true end end
-        return false
-    end
-
     -- Instance-level guard over _handleLaneRelease: while a lane is auto-held, drop
     -- any release we didn't authorize (a stray InputEnded would EARLY_RELEASE the
     -- hold before the engine auto-finalizes it at t+len). We only allow the single
@@ -245,10 +236,7 @@ return function(Lib, Core)
 
         -- Guard _handleLaneRelease: drop unauthorized releases on held lanes.
         rawset(engine, "_handleLaneRelease", function(self, lane)
-            if _heldLane[lane] and not _allowRelease[lane] then
-                rlog("GUARD BLOCK handleRelease lane=%s", tostring(lane))
-                return
-            end
+            if _heldLane[lane] and not _allowRelease[lane] then return end
             return realRelease(self, lane)
         end)
 
@@ -259,16 +247,12 @@ return function(Lib, Core)
         -- t+len instead.
         if type(realOnRelease) == "function" then
             rawset(engine, "_onReleaseLane", function(self, lane, t)
-                if _heldLane[lane] and not _allowRelease[lane] then
-                    rlog("GUARD BLOCK onReleaseLane lane=%s", tostring(lane))
-                    return
-                end
+                if _heldLane[lane] and not _allowRelease[lane] then return end
                 return realOnRelease(self, lane, t)
             end)
         end
 
         rawset(engine, "__ar_guardToken", GUARD_TOKEN)
-        rlog("GUARD INSTALLED (handleRelease + onReleaseLane) on engine %s", tostring(engine))
     end
 
     local function step()
@@ -317,9 +301,6 @@ return function(Lib, Core)
         for lane, note in pairs(_heldLane) do
             local holdEnd = note.t + (note.len or 0)
             if note.holdJudgment ~= nil or now > holdEnd + 0.5 then
-                rlog("HOLD END lane=%d judged=%s holding=%s hit=%s now-end=%.3f",
-                    lane, tostring(note.holdJudgment), tostring(note.holding),
-                    tostring(note.hit), now - holdEnd)
                 _allowRelease[lane] = true
                 pcall(engine._handleLaneRelease, engine, lane)
                 _allowRelease[lane] = nil
@@ -328,17 +309,6 @@ return function(Lib, Core)
                 -- Still holding: mark the lane so the tap branch never releases it, and
                 -- let the engine keep/advance the hold on its own.
                 _laneHolding[lane] = true
-                -- Debug: report holding state a few times across the sustain.
-                if Config.AutoRythm_Debug then
-                    local key = note
-                    local last = _dbgHoldLast[key] or 0
-                    if now - last > 0.15 then
-                        _dbgHoldLast[key] = now
-                        rlog("HOLD... lane=%d t=%.3f len=%.3f now-t=%.3f holding=%s hit=%s judged=%s inActive=%s",
-                            lane, note.t, note.len or 0, now - note.t, tostring(note.holding),
-                            tostring(note.hit), tostring(note.holdJudgment), tostring(_inActive(active, note)))
-                    end
-                end
             end
         end
 
@@ -352,10 +322,6 @@ return function(Lib, Core)
                     -- engine promotes it to holding and auto-finalizes it as PERFECT.
                     if now >= note.t + offset and not _heldLane[lane] then
                         pcall(engine._handleLanePress, engine, lane)
-                        rlog("HOLD PRESS lane=%d t=%.3f len=%.3f now=%.3f dt=%.3f -> hit=%s holding=%s attempted=%s holdStart=%s",
-                            lane, note.t, note.len or 0, now, now - note.t,
-                            tostring(note.hit), tostring(note.holding),
-                            tostring(note.attempted), tostring(note.holdStartTime))
                         _heldLane[lane]    = note
                         _laneHolding[lane] = true
                     end
@@ -372,13 +338,8 @@ return function(Lib, Core)
     local CHALK_COLOR = Color3.fromRGB(242, 242, 238)
     local BOARD_W, BOARD_H = 512, 384   -- EditableImage canvas (WhiteboardServiceClient:189)
 
-    -- Debug logging, gated by the UI toggle. Prints to the executor console with a
-    -- clear prefix so the user can trace exactly which step succeeds or fails.
-    local function adlog(fmt, ...)
-        if not Config.AutoDraw.Debug then return end
-        local ok, msg = pcall(string.format, fmt, ...)
-        print("[AutoDraw] " .. (ok and msg or tostring(fmt)))
-    end
+    -- Debug logging removed — kept as a no-op so the existing call sites stay valid.
+    local function adlog() end
 
     -- Replicates WhiteboardServiceClient.uvToWorldPos (dump line 176): maps a board
     -- UV (0..1) to a world position on the correct face. Used purely for the visual
@@ -1877,6 +1838,147 @@ return function(Lib, Core)
         return out
     end
 
+    -- ═══════════════════════════ ITEM COLLECTOR ═════════════════════════════
+    -- Gathers every loose world item (workspace.Items) into a neat pile next to
+    -- your character. This is a CLIENT-SIDE gather: it PivotTos each item model
+    -- to a ring around a center point. The game's world-item pivot fix only
+    -- re-pins an item when it is (re)parented or its WorldReturnPivot attribute
+    -- changes (ItemServiceClient:207-291) — there is NO per-frame server re-pin
+    -- — so a light maintain loop is enough to keep the heap in place.
+    --
+    -- On "holding 2+ items": the character exposes a SINGLE `ItemEquipped`
+    -- attribute and the server validates equips against it (auth-token gated),
+    -- so no client can make the server believe two items are truly equipped.
+    -- Instead of faking that, the collector brings EVERY item to you and can
+    -- make the heap follow you — the same practical payoff (a movable dump you
+    -- carry around) without a fake server state that would just get rejected.
+    local CollectorState = {
+        conn     = nil,
+        center   = nil,                                   -- fixed heap CFrame (Follow off)
+        anchored = setmetatable({}, { __mode = "k" }),    -- part -> original Anchored
+    }
+
+    local function collectorCharRoot()
+        local char = LocalPlayer and LocalPlayer.Character
+        if not char then return nil, nil end
+        local root = char:FindFirstChild("HumanoidRootPart")
+            or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+        return char, root
+    end
+
+    -- World items = Models directly under workspace.Items. Equipped items get
+    -- reparented onto a character, so anything still under Items is "loose".
+    local function collectorItems()
+        local folder = workspace:FindFirstChild("Items")
+        if not (folder and folder:IsA("Folder")) then return {} end
+        local out = {}
+        for _, m in ipairs(folder:GetChildren()) do
+            if m:IsA("Model") then out[#out + 1] = m end
+        end
+        return out
+    end
+
+    -- Same handle resolution the game uses (ItemServiceUtils.FindModelHandle):
+    -- PrimaryPart, else a part named "Handle", else any BasePart.
+    local function collectorHandle(model)
+        if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then return model.PrimaryPart end
+        local h = model:FindFirstChild("Handle")
+        if h and h:IsA("BasePart") then return h end
+        return model:FindFirstChildWhichIsA("BasePart")
+    end
+
+    -- Resolve the heap center. Follow / a fresh Collect Now recomputes it from the
+    -- character; otherwise the previously stored fixed world point is reused so a
+    -- dropped dump stays put even if you walk away.
+    local function collectorResolveCenter(recompute)
+        if recompute or not CollectorState.center then
+            local _, root = collectorCharRoot()
+            if root then
+                CollectorState.center = root.CFrame * CFrame.new(0, -2, -(Config.Collector.Radius or 6))
+            end
+        end
+        return CollectorState.center
+    end
+
+    -- Move every (in-range) world item into a heap around `center`. Anchoring the
+    -- handle client-side stops local physics from dragging it off between ticks.
+    local function collectorPile(center)
+        if not center then return 0 end
+        local cfg = Config.Collector
+        local spread = math.max(0, cfg.Spread or 4)
+        local range  = cfg.Range or 0
+        local _, root = collectorCharRoot()
+        local origin = root and root.Position
+        local n = 0
+        for _, model in ipairs(collectorItems()) do
+            local handle = collectorHandle(model)
+            if handle then
+                local inRange = true
+                if range > 0 and origin then
+                    inRange = (handle.Position - origin).Magnitude <= range
+                end
+                if inRange then
+                    -- Golden-angle scatter for an even, natural-looking heap.
+                    local ang = n * 2.399963
+                    local rad = spread * math.sqrt((n % 32) / 32)
+                    local off = CFrame.new(math.cos(ang) * rad, (n % 3) * 0.6, math.sin(ang) * rad)
+                    if CollectorState.anchored[handle] == nil then
+                        CollectorState.anchored[handle] = handle.Anchored
+                    end
+                    pcall(function()
+                        handle.AssemblyLinearVelocity  = Vector3.zero
+                        handle.AssemblyAngularVelocity = Vector3.zero
+                        handle.Anchored = true
+                        model:PivotTo(center * off)
+                    end)
+                    n = n + 1
+                end
+            end
+        end
+        return n
+    end
+
+    -- Restore anchoring on every item we touched so physics behaves normally once
+    -- the collector is off.
+    local function collectorRelease()
+        for part, wasAnchored in pairs(CollectorState.anchored) do
+            if part and part.Parent then
+                pcall(function() part.Anchored = wasAnchored and true or false end)
+            end
+        end
+        CollectorState.anchored = setmetatable({}, { __mode = "k" })
+    end
+
+    -- One-shot gather at the current character position (used by the button).
+    local function collectorCollectNow()
+        local center = collectorResolveCenter(true)
+        return collectorPile(center)
+    end
+
+    local function collectorStop()
+        Config.Collector.Auto = false
+        if CollectorState.conn then CollectorState.conn:Disconnect(); CollectorState.conn = nil end
+        collectorRelease()
+        CollectorState.center = nil
+    end
+
+    -- Persistent maintain loop; gated on Config.Collector.Auto. Follow recomputes
+    -- the center from the character each tick (heap sticks to you); otherwise it
+    -- re-pins items to the fixed stored center (a dump left in place).
+    local function collectorStart()
+        if CollectorState.conn then return end
+        local acc = 0
+        CollectorState.conn = RunService.Heartbeat:Connect(function(dt)
+            if not Config.Collector.Auto then return end
+            acc = acc + dt
+            local period = Config.Collector.Follow and 0.05 or 0.35
+            if acc < period then return end
+            acc = 0
+            local center = collectorResolveCenter(Config.Collector.Follow == true)
+            pcall(collectorPile, center)
+        end)
+    end
+
     -- ═══════════════════════════════ MODULE ═════════════════════════════════
     local M = {}
     local _conn
@@ -1888,11 +1990,13 @@ return function(Lib, Core)
                 if Config.AutoRythm_On then pcall(step) end
             end)
         end
+        collectorStart()
         pcall(function()
             if Core and Core.On then
                 Core:On("unload", function()
                     Config.AutoRythm_On = false
                     stopAutoDraw()
+                    collectorStop()
                     if _conn then _conn:Disconnect(); _conn = nil end
                 end)
             end
@@ -1956,14 +2060,52 @@ return function(Lib, Core)
         })
         sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if your client has audio/display lag. Taps stay PERFECT within about +-43ms." })
         sAR:Divider()
-        feature(sAR, {
-            Title = "Debug holds", Flag = "Misc_AutoRythm_Debug",
-            get = function() return Config.AutoRythm_Debug end,
-            set = function(v) Config.AutoRythm_Debug = v end,
-            Desc = "prints hold-note diagnostics to the executor console\nturn on, play a song with holds, then send me the [AutoRythm] lines",
-        })
-        sAR:Divider()
         sAR:SubLabel({ Text = "Grabs the live RhythmEngine and plays it directly, so the game sees a clean PERFECT run. Just start a song and enable." })
+
+        -- ─────────────── Section: Item Collector (Left) ───────────────
+        local col = Config.Collector
+        local sIC = Misc:Section({ Side = "Left" })
+        sIC:Header({ Name = "Item Collector" })
+        sIC:Button({
+            Name = "Collect Now",
+            Callback = function()
+                local n = collectorCollectNow()
+                notify("Item Collector", ("piled %d item%s next to you"):format(n, n == 1 and "" or "s"))
+            end,
+        })
+        sIC:SubLabel({ Text = "Sweeps every loose world item into a heap right next to your character (one shot)." })
+        feature(sIC, {
+            Title = "Auto Collect", Flag = "Misc_Collector_Auto",
+            get = function() return col.Auto end,
+            set = function(v) col.Auto = v and true or false end,
+            Desc = "keeps sweeping items into the heap so new / knocked-away items get pulled back in",
+        })
+        sIC:Toggle({
+            Name = "Follow me", Default = col.Follow,
+            Callback = function(v) col.Follow = v and true or false end,
+        }, ctx.flag("Misc_Collector_Follow"))
+        sIC:SubLabel({ Text = "ON: the heap sticks to you (a movable dump you carry around). OFF: the pile is dropped in place and stays there even if you walk away." })
+        sIC:Divider()
+        slider(sIC, {
+            Name = "Distance", Flag = "Misc_Collector_Radius",
+            Default = col.Radius, Min = 3, Max = 20, Precision = 0, Suffix = " studs",
+            Callback = function(v) col.Radius = v end,
+        })
+        sIC:SubLabel({ Text = "How far in front of you the heap sits." })
+        slider(sIC, {
+            Name = "Spread", Flag = "Misc_Collector_Spread",
+            Default = col.Spread, Min = 0, Max = 15, Precision = 0, Suffix = " studs",
+            Callback = function(v) col.Spread = v end,
+        })
+        sIC:SubLabel({ Text = "How loose the heap is (0 = tight stack, higher = spread out)." })
+        slider(sIC, {
+            Name = "Range", Flag = "Misc_Collector_Range",
+            Default = col.Range, Min = 0, Max = 500, Precision = 0, Suffix = " studs",
+            Callback = function(v) col.Range = v end,
+        })
+        sIC:SubLabel({ Text = "Only grab items within this distance (0 = whole map)." })
+        sIC:Divider()
+        sIC:SubLabel({ Text = "Note: the game tracks one equipped item per player server-side, so 2+ truly-held items would just be rejected. This gathers ALL items to you instead — same payoff, no fake state." })
 
         -- ─────────────── Section: Auto Draw (Right) ──���────────────
         local ad = Config.AutoDraw
@@ -2066,17 +2208,12 @@ return function(Lib, Core)
         sAD:SubLabel({ Text = "0 = top, 50 = middle, 100 = bottom." })
 
         sAD:Divider()
-        sAD:Header({ Name = "Preview & Debug" })
+        sAD:Header({ Name = "Preview" })
         sAD:Button({ Name = "Preview Board", Callback = function() previewBoard(notify) end })
         sAD:SubLabel({ Text = "Highlights the nearest board (blue) and outlines where the image will be drawn (green). Auto-clears after ~12s." })
         sAD:Button({ Name = "Test Stroke (X)", Callback = function() testStroke(notify) end })
         sAD:SubLabel({ Text = "Draws a white X + border on the board (renders locally, and syncs if Sync is on). If this shows up, the draw path works and only image loading is the problem." })
         sAD:Button({ Name = "Clear Preview", Callback = function() clearPreview(); notify("Auto Draw", "preview cleared") end })
-        sAD:Toggle({
-            Name = "Debug Logging", Default = ad.Debug,
-            Callback = function(v) ad.Debug = v end,
-        }, ctx.flag("Misc_AutoDraw_Debug"))
-        sAD:SubLabel({ Text = "Prints step-by-step diagnostics to the executor console (prefixed [AutoDraw]). Enable this if nothing draws." })
 
         sAD:Divider()
         sAD:Button({ Name = "Draw", Callback = function() startAutoDraw(notify) end })
