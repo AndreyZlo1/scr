@@ -54,7 +54,38 @@ return function(Lib, Core)
         -- positive = later. Only change if your client has audio/display latency;
         -- taps stay PERFECT within ±43ms, holds stay PERFECT at any small offset.
         Offset = 0,
+        -- Diagnostic logging. When on, prints [AutoRythm] traces to the executor
+        -- console so we can see exactly where the chain breaks.
+        Debug = false,
     }
+
+    -- ── Debug logging ────────────────────────────────────────────────────────
+    local function dbg(...)
+        if Config.Debug then print("[AutoRythm]", ...) end
+    end
+    -- Throttled logger: same key logs at most once per `gap` seconds (avoids
+    -- flooding the console from the per-frame step loop).
+    local _dbgStamps = {}
+    local function dbgT(key, gap, ...)
+        if not Config.Debug then return end
+        local t = os.clock()
+        if (t - (_dbgStamps[key] or 0)) < (gap or 1) then return end
+        _dbgStamps[key] = t
+        print("[AutoRythm]", ...)
+    end
+    -- List the string keys of a table (for discovering the real field names).
+    local function dumpKeys(o)
+        if type(o) ~= "table" then return "<not a table: " .. type(o) .. ">" end
+        local names, n = {}, 0
+        local ok = pcall(function()
+            for k in pairs(o) do
+                if type(k) == "string" then n = n + 1; names[n] = k end
+            end
+        end)
+        if not ok then return "<pairs() blocked by metatable>" end
+        table.sort(names)
+        return "{ " .. table.concat(names, ", ") .. " }"
+    end
 
     -- ── Engine acquisition — filtergc for the client singleton ───────────────
     -- IMPORTANT: we canNOT require the module. RhythmServiceClient lives under
@@ -88,28 +119,84 @@ return function(Lib, Core)
     local SCAN_GAP = 1.0     -- min seconds between scans while still searching
     local function getClient()
         if _client then return _client end
-        if type(filtergc) ~= "function" then return nil end
+        if type(filtergc) ~= "function" then
+            dbgT("no_filtergc", 3, "filtergc is NOT available in this executor (type=" .. type(filtergc) .. ")")
+            return nil
+        end
         -- Throttle scans until found. The singleton exists from client startup, so
         -- this normally succeeds on the very first scan and then never runs again.
         local nowClock = os.clock()
         if nowClock - _lastScan < SCAN_GAP then return nil end
         _lastScan = nowClock
+
+        -- Attempt 1: filterOne = true (single match, cheapest).
         local ok, res = pcall(filtergc, "table",
             { Keys = { "_startPlaySeq", "_characterJanitor", "_janitor" } }, true)
-        if ok and looksLikeClient(res) then _client = res end
+        dbgT("scan1", 2, "scan#1 filterOne: ok=" .. tostring(ok)
+            .. " type=" .. type(res) .. " looksLikeClient=" .. tostring(looksLikeClient(res)))
+        if ok and looksLikeClient(res) then
+            _client = res
+            dbg("CLIENT FOUND (scan#1). keys=", dumpKeys(res))
+            return _client
+        end
+
+        -- Attempt 2: filterOne = false → returns a LIST; take the first valid one.
+        -- Some executors ignore the 3rd arg or need the list form.
+        local ok2, list = pcall(filtergc, "table",
+            { Keys = { "_startPlaySeq", "_characterJanitor", "_janitor" } }, false)
+        dbgT("scan2", 2, "scan#2 list: ok=" .. tostring(ok2)
+            .. " type=" .. type(list) .. " count=" .. (type(list) == "table" and #list or -1))
+        if ok2 and type(list) == "table" then
+            for i = 1, #list do
+                if looksLikeClient(list[i]) then
+                    _client = list[i]
+                    dbg("CLIENT FOUND (scan#2, index " .. i .. "). keys=", dumpKeys(_client))
+                    return _client
+                end
+            end
+        end
+
+        dbgT("no_client", 2, "no matching client this scan — signature may be wrong. Retrying...")
         return _client
     end
+
+    -- Candidate field names that might hold the live play session on the client.
+    -- We prefer _session (seen in the dump) but probe alternatives in case this
+    -- build renamed it — the debug log will tell us which one is real.
+    local SESSION_FIELDS = { "_session", "_playSession", "_activeSession", "_engine", "_play", "_current" }
 
     -- Read the live engine (play session) off the singleton; nil when no song.
     local function getEngine()
         local client = getClient()
-        if not client then return nil end
-        local e = client._session
-        if type(e) ~= "table" then return nil end
-        if type(e._active) ~= "table" or type(e._now) ~= "function"
-           or type(e._handleLanePress) ~= "function" then
+        if not client then
+            dbgT("no_client_eng", 2, "getEngine: no client yet")
             return nil
         end
+
+        -- Find whichever field currently holds a session-like table.
+        local e, usedField
+        for _, f in ipairs(SESSION_FIELDS) do
+            local v = client[f]
+            if type(v) == "table" then e, usedField = v, f; break end
+        end
+
+        if not e then
+            dbgT("no_session", 1.5, "getEngine: client present but NO session field set (no song playing?). client keys=", dumpKeys(client))
+            return nil
+        end
+
+        local hasActive = type(e._active) == "table"
+        local hasNow    = type(e._now) == "function"
+        local hasPress  = type(e._handleLanePress) == "function"
+        if not (hasActive and hasNow and hasPress) then
+            dbgT("bad_session", 1.5, "getEngine: session in '" .. usedField
+                .. "' missing methods — _active=" .. tostring(hasActive)
+                .. " _now=" .. tostring(hasNow) .. " _handleLanePress=" .. tostring(hasPress)
+                .. " | session keys=", dumpKeys(e))
+            return nil
+        end
+
+        dbgT("engine_ok", 5, "getEngine OK via '" .. usedField .. "' (session live)")
         return e
     end
 
@@ -127,6 +214,8 @@ return function(Lib, Core)
         if type(active) ~= "table" then return end
         local lanes  = engine._lanes or 0
         local offset = (Config.Offset or 0) / 1000
+
+        dbgT("step_alive", 2, ("step: now=%.2f lanes=%d activeNotes=%d"):format(now, lanes, #active))
 
         -- Reused scratch tables (cleared each frame → no per-frame allocation).
         table.clear(_laneHolding); table.clear(_pressHold); table.clear(_pressTap)
@@ -166,15 +255,23 @@ return function(Lib, Core)
         -- note at t+len with fraction ≈ 1.0 → PERFECT (RhythmEngine._step:1582). A
         -- manual early release would score EARLY_RELEASE and tank the grade.
         -- (pcall(fn, engine, lane) forwards args → no per-frame closure allocation.)
+        local nHold, nTap = 0, 0
         for lane in pairs(_pressHold) do
-            pcall(engine._handleLanePress, engine, lane)
+            local ok = pcall(engine._handleLanePress, engine, lane)
+            nHold = nHold + 1
+            dbg(("HOLD press lane=%d ok=%s"):format(lane, tostring(ok)))
         end
         -- Taps: quick press + release. Skip lanes that are mid-hold or just pressed.
         for lane in pairs(_pressTap) do
             if not _pressHold[lane] and not _laneHolding[lane] then
-                pcall(engine._handleLanePress, engine, lane)
-                pcall(engine._handleLaneRelease, engine, lane)
+                local ok1 = pcall(engine._handleLanePress, engine, lane)
+                local ok2 = pcall(engine._handleLaneRelease, engine, lane)
+                nTap = nTap + 1
+                dbg(("TAP  lane=%d press=%s release=%s"):format(lane, tostring(ok1), tostring(ok2)))
             end
+        end
+        if nHold > 0 or nTap > 0 then
+            dbg(("frame fired: %d hold(s), %d tap(s)"):format(nHold, nTap))
         end
     end
 
@@ -184,15 +281,18 @@ return function(Lib, Core)
 
     function M.start()
         Config.AutoRythm_On = false
+        dbg("module start() — filtergc available:", type(filtergc) == "function")
         -- Drive on RenderStepped (the same signal the engine steps on). Timing is
         -- taken from the engine's own audio clock, so signal order is irrelevant.
         if not _conn then
             _conn = RunService.RenderStepped:Connect(function()
                 if Config.AutoRythm_On then
                     -- swallow errors: a transient nil during song teardown must never spam
-                    pcall(step)
+                    local ok, err = pcall(step)
+                    if not ok then dbgT("step_err", 1, "step ERROR:", tostring(err)) end
                 end
             end)
+            dbg("RenderStepped connected")
         end
         -- Clean up on loader unload.
         pcall(function()
@@ -261,6 +361,16 @@ return function(Lib, Core)
             Callback = function(v) Config.Offset = v end,
         })
         sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if your client has audio/display lag. Taps stay PERFECT within about +-43ms." })
+        sAR:Divider()
+        sAR:Header({ Name = "Debug" })
+        sAR:Toggle({
+            Name = "Debug Logs", Default = Config.Debug,
+            Callback = function(v)
+                Config.Debug = v
+                if v then print("[AutoRythm]", "debug logging ENABLED — open a song, enable AutoRythm, and watch the console") end
+            end,
+        }, ctx.flag("Misc_AutoRythm_Debug"))
+        sAR:SubLabel({ Text = "Prints [AutoRythm] traces to the executor console so we can see where it stops (client found? session live? notes seen? presses fired?)." })
         sAR:Divider()
         sAR:SubLabel({ Text = "Grabs the live RhythmEngine and plays it directly, so the game sees a clean PERFECT run. Just start a song and enable." })
 
