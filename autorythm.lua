@@ -68,6 +68,7 @@ return function(Lib, Core)
         AutoDraw = {
             Url        = "",     -- image URL to download and draw
             File       = "",     -- image file in the executor workspace
+            Source     = "",     -- "url" | "file": which input the user touched last
             Quality    = 60,     -- 1-100: single knob for detail + colour fidelity
             Speed      = 45,     -- segments/second sent to the server (Sync on)
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
@@ -198,6 +199,10 @@ return function(Lib, Core)
     local _heldLane    = {}                -- lane -> hold note currently held
     local _allowRelease = {}               -- lane -> true when WE authorize a release
     local _lastEngine
+    -- Seconds after a sustain's end (t+len) at which we release to score it. Must be
+    -- < the engine's BAD window (140ms) or the note despawns unscored; big enough that
+    -- the held ratio is comfortably >= 0.95 (PERFECT). 30ms sits safely in the middle.
+    local HOLD_REL_MARGIN = 0.03
 
     -- Instance-level guard over _handleLaneRelease: while a lane is auto-held, drop
     -- any release we didn't authorize (a stray InputEnded would EARLY_RELEASE the
@@ -243,13 +248,20 @@ return function(Lib, Core)
             end
         end
 
-        -- Clear tracking of holds the engine has already scored; safety-release any
-        -- hold stuck well past its end (e.g. engine paused).
+        -- Finalize holds. IMPORTANT: the engine does NOT auto-score a sustain you keep
+        -- holding — RhythmEngine._step just despawns a hold note (unscored, = a miss)
+        -- once it scrolls past t+len+BAD (BAD window = 140ms). A hold is scored ONLY by
+        -- _onReleaseLane, which grades it on the ratio held = (releaseTime - holdStart)/len.
+        -- So to bank a PERFECT we must RELEASE right at the end of the sustain, inside
+        -- that 140ms window. We release at t+len+HOLD_REL_MARGIN: since we pressed at
+        -- t (initial timing ~0 = PERFECT) the ratio is ~1.0 (>=0.95) => PERFECT.
         for lane, note in pairs(_heldLane) do
             if note.holdJudgment ~= nil then
+                -- Engine already scored it (our release landed, or a stray release slipped
+                -- through) — stop tracking.
                 _heldLane[lane] = nil
                 _allowRelease[lane] = nil
-            elseif now > (note.t + (note.len or 0) + 0.5) then
+            elseif now >= note.t + (note.len or 0) + HOLD_REL_MARGIN then
                 _allowRelease[lane] = true
                 pcall(engine._handleLaneRelease, engine, lane)
                 _allowRelease[lane] = nil
@@ -1619,12 +1631,32 @@ return function(Lib, Core)
         local ad = Config.AutoDraw
         local path
 
-        if ad.File and ad.File ~= "" and not ad.File:match("^%(") then
+        -- Decide which source to use. Previously the Workspace File was ALWAYS checked
+        -- first, so a leftover dropdown selection silently overrode a freshly pasted URL
+        -- (the reported bug: "loaded the old workspace file instead of my link"). Now we
+        -- honour whichever input the user edited most recently (ad.Source), and only fall
+        -- back to "any valid source" when that is unset.
+        local urlOk  = ad.Url and ad.Url:match("^https?://") ~= nil
+        local fileOk = ad.File and ad.File ~= "" and not ad.File:match("^%(")
+        local useUrl
+        if ad.Source == "url" and urlOk then
+            useUrl = true
+        elseif ad.Source == "file" and fileOk then
+            useUrl = false
+        elseif urlOk then           -- no clear intent: prefer an explicit URL
+            useUrl = true
+        elseif fileOk then
+            useUrl = false
+        else
+            notify("Auto Draw", "select a workspace file or paste an image URL first"); return
+        end
+
+        if not useUrl then
             path = ad.File
             if type(isfile) == "function" and not isfile(path) then
                 notify("Auto Draw", "file not found: " .. path); return
             end
-        elseif ad.Url and ad.Url:match("^https?://") then
+        else
             local data
             local ok = pcall(function()
                 if type(request) == "function" then
@@ -1645,8 +1677,6 @@ return function(Lib, Core)
             if not pcall(writefile, path, data) then
                 notify("Auto Draw", "could not save the downloaded image"); return
             end
-        else
-            notify("Auto Draw", "select a workspace file or paste an image URL first"); return
         end
 
         _drawToken = _drawToken + 1
@@ -1835,7 +1865,12 @@ return function(Lib, Core)
 
         sAD:Input({
             Name = "Image URL", Placeholder = "https://.../image.png", Default = ad.Url,
-            Callback = function(t) ad.Url = t or "" end,
+            Callback = function(t)
+                ad.Url = t or ""
+                -- Remember that the URL was the most recent choice so it wins over a
+                -- stale Workspace File dropdown selection when we resolve the source.
+                if ad.Url:match("^https?://") then ad.Source = "url" end
+            end,
         }, ctx.flag("Misc_AutoDraw_Url"))
 
         local fileDD = sAD:Dropdown({
@@ -1845,7 +1880,12 @@ return function(Lib, Core)
                 if #list == 0 then return { "(no images in workspace)" } end
                 return list
             end)(),
-            Callback = function(v) ad.File = v or "" end,
+            Callback = function(v)
+                ad.File = v or ""
+                -- Picking a real file (not the "(no images…)" placeholder) makes the
+                -- file the most recent choice, so it wins over a stale URL.
+                if ad.File ~= "" and not ad.File:match("^%(") then ad.Source = "file" end
+            end,
         }, ctx.flag("Misc_AutoDraw_File"))
 
         sAD:Button({
