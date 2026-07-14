@@ -131,7 +131,7 @@ return function(Lib, Core)
         return c, hum, root
     end
 
-    -- ═══════════════════ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
+    -- ══════════════════�� IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
     -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
     -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
     -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
@@ -144,26 +144,54 @@ return function(Lib, Core)
     --   • HRP.CarryWeld / GripWeld  → physical carry/grip weld (RagdollServiceClient.isCarriedOrGripped)
     -- While ANY is active we suppress every speed write so the game's lock wins cleanly.
     local IMMOBILE_ATTRS = { "Grappling", "Ragdoll", "Downed" }
+    -- The M2 wrestling GRAB (M2.lua applyWrestlingGrabNoCollision) welds you to the attacker and
+    -- creates NoCollisionConstraints named "WrestlingM2GrabNoCollide" across your parts, then the
+    -- server positions you — you are genuinely locked WITHOUT Anchored / the Grappling attribute /
+    -- a named Carry/Grip weld. That's the case the user hit: NS raised WalkSpeed but the server
+    -- held them in place → rubberband ("на месте для сервера"). This constraint is the reliable
+    -- marker for it. Scanning descendants is a bit heavy, so cache the whole isImmobile result for
+    -- one frame (both stepSpeed and the SetSpeed hook call it, sometimes many times per frame).
+    local _immCacheT, _immCacheV = 0, false
+    local function hasGrabConstraint(char)
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("NoCollisionConstraint") and d.Name == "WrestlingM2GrabNoCollide" then
+                return true
+            end
+        end
+        return false
+    end
     local function isImmobile(char, root)
         if not Config.NS_RespectImmobile then return false end
-        char = char or getChar(); if not char then return false end
+        local now = os.clock()
+        if (now - _immCacheT) < 0.05 then return _immCacheV end
+        _immCacheT = now
+        char = char or getChar(); if not char then _immCacheV = false; return false end
         if not root then
             root = char:FindFirstChild("HumanoidRootPart")
         end
-        if root and root.Anchored then return true end
-        for _, a in ipairs(IMMOBILE_ATTRS) do
-            if char:GetAttribute(a) == true then return true end
+        local result = false
+        if root and root.Anchored then
+            result = true
+        else
+            for _, a in ipairs(IMMOBILE_ATTRS) do
+                if char:GetAttribute(a) == true then result = true; break end
+            end
+            if not result then
+                local states = char:FindFirstChild("States")
+                if states then
+                    local bc = states:FindFirstChild("BeingCarried")
+                    local bg = states:FindFirstChild("BeingGripped")
+                    if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then result = true end
+                end
+            end
+            if not result and root and (root:FindFirstChild("CarryWeld") or root:FindFirstChild("GripWeld")) then
+                result = true
+            end
+            -- being wrestled/grabbed (server-positioned, no anchor/attr) → the reported bug
+            if not result and hasGrabConstraint(char) then result = true end
         end
-        local states = char:FindFirstChild("States")
-        if states then
-            local bc = states:FindFirstChild("BeingCarried")
-            local bg = states:FindFirstChild("BeingGripped")
-            if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return true end
-        end
-        if root and (root:FindFirstChild("CarryWeld") or root:FindFirstChild("GripWeld")) then
-            return true
-        end
-        return false
+        _immCacheV = result
+        return result
     end
 
     -- ══════════════════════════ Move-vector math ════════════════════════════
@@ -285,7 +313,7 @@ return function(Lib, Core)
         end
     end
 
-    -- ═══════════════════ HOOK-BASED FEATURES ════════��════���════════════��═════
+    -- ══════════��════════ HOOK-BASED FEATURES ════════��════���════════════��═════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
     -- when the production bytecode ships with stripped function debug-names, which
     -- is why {Name=...} lookups silently returned nil before.
@@ -697,20 +725,24 @@ return function(Lib, Core)
     -- Honest ceiling: a cooldown BELOW the server's true value is client-prediction only — the
     -- server still owns the real dash confirmation and i-frames.
     --
-    -- DODGE-EVERYWHERE: Evasive() has unconditional early-returns (Evasive.lua:590-617) on
-    -- CombatAttacking / Blocking / Stunned / GuardBroken / Greenzone / RpCombatLocked /
-    -- CantAnything. While attacking, the combat system re-asserts CombatAttacking every frame,
-    -- so clearing the attribute from a loop LOSES the race. The combat __namecall hook (below)
-    -- hides these attributes synchronously on the read the game itself makes → reliable.
+    -- DODGE-EVERYWHERE — two layers, matching how Evasive() gates itself (verified Evasive.lua):
+    --   1) OutnumberedEvasiveGrant=true → u51 bypass (line 529). When set, Evasive INTERNALLY
+    --      zeroes cooldown deadlines (u5/u6/u7/u8=0, line 557-560) AND skips the `if not u51`
+    --      gates: IFRAMECD / Stunned / GuardBroken / CantAnything (line 567-597). So "dodge when
+    --      HIT / stunned / guard-broken" works via the game's OWN bypass — no global attribute
+    --      spoof needed for those (which would leak into other systems). driveDodge asserts it.
+    --   2) The remaining gates are OUTSIDE the u51 guard (line 599-617): Ragdoll / Blocking /
+    --      CombatAttacking / Greenzone / RpCombatLocked. Ragdoll is handled by anti-ragdoll;
+    --      the other four we hide via the __namecall GetAttribute hook (synchronous, no race).
     local DODGE_SPOOF_SET = {
-        CombatAttacking = true, Blocking = true, GuardBroken = true,
-        Stunned = true, Greenzone = true, RpCombatLocked = true, CantAnything = true,
+        Blocking = true, CombatAttacking = true, Greenzone = true, RpCombatLocked = true,
     }
     -- Map Evasive base values ONCE: config-table defaults + (if debug API present) the upvalue
     -- indices for DashSpeed / Cooldown (Evasive.lua:506 upvalue list).
     local _evMapped, _evSpeedIdx, _evCdIdx = false, nil, nil
     local _evSpeedBase, _evCdBase = nil, nil
     local _appliedSpeed, _appliedCd = nil, nil
+    local _evDeadlineIdxs = {}   -- numeric upvalue indices that may hold os.clock cooldown deadlines
     local function mapEvasive()
         if _evMapped then return true end
         local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return false end
@@ -724,9 +756,14 @@ return function(Lib, Core)
                 for i, v in pairs(ups) do
                     if type(v) == "number" then
                         if _evSpeedBase and not _evSpeedIdx and math.abs(v - _evSpeedBase) < 1e-4 then
-                            _evSpeedIdx = i
+                            _evSpeedIdx = i          -- DashSpeed constant
                         elseif _evCdBase and not _evCdIdx and math.abs(v - _evCdBase) < 1e-4 then
-                            _evCdIdx = i
+                            _evCdIdx = i             -- Cooldown constant
+                        else
+                            -- everything else numeric is a deadline candidate (u5/u6/u7/u8 are
+                            -- os.clock() deadlines; small constants get filtered at clamp time
+                            -- by the `v > now` test, so listing them here is harmless).
+                            _evDeadlineIdxs[#_evDeadlineIdxs + 1] = i
                         end
                     end
                 end
@@ -754,9 +791,44 @@ return function(Lib, Core)
             if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, wantCd) end
             _appliedCd = wantCd
         end
+
+        -- CUSTOM COOLDOWN — the real gate is `os.clock() < u6/u5/u7/u8` (Evasive.lua:573-581),
+        -- NOT the Cooldown constant. Only u6 comes from the attribute clamp; u5/u7 (ServerConfirm/
+        -- DashDuration) gate independently → that's why custom cooldown "did nothing". Fix: clamp
+        -- the live deadline upvalues DOWN to now+wantCd each frame. Only when the user lowered the
+        -- cooldown below the game default (else pure vanilla), and only ACTIVE future deadlines
+        -- (`v > now`) so we never CREATE a cooldown, only shorten one.
+        if ev and wantCd and _evCdBase and wantCd < _evCdBase - 1e-4 then
+            local now = os.clock()
+            local cap = now + wantCd
+            for _, idx in ipairs(_evDeadlineIdxs) do
+                local ok, v = pcall(debug.getupvalue, ev.Evasive, idx)
+                if ok and type(v) == "number" and v > now and (v - now) < 30 and v > cap then
+                    pcall(debug.setupvalue, ev.Evasive, idx, cap)
+                end
+            end
+        end
+
+        -- DODGE EVERYWHERE — assert the game's own u51 bypass (zeroes cooldowns + skips the
+        -- hit/stun/guard-broken/cant-anything gates internally). The __namecall hook covers the
+        -- remaining Blocking/CombatAttacking/Greenzone/RpCombatLocked gates.
+        if Config.Dodge_Everywhere then
+            local c = _myChar
+            if c and c:GetAttribute("OutnumberedEvasiveGrant") ~= true then
+                pcall(function() c:SetAttribute("OutnumberedEvasiveGrant", true) end)
+            end
+        end
+    end
+    -- Clear the u51 grant we asserted (called when Everywhere / Dodge is toggled off).
+    local function clearDodgeGrant()
+        local c = _myChar
+        if c and c:GetAttribute("OutnumberedEvasiveGrant") == true then
+            pcall(function() c:SetAttribute("OutnumberedEvasiveGrant", nil) end)
+        end
     end
     -- Restore the game's own numbers (called when Dodge is toggled off).
     local function restoreDodge()
+        clearDodgeGrant()
         if not _evMapped then return end
         local ev  = getEvasive()
         local cfg = getCombatConfig()
@@ -1024,7 +1096,7 @@ return function(Lib, Core)
             Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
         sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default (12)" })
 
-        -- ────────��────── Section 4: Combat exploits (Right) ───────────────
+        -- ────────��────── Section 4: Combat exploits (Right) ��──────────────
         local sCbt = MV:Section({ Side = "Right" })
         sCbt:Header({ Name = "No Delay" })
         feature(sCbt, {
@@ -1111,13 +1183,19 @@ return function(Lib, Core)
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
             function(v)
-                Config.Dodge_Everywhere = v
-                if v and not installCombatHook() then
-                    notify("Dodge Everywhere", "executor lacks hookmetamethod/getnamecallmethod")
+                if v then
+                    if not installCombatHook() then
+                        notify("Dodge Everywhere", "executor lacks hookmetamethod/getnamecallmethod")
+                        return
+                    end
+                    Config.Dodge_Everywhere = true
+                    driveDodge()          -- assert the grant immediately
+                else
                     Config.Dodge_Everywhere = false
+                    clearDodgeGrant()     -- drop the bypass → cooldown/gates return to normal
                 end
             end)
-        sDodge:SubLabel({ Text = "Everywhere = dodge even while attacking / blocking / stunned. i-frames still server-owned." })
+        sDodge:SubLabel({ Text = "Everywhere = dodge in ANY state incl. when hit/blocking (uses the game's own grant; makes dodge instant)." })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
             Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
