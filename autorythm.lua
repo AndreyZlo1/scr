@@ -238,62 +238,37 @@ return function(Lib, Core)
 
         table.clear(_laneHolding)
 
-        -- WHY THE OLD APPROACH FAILED, AND WHAT WE DO NOW
-        -- ------------------------------------------------
-        -- A hold is scored ONLY inside RhythmEngine._step, at t+len, by calling
-        -- _judgeHoldNote(ratio, initialTiming) + _applyScore (RhythmEngine:1594-1601).
-        -- BUT that finalize is nested inside `if note.inst then` and guarded by despawn
-        -- checks — timing we don't control. If the note gets despawned (offscreen / past
-        -- t+len+BAD) before that branch runs, or its instance is gone, the sustain is
-        -- silently removed WITH NO SCORE. Merely forcing note.holding = true (previous
-        -- attempt) didn't help because the finalize branch never executed for it.
+        -- HOW HOLDS WORK IN THIS ENGINE (fully verified in RhythmEngine._step):
+        --   • _onPressLane (called by _handleLanePress) judges the tap and, for a hold
+        --     pressed on time, sets hit=true, holding=true, holdStartTime (RhythmEngine
+        --     :1150-1163).
+        --   • Every frame _step AUTO-PROMOTES any hit hold to holding once note.t <= now
+        --     (RhythmEngine:1463-1471) — so even a hair-early press is fixed up.
+        --   • At note.t+note.len, _step AUTO-FINALIZES the hold: ratio=(now-holdStart)/len
+        --     ≈ 1.0 → PERFECT (RhythmEngine:1582-1601). This runs whether or not the note
+        --     still has a visual instance, and BEFORE the miss/despawn cutoff at
+        --     note.t+note.len+BAD. It is NOT gated by physical key state.
         --
-        -- FIX: `active` IS the engine's live _active array and _judgeHoldNote/_applyScore
-        -- are real methods. So we FINALIZE THE HOLD OURSELVES at t+len by calling those
-        -- same methods on the live note. This banks the score no matter what the engine's
-        -- despawn/instance timing does. We set note.holdJudgment first, so the engine's
-        -- own finalize branch (RhythmEngine:1583 `if holdJudgment then`) just cleans up
-        -- the instance instead of scoring again — no double count.
+        -- => The ONLY thing autoplay must do for a hold is PRESS IT ONCE at note.t and
+        --    NOT release it. The engine holds and scores it. Previously we also forced
+        --    note fields and called _applyScore ourselves; that raced the engine's own
+        --    per-frame promote/finalize and mis-scored the note (the immediate MISS).
+        --    So we no longer touch note fields or score manually — we just press and wait.
 
-        -- 1) Maintain / finalize notes we're currently holding.
+        -- 1) Track notes we're holding: release ONLY after the engine has finalized them
+        --    (holdJudgment set) so a future note on that lane starts from a clean key
+        --    state. A safety timeout releases anything stuck well past its end.
         for lane, note in pairs(_heldLane) do
             local holdEnd = note.t + (note.len or 0)
-            if note.holdJudgment ~= nil then
-                -- Already scored (by us on a previous frame, or by the engine) — release
-                -- the key so the lane is free for future notes, then stop tracking.
-                _allowRelease[lane] = true
-                pcall(engine._handleLaneRelease, engine, lane)
-                _allowRelease[lane] = nil
-                _heldLane[lane] = nil
-            elseif now >= holdEnd then
-                -- Reached the end of the sustain: score it ourselves exactly like the
-                -- engine would. Full hold => ratio ~= 1.0 and PERFECT initial timing =>
-                -- PERFECT judgment.
-                note.holdStartTime = note.holdStartTime or note.t
-                local held  = now - note.holdStartTime
-                local ratio = (note.len and note.len > 0) and (held / note.len) or 1
-                if ratio > 1 then ratio = 1 end
-                local judged
-                local okJ = pcall(function()
-                    judged = engine._judgeHoldNote(engine, ratio, note.initialTiming or 0)
-                end)
-                if not okJ or type(judged) ~= "string" then judged = "PERFECT" end
-                note.holding      = false
-                note.holdEndTime  = now
-                note.holdDuration = held
-                note.holdJudgment = judged
-                pcall(engine._applyScore, engine, judged, note.initialTiming or 0, note.lane)
-                -- Now release the (logical) key and stop tracking.
+            if note.holdJudgment ~= nil or now > holdEnd + 0.5 then
                 _allowRelease[lane] = true
                 pcall(engine._handleLaneRelease, engine, lane)
                 _allowRelease[lane] = nil
                 _heldLane[lane] = nil
             else
-                -- Still within the sustain: keep the lane marked held (so the tap branch
-                -- never releases it) and keep the engine's visual state consistent.
+                -- Still holding: mark the lane so the tap branch never releases it, and
+                -- let the engine keep/advance the hold on its own.
                 _laneHolding[lane] = true
-                note.holdStartTime = note.holdStartTime or note.t
-                if note.holding ~= true then note.holding = true end
             end
         end
 
@@ -303,19 +278,15 @@ return function(Lib, Core)
             if type(lane) == "number" and lane >= 1 and lane <= lanes
                and not note.hit and not note.attempted then
                 if (note.len or 0) > 0 then
-                    -- Hold: press once at note.t for the receptor visual, then FORCE the
-                    -- note into a valid held state so our own finalize (block 1) will
-                    -- score it — independent of whether the engine's press judged it.
+                    -- Hold: press ONCE at note.t and leave the key logically down. The
+                    -- engine promotes it to holding and auto-finalizes it as PERFECT.
                     if now >= note.t + offset and not _heldLane[lane] then
                         pcall(engine._handleLanePress, engine, lane)
-                        note.hit          = true
-                        note.initialTiming = note.initialTiming or 0
-                        note.holdStartTime = note.holdStartTime or note.t
-                        note.holding      = true
-                        _heldLane[lane]   = note
+                        _heldLane[lane]    = note
                         _laneHolding[lane] = true
                     end
                 elseif now >= note.t + offset and not _laneHolding[lane] then
+                    -- Tap: press + immediate release.
                     pcall(engine._handleLanePress, engine, lane)
                     pcall(engine._handleLaneRelease, engine, lane)
                 end
