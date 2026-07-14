@@ -87,117 +87,89 @@ return function(Lib, Core)
         return "{ " .. table.concat(names, ", ") .. " }"
     end
 
-    -- ── Engine acquisition — filtergc for the client singleton ───────────────
-    -- IMPORTANT: we canNOT require the module. RhythmServiceClient lives under
-    -- ReplicatedStorage.Shared.Services, and that folder is DESTROYED right after
-    -- bootstrap (the module itself errors "require during bootstrap before
-    -- Shared.Services is destroyed" — see RhythmServiceClient:99-103). So the
-    -- Instance path is dead at runtime and require() can't reach it.
-    --
-    -- But the RhythmServiceClient SINGLETON object still lives in memory forever
-    -- (held by UserInputService connections + janitors). We grab it once with
-    -- filtergc(filterOne) — cheap, stops at the first match, no full-heap copy
-    -- like the old getgc(true) that froze — then cache it FOREVER. Its ._session
-    -- field is the live play session (the engine); it's recreated per song, so we
-    -- read it fresh each frame. Signature keys are non-nil direct fields:
-    -- _startPlaySeq (=0), _characterJanitor, _janitor (RhythmServiceClient:117-129).
-    -- NB: _session is nil at construction, so it is NOT a usable match key.
+    -- ── Engine acquisition — filtergc for the live RhythmEngine instance ─────
+    -- The RhythmServiceClient singleton does NOT store the play session (its keys
+    -- are just _ampRelayActive/_characterJanitor/_initialized/_janitor/
+    -- _startPlayGateUntil/_startPlaySeq — no session field, even mid-song). The
+    -- actual playable object is the RhythmEngine INSTANCE created per song
+    -- (RhythmEngine:100-160), so we grab THAT directly by its unique instance
+    -- fields: _liveNotes, _active, _windows, _lanes, _judgeCounts, _scrollPxPerSec.
+    -- Methods (_now/_handleLanePress/_handleLaneRelease) live on the class metatable
+    -- and are reachable through the instance. The engine is destroyed after each
+    -- song (_destroyed=true), so we validate every frame and rescan when it dies —
+    -- filtergc(filterOne) is cheap (no full-heap copy like the getgc that froze).
     local rawgetFn = rawget
 
-    local function looksLikeClient(o)
+    local ENGINE_KEYS = { "_liveNotes", "_active", "_windows", "_lanes", "_judgeCounts", "_scrollPxPerSec" }
+    local function looksLikeEngine(o)
         if type(o) ~= "table" then return false end
         local ok, yes = pcall(function()
-            return rawgetFn(o, "_characterJanitor") ~= nil
-               and rawgetFn(o, "_janitor") ~= nil
-               and rawgetFn(o, "_startPlaySeq") ~= nil
+            return rawgetFn(o, "_liveNotes") ~= nil
+               and type(rawgetFn(o, "_active")) == "table"
+               and rawgetFn(o, "_windows") ~= nil
+               and rawgetFn(o, "_lanes") ~= nil
+               and rawgetFn(o, "_judgeCounts") ~= nil
+               and rawgetFn(o, "_destroyed") ~= true
         end)
-        return ok and yes
+        if not (ok and yes) then return false end
+        local mok, hasM = pcall(function()
+            return type(o._now) == "function"
+               and type(o._handleLanePress) == "function"
+               and type(o._handleLaneRelease) == "function"
+        end)
+        return mok and hasM
     end
 
-    local _client            -- cached singleton (forever, once found)
+    -- A cached engine is only valid while it exists and isn't destroyed.
+    local function engineAlive(e)
+        if type(e) ~= "table" then return false end
+        local ok, alive = pcall(function()
+            return e._destroyed ~= true and type(e._active) == "table"
+        end)
+        return ok and alive
+    end
+
+    local _engine            -- cached engine for the current song
     local _lastScan = 0
-    local SCAN_GAP = 1.0     -- min seconds between scans while still searching
-    local function getClient()
-        if _client then return _client end
+    local SCAN_GAP = 0.5     -- min seconds between scans while searching
+    local function getEngine()
+        if engineAlive(_engine) then return _engine end
+        _engine = nil        -- stale/destroyed → drop it
+
         if type(filtergc) ~= "function" then
             dbgT("no_filtergc", 3, "filtergc is NOT available in this executor (type=" .. type(filtergc) .. ")")
             return nil
         end
-        -- Throttle scans until found. The singleton exists from client startup, so
-        -- this normally succeeds on the very first scan and then never runs again.
         local nowClock = os.clock()
         if nowClock - _lastScan < SCAN_GAP then return nil end
         _lastScan = nowClock
 
         -- Attempt 1: filterOne = true (single match, cheapest).
-        local ok, res = pcall(filtergc, "table",
-            { Keys = { "_startPlaySeq", "_characterJanitor", "_janitor" } }, true)
+        local ok, res = pcall(filtergc, "table", { Keys = ENGINE_KEYS }, true)
         dbgT("scan1", 2, "scan#1 filterOne: ok=" .. tostring(ok)
-            .. " type=" .. type(res) .. " looksLikeClient=" .. tostring(looksLikeClient(res)))
-        if ok and looksLikeClient(res) then
-            _client = res
-            dbg("CLIENT FOUND (scan#1). keys=", dumpKeys(res))
-            return _client
+            .. " type=" .. type(res) .. " looksLikeEngine=" .. tostring(looksLikeEngine(res)))
+        if ok and looksLikeEngine(res) then
+            _engine = res
+            dbg("ENGINE FOUND (scan#1). keys=", dumpKeys(res))
+            return _engine
         end
 
-        -- Attempt 2: filterOne = false → returns a LIST; take the first valid one.
-        -- Some executors ignore the 3rd arg or need the list form.
-        local ok2, list = pcall(filtergc, "table",
-            { Keys = { "_startPlaySeq", "_characterJanitor", "_janitor" } }, false)
+        -- Attempt 2: filterOne = false → LIST form (some executors ignore arg 3).
+        local ok2, list = pcall(filtergc, "table", { Keys = ENGINE_KEYS }, false)
         dbgT("scan2", 2, "scan#2 list: ok=" .. tostring(ok2)
             .. " type=" .. type(list) .. " count=" .. (type(list) == "table" and #list or -1))
         if ok2 and type(list) == "table" then
             for i = 1, #list do
-                if looksLikeClient(list[i]) then
-                    _client = list[i]
-                    dbg("CLIENT FOUND (scan#2, index " .. i .. "). keys=", dumpKeys(_client))
-                    return _client
+                if looksLikeEngine(list[i]) then
+                    _engine = list[i]
+                    dbg("ENGINE FOUND (scan#2, index " .. i .. "). keys=", dumpKeys(_engine))
+                    return _engine
                 end
             end
         end
 
-        dbgT("no_client", 2, "no matching client this scan — signature may be wrong. Retrying...")
-        return _client
-    end
-
-    -- Candidate field names that might hold the live play session on the client.
-    -- We prefer _session (seen in the dump) but probe alternatives in case this
-    -- build renamed it — the debug log will tell us which one is real.
-    local SESSION_FIELDS = { "_session", "_playSession", "_activeSession", "_engine", "_play", "_current" }
-
-    -- Read the live engine (play session) off the singleton; nil when no song.
-    local function getEngine()
-        local client = getClient()
-        if not client then
-            dbgT("no_client_eng", 2, "getEngine: no client yet")
-            return nil
-        end
-
-        -- Find whichever field currently holds a session-like table.
-        local e, usedField
-        for _, f in ipairs(SESSION_FIELDS) do
-            local v = client[f]
-            if type(v) == "table" then e, usedField = v, f; break end
-        end
-
-        if not e then
-            dbgT("no_session", 1.5, "getEngine: client present but NO session field set (no song playing?). client keys=", dumpKeys(client))
-            return nil
-        end
-
-        local hasActive = type(e._active) == "table"
-        local hasNow    = type(e._now) == "function"
-        local hasPress  = type(e._handleLanePress) == "function"
-        if not (hasActive and hasNow and hasPress) then
-            dbgT("bad_session", 1.5, "getEngine: session in '" .. usedField
-                .. "' missing methods — _active=" .. tostring(hasActive)
-                .. " _now=" .. tostring(hasNow) .. " _handleLanePress=" .. tostring(hasPress)
-                .. " | session keys=", dumpKeys(e))
-            return nil
-        end
-
-        dbgT("engine_ok", 5, "getEngine OK via '" .. usedField .. "' (session live)")
-        return e
+        dbgT("no_engine", 2, "no live engine this scan (no song playing yet?). Retrying...")
+        return nil
     end
 
     -- ── The autoplay step (one pass over the on-screen notes) ────────────────
