@@ -74,6 +74,7 @@ return function(Lib, Core)
             SkipBg     = true,   -- skip near-black pixels (board background is black)
             Mono       = false,  -- draw everything in chalk white instead of colour
             Preserve   = true,   -- preserve the image aspect ratio on the board
+            Sync       = true,   -- also fire the draw remote (persist + show to others)
             Debug      = false,  -- print step-by-step diagnostics to the console
         },
     }
@@ -450,6 +451,86 @@ return function(Lib, Core)
         return ok
     end
 
+    -- ── Local rendering ──────────────────────────────────────────────────────
+    -- CRITICAL: the game renders each board CLIENT-SIDE onto an EditableImage held
+    -- in a module-local board map (WhiteboardServiceClient `u2`). When we fire the
+    -- draw remote, the server only broadcasts to OTHER players — it never echoes to
+    -- the sender, because the sender is expected to have already drawn locally. So
+    -- firing alone shows NOTHING on our own screen. To actually SEE the drawing we
+    -- must render onto the board's EditableImage ourselves, exactly like the game.
+    --
+    -- We locate that board map by scanning the GC for the table whose entries look
+    -- like { part = BasePart, editableImage = <EditableImage>, surfaceGui = ... }.
+    local _boardMap
+    local function resolveBoardMap()
+        if _boardMap then
+            -- Validate the cache still holds live entries.
+            local k, v = next(_boardMap)
+            if type(v) == "table" and typeof(v.part) == "Instance" then return _boardMap end
+            _boardMap = nil
+        end
+        if type(getgc) ~= "function" then
+            adlog("resolveBoardMap: getgc unavailable")
+            return nil
+        end
+        for _, o in ipairs(getgc(true)) do
+            if type(o) == "table" then
+                local k, v = next(o)
+                if type(k) == "number" and type(v) == "table"
+                   and typeof(v.part) == "Instance" and v.editableImage ~= nil
+                   and v.surfaceGui ~= nil then
+                    _boardMap = o
+                    adlog("resolveBoardMap: found board map (%s entries)", tostring(#o))
+                    return o
+                end
+            end
+        end
+        adlog("resolveBoardMap: board map NOT found in GC")
+        return nil
+    end
+
+    -- Replica of the game's chalkSegment (WhiteboardServiceClient:245): draw a dotted
+    -- line between two UV points onto an EditableImage.
+    local function chalkSegmentLocal(img, x1, y1, x2, y2, brush, col)
+        local ax, ay = x1 * 512, y1 * 384
+        local dx, dy = x2 * 512 - ax, y2 * 384 - ay
+        local dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 0.5 then return end
+        local steps = math.max(1, math.floor(dist / 2))
+        for i = 0, steps do
+            local t = i / steps
+            img:DrawCircle(
+                Vector2.new(math.round(ax + dx * t), math.round(ay + dy * t)),
+                brush, col, 0.05 + math.random() * 0.18, Enum.ImageCombineType.AlphaBlend)
+        end
+    end
+
+    -- Render one stroke locally onto the board's EditableImage. Returns true on success.
+    local function localStroke(boardId, brush, r, g, b, u1, v1, u2, v2)
+        local map = resolveBoardMap()
+        local entry = map and map[boardId]
+        if not entry or not entry.editableImage then return false end
+        local img = entry.editableImage
+        local col = Color3.fromRGB(b8(r), b8(g), b8(b))
+        local ok = pcall(function()
+            if u1 == u2 and v1 == v2 then
+                img:DrawCircle(Vector2.new(math.round(uvClamp(u1) * 512), math.round(uvClamp(v1) * 384)),
+                    brush, col, 0.05 + math.random() * 0.18, Enum.ImageCombineType.AlphaBlend)
+            else
+                chalkSegmentLocal(img, uvClamp(u1), uvClamp(v1), uvClamp(u2), uvClamp(v2), brush, col)
+            end
+        end)
+        return ok
+    end
+
+    -- Draw a stroke: always render locally (so WE see it) and, when sync is on, also
+    -- fire the remote so the server persists it and other players see it too.
+    local function drawStroke(boardId, brush, r, g, b, u1, v1, u2, v2, sync)
+        local shown = localStroke(boardId, brush, r, g, b, u1, v1, u2, v2)
+        if sync then fireRun(boardId, brush, r, g, b, u1, v1, u2, v2) end
+        return shown
+    end
+
     -- Nearest tagged whiteboard with a valid WhiteboardId; returns board + distance.
     local function findNearestBoard()
         local root
@@ -478,7 +559,294 @@ return function(Lib, Core)
         return best, bestD
     end
 
-    -- Load an image file (workspace-relative path) into an EditableImage.
+    -- ═══════════════════ PURE-LUA PNG DECODER ═══════════════════════════════
+    -- The executor's getcustomasset + AssetService:CreateEditableImageAsync path is
+    -- unreliable ("Failed to load texture, unexpected format" on many builds even
+    -- for valid PNGs). To make loading dependable we decode PNG bytes ourselves —
+    -- DEFLATE inflate + scanline unfilter — and hand back RGBA pixels directly. No
+    -- Roblox image pipeline involved, so it works regardless of executor quirks.
+
+    local PNG_SIG = string.char(137, 80, 78, 71, 13, 10, 26, 10)
+    local _adYield  -- optional yield callback set during a decode to avoid timeouts
+
+    -- RFC 1951 length/distance base + extra-bit tables.
+    local LEN_BASE  = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258}
+    local LEN_EXTRA = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0}
+    local DIST_BASE = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577}
+    local DIST_EXTRA= {0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13}
+    local CL_ORDER  = {16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15}
+
+    -- Build a canonical Huffman table (puff-style) from 0-based code lengths.
+    local function huffConstruct(lengths, n)
+        local count = {}
+        for l = 0, 15 do count[l] = 0 end
+        for s = 0, n - 1 do count[lengths[s] or 0] = count[lengths[s] or 0] + 1 end
+        count[0] = 0
+        local offs = {}
+        offs[1] = 0
+        for l = 1, 15 do offs[l + 1] = offs[l] + count[l] end
+        local symbol = {}
+        for s = 0, n - 1 do
+            local l = lengths[s] or 0
+            if l ~= 0 then symbol[offs[l]] = s; offs[l] = offs[l] + 1 end
+        end
+        return { count = count, symbol = symbol }
+    end
+
+    -- Prebuilt fixed Huffman tables.
+    local FIXED_LIT, FIXED_DIST
+    do
+        local lit = {}
+        for i = 0, 143 do lit[i] = 8 end
+        for i = 144, 255 do lit[i] = 9 end
+        for i = 256, 279 do lit[i] = 7 end
+        for i = 280, 287 do lit[i] = 8 end
+        FIXED_LIT = huffConstruct(lit, 288)
+        local dist = {}
+        for i = 0, 31 do dist[i] = 5 end
+        FIXED_DIST = huffConstruct(dist, 32)
+    end
+
+    -- Inflate a zlib/deflate stream starting at 1-based `startPos` in `data`,
+    -- writing exactly `expected` bytes into a fresh buffer (PNG output size is known).
+    local function inflate(data, startPos, expected)
+        local byte = string.byte
+        local pos = startPos
+        local bitbuf, bitcnt = 0, 0
+
+        local function getbit()
+            if bitcnt == 0 then
+                bitbuf = byte(data, pos) or 0
+                pos = pos + 1
+                bitcnt = 8
+            end
+            local b = bitbuf % 2
+            bitbuf = (bitbuf - b) * 0.5
+            bitcnt = bitcnt - 1
+            return b
+        end
+        local function getbits(nn)
+            local v, m = 0, 1
+            for _ = 1, nn do v = v + getbit() * m; m = m + m end
+            return v
+        end
+        local function decode(h)
+            local code, first, index = 0, 0, 0
+            local count = h.count
+            for len = 1, 15 do
+                code = code + getbit()
+                local c = count[len]
+                if code - c < first then return h.symbol[index + (code - first)] end
+                index = index + c
+                first = (first + c) * 2
+                code = code * 2
+            end
+            return -1
+        end
+
+        local out = buffer.create(expected)
+        local outLen = 0
+        local sinceYield = 0
+        local function putbyte(b)
+            buffer.writeu8(out, outLen, b)
+            outLen = outLen + 1
+        end
+        local function maybeYield()
+            sinceYield = sinceYield + 1
+            if sinceYield >= 24000 then
+                sinceYield = 0
+                if _adYield then _adYield() end
+            end
+        end
+
+        repeat
+            local final = getbit()
+            local btype = getbits(2)
+            if btype == 0 then                     -- stored
+                bitbuf, bitcnt = 0, 0
+                local len = (byte(data, pos) or 0) + (byte(data, pos + 1) or 0) * 256
+                pos = pos + 4
+                for _ = 1, len do putbyte(byte(data, pos) or 0); pos = pos + 1 end
+                maybeYield()
+            elseif btype == 1 or btype == 2 then
+                local litH, distH
+                if btype == 1 then
+                    litH, distH = FIXED_LIT, FIXED_DIST
+                else
+                    local hlit  = getbits(5) + 257
+                    local hdist = getbits(5) + 1
+                    local hclen = getbits(4) + 4
+                    local clLen = {}
+                    for i = 0, 18 do clLen[i] = 0 end
+                    for i = 1, hclen do clLen[CL_ORDER[i]] = getbits(3) end
+                    local clH = huffConstruct(clLen, 19)
+                    local lens = {}
+                    local nn = 0
+                    while nn < hlit + hdist do
+                        local sym = decode(clH)
+                        if sym < 16 then
+                            lens[nn] = sym; nn = nn + 1
+                        elseif sym == 16 then
+                            local prev = lens[nn - 1] or 0
+                            for _ = 1, getbits(2) + 3 do lens[nn] = prev; nn = nn + 1 end
+                        elseif sym == 17 then
+                            for _ = 1, getbits(3) + 3 do lens[nn] = 0; nn = nn + 1 end
+                        elseif sym == 18 then
+                            for _ = 1, getbits(7) + 11 do lens[nn] = 0; nn = nn + 1 end
+                        else
+                            error("bad code-length symbol")
+                        end
+                    end
+                    local litLen, distLen = {}, {}
+                    for i = 0, hlit - 1 do litLen[i] = lens[i] or 0 end
+                    for i = 0, hdist - 1 do distLen[i] = lens[hlit + i] or 0 end
+                    litH  = huffConstruct(litLen, hlit)
+                    distH = huffConstruct(distLen, hdist)
+                end
+                while true do
+                    local sym = decode(litH)
+                    if sym == 256 then break
+                    elseif sym >= 0 and sym < 256 then
+                        putbyte(sym); maybeYield()
+                    elseif sym > 256 then
+                        local li = sym - 256
+                        local length = LEN_BASE[li] + getbits(LEN_EXTRA[li])
+                        local dsym = decode(distH) + 1
+                        local dist = DIST_BASE[dsym] + getbits(DIST_EXTRA[dsym])
+                        local from = outLen - dist
+                        for k = 0, length - 1 do
+                            buffer.writeu8(out, outLen, buffer.readu8(out, from + k))
+                            outLen = outLen + 1
+                        end
+                        maybeYield()
+                    else
+                        error("bad literal/length symbol")
+                    end
+                end
+            else
+                error("bad block type " .. tostring(btype))
+            end
+        until final == 1 or outLen >= expected
+
+        return out
+    end
+
+    -- Decode PNG bytes → { w, h, buf } (RGBA u8 buffer), or nil,err. Non-interlaced,
+    -- 8/16-bit, colour types 0/2/3/4/6.
+    local function decodePNG(bytes)
+        local byte = string.byte
+        if #bytes < 8 or bytes:sub(1, 8) ~= PNG_SIG then return nil, "not a PNG" end
+        local function u32(p)
+            return byte(bytes, p) * 16777216 + byte(bytes, p + 1) * 65536
+                 + byte(bytes, p + 2) * 256 + byte(bytes, p + 3)
+        end
+        local pos = 9
+        local width, height, bitDepth, colorType, interlace, palette
+        local idat = {}
+        while pos + 7 <= #bytes do
+            local len = u32(pos)
+            local ctype = bytes:sub(pos + 4, pos + 7)
+            local dstart = pos + 8
+            if ctype == "IHDR" then
+                width, height = u32(dstart), u32(dstart + 4)
+                bitDepth  = byte(bytes, dstart + 8)
+                colorType = byte(bytes, dstart + 9)
+                interlace = byte(bytes, dstart + 12)
+            elseif ctype == "PLTE" then
+                palette = bytes:sub(dstart, dstart + len - 1)
+            elseif ctype == "IDAT" then
+                idat[#idat + 1] = bytes:sub(dstart, dstart + len - 1)
+            elseif ctype == "IEND" then
+                break
+            end
+            pos = dstart + len + 4
+        end
+        if not width then return nil, "no IHDR" end
+        if interlace ~= 0 then return nil, "interlaced PNG unsupported (re-save without interlace)" end
+        if bitDepth ~= 8 and bitDepth ~= 16 then
+            return nil, ("bit depth %d unsupported (re-save as 8-bit)"):format(bitDepth or -1)
+        end
+        local channelsByType = { [0] = 1, [2] = 3, [3] = 1, [4] = 2, [6] = 4 }
+        local channels = channelsByType[colorType]
+        if not channels then return nil, "colour type " .. tostring(colorType) .. " unsupported" end
+        if colorType == 3 and not palette then return nil, "palette PNG missing PLTE" end
+        if width * height > 4000000 then
+            return nil, ("image too large (%dx%d) — resize under ~2000px"):format(width, height)
+        end
+        if #idat == 0 then return nil, "no IDAT data" end
+
+        local comp = table.concat(idat)
+        local flg = byte(comp, 2) or 0
+        local startPos = (math.floor(flg / 32) % 2 == 1) and 7 or 3   -- skip zlib hdr (+dict)
+
+        local sampleBytes = (bitDepth == 16) and 2 or 1
+        local bpp = channels * sampleBytes
+        local stride = width * bpp
+        local expected = height * (1 + stride)
+
+        local px
+        local ok, err = pcall(function()
+            local raw = inflate(comp, startPos, expected)
+            local out = buffer.create(width * height * 4)
+            local prev = buffer.create(stride)
+            local cur  = buffer.create(stride)
+            local rpos = 0
+            local abs, floor = math.abs, math.floor
+            local rB, wB = buffer.readu8, buffer.writeu8
+            for y = 0, height - 1 do
+                local ft = rB(raw, rpos); rpos = rpos + 1
+                for i = 0, stride - 1 do
+                    local x = rB(raw, rpos + i)
+                    local val
+                    if ft == 0 then
+                        val = x
+                    elseif ft == 1 then
+                        val = x + (i >= bpp and rB(cur, i - bpp) or 0)
+                    elseif ft == 2 then
+                        val = x + rB(prev, i)
+                    elseif ft == 3 then
+                        local a = i >= bpp and rB(cur, i - bpp) or 0
+                        val = x + floor((a + rB(prev, i)) / 2)
+                    elseif ft == 4 then
+                        local a = i >= bpp and rB(cur, i - bpp) or 0
+                        local b = rB(prev, i)
+                        local c = i >= bpp and rB(prev, i - bpp) or 0
+                        local p = a + b - c
+                        local pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                        local pr = (pa <= pb and pa <= pc) and a or (pb <= pc and b or c)
+                        val = x + pr
+                    else
+                        error("bad filter type " .. tostring(ft))
+                    end
+                    wB(cur, i, val % 256)
+                end
+                rpos = rpos + stride
+                local orow = y * width * 4
+                for xp = 0, width - 1 do
+                    local sp = xp * bpp
+                    local r, g, b
+                    if colorType == 2 or colorType == 6 then
+                        r = rB(cur, sp); g = rB(cur, sp + sampleBytes); b = rB(cur, sp + 2 * sampleBytes)
+                    elseif colorType == 0 or colorType == 4 then
+                        r = rB(cur, sp); g = r; b = r
+                    else -- palette (bitDepth 8)
+                        local pp = rB(cur, sp) * 3
+                        r = palette:byte(pp + 1) or 0
+                        g = palette:byte(pp + 2) or 0
+                        b = palette:byte(pp + 3) or 0
+                    end
+                    local o = orow + xp * 4
+                    wB(out, o, r); wB(out, o + 1, g); wB(out, o + 2, b); wB(out, o + 3, 255)
+                end
+                prev, cur = cur, prev
+                if (y % 32) == 0 and _adYield then _adYield() end
+            end
+            px = { w = width, h = height, buf = out }
+        end)
+        if not ok then return nil, "PNG decode error: " .. tostring(err) end
+        return px
+    end
+
     -- Load an image file into an EditableImage. Roblox reworked this API twice, and
     -- CreateEditableImageAsync now RETURNS NIL (no error) on failure, so we try every
     -- known call form and surface the REAL error/reason instead of guessing.
@@ -565,6 +933,48 @@ return function(Lib, Core)
         end
     end
 
+    -- Load an image file → { w, h, buf|arr }. Prefers the pure-Lua PNG decoder
+    -- (dependable across executors); falls back to the EditableImage pipeline for
+    -- non-PNG formats (e.g. JPG). Sets _adYield during decode to avoid script timeouts.
+    local function decodeImage(path)
+        _adYield = function() RunService.Heartbeat:Wait() end
+        local cleanup = function() _adYield = nil end
+
+        -- 1) Pure-Lua PNG via readfile (no getcustomasset needed).
+        if type(readfile) == "function" then
+            local okR, bytes = pcall(readfile, path)
+            if okR and type(bytes) == "string" and #bytes > 8 then
+                if bytes:sub(1, 8) == PNG_SIG then
+                    local px, perr = decodePNG(bytes)
+                    cleanup()
+                    if px then
+                        adlog("decodeImage: PNG decoded %dx%d (pure-Lua)", px.w, px.h)
+                        return px
+                    end
+                    adlog("decodeImage: pure-Lua PNG failed: %s — trying EditableImage", tostring(perr))
+                    _adYield = function() RunService.Heartbeat:Wait() end
+                else
+                    adlog("decodeImage: not PNG (magic %d,%d,%d) — trying EditableImage",
+                        bytes:byte(1) or 0, bytes:byte(2) or 0, bytes:byte(3) or 0)
+                end
+            else
+                adlog("decodeImage: readfile failed (%s) — trying EditableImage", tostring(bytes))
+            end
+        else
+            adlog("decodeImage: no readfile — trying EditableImage")
+        end
+
+        -- 2) EditableImage fallback (JPG / anything the decoder can't handle).
+        local img, err = loadEditableImage(path)
+        if not img then cleanup(); return nil, err end
+        local px = readPixels(img)
+        pcall(function() img:Destroy() end)
+        cleanup()
+        if not px then return nil, "could not read image pixels" end
+        adlog("decodeImage: %dx%d via EditableImage", px.w, px.h)
+        return px
+    end
+
     local _drawing = false
     local _drawToken = 0
 
@@ -575,7 +985,7 @@ return function(Lib, Core)
     end
 
     -- The game always draws chalk at brush radius 2 (WhiteboardServiceClient:406
-    -- hardcodes it), so the server expects that value — we send exactly 2 and let
+    -- hardcodes it), so the server expects that value �� we send exactly 2 and let
     -- Detail (row count) control how finely the image is reproduced.
     local BRUSH = 2
     local MAX_STROKES = 60000   -- safety cap against pathological (noisy) images
@@ -585,11 +995,8 @@ return function(Lib, Core)
         _fireErrLogged = false
         adlog("runDraw: start boardId=%s path='%s' detail=%d speed=%d",
             tostring(board.id), tostring(opts.path), opts.detail, opts.speed)
-        local img, err = loadEditableImage(opts.path)
-        if not img then _drawing = false; adlog("runDraw: image load FAILED: %s", tostring(err)); notify("Auto Draw", tostring(err)); return end
-        local px = readPixels(img)
-        pcall(function() img:Destroy() end)
-        if not px then _drawing = false; adlog("runDraw: readPixels FAILED"); notify("Auto Draw", "could not read image pixels"); return end
+        local px, err = decodeImage(opts.path)
+        if not px then _drawing = false; adlog("runDraw: image load FAILED: %s", tostring(err)); notify("Auto Draw", tostring(err)); return end
 
         local token = _drawToken
         local iw, ih = px.w, px.h
@@ -678,41 +1085,66 @@ return function(Lib, Core)
             adlog("runDraw: first stroke sample rgb=(%d,%d,%d) at v=%.3f", strokes[1].r, strokes[1].g, strokes[1].b, strokes[1].v)
         end
 
-        -- ── Phase 2: send strokes, rate-limited (unreliable remote drops if flooded) ──
-        -- opts.speed = strokes per SECOND. A budget accumulator paces sends against
-        -- real time regardless of frame rate, with a small burst cap so a lag spike
-        -- can't dump a flood of packets (which the unreliable channel would drop).
-        local perSec   = math.clamp(math.floor(opts.speed), 5, 200)
-        local burstCap = math.clamp(math.floor(perSec / 12), 2, 8)
-        local budget, lastClock = 0, os.clock()
+        -- ── Phase 2: draw the strokes ────────────────────────────────────────
+        -- Every stroke is rendered LOCALLY onto the board's EditableImage so we
+        -- actually see it (the server never echoes our own batches back to us).
+        -- When Sync is on we ALSO fire the draw remote so the server persists the
+        -- drawing and other players see it — that path is rate-limited because the
+        -- unreliable channel drops packets if flooded. With Sync off we just blast
+        -- the local render as fast as possible (yielding to keep the frame alive).
+        local sync = opts.sync
         local sent = 0
+        local drewLocal = false
 
-        for i = 1, total do
-            if token ~= _drawToken then break end
-            local nowc = os.clock()
-            budget = budget + (nowc - lastClock) * perSec
-            lastClock = nowc
-            if budget > burstCap then budget = burstCap end
-            while budget < 1 do
-                RunService.Heartbeat:Wait()
+        if not sync then
+            for i = 1, total do
                 if token ~= _drawToken then break end
-                nowc = os.clock()
+                local s = strokes[i]
+                if localStroke(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                    drewLocal = true
+                end
+                if (i % 120) == 0 then RunService.Heartbeat:Wait() end
+            end
+        else
+            local perSec   = math.clamp(math.floor(opts.speed), 5, 200)
+            local burstCap = math.clamp(math.floor(perSec / 12), 2, 8)
+            local budget, lastClock = 0, os.clock()
+            for i = 1, total do
+                if token ~= _drawToken then break end
+                local nowc = os.clock()
                 budget = budget + (nowc - lastClock) * perSec
                 lastClock = nowc
-            end
-            if token ~= _drawToken then break end
-            budget = budget - 1
+                if budget > burstCap then budget = burstCap end
+                while budget < 1 do
+                    RunService.Heartbeat:Wait()
+                    if token ~= _drawToken then break end
+                    nowc = os.clock()
+                    budget = budget + (nowc - lastClock) * perSec
+                    lastClock = nowc
+                end
+                if token ~= _drawToken then break end
+                budget = budget - 1
 
-            local s = strokes[i]
-            if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
-                sent = sent + 1
+                local s = strokes[i]
+                if localStroke(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                    drewLocal = true
+                end
+                if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                    sent = sent + 1
+                end
             end
         end
 
         _drawing = false
-        adlog("runDraw: DONE sent=%d/%d (fireErr=%s)", sent, total, tostring(_fireErrLogged))
+        adlog("runDraw: DONE local=%s synced=%d/%d (fireErr=%s)", tostring(drewLocal), sent, total, tostring(_fireErrLogged))
         if token == _drawToken then
-            notify("Auto Draw", ("done — %d/%d strokes%s"):format(sent, total, capped and " (detail capped)" or ""))
+            if not drewLocal then
+                notify("Auto Draw", "could not access the board image (local render failed) — see debug log")
+            elseif sync then
+                notify("Auto Draw", ("done — %d/%d strokes synced%s"):format(sent, total, capped and " (detail capped)" or ""))
+            else
+                notify("Auto Draw", ("done — %d strokes (local only)%s"):format(total, capped and " (detail capped)" or ""))
+            end
         end
     end
 
@@ -720,9 +1152,12 @@ return function(Lib, Core)
     local function startAutoDraw(notify)
         if _drawing then notify("Auto Draw", "already drawing — press Stop first"); return end
 
-        local net = getNet()
-        if not net or not net.WhiteboardDrawBatch then
-            notify("Auto Draw", "whiteboard network remote unavailable"); return
+        -- Only the server-sync path needs the remote; local-only drawing does not.
+        if Config.AutoDraw.Sync then
+            local net = getNet()
+            if not net or not net.WhiteboardDrawBatch then
+                notify("Auto Draw", "whiteboard network remote unavailable (turn off Sync to draw locally)"); return
+            end
         end
 
         local board, dist = findNearestBoard()
@@ -771,7 +1206,7 @@ return function(Lib, Core)
 
         local opts = {
             path = path, detail = ad.Detail, speed = ad.Speed, threshold = ad.Threshold,
-            skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve,
+            skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve, sync = ad.Sync,
         }
         task.spawn(function()
             local ok, err = pcall(runDraw, board, opts, notify)
@@ -792,12 +1227,14 @@ return function(Lib, Core)
         local ad = Config.AutoDraw
         local iw, ih
         if ad.File and ad.File ~= "" and not ad.File:match("^%(")
-           and type(isfile) == "function" and isfile(ad.File) then
-            local img = loadEditableImage(ad.File)
-            if img then
-                local sz = img.Size
-                iw, ih = math.floor(sz.X), math.floor(sz.Y)
-                pcall(function() img:Destroy() end)
+           and type(isfile) == "function" and isfile(ad.File)
+           and type(readfile) == "function" then
+            -- Cheap: read just the PNG IHDR (bytes 17-24) for width/height.
+            local okR, bytes = pcall(readfile, ad.File)
+            if okR and type(bytes) == "string" and #bytes >= 24 and bytes:sub(1, 8) == PNG_SIG then
+                local b = string.byte
+                iw = b(bytes,17)*16777216 + b(bytes,18)*65536 + b(bytes,19)*256 + b(bytes,20)
+                ih = b(bytes,21)*16777216 + b(bytes,22)*65536 + b(bytes,23)*256 + b(bytes,24)
             end
         end
 
@@ -807,33 +1244,31 @@ return function(Lib, Core)
             :format(tostring(board.id), dist or 0, iw and (" ("..iw.."x"..ih..")") or ""))
     end
 
-    -- Diagnostic: draw a big white "X" + border on the nearest board WITHOUT any
-    -- image loading. If this appears, the network/draw path works and any failure
-    -- is purely in image decoding. If it does NOT appear, the issue is proximity,
-    -- board id, chalk-equip requirement, or the remote itself.
+    -- Diagnostic: draw a big white "X" + border on the nearest board. It renders
+    -- LOCALLY (so you see it immediately) and, when Sync is on, also fires the remote.
+    -- If the X shows up, the draw path works and any Draw failure is purely image
+    -- loading. If it does NOT show up, the board map / EditableImage access failed.
     local function testStroke(notify)
-        local net = getNet()
-        if not net or not net.WhiteboardDrawBatch then
-            notify("Auto Draw", "network remote unavailable"); return
-        end
         local board, dist = findNearestBoard()
         if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
-        if dist and dist > 22 then
-            notify("Auto Draw", ("too far (%.0f studs) — move closer"):format(dist)); return
-        end
         local W = b8(CHALK_COLOR.R * 255)
         local id = board.id
-        adlog("testStroke: firing X on boardId=%s dist=%.1f", tostring(id), dist or -1)
+        local sync = Config.AutoDraw.Sync
+        adlog("testStroke: drawing X on boardId=%s dist=%.1f sync=%s", tostring(id), dist or -1, tostring(sync))
         -- Two diagonals + a rectangle border, all as connected 2-point strokes.
-        fireRun(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.95)
-        fireRun(id, 2, W, W, W, 0.95, 0.05, 0.05, 0.95)
-        fireRun(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.05)
-        fireRun(id, 2, W, W, W, 0.95, 0.05, 0.95, 0.95)
-        fireRun(id, 2, W, W, W, 0.95, 0.95, 0.05, 0.95)
-        fireRun(id, 2, W, W, W, 0.05, 0.95, 0.05, 0.05)
+        local shown = false
+        shown = drawStroke(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.95, sync) or shown
+        drawStroke(id, 2, W, W, W, 0.95, 0.05, 0.05, 0.95, sync)
+        drawStroke(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.05, sync)
+        drawStroke(id, 2, W, W, W, 0.95, 0.05, 0.95, 0.95, sync)
+        drawStroke(id, 2, W, W, W, 0.95, 0.95, 0.05, 0.95, sync)
+        drawStroke(id, 2, W, W, W, 0.05, 0.95, 0.05, 0.05, sync)
         showPreview(board, 0, 0, 1, 1, 8)
-        notify("Auto Draw", ("test X sent to board #%s (%.0f studs) — check the board")
-            :format(tostring(id), dist or 0))
+        if shown then
+            notify("Auto Draw", ("test X drawn on board #%s (%.0f studs)"):format(tostring(id), dist or 0))
+        else
+            notify("Auto Draw", "could not access the board image (local render failed) — see debug log")
+        end
     end
 
     -- List image files in the executor workspace root (for the file dropdown).
@@ -995,13 +1430,18 @@ return function(Lib, Core)
             Name = "Preserve Aspect Ratio", Default = ad.Preserve,
             Callback = function(v) ad.Preserve = v end,
         }, ctx.flag("Misc_AutoDraw_Preserve"))
+        sAD:Toggle({
+            Name = "Sync to Server", Default = ad.Sync,
+            Callback = function(v) ad.Sync = v end,
+        }, ctx.flag("Misc_AutoDraw_Sync"))
+        sAD:SubLabel({ Text = "ON: also sends strokes to the server so the drawing persists and other players see it (slower, rate-limited). OFF: renders instantly on your screen only." })
 
         sAD:Divider()
         sAD:Header({ Name = "Preview & Debug" })
         sAD:Button({ Name = "Preview Board", Callback = function() previewBoard(notify) end })
         sAD:SubLabel({ Text = "Highlights the nearest board (blue) and outlines where the image will be drawn (green). Auto-clears after ~12s." })
         sAD:Button({ Name = "Test Stroke (X)", Callback = function() testStroke(notify) end })
-        sAD:SubLabel({ Text = "Draws a plain white X + border on the board with NO image. If this shows up, drawing works and only image loading is the problem." })
+        sAD:SubLabel({ Text = "Draws a white X + border on the board (renders locally, and syncs if Sync is on). If this shows up, the draw path works and only image loading is the problem." })
         sAD:Button({ Name = "Clear Preview", Callback = function() clearPreview(); notify("Auto Draw", "preview cleared") end })
         sAD:Toggle({
             Name = "Debug Logging", Default = ad.Debug,
