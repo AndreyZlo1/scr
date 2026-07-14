@@ -166,15 +166,28 @@ return function(Lib, Core)
         return nil
     end
 
-    -- Cheap "is a song active right now?" gate, read off the client.
-    local function songActive(client)
-        if not client then return false end
-        local ok, active = pcall(function()
-            return client._session ~= nil
-                or client._ampRelayActive == true
-                or (type(client._startPlayGateUntil) == "number" and os.clock() < client._startPlayGateUntil)
+    -- Cheap "is the rhythm minigame open right now?" gate. The client fields turned
+    -- out unreliable on this build (the found singleton never showed _session), so
+    -- we detect the minigame's ScreenGui instead: it's named "RhythmServiceUI" and
+    -- lives in PlayerGui while a song is open (RhythmServiceClient:73). This is a
+    -- single FindFirstChild — no GC work — so we gate the getgc fallback on it and
+    -- never scan while idle.
+    local CoreGui = game:GetService("CoreGui")
+    local function minigameOpen()
+        local ok, found = pcall(function()
+            local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            if pg and pg:FindFirstChild("RhythmServiceUI") then return true end
+            -- executors sometimes reparent protected UI under gethui()
+            if type(gethui) == "function" then
+                local hui = gethui()
+                if hui and hui:FindFirstChild("RhythmServiceUI") then return true end
+            end
+            for _, g in ipairs(CoreGui:GetChildren()) do
+                if g.Name == "RhythmServiceUI" then return true end
+            end
+            return false
         end)
-        return ok and active
+        return ok and found == true
     end
 
     local _engine, _lastScan = nil, 0
@@ -195,10 +208,10 @@ return function(Lib, Core)
             end
         end
 
-        -- Fallback: direct getgc scan, but ONLY while a song is active (so we never
-        -- freeze at idle) and throttled (one brief hitch, then cached for the song).
-        if client and not songActive(client) then
-            dbgT("idle", 3, "no song active (client._session nil, no amp relay) — not scanning")
+        -- Fallback: direct getgc scan, but ONLY while the minigame UI is open (so we
+        -- never freeze at idle) and throttled (one brief hitch, then cached for song).
+        if not minigameOpen() then
+            dbgT("idle", 3, "RhythmServiceUI not open — no song, not scanning")
             return nil
         end
 
