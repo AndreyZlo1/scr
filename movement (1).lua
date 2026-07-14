@@ -680,17 +680,22 @@ return function(Lib, Core)
     local _myChar = LocalPlayer.Character
 
     -- ══════════════════════════ DODGE TWEAKS ════════════════════════════════
-    -- Applied to the game's Evasive module so the player's OWN dodge uses these values.
-    -- COOLDOWN BUG ROOT CAUSE: the cooldown is read from ONE OF TWO sources depending on the
-    -- equipped style (Evasive.lua:84-91 & 769-777) — GetStyleEvasiveCooldown reads the CONFIG
-    -- TABLE (Evasive.Cooldown * styleMult), otherwise it falls back to the module `Cooldown`
-    -- upvalue. Patching only the upvalue worked for SOME styles and not others → the
-    -- "sometimes changes, sometimes not". Fix: write BOTH the config field AND the upvalue.
-    -- DashSpeed (line 701) drives the dash velocity from the upvalue; we patch both there too.
-    -- Values default to the real in-game numbers and we ONLY write when a slider differs from
-    -- them (dirty-flag), so leaving defaults = untouched vanilla and there's no per-frame churn.
-    -- Honest ceiling: syncCooldownFromServer (Evasive.lua:64) re-applies the authoritative
-    -- EvasiveCooldownRemaining attribute, so a cooldown below the server's may re-sync.
+    -- SPEED: the dash velocity reads the `DashSpeed` module upvalue directly (Evasive.lua:701)
+    -- and the config field (Evasive.DashSpeed) — we patch both. This works.
+    --
+    -- COOLDOWN — real root cause (why it "didn't work"): the gate is `os.clock() < u6`
+    -- (Evasive.lua:577). u6 is NEVER set from the `Cooldown` upvalue we were patching. It is set
+    -- by syncCooldownFromServer (Evasive.lua:64) from TWO places, in priority order:
+    --   1) the server attribute `EvasiveCooldownRemaining` (line 76-79) — AUTHORITATIVE, so our
+    --      config patch was simply ignored whenever the server set it → "sometimes works".
+    --   2) config fallback GetStyleEvasiveCooldown = Evasive.Cooldown * styleMult (line 89) when
+    --      that attribute is absent.
+    -- Fix: CLAMP the `EvasiveCooldownRemaining` attribute read in the combat __namecall hook to
+    -- our custom value (covers the authoritative path), AND patch the config field (covers the
+    -- fallback path). Now u6 = now + customCooldown on both branches. Defaults = the real game
+    -- numbers (30 studs / 1.5s) and the clamp only lowers, so leaving defaults = pure vanilla.
+    -- Honest ceiling: a cooldown BELOW the server's true value is client-prediction only — the
+    -- server still owns the real dash confirmation and i-frames.
     --
     -- DODGE-EVERYWHERE: Evasive() has unconditional early-returns (Evasive.lua:590-617) on
     -- CombatAttacking / Blocking / Stunned / GuardBroken / Greenzone / RpCombatLocked /
@@ -742,7 +747,8 @@ return function(Lib, Core)
             if _evSpeedIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, wantSpeed) end
             _appliedSpeed = wantSpeed
         end
-        local wantCd = (Config.Dodge_Cooldown and Config.Dodge_Cooldown > 0) and Config.Dodge_Cooldown or _evCdBase
+        -- allow 0 (instant); only fall back to the game value when the slider is unset (nil)
+        local wantCd = Config.Dodge_Cooldown or _evCdBase
         if wantCd and wantCd ~= _appliedCd then
             if cfg and cfg.Evasive then cfg.Evasive.Cooldown = wantCd end
             if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, wantCd) end
@@ -809,12 +815,23 @@ return function(Lib, Core)
             if self == _myChar then
                 local dodgeEV = Config.Dodge_On and Config.Dodge_Everywhere
                 local ragEV   = Config.AntiRagdoll_On
-                if (dodgeEV or ragEV) and getnamecallmethod() == "GetAttribute" then
+                local cdOn    = Config.Dodge_On   -- custom-cooldown clamp active
+                if (dodgeEV or ragEV or cdOn) and getnamecallmethod() == "GetAttribute" then
                     local key = ...
                     if ragEV and key == "Ragdoll" then
                         if not isManagedRagdoll(self) then return nil end   -- hide ragdoll
                     elseif dodgeEV and DODGE_SPOOF_SET[key] then
                         return nil                                          -- hide action-lock
+                    elseif cdOn and key == "EvasiveCooldownRemaining" then
+                        -- clamp the authoritative server cooldown down to our custom value; this
+                        -- is what syncCooldownFromServer feeds into the u6 dodge gate.
+                        local real = oldNamecall(self, ...)
+                        local cd = Config.Dodge_Cooldown
+                        -- cd >= 0 so a 0 slider = instant (u6 = now, dodge always ready)
+                        if type(real) == "number" and type(cd) == "number" and cd >= 0 and real > cd then
+                            return cd
+                        end
+                        return real
                     end
                 end
             end
@@ -1082,6 +1099,7 @@ return function(Lib, Core)
                         notify("Dodge", "Evasive module not found yet"); Config.Dodge_On = false; return
                     end
                     Config.Dodge_On = true
+                    installCombatHook()   -- clamps EvasiveCooldownRemaining → custom cooldown works
                     driveDodge()          -- apply current slider values immediately
                 else
                     Config.Dodge_On = false
@@ -1106,7 +1124,7 @@ return function(Lib, Core)
         slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
             Min = 0, Max = 5, Precision = 2, Suffix = " s", Callback = function(v)
                 Config.Dodge_Cooldown = v; driveDodge() end })
-        sDodge:SubLabel({ Text = "Defaults (30 studs · 1.5s) = the game's own values → leave them for vanilla feel" })
+        sDodge:SubLabel({ Text = "Defaults (30 studs · 1.5s) = vanilla. Cooldown only lowers: 0 = instant, 1.5 = game." })
 
         -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
