@@ -75,6 +75,9 @@ return function(Lib, Core)
             Mono       = false,  -- draw everything in chalk white instead of colour
             Preserve   = true,   -- preserve the image aspect ratio on the board
             Sync       = true,   -- also fire the draw remote (persist + show to others)
+            Scale      = 100,    -- % of the board the drawing occupies (10-100)
+            AlignX     = 50,     -- horizontal placement: 0 = left, 50 = center, 100 = right
+            AlignY     = 50,     -- vertical placement: 0 = top, 50 = middle, 100 = bottom
             Debug      = false,  -- print step-by-step diagnostics to the console
         },
     }
@@ -344,8 +347,13 @@ return function(Lib, Core)
 
     -- Compute the aspect-preserving letterbox region (in board pixels), exactly as
     -- runDraw does. Pass imgW/imgH when known; nil → assume the region fills the
-    -- board. Returns UV rect u0,v0,u1,v1.
-    local function computeRegion(preserve, imgW, imgH)
+    -- board. `scale` (0-1) shrinks the region so it covers only part of the board;
+    -- `ax`/`ay` (0-1) place it (0 = left/top, .5 = center, 1 = right/bottom).
+    -- Returns UV rect u0,v0,u1,v1.
+    local function computeRegion(preserve, imgW, imgH, scale, ax, ay)
+        scale = math.clamp(scale or 1, 0.05, 1)
+        ax = math.clamp(ax == nil and 0.5 or ax, 0, 1)
+        ay = math.clamp(ay == nil and 0.5 or ay, 0, 1)
         local drawW, drawH
         if preserve and imgW and imgH and imgW > 0 and imgH > 0 then
             local imgA, boardA = imgW / imgH, BOARD_W / BOARD_H
@@ -354,7 +362,8 @@ return function(Lib, Core)
         else
             drawW, drawH = BOARD_W, BOARD_H
         end
-        local offX, offY = (BOARD_W - drawW) / 2, (BOARD_H - drawH) / 2
+        drawW, drawH = drawW * scale, drawH * scale
+        local offX, offY = (BOARD_W - drawW) * ax, (BOARD_H - drawH) * ay
         return offX / BOARD_W, offY / BOARD_H, (offX + drawW) / BOARD_W, (offY + drawH) / BOARD_H
     end
 
@@ -940,29 +949,312 @@ return function(Lib, Core)
         end
     end
 
-    -- Load an image file → { w, h, buf|arr }. Prefers the pure-Lua PNG decoder
-    -- (dependable across executors); falls back to the EditableImage pipeline for
-    -- non-PNG formats (e.g. JPG). Sets _adYield during decode to avoid script timeouts.
+    -- ═══════════════════ PURE-LUA JPEG DECODER ══════════════════════════════
+    -- Baseline (sequential DCT + Huffman) JPEG decoder. Same rationale as the PNG
+    -- decoder: the executor's getcustomasset + CreateEditableImageAsync pipeline
+    -- fails on real photos ("unexpected format"), so we decode the bytes ourselves.
+    -- Supports greyscale + YCbCr, 4:4:4 / 4:2:2 / 4:2:0 subsampling, and restart
+    -- markers. Progressive JPEGs are rejected with a clear message.
+    local ZIGZAG = {
+        [0]=0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,
+        12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+        35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,
+        58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63,
+    }
+    local IDCT_M = {}
+    do
+        local cos, pi, sqrt = math.cos, math.pi, math.sqrt
+        for x = 0, 7 do
+            IDCT_M[x] = {}
+            for u = 0, 7 do
+                local cu = (u == 0) and (1 / sqrt(2)) or 1
+                IDCT_M[x][u] = 0.5 * cu * cos((2 * x + 1) * u * pi / 16)
+            end
+        end
+    end
+    local function decodeJPEG(data)
+        local byte = string.byte
+        local n = #data
+        if n < 2 or byte(data,1) ~= 0xFF or byte(data,2) ~= 0xD8 then return nil,"not a JPEG" end
+        local pos = 3
+        local quant, huffDC, huffAC = {}, {}, {}
+        local width, height, components = nil, nil, {}
+        local restartInterval, progressive, frameFound = 0, false, false
+        local sosFound = false
+        local function buildHuff(counts, symbols)
+            local mincode, maxcode, valptr = {}, {}, {}
+            local code, p = 0, 1
+            for l = 1, 16 do
+                if counts[l] > 0 then
+                    valptr[l] = p; mincode[l] = code
+                    code = code + counts[l]; maxcode[l] = code - 1; p = p + counts[l]
+                else maxcode[l] = -1 end
+                code = code * 2
+            end
+            return { mincode=mincode, maxcode=maxcode, valptr=valptr, values=symbols }
+        end
+        while pos < n do
+            if byte(data,pos) ~= 0xFF then pos = pos + 1
+            else
+                local marker = byte(data,pos+1); pos = pos + 2
+                if marker == 0xD9 then break
+                elseif marker == 0x01 or (marker and marker >= 0xD0 and marker <= 0xD7) then
+                elseif marker == nil then break
+                else
+                    local len = byte(data,pos)*256 + byte(data,pos+1)
+                    local seg, segEnd = pos+2, pos+len
+                    if marker == 0xDB then
+                        local q = seg
+                        while q < segEnd do
+                            local pqtq = byte(data,q); q = q + 1
+                            local pq, tq = math.floor(pqtq/16), pqtq%16
+                            local t = {}
+                            for i=0,63 do
+                                local v
+                                if pq==0 then v=byte(data,q); q=q+1 else v=byte(data,q)*256+byte(data,q+1); q=q+2 end
+                                t[ZIGZAG[i]] = v
+                            end
+                            quant[tq] = t
+                        end
+                    elseif marker == 0xC0 or marker == 0xC1 then
+                        frameFound = true
+                        local p = seg
+                        height = byte(data,p+1)*256+byte(data,p+2)
+                        width  = byte(data,p+3)*256+byte(data,p+4)
+                        local ncc = byte(data,p+5); p = p + 6
+                        components = {}
+                        for _=1,ncc do
+                            local id,hv,qt = byte(data,p),byte(data,p+1),byte(data,p+2)
+                            components[#components+1] = { id=id, h=math.floor(hv/16), v=hv%16, qt=qt }
+                            p = p + 3
+                        end
+                    elseif marker == 0xC2 then progressive = true
+                    elseif marker == 0xC4 then
+                        local q = seg
+                        while q < segEnd do
+                            local tcth = byte(data,q); q=q+1
+                            local tc,th = math.floor(tcth/16), tcth%16
+                            local counts, tot = {}, 0
+                            for l=1,16 do counts[l]=byte(data,q); tot=tot+counts[l]; q=q+1 end
+                            local symbols = {}
+                            for i=1,tot do symbols[i]=byte(data,q); q=q+1 end
+                            local tbl = buildHuff(counts, symbols)
+                            if tc==0 then huffDC[th]=tbl else huffAC[th]=tbl end
+                        end
+                    elseif marker == 0xDD then
+                        restartInterval = byte(data,seg)*256+byte(data,seg+1)
+                    elseif marker == 0xDA then
+                        local p = seg
+                        local ns = byte(data,p); p=p+1
+                        local scan = {}
+                        for _=1,ns do
+                            local cs,tdta = byte(data,p),byte(data,p+1)
+                            scan[#scan+1] = { id=cs, td=math.floor(tdta/16), ta=tdta%16 }
+                            p = p + 2
+                        end
+                        p = p + 3
+                        pos = p
+                        for _,sc in ipairs(scan) do
+                            for _,c in ipairs(components) do
+                                if c.id==sc.id then c.td=sc.td; c.ta=sc.ta end
+                            end
+                        end
+                        sosFound = true
+                    end
+                    if sosFound then break end
+                    pos = segEnd
+                end
+            end
+        end
+        if not frameFound or not width then return nil,"no SOF frame" end
+        if progressive then return nil,"progressive JPEG unsupported (re-save as baseline)" end
+        if width*height > 6000000 then return nil,("image too large (%dx%d)"):format(width,height) end
+
+        local bitBuf, bitCnt = 0, 0
+        local bpos, eod = pos, false
+        local function resetBits() bitBuf,bitCnt = 0,0 end
+        local function nextByte()
+            if bpos > n then eod=true; return 0 end
+            local b = byte(data,bpos); bpos=bpos+1
+            if b == 0xFF then
+                local b2 = byte(data,bpos)
+                if b2 == 0x00 then bpos=bpos+1
+                else bpos=bpos-1; eod=true; return 0 end
+            end
+            return b
+        end
+        local function getBit()
+            if bitCnt==0 then bitBuf=nextByte(); bitCnt=8 end
+            bitCnt = bitCnt - 1
+            return math.floor(bitBuf / (2^bitCnt)) % 2
+        end
+        local function getBits(s) local v=0 for _=1,s do v=v*2+getBit() end return v end
+        local function receiveExtend(s)
+            if s==0 then return 0 end
+            local v = getBits(s)
+            if v < 2^(s-1) then v = v - 2^s + 1 end
+            return v
+        end
+        local function huffDecode(tbl)
+            local code = 0
+            for l=1,16 do
+                code = code*2 + getBit()
+                if tbl.maxcode[l] >= 0 and code <= tbl.maxcode[l] then
+                    return tbl.values[tbl.valptr[l] + (code - tbl.mincode[l])]
+                end
+            end
+            return nil
+        end
+        local function consumeRestart()
+            resetBits(); eod=false
+            while bpos <= n do
+                if byte(data,bpos)==0xFF then
+                    local m = byte(data,bpos+1)
+                    if m and m>=0xD0 and m<=0xD7 then bpos=bpos+2; return end
+                    if m==0xD9 then return end
+                end
+                bpos = bpos + 1
+            end
+        end
+
+        local maxH, maxV = 1, 1
+        for _,c in ipairs(components) do if c.h>maxH then maxH=c.h end if c.v>maxV then maxV=c.v end end
+        local mcuW, mcuH = 8*maxH, 8*maxV
+        local mcusX, mcusY = math.ceil(width/mcuW), math.ceil(height/mcuH)
+        for _,c in ipairs(components) do
+            c.planeW = mcusX*c.h*8; c.planeH = mcusY*c.v*8
+            c.plane = buffer.create(c.planeW*c.planeH); c.pred = 0
+        end
+        local coef, tmp = {}, {}
+        for i=0,63 do coef[i]=0; tmp[i]=0 end
+        local function decodeBlock(c, bx, by)
+            for i=0,63 do coef[i]=0 end
+            local qt = quant[c.qt]
+            local t = huffDecode(huffDC[c.td]); if t==nil then return false end
+            c.pred = c.pred + receiveExtend(t)
+            coef[0] = c.pred * qt[0]
+            local k = 1
+            while k < 64 do
+                local rs = huffDecode(huffAC[c.ta]); if rs==nil then return false end
+                local r,s = math.floor(rs/16), rs%16
+                if s==0 then if r==15 then k=k+16 else break end
+                else
+                    k=k+r; if k>63 then break end
+                    local p2 = ZIGZAG[k]
+                    coef[p2] = receiveExtend(s)*qt[p2]; k=k+1
+                end
+            end
+            local M = IDCT_M
+            for y=0,7 do
+                local base=y*8
+                local c0,c1,c2,c3,c4,c5,c6,c7 = coef[base],coef[base+1],coef[base+2],coef[base+3],coef[base+4],coef[base+5],coef[base+6],coef[base+7]
+                for x=0,7 do
+                    local Mx=M[x]
+                    tmp[base+x]=Mx[0]*c0+Mx[1]*c1+Mx[2]*c2+Mx[3]*c3+Mx[4]*c4+Mx[5]*c5+Mx[6]*c6+Mx[7]*c7
+                end
+            end
+            local plane,pw = c.plane, c.planeW
+            local ox,oy = bx*8, by*8
+            for x=0,7 do
+                local t0,t1,t2,t3,t4,t5,t6,t7 = tmp[x],tmp[8+x],tmp[16+x],tmp[24+x],tmp[32+x],tmp[40+x],tmp[48+x],tmp[56+x]
+                for y=0,7 do
+                    local My=M[y]
+                    local val = My[0]*t0+My[1]*t1+My[2]*t2+My[3]*t3+My[4]*t4+My[5]*t5+My[6]*t6+My[7]*t7 + 128
+                    if val<0 then val=0 elseif val>255 then val=255 end
+                    buffer.writeu8(plane,(oy+y)*pw+(ox+x),val)
+                end
+            end
+            return true
+        end
+        local mcuCount = 0
+        local aborted = false
+        for my=0,mcusY-1 do
+            for mx=0,mcusX-1 do
+                if restartInterval>0 and mcuCount>0 and (mcuCount%restartInterval)==0 then
+                    consumeRestart()
+                    for _,c in ipairs(components) do c.pred=0 end
+                end
+                for _,c in ipairs(components) do
+                    for by=0,c.v-1 do
+                        for bx=0,c.h-1 do
+                            if not decodeBlock(c, mx*c.h+bx, my*c.v+by) then aborted=true; break end
+                        end
+                        if aborted then break end
+                    end
+                    if aborted then break end
+                end
+                if aborted then break end
+                mcuCount = mcuCount + 1
+            end
+            if aborted then break end
+            if _adYield and (my % 8)==0 then _adYield() end
+        end
+        local out = buffer.create(width*height*4)
+        local rB,wB = buffer.readu8, buffer.writeu8
+        local floor = math.floor
+        if #components == 1 then
+            local c = components[1]; local plane,pw = c.plane,c.planeW
+            for y=0,height-1 do for x=0,width-1 do
+                local g = rB(plane, y*pw+x); local o=(y*width+x)*4
+                wB(out,o,g);wB(out,o+1,g);wB(out,o+2,g);wB(out,o+3,255)
+            end
+            if _adYield and (y % 48)==0 then _adYield() end
+            end
+        else
+            local cY,cB,cR = components[1],components[2],components[3]
+            local yhx,yhy = cY.h/maxH, cY.v/maxV
+            local bhx,bhy = cB.h/maxH, cB.v/maxV
+            local rhx,rhy = cR.h/maxH, cR.v/maxV
+            local Yp,Ypw = cY.plane,cY.planeW
+            local Bp,Bpw = cB.plane,cB.planeW
+            local Rp,Rpw = cR.plane,cR.planeW
+            for y=0,height-1 do
+                local rowY,rowB,rowR = floor(y*yhy)*Ypw, floor(y*bhy)*Bpw, floor(y*rhy)*Rpw
+                for x=0,width-1 do
+                    local Y = rB(Yp,rowY+floor(x*yhx))
+                    local Cb = rB(Bp,rowB+floor(x*bhx))-128
+                    local Cr = rB(Rp,rowR+floor(x*rhx))-128
+                    local r = Y+1.402*Cr
+                    local g = Y-0.344136*Cb-0.714136*Cr
+                    local b = Y+1.772*Cb
+                    if r<0 then r=0 elseif r>255 then r=255 end
+                    if g<0 then g=0 elseif g>255 then g=255 end
+                    if b<0 then b=0 elseif b>255 then b=255 end
+                    local o=(y*width+x)*4
+                    wB(out,o,r);wB(out,o+1,g);wB(out,o+2,b);wB(out,o+3,255)
+                end
+                if _adYield and (y % 32)==0 then _adYield() end
+            end
+        end
+        return { w=width, h=height, buf=out }
+    end
+
+    -- Load an image file → { w, h, buf }. Uses the pure-Lua PNG/JPEG decoders first
+    -- (dependable across executors, since getcustomasset + CreateEditableImageAsync
+    -- fails on real photos on many builds); falls back to the EditableImage pipeline
+    -- only for other formats. Sets _adYield during decode to avoid script timeouts.
     local function decodeImage(path)
         _adYield = function() RunService.Heartbeat:Wait() end
         local cleanup = function() _adYield = nil end
 
-        -- 1) Pure-Lua PNG via readfile (no getcustomasset needed).
+        -- 1) Pure-Lua PNG / JPEG via readfile (no getcustomasset needed).
         if type(readfile) == "function" then
             local okR, bytes = pcall(readfile, path)
             if okR and type(bytes) == "string" and #bytes > 8 then
+                local b1, b2, b3 = bytes:byte(1), bytes:byte(2), bytes:byte(3)
                 if bytes:sub(1, 8) == PNG_SIG then
                     local px, perr = decodePNG(bytes)
-                    cleanup()
-                    if px then
-                        adlog("decodeImage: PNG decoded %dx%d (pure-Lua)", px.w, px.h)
-                        return px
-                    end
-                    adlog("decodeImage: pure-Lua PNG failed: %s — trying EditableImage", tostring(perr))
-                    _adYield = function() RunService.Heartbeat:Wait() end
+                    if px then cleanup(); adlog("decodeImage: PNG decoded %dx%d (pure-Lua)", px.w, px.h); return px end
+                    cleanup(); adlog("decodeImage: pure-Lua PNG failed: %s", tostring(perr))
+                    return nil, tostring(perr)
+                elseif b1 == 0xFF and b2 == 0xD8 then
+                    local px, jerr = decodeJPEG(bytes)
+                    if px then cleanup(); adlog("decodeImage: JPEG decoded %dx%d (pure-Lua)", px.w, px.h); return px end
+                    cleanup(); adlog("decodeImage: pure-Lua JPEG failed: %s", tostring(jerr))
+                    return nil, tostring(jerr)
                 else
-                    adlog("decodeImage: not PNG (magic %d,%d,%d) — trying EditableImage",
-                        bytes:byte(1) or 0, bytes:byte(2) or 0, bytes:byte(3) or 0)
+                    adlog("decodeImage: unknown format (magic %d,%d,%d) — trying EditableImage",
+                        b1 or 0, b2 or 0, b3 or 0)
                 end
             else
                 adlog("decodeImage: readfile failed (%s) — trying EditableImage", tostring(bytes))
@@ -1009,8 +1301,9 @@ return function(Lib, Core)
         local iw, ih = px.w, px.h
         adlog("runDraw: image %dx%d, pixels read via %s", iw, ih, px.buf and "buffer" or "array")
 
-        -- Fit the image onto the board, preserving aspect if requested.
-        local u0, v0, u1v, v1v = computeRegion(opts.preserve, iw, ih)
+        -- Fit the image onto the board, preserving aspect if requested, then apply
+        -- the user's scale / alignment so the drawing can cover only part of the board.
+        local u0, v0, u1v, v1v = computeRegion(opts.preserve, iw, ih, opts.scale, opts.alignx, opts.aligny)
         local drawW, drawH = (u1v - u0) * BOARD_W, (v1v - v0) * BOARD_H
         local offX, offY = u0 * BOARD_W, v0 * BOARD_H
         adlog("runDraw: region uv[%.3f,%.3f]-[%.3f,%.3f] (%.0fx%.0f px)", u0, v0, u1v, v1v, drawW, drawH)
@@ -1214,6 +1507,7 @@ return function(Lib, Core)
         local opts = {
             path = path, detail = ad.Detail, speed = ad.Speed, threshold = ad.Threshold,
             skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve, sync = ad.Sync,
+            scale = (ad.Scale or 100) / 100, alignx = (ad.AlignX or 50) / 100, aligny = (ad.AlignY or 50) / 100,
         }
         task.spawn(function()
             local ok, err = pcall(runDraw, board, opts, notify)
@@ -1245,7 +1539,8 @@ return function(Lib, Core)
             end
         end
 
-        local u0, v0, u1v, v1v = computeRegion(ad.Preserve, iw, ih)
+        local u0, v0, u1v, v1v = computeRegion(ad.Preserve, iw, ih,
+            (ad.Scale or 100) / 100, (ad.AlignX or 50) / 100, (ad.AlignY or 50) / 100)
         showPreview(board, u0, v0, u1v, v1v, 12)
         notify("Auto Draw", ("preview: board #%s at %.0f studs%s")
             :format(tostring(board.id), dist or 0, iw and (" ("..iw.."x"..ih..")") or ""))
@@ -1279,7 +1574,7 @@ return function(Lib, Core)
     end
 
     -- List image files in the executor workspace root (for the file dropdown).
-    local IMG_EXT = { png = true, jpg = true, jpeg = true, jfif = true, bmp = true, tga = true, webp = true }
+    local IMG_EXT = { png = true, jpg = true, jpeg = true, jfif = true, jpe = true }
     local function scanImageFiles()
         local out = {}
         if type(listfiles) ~= "function" then return out end
@@ -1378,7 +1673,7 @@ return function(Lib, Core)
         local ad = Config.AutoDraw
         local sAD = Misc:Section({ Side = "Right" })
         sAD:Header({ Name = "Auto Draw" })
-        sAD:SubLabel({ Text = "Draws an image on the nearest chalk whiteboard. Equip Chalk and stand within ~16 studs of a board." })
+        sAD:SubLabel({ Text = "Draws a PNG or JPEG on the nearest chalk whiteboard. Equip Chalk and stand within ~16 studs of a board." })
 
         sAD:Input({
             Name = "Image URL", Placeholder = "https://.../image.png", Default = ad.Url,
@@ -1415,7 +1710,7 @@ return function(Lib, Core)
         sAD:SubLabel({ Text = "Vertical resolution. Higher = finer image but more strokes and slower drawing." })
         slider(sAD, {
             Name = "Speed", Flag = "Misc_AutoDraw_Speed",
-            Default = ad.Speed, Min = 5, Max = 200, Precision = 0, Suffix = " /sec",
+            Default = ad.Speed, Min = 5, Max = 4000, Precision = 0, Suffix = " /sec",
             Callback = function(v) ad.Speed = v end,
         })
         sAD:SubLabel({ Text = "Strokes sent per second. The draw remote is unreliable, so very high rates drop packets (gaps) or risk a kick. 30-60 is a safe sweet spot." })
@@ -1442,6 +1737,27 @@ return function(Lib, Core)
             Callback = function(v) ad.Sync = v end,
         }, ctx.flag("Misc_AutoDraw_Sync"))
         sAD:SubLabel({ Text = "ON: also sends strokes to the server so the drawing persists and other players see it (slower, rate-limited). OFF: renders instantly on your screen only." })
+
+        sAD:Divider()
+        sAD:Header({ Name = "Size & Position" })
+        slider(sAD, {
+            Name = "Scale", Flag = "Misc_AutoDraw_Scale",
+            Default = ad.Scale, Min = 10, Max = 100, Precision = 0, Suffix = " %",
+            Callback = function(v) ad.Scale = v end,
+        })
+        sAD:SubLabel({ Text = "How much of the board the drawing fills. 100% = as large as fits; lower to draw a smaller image. Use Preview Board to see the exact region." })
+        slider(sAD, {
+            Name = "Horizontal Align", Flag = "Misc_AutoDraw_AlignX",
+            Default = ad.AlignX, Min = 0, Max = 100, Precision = 0, Suffix = " %",
+            Callback = function(v) ad.AlignX = v end,
+        })
+        sAD:SubLabel({ Text = "0 = left, 50 = center, 100 = right." })
+        slider(sAD, {
+            Name = "Vertical Align", Flag = "Misc_AutoDraw_AlignY",
+            Default = ad.AlignY, Min = 0, Max = 100, Precision = 0, Suffix = " %",
+            Callback = function(v) ad.AlignY = v end,
+        })
+        sAD:SubLabel({ Text = "0 = top, 50 = middle, 100 = bottom." })
 
         sAD:Divider()
         sAD:Header({ Name = "Preview & Debug" })
