@@ -82,14 +82,6 @@ return function(Lib, Core)
             AlignY     = 50,     -- vertical placement: 0 = top, 50 = middle, 100 = bottom
         },
 
-        Collector = {
-            Auto     = false,  -- keep gathering world items into a pile every tick
-            Follow   = false,  -- pile follows the character (mobile dump / "carry all")
-            Radius   = 6,      -- studs: how far in front of you the pile sits
-            Spread   = 4,      -- studs: pile spread (bigger = looser heap)
-            Range    = 0,      -- studs: only collect items within this range (0 = all)
-        },
-
         Chalk = {
             Auto  = false,      -- endlessly take + drop chalk
             Mode  = "Rainbow",  -- "Rainbow" | "Random" | a color key (White/Red/...)
@@ -1844,144 +1836,6 @@ return function(Lib, Core)
         return out
     end
 
-    -- ═══════════════════════════ ITEM COLLECTOR ═════════════════════════════
-    -- Vacuums every loose world item (workspace.Items) toward a pile next to your
-    -- character using PHYSICS, not teleportation (Infinity-Yield style): items are
-    -- left UNANCHORED and we push them with AssemblyLinearVelocity every tick. The
-    -- server auto-assigns network ownership of nearby unanchored parts to the
-    -- closest player, so the client's simulation replicates — this is why a plain
-    -- PivotTo/anchor approach failed (we don't own the parts, the server snaps them
-    -- back), while a velocity nudge on an owned unanchored part sticks.
-    --
-    -- On "holding 2+ items": the character exposes a SINGLE `ItemEquipped`
-    -- attribute and the server validates equips against it (auth-token gated),
-    -- so no client can make the server believe two items are truly equipped.
-    -- Instead of faking that, the collector brings EVERY item to you and can
-    -- make the heap follow you — the same practical payoff (a movable dump you
-    -- carry around) without a fake server state that would just get rejected.
-    local CollectorState = {
-        conn   = nil,
-        center = nil,   -- fixed heap CFrame (Follow off)
-    }
-
-    local function collectorCharRoot()
-        local char = LocalPlayer and LocalPlayer.Character
-        if not char then return nil, nil end
-        local root = char:FindFirstChild("HumanoidRootPart")
-            or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
-        return char, root
-    end
-
-    -- World items = Models directly under workspace.Items. Equipped items get
-    -- reparented onto a character, so anything still under Items is "loose".
-    local function collectorItems()
-        local folder = workspace:FindFirstChild("Items")
-        if not (folder and folder:IsA("Folder")) then return {} end
-        local out = {}
-        for _, m in ipairs(folder:GetChildren()) do
-            if m:IsA("Model") then out[#out + 1] = m end
-        end
-        return out
-    end
-
-    -- Same handle resolution the game uses (ItemServiceUtils.FindModelHandle):
-    -- PrimaryPart, else a part named "Handle", else any BasePart.
-    local function collectorHandle(model)
-        if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then return model.PrimaryPart end
-        local h = model:FindFirstChild("Handle")
-        if h and h:IsA("BasePart") then return h end
-        return model:FindFirstChildWhichIsA("BasePart")
-    end
-
-    -- Resolve the heap center. Follow / a fresh Collect Now recomputes it from the
-    -- character; otherwise the previously stored fixed world point is reused so a
-    -- dropped dump stays put even if you walk away.
-    local function collectorResolveCenter(recompute)
-        if recompute or not CollectorState.center then
-            local _, root = collectorCharRoot()
-            if root then
-                CollectorState.center = root.CFrame * CFrame.new(0, -2, -(Config.Collector.Radius or 6))
-            end
-        end
-        return CollectorState.center
-    end
-
-    -- Try to take network ownership of a part if the executor exposes it (most
-    -- don't from the client — that's fine, proximity auto-ownership still applies).
-    local function collectorClaim(part)
-        local sno = rawget(getfenv and getfenv() or _G, "setnetworkowner")
-        if type(sno) == "function" then pcall(sno, part, LocalPlayer) end
-    end
-
-    -- Physics vacuum: for every in-range world item, leave it UNANCHORED and push it
-    -- toward its slot in the heap with AssemblyLinearVelocity. No teleport, so the
-    -- server (which owns the part) accepts the motion instead of snapping it back.
-    local function collectorPile(center)
-        if not center then return 0 end
-        local cfg = Config.Collector
-        local spread = math.max(0, cfg.Spread or 4)
-        local range  = cfg.Range or 0
-        local _, root = collectorCharRoot()
-        local origin = root and root.Position
-        local n = 0
-        for _, model in ipairs(collectorItems()) do
-            local handle = collectorHandle(model)
-            if handle then
-                local inRange = true
-                if range > 0 and origin then
-                    inRange = (handle.Position - origin).Magnitude <= range
-                end
-                if inRange then
-                    -- Golden-angle scatter for an even, natural-looking heap.
-                    local ang = n * 2.399963
-                    local rad = spread * math.sqrt((n % 32) / 32)
-                    local target = (center * CFrame.new(math.cos(ang) * rad, (n % 3) * 0.6, math.sin(ang) * rad)).Position
-                    pcall(function()
-                        if handle.Anchored then handle.Anchored = false end
-                        collectorClaim(handle)
-                        local delta = target - handle.Position
-                        local dist  = delta.Magnitude
-                        if dist > 0.4 then
-                            -- Speed scales with distance so items rush in then settle.
-                            local speed = math.clamp(dist * 9, 0, 90)
-                            handle.AssemblyLinearVelocity = delta.Unit * speed
-                        else
-                            -- Arrived: kill motion so the heap sits still.
-                            handle.AssemblyLinearVelocity  = Vector3.zero
-                            handle.AssemblyAngularVelocity = Vector3.zero
-                        end
-                    end)
-                    n = n + 1
-                end
-            end
-        end
-        return n
-    end
-
-    -- One-shot gather at the current character position (used by the button).
-    local function collectorCollectNow()
-        local center = collectorResolveCenter(true)
-        return collectorPile(center)
-    end
-
-    local function collectorStop()
-        Config.Collector.Auto = false
-        if CollectorState.conn then CollectorState.conn:Disconnect(); CollectorState.conn = nil end
-        CollectorState.center = nil
-    end
-
-    -- Persistent vacuum loop; gated on Config.Collector.Auto. Runs every frame so
-    -- the physics push stays smooth. Follow recomputes the center from the character
-    -- each tick (heap sticks to you); otherwise items pull to the fixed stored center.
-    local function collectorStart()
-        if CollectorState.conn then return end
-        CollectorState.conn = RunService.Heartbeat:Connect(function()
-            if not Config.Collector.Auto then return end
-            local center = collectorResolveCenter(Config.Collector.Follow == true)
-            pcall(collectorPile, center)
-        end)
-    end
-
     -- ═══════════════════════════ CHALK SPAMMER ══════════════════════════════
     -- Endlessly takes chalk from a ChalkCarton dispenser and immediately drops it,
     -- littering the floor with chalk. Mirrors exactly what the game itself does:
@@ -2030,13 +1884,17 @@ return function(Lib, Core)
         return mode  -- a specific color key
     end
 
+    -- Each action returns (ok, reason) so the UI can report the ACTUAL failure
+    -- point instead of a vague "failed". reason is nil on success.
     local function chalkRequest(colorKey)
-        local net  = getNet()
+        local net = getNet()
+        if not net then return false, "network Client unavailable" end
+        if not net.DispenserRequest then return false, "DispenserRequest remote missing" end
         local auth = chalkAuth()
-        if not (net and net.DispenserRequest and auth) then return false end
+        if not auth then return false, "AuthServiceClient unavailable" end
         local token, check, nonce = auth:NextForKey("Dispenser.Request")
-        if nonce == 0 then return false end
-        local ok = pcall(function()
+        if nonce == 0 then return false, "auth returned no token (rate limited?)" end
+        local ok, err = pcall(function()
             net.DispenserRequest.Fire({
                 DispenserName = "ChalkCarton",
                 OptionKey     = colorKey,
@@ -2045,17 +1903,22 @@ return function(Lib, Core)
                 Nonce         = nonce,
             })
         end)
-        return ok
+        if not ok then return false, "Fire error: " .. tostring(err) end
+        return true
     end
 
     local function chalkDrop()
         local auth = chalkAuth()
+        if not auth then return false, "AuthServiceClient unavailable" end
         local remotes = ReplicatedStorage:FindFirstChild("Remotes")
         local unequip = remotes and remotes:FindFirstChild("ItemUnequip")
-        if not (auth and unequip and unequip:IsA("RemoteEvent")) then return false end
+        if not remotes then return false, "Remotes folder missing" end
+        if not (unequip and unequip:IsA("RemoteEvent")) then return false, "ItemUnequip remote missing" end
         local token, check, nonce = auth:NextForKey("Item.Unequip")
-        if nonce == 0 then return false end
-        return pcall(function() unequip:FireServer(token, check, nonce) end)
+        if nonce == 0 then return false, "auth returned no token (rate limited?)" end
+        local ok, err = pcall(function() unequip:FireServer(token, check, nonce) end)
+        if not ok then return false, "FireServer error: " .. tostring(err) end
+        return true
     end
 
     -- One full cycle driver. Held item -> drop it; empty hands -> request chalk.
@@ -2077,8 +1940,8 @@ return function(Lib, Core)
         end
     end
 
-    -- Manual one-shot: take a chalk now (it will be dropped on the next tick if Auto
-    -- is on, or you can press again). Returns whether the request fired.
+    -- Manual one-shot: hold something -> drop it; empty hands -> take chalk.
+    -- Returns (ok, reason) so the button can show the real failure cause.
     local function chalkTakeAndDropOnce()
         local equipped = chalkCharAttr("ItemEquipped")
         if equipped ~= nil then return chalkDrop() end
@@ -2109,14 +1972,12 @@ return function(Lib, Core)
                 if Config.AutoRythm_On then pcall(step) end
             end)
         end
-        collectorStart()
         chalkStart()
         pcall(function()
             if Core and Core.On then
                 Core:On("unload", function()
                     Config.AutoRythm_On = false
                     stopAutoDraw()
-                    collectorStop()
                     chalkStop()
                     if _conn then _conn:Disconnect(); _conn = nil end
                 end)
@@ -2183,51 +2044,6 @@ return function(Lib, Core)
         sAR:Divider()
         sAR:SubLabel({ Text = "Grabs the live RhythmEngine and plays it directly, so the game sees a clean PERFECT run. Just start a song and enable." })
 
-        -- ─────────────── Section: Item Collector (Left) ───────────────
-        local col = Config.Collector
-        local sIC = Misc:Section({ Side = "Left" })
-        sIC:Header({ Name = "Item Collector" })
-        sIC:Button({
-            Name = "Collect Now",
-            Callback = function()
-                local n = collectorCollectNow()
-                notify("Item Collector", ("piled %d item%s next to you"):format(n, n == 1 and "" or "s"))
-            end,
-        })
-        sIC:SubLabel({ Text = "Sweeps every loose world item into a heap right next to your character (one shot)." })
-        feature(sIC, {
-            Title = "Auto Collect", Flag = "Misc_Collector_Auto",
-            get = function() return col.Auto end,
-            set = function(v) col.Auto = v and true or false end,
-            Desc = "keeps sweeping items into the heap so new / knocked-away items get pulled back in",
-        })
-        sIC:Toggle({
-            Name = "Follow me", Default = col.Follow,
-            Callback = function(v) col.Follow = v and true or false end,
-        }, ctx.flag("Misc_Collector_Follow"))
-        sIC:SubLabel({ Text = "ON: the heap sticks to you (a movable dump you carry around). OFF: the pile is dropped in place and stays there even if you walk away." })
-        sIC:Divider()
-        slider(sIC, {
-            Name = "Distance", Flag = "Misc_Collector_Radius",
-            Default = col.Radius, Min = 3, Max = 20, Precision = 0, Suffix = " studs",
-            Callback = function(v) col.Radius = v end,
-        })
-        sIC:SubLabel({ Text = "How far in front of you the heap sits." })
-        slider(sIC, {
-            Name = "Spread", Flag = "Misc_Collector_Spread",
-            Default = col.Spread, Min = 0, Max = 15, Precision = 0, Suffix = " studs",
-            Callback = function(v) col.Spread = v end,
-        })
-        sIC:SubLabel({ Text = "How loose the heap is (0 = tight stack, higher = spread out)." })
-        slider(sIC, {
-            Name = "Range", Flag = "Misc_Collector_Range",
-            Default = col.Range, Min = 0, Max = 500, Precision = 0, Suffix = " studs",
-            Callback = function(v) col.Range = v end,
-        })
-        sIC:SubLabel({ Text = "Only grab items within this distance (0 = whole map)." })
-        sIC:Divider()
-        sIC:SubLabel({ Text = "Note: the game tracks one equipped item per player server-side, so 2+ truly-held items would just be rejected. This gathers ALL items to you instead — same payoff, no fake state." })
-
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
         local sCH = Misc:Section({ Side = "Right" })
@@ -2236,10 +2052,11 @@ return function(Lib, Core)
         sCH:Button({
             Name = "Take & Drop Once",
             Callback = function()
-                if chalkTakeAndDropOnce() then
+                local ok, reason = chalkTakeAndDropOnce()
+                if ok then
                     notify("Chalk Spammer", "took / dropped chalk")
                 else
-                    notify("Chalk Spammer", "failed — stand next to a chalk box")
+                    notify("Chalk Spammer", "failed: " .. tostring(reason or "unknown"))
                 end
             end,
         })
