@@ -479,34 +479,58 @@ return function(Lib, Core)
     end
 
     -- Load an image file (workspace-relative path) into an EditableImage.
+    -- Load an image file into an EditableImage. Roblox reworked this API twice, and
+    -- CreateEditableImageAsync now RETURNS NIL (no error) on failure, so we try every
+    -- known call form and surface the REAL error/reason instead of guessing.
     local function loadEditableImage(path)
         local getAsset = getcustomasset or getsynasset
         if type(getAsset) ~= "function" then
-            return nil, "executor has no getcustomasset"
+            return nil, "executor has no getcustomasset/getsynasset"
         end
-        local asset
-        if not pcall(function() asset = getAsset(path) end) or not asset then
-            return nil, "getcustomasset failed for '" .. tostring(path) .. "'"
+        local okA, asset = pcall(getAsset, path)
+        if not okA or not asset then
+            return nil, "getcustomasset failed: " .. tostring(asset)
         end
         adlog("loadImage: getcustomasset ok, asset='%s'", tostring(asset))
-        local content
-        pcall(function() content = Content.fromUri(asset) end)
 
-        local img
-        local ok1 = content and pcall(function()
-            img = AssetService:CreateEditableImageAsync(content)
-        end)
-        adlog("loadImage: CreateEditableImageAsync(content) ok=%s img=%s", tostring(ok1), tostring(img ~= nil))
-        if not (ok1 and img) then
-            local ok2 = pcall(function()
-                img = AssetService:CreateEditableImageAsync(asset)
+        local attempts = {}
+        local function tryCreate(label, arg)
+            local okI, res = pcall(function()
+                return AssetService:CreateEditableImageAsync(arg)
             end)
-            adlog("loadImage: fallback CreateEditableImageAsync(asset) ok=%s img=%s", tostring(ok2), tostring(img ~= nil))
-            if not (ok2 and img) then
-                return nil, "CreateEditableImageAsync failed (format unsupported or image too large; max 1024x1024)"
+            if okI and res then
+                adlog("loadImage: [%s] SUCCESS size=%s", label, tostring(res.Size))
+                return res
             end
+            local why = okI and "returned nil (over memory budget / bad format)" or tostring(res)
+            adlog("loadImage: [%s] failed: %s", label, why)
+            attempts[#attempts + 1] = label .. " -> " .. why
+            return nil
         end
-        return img
+
+        -- Strategy 1 (current API): CreateEditableImageAsync(Content.fromUri(asset))
+        local ContentT
+        pcall(function() ContentT = Content end)
+        if ContentT and type(ContentT.fromUri) == "function" then
+            local okC, content = pcall(ContentT.fromUri, asset)
+            if okC and content then
+                local img = tryCreate("Content.fromUri", content)
+                if img then return img end
+            else
+                adlog("loadImage: Content.fromUri ctor failed: %s", tostring(content))
+                attempts[#attempts + 1] = "Content.fromUri ctor -> " .. tostring(content)
+            end
+        else
+            attempts[#attempts + 1] = "Content.fromUri unavailable"
+        end
+
+        -- Strategy 2 (legacy API): CreateEditableImageAsync(assetUriString)
+        do
+            local img = tryCreate("direct-string", asset)
+            if img then return img end
+        end
+
+        return nil, "CreateEditableImage failed — " .. table.concat(attempts, " | ")
     end
 
     -- Read every pixel; returns { w, h, buf|arr } for O(1) sampling.
@@ -783,6 +807,35 @@ return function(Lib, Core)
             :format(tostring(board.id), dist or 0, iw and (" ("..iw.."x"..ih..")") or ""))
     end
 
+    -- Diagnostic: draw a big white "X" + border on the nearest board WITHOUT any
+    -- image loading. If this appears, the network/draw path works and any failure
+    -- is purely in image decoding. If it does NOT appear, the issue is proximity,
+    -- board id, chalk-equip requirement, or the remote itself.
+    local function testStroke(notify)
+        local net = getNet()
+        if not net or not net.WhiteboardDrawBatch then
+            notify("Auto Draw", "network remote unavailable"); return
+        end
+        local board, dist = findNearestBoard()
+        if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
+        if dist and dist > 22 then
+            notify("Auto Draw", ("too far (%.0f studs) — move closer"):format(dist)); return
+        end
+        local W = b8(CHALK_COLOR.R * 255)
+        local id = board.id
+        adlog("testStroke: firing X on boardId=%s dist=%.1f", tostring(id), dist or -1)
+        -- Two diagonals + a rectangle border, all as connected 2-point strokes.
+        fireRun(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.95)
+        fireRun(id, 2, W, W, W, 0.95, 0.05, 0.05, 0.95)
+        fireRun(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.05)
+        fireRun(id, 2, W, W, W, 0.95, 0.05, 0.95, 0.95)
+        fireRun(id, 2, W, W, W, 0.95, 0.95, 0.05, 0.95)
+        fireRun(id, 2, W, W, W, 0.05, 0.95, 0.05, 0.05)
+        showPreview(board, 0, 0, 1, 1, 8)
+        notify("Auto Draw", ("test X sent to board #%s (%.0f studs) — check the board")
+            :format(tostring(id), dist or 0))
+    end
+
     -- List image files in the executor workspace root (for the file dropdown).
     local IMG_EXT = { png = true, jpg = true, jpeg = true, jfif = true, bmp = true, tga = true, webp = true }
     local function scanImageFiles()
@@ -947,6 +1000,8 @@ return function(Lib, Core)
         sAD:Header({ Name = "Preview & Debug" })
         sAD:Button({ Name = "Preview Board", Callback = function() previewBoard(notify) end })
         sAD:SubLabel({ Text = "Highlights the nearest board (blue) and outlines where the image will be drawn (green). Auto-clears after ~12s." })
+        sAD:Button({ Name = "Test Stroke (X)", Callback = function() testStroke(notify) end })
+        sAD:SubLabel({ Text = "Draws a plain white X + border on the board with NO image. If this shows up, drawing works and only image loading is the problem." })
         sAD:Button({ Name = "Clear Preview", Callback = function() clearPreview(); notify("Auto Draw", "preview cleared") end })
         sAD:Toggle({
             Name = "Debug Logging", Default = ad.Debug,
