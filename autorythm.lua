@@ -238,27 +238,37 @@ return function(Lib, Core)
 
         table.clear(_laneHolding)
 
-        -- HOW HOLDS ACTUALLY WORK IN THIS ENGINE (verified in RhythmEngine._step):
-        --   1. We press a hold note ONCE near note.t → _onPressLane sets note.hit = true.
-        --   2. Every frame _step promotes any hit hold note to holding = true once
-        --      note.t <= now, and sets holdStartTime = note.t (RhythmEngine:1463-1471).
-        --   3. At note.t+len, _step AUTO-FINALIZES the hold: ratio = (now-holdStart)/len
-        --      ≈ 1.0 → PERFECT, and removes it (RhythmEngine:1582-1601).
-        -- => We must NOT call release for a hold; releasing early is scored EARLY_RELEASE.
-        --    The engine holds and scores it for us. We only press once and wait.
-
-        -- Mark lanes that have a hold in progress (pressed, not yet auto-finalized) so the
-        -- tap branch never fires a release on them. Base this on note.hit (set instantly
-        -- at press) — not note.holding, which the engine only sets a frame or two later.
+        -- HOW HOLDS WORK IN THIS ENGINE (verified in RhythmEngine._onPressLane / _step):
+        --   1. Pressing a hold near note.t → _onPressLane sets note.hit = true, and, IF
+        --      note.t <= engine._now() at that instant, also note.holding = true. If we
+        --      pressed a hair early (note.t > engine._now()), it sets hit only and takes
+        --      the "future note" branch — holding stays false (RhythmEngine:1153-1163).
+        --   2. Each frame _step is SUPPOSED to promote a hit hold to holding once
+        --      note.t <= now (RhythmEngine:1463-1471), then AUTO-FINALIZE it at note.t+len
+        --      with ratio ≈ 1.0 → PERFECT (RhythmEngine:1582-1601).
+        --   3. Scoring depends ENTIRELY on note.holding being true at note.t+len. If, for
+        --      any reason, the engine's promote pass doesn't set it, the hold despawns
+        --      unscored — which is the bug being reported.
+        --
+        -- FIX: `active` IS the engine's live _active array, so we drive the promote
+        -- OURSELVES — doing exactly what RhythmEngine:1465-1469 does — for every hit hold
+        -- whose start time has arrived. This guarantees holding=true regardless of the
+        -- engine's own timing, and the engine then finalizes it as PERFECT. We never
+        -- release a hold early (that scores EARLY_RELEASE); the engine finalizes it.
         for _, note in ipairs(active) do
             if (note.len or 0) > 0 and note.hit and note.holdJudgment == nil then
                 _laneHolding[note.lane] = true
+                if note.t <= now and note.holding ~= true then
+                    note.holdStartTime = note.holdStartTime or note.t
+                    note.holding = true
+                end
             end
         end
 
-        -- Cleanup: once the engine has finalized a hold (holdJudgment set), fire ONE
-        -- authorized release so the lane's key state resets for future notes, then stop
-        -- tracking it. (The release comes AFTER scoring, so it can't hurt the judgment.)
+        -- Cleanup: once the engine has finalized a hold (holdJudgment set) — or its press
+        -- somehow missed (hit never became true) — fire ONE authorized release to reset
+        -- the lane's key state, then stop tracking it. This runs AFTER scoring, so it
+        -- cannot downgrade the judgment.
         for lane, note in pairs(_heldLane) do
             if note.holdJudgment ~= nil or not note.hit then
                 _allowRelease[lane] = true
@@ -274,11 +284,16 @@ return function(Lib, Core)
             if type(lane) == "number" and lane >= 1 and lane <= lanes
                and not note.hit and not note.attempted then
                 if (note.len or 0) > 0 then
-                    -- Hold: press once at/just after note.t so _onPressLane registers a
-                    -- hit (and, since now >= note.t, sets holding immediately). Then leave
-                    -- it — the engine keeps it held and auto-scores it at note.t+len.
+                    -- Hold: press once at/just after note.t. Then immediately guarantee
+                    -- the holding state ourselves (covers the "future note" branch where
+                    -- _onPressLane set hit but not holding), so the sustain is always
+                    -- scored. Leave the key logically down — never release it here.
                     if now >= note.t + offset and not _heldLane[lane] then
                         pcall(engine._handleLanePress, engine, lane)
+                        if note.hit and note.t <= now and note.holding ~= true then
+                            note.holdStartTime = note.holdStartTime or note.t
+                            note.holding = true
+                        end
                         _heldLane[lane] = note
                         _laneHolding[lane] = true
                     end
