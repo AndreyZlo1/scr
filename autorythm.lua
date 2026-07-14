@@ -221,15 +221,54 @@ return function(Lib, Core)
     -- any release we didn't authorize (a stray InputEnded would EARLY_RELEASE the
     -- hold before the engine auto-finalizes it at t+len). We only allow the single
     -- cleanup release we fire ourselves after the hold has already been scored.
+    -- Unique per SCRIPT LOAD. If the user re-executes the script, the engine object may
+    -- persist with an OLD guard installed whose closures capture the OLD (dead) _heldLane
+    -- table — that stale guard blocks nothing and every release slips through as an
+    -- EARLY_RELEASE. Tagging the engine with this token lets us detect "my guard isn't the
+    -- live one" and reinstall fresh closures bound to THIS load's tables.
+    local GUARD_TOKEN = {}
     local function installReleaseGuard(engine)
-        if rawget(engine, "__ar_relGuard") then return end
-        local realRelease = engine._handleLaneRelease
+        if rawget(engine, "__ar_guardToken") == GUARD_TOKEN then return end
+
+        -- Capture the TRUE originals once (never chain onto a previous guard).
+        if type(rawget(engine, "__ar_realRelease")) ~= "function" then
+            local r = engine._handleLaneRelease
+            if type(r) == "function" then rawset(engine, "__ar_realRelease", r) end
+        end
+        if type(rawget(engine, "__ar_realOnRelease")) ~= "function" then
+            local r = engine._onReleaseLane
+            if type(r) == "function" then rawset(engine, "__ar_realOnRelease", r) end
+        end
+        local realRelease   = rawget(engine, "__ar_realRelease")
+        local realOnRelease = rawget(engine, "__ar_realOnRelease")
         if type(realRelease) ~= "function" then return end
+
+        -- Guard _handleLaneRelease: drop unauthorized releases on held lanes.
         rawset(engine, "_handleLaneRelease", function(self, lane)
-            if _heldLane[lane] and not _allowRelease[lane] then return end
+            if _heldLane[lane] and not _allowRelease[lane] then
+                rlog("GUARD BLOCK handleRelease lane=%s", tostring(lane))
+                return
+            end
             return realRelease(self, lane)
         end)
-        rawset(engine, "__ar_relGuard", true)
+
+        -- Guard _onReleaseLane: THE real protection. This is the only function that sets
+        -- EARLY_RELEASE and applies its score (RhythmEngine:1183-1184). No matter what
+        -- calls it (keyboard/gamepad/touch InputEnded), block it on a lane we are
+        -- deliberately auto-holding so the engine finalizes the sustain as PERFECT at
+        -- t+len instead.
+        if type(realOnRelease) == "function" then
+            rawset(engine, "_onReleaseLane", function(self, lane, t)
+                if _heldLane[lane] and not _allowRelease[lane] then
+                    rlog("GUARD BLOCK onReleaseLane lane=%s", tostring(lane))
+                    return
+                end
+                return realOnRelease(self, lane, t)
+            end)
+        end
+
+        rawset(engine, "__ar_guardToken", GUARD_TOKEN)
+        rlog("GUARD INSTALLED (handleRelease + onReleaseLane) on engine %s", tostring(engine))
     end
 
     local function step()
