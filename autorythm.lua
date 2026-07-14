@@ -240,11 +240,27 @@ return function(Lib, Core)
     end
 
     -- ── The autoplay step (one pass over the on-screen notes) ────────────────
-    local _laneHolding, _pressHold, _pressTap = {}, {}, {}   -- reused scratch tables
+    -- Strategy: mimic a real player. Press a note's lane exactly when it arrives
+    -- (now >= note.t); for a hold, keep the key logically down and RELEASE it when
+    -- the hold duration completes (now >= note.t + note.len). The engine's own
+    -- _onReleaseLane then finalizes the hold with fraction = (release - start)/len
+    -- ≈ 1.0 → PERFECT (RhythmEngine:1178). We do NOT poke internal fields — genuine
+    -- press/release through the real handlers is what the engine trusts.
+    local _laneHolding, _pressTap = {}, {}      -- reused scratch tables
+    local _heldLane = {}   -- lane -> hold note we are currently holding (persists across frames)
+    local _gradeSeen = setmetatable({}, { __mode = "k" })  -- note -> true once we've logged its grade
+    local _lastEngine  -- detect song changes to drop stale hold tracking
+
     local function step()
         if not Config.AutoRythm_On then return end
         local engine = getEngine()
         if not engine then return end
+
+        -- New song / new engine → forget any hold we thought we were holding.
+        if engine ~= _lastEngine then
+            _lastEngine = engine
+            table.clear(_heldLane)
+        end
 
         local okNow, now = pcall(engine._now, engine)
         if not okNow or type(now) ~= "number" then return end
@@ -256,111 +272,72 @@ return function(Lib, Core)
 
         dbgT("step_alive", 2, ("step: now=%.2f lanes=%d activeNotes=%d"):format(now, lanes, #active))
 
-        -- Reused scratch tables (cleared each frame → no per-frame allocation).
-        table.clear(_laneHolding); table.clear(_pressHold); table.clear(_pressTap)
+        table.clear(_laneHolding); table.clear(_pressTap)
 
-        -- First figure out which lanes currently have a hold in progress — we must
-        -- never tap-release those (a release runs _onReleaseLane on the whole lane
-        -- and EARLY_RELEASEs the hold). We treat a lane as "busy with a hold" if it
-        -- has a hold note that's already been hit but not yet finalized — this is
-        -- stronger than checking note.holding alone, which can momentarily flip
-        -- false between the engine's maintenance passes.
+        -- Lanes with a hold currently in progress must never be tap-released.
         for _, note in ipairs(active) do
-            if (note.len or 0) > 0 and (note.holding or (note.hit and not note.holdJudgment)) then
+            if (note.len or 0) > 0 and note.hit and not note.holdJudgment then
                 _laneHolding[note.lane] = true
             end
+            -- Lifecycle logging: report the ACTUAL grade the engine assigns a hold.
+            if (note.len or 0) > 0 and note.holdJudgment and not _gradeSeen[note] then
+                _gradeSeen[note] = true
+                local frac = note.holdDuration and note.len and (note.holdDuration / note.len) or -1
+                dbg(("HOLD GRADE lane=%d judgment=%s frac=%.3f start=%.3f end=%.3f len=%.2f")
+                    :format(note.lane or -1, tostring(note.holdJudgment), frac,
+                            note.holdStartTime or -1, note.holdEndTime or -1, note.len or -1))
+            end
         end
 
-        -- Decide presses this frame. A note is due when now >= its hit time.
-        --
-        -- CRITICAL for holds: the engine only starts a hold (holding = true) if the
-        -- press lands at/after the note time. If you press even slightly EARLY it
-        -- takes the "future note" branch (_onPressLane:1154) — the tap is credited
-        -- but holding never turns on, so the sustain scores nothing. Taps don't care
-        -- about early vs late (any press inside the window counts), so ONLY holds
-        -- must be protected: we clamp their offset so a negative (press-earlier)
-        -- Offset can never drag a hold press before note.t.
-        -- Map each lane we want to press to the actual hold note (so we can verify
-        -- the press "took" afterwards and re-press if the engine didn't register it).
-        local holdOffset = (offset > 0) and offset or 0
-        local _holdNote = {}   -- lane -> note (the hold we're trying to start)
+        local nHoldStart, nHoldEnd, nTap = 0, 0, 0
+
+        -- 1) RELEASE holds whose duration has elapsed (now >= t + len). This is the
+        --    finalize a real player triggers — gives fraction ≈ 1.0 → PERFECT.
+        for lane, note in pairs(_heldLane) do
+            local finalized = note.holdJudgment ~= nil
+            local elapsed   = now >= (note.t + (note.len or 0))
+            if finalized then
+                _heldLane[lane] = nil                       -- engine already scored it
+            elseif elapsed then
+                local ok = pcall(engine._handleLaneRelease, engine, lane)
+                _heldLane[lane] = nil
+                nHoldEnd = nHoldEnd + 1
+                dbg(("HOLD RELEASE lane=%d ok=%s at now=%.3f (t+len=%.3f) holding=%s")
+                    :format(lane, tostring(ok), now, note.t + (note.len or 0), tostring(note.holding)))
+            end
+        end
+
+        -- 2) PRESS notes that have arrived. Holds start a sustain we release later;
+        --    taps are pressed+released immediately.
         for _, note in ipairs(active) do
             local lane = note.lane
-            if type(lane) == "number" and lane >= 1 and lane <= lanes then
-                if not note.hit and not note.attempted then
-                    if (note.len or 0) > 0 then
-                        if not note.holding and now >= note.t + holdOffset then
-                            _pressHold[lane] = true
-                            _holdNote[lane] = note
-                        end
-                    elseif now >= note.t + offset then
-                        _pressTap[lane] = true
+            if type(lane) == "number" and lane >= 1 and lane <= lanes
+               and not note.hit and not note.attempted then
+                if (note.len or 0) > 0 then
+                    -- Hold: press only at/after note.t (an early press takes the
+                    -- "future note" branch and never sets holding — _onPressLane:1154).
+                    local holdOffset = (offset > 0) and offset or 0
+                    if now >= note.t + holdOffset and not _heldLane[lane] then
+                        local ok = pcall(engine._handleLanePress, engine, lane)
+                        _heldLane[lane] = note
+                        _laneHolding[lane] = true
+                        nHoldStart = nHoldStart + 1
+                        dbg(("HOLD START  lane=%d ok=%s -> hit=%s holding=%s dt=%.3f len=%.2f")
+                            :format(lane, tostring(ok), tostring(note.hit), tostring(note.holding),
+                                    now - note.t, note.len or -1))
                     end
+                elseif now >= note.t + offset and not _laneHolding[lane] then
+                    local ok1 = pcall(engine._handleLanePress, engine, lane)
+                    local ok2 = pcall(engine._handleLaneRelease, engine, lane)
+                    nTap = nTap + 1
+                    dbg(("TAP  lane=%d press=%s release=%s"):format(lane, tostring(ok1), tostring(ok2)))
                 end
             end
         end
 
-        -- Holds: press ONCE and DO NOT release. Once the note is `hit`, the engine's
-        -- own maintenance loop re-asserts holding=true every step and auto-finalizes
-        -- it at t+len with fraction ≈ 1.0 → PERFECT (RhythmEngine._step:1463-1471,
-        -- 1582). A manual release would score EARLY_RELEASE and tank the grade.
-        local nHold, nTap = 0, 0
-        for lane in pairs(_pressHold) do
-            local note = _holdNote[lane]
-            local ok = pcall(engine._handleLanePress, engine, lane)
-            nHold = nHold + 1
-            if note then
-                -- Report whether the press actually registered on THIS hold note.
-                dbg(("HOLD lane=%d ok=%s  -> hit=%s holding=%s attempted=%s len=%.2f dt=%.3f")
-                    :format(lane, tostring(ok), tostring(note.hit), tostring(note.holding),
-                            tostring(note.attempted), note.len or -1, now - note.t))
-                if note.attempted and not note.hit then
-                    dbg(("  !! HOLD lane=%d got MISS on press (dt=%.3f) — timing outside window")
-                        :format(lane, now - note.t))
-                end
-            else
-                dbg(("HOLD lane=%d ok=%s (no note ref)"):format(lane, tostring(ok)))
-            end
-        end
-        -- Taps: quick press + release. Skip lanes that are mid-hold or just pressed.
-        for lane in pairs(_pressTap) do
-            if not _pressHold[lane] and not _laneHolding[lane] then
-                local ok1 = pcall(engine._handleLanePress, engine, lane)
-                local ok2 = pcall(engine._handleLaneRelease, engine, lane)
-                nTap = nTap + 1
-                dbg(("TAP  lane=%d press=%s release=%s"):format(lane, tostring(ok1), tostring(ok2)))
-            end
-        end
-
-        -- ── Sustain maintenance — the actual fix for holds ───────────────────
-        -- Pressing once should be enough (the engine re-asserts holding in its own
-        -- maintenance loop), but in practice a hold can lose `holding` before it
-        -- finalizes, and the engine then drops the sustain with no score. So we
-        -- actively KEEP every hit-but-unfinished hold alive every frame:
-        --   • holding = true          → the finalize branch (RhythmEngine:1582) runs
-        --   • holdStartTime = note.t  → fraction = (t+len - t)/len = 1.0 → PERFECT
-        --     (fraction is judged by _judgeHoldNote:454; >=0.95 => PERFECT)
-        --   • _laneKeyDown[lane] = true → mirror a physically-held key so nothing
-        --     in the engine treats the key as released.
-        -- We only do this once the note has arrived (now >= note.t) and before it's
-        -- been finalized (no holdJudgment yet), matching the engine's own gating.
-        local keyDown = engine._laneKeyDown
-        local nSustain = 0
-        for _, note in ipairs(active) do
-            if (note.len or 0) > 0 and note.hit and not note.holdJudgment and now >= note.t then
-                note.holding = true
-                if note.holdStartTime == nil or note.holdStartTime > note.t then
-                    note.holdStartTime = note.t
-                end
-                if type(keyDown) == "table" and type(note.lane) == "number" then
-                    keyDown[note.lane] = true
-                end
-                nSustain = nSustain + 1
-            end
-        end
-
-        if nHold > 0 or nTap > 0 or nSustain > 0 then
-            dbgT("frame_fire", 1, ("frame: %d hold-start, %d tap, %d sustaining"):format(nHold, nTap, nSustain))
+        if nHoldStart > 0 or nHoldEnd > 0 or nTap > 0 then
+            dbgT("frame_fire", 1, ("frame: %d hold-start, %d hold-release, %d tap")
+                :format(nHoldStart, nHoldEnd, nTap))
         end
     end
 
