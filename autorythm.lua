@@ -260,9 +260,15 @@ return function(Lib, Core)
         table.clear(_laneHolding); table.clear(_pressHold); table.clear(_pressTap)
 
         -- First figure out which lanes currently have a hold in progress — we must
-        -- never tap-release those (it would EARLY_RELEASE and wreck the hold).
+        -- never tap-release those (a release runs _onReleaseLane on the whole lane
+        -- and EARLY_RELEASEs the hold). We treat a lane as "busy with a hold" if it
+        -- has a hold note that's already been hit but not yet finalized — this is
+        -- stronger than checking note.holding alone, which can momentarily flip
+        -- false between the engine's maintenance passes.
         for _, note in ipairs(active) do
-            if note.holding then _laneHolding[note.lane] = true end
+            if (note.len or 0) > 0 and (note.holding or (note.hit and not note.holdJudgment)) then
+                _laneHolding[note.lane] = true
+            end
         end
 
         -- Decide presses this frame. A note is due when now >= its hit time.
@@ -274,7 +280,10 @@ return function(Lib, Core)
         -- about early vs late (any press inside the window counts), so ONLY holds
         -- must be protected: we clamp their offset so a negative (press-earlier)
         -- Offset can never drag a hold press before note.t.
+        -- Map each lane we want to press to the actual hold note (so we can verify
+        -- the press "took" afterwards and re-press if the engine didn't register it).
         local holdOffset = (offset > 0) and offset or 0
+        local _holdNote = {}   -- lane -> note (the hold we're trying to start)
         for _, note in ipairs(active) do
             local lane = note.lane
             if type(lane) == "number" and lane >= 1 and lane <= lanes then
@@ -282,6 +291,7 @@ return function(Lib, Core)
                     if (note.len or 0) > 0 then
                         if not note.holding and now >= note.t + holdOffset then
                             _pressHold[lane] = true
+                            _holdNote[lane] = note
                         end
                     elseif now >= note.t + offset then
                         _pressTap[lane] = true
@@ -290,15 +300,27 @@ return function(Lib, Core)
             end
         end
 
-        -- Holds: press ONCE and DO NOT release. The engine auto-finalizes the held
-        -- note at t+len with fraction ≈ 1.0 → PERFECT (RhythmEngine._step:1582). A
-        -- manual early release would score EARLY_RELEASE and tank the grade.
-        -- (pcall(fn, engine, lane) forwards args → no per-frame closure allocation.)
+        -- Holds: press ONCE and DO NOT release. Once the note is `hit`, the engine's
+        -- own maintenance loop re-asserts holding=true every step and auto-finalizes
+        -- it at t+len with fraction ≈ 1.0 → PERFECT (RhythmEngine._step:1463-1471,
+        -- 1582). A manual release would score EARLY_RELEASE and tank the grade.
         local nHold, nTap = 0, 0
         for lane in pairs(_pressHold) do
+            local note = _holdNote[lane]
             local ok = pcall(engine._handleLanePress, engine, lane)
             nHold = nHold + 1
-            dbg(("HOLD press lane=%d ok=%s"):format(lane, tostring(ok)))
+            if note then
+                -- Report whether the press actually registered on THIS hold note.
+                dbg(("HOLD lane=%d ok=%s  -> hit=%s holding=%s attempted=%s len=%.2f dt=%.3f")
+                    :format(lane, tostring(ok), tostring(note.hit), tostring(note.holding),
+                            tostring(note.attempted), note.len or -1, now - note.t))
+                if note.attempted and not note.hit then
+                    dbg(("  !! HOLD lane=%d got MISS on press (dt=%.3f) — timing outside window")
+                        :format(lane, now - note.t))
+                end
+            else
+                dbg(("HOLD lane=%d ok=%s (no note ref)"):format(lane, tostring(ok)))
+            end
         end
         -- Taps: quick press + release. Skip lanes that are mid-hold or just pressed.
         for lane in pairs(_pressTap) do
