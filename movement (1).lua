@@ -125,7 +125,7 @@ return function(Lib, Core)
         AntiRagdoll_On = false,
     }
 
-    -- ═════════════════════════ Character helpers ═════════════════════���══════
+    -- ═════════════════════════ Character helpers ═════════════════════����══════
     local function getChar()
         local c = LocalPlayer.Character
         if not c or not c.Parent then return nil end
@@ -433,19 +433,50 @@ return function(Lib, Core)
     -- Are WE currently ragdolled / downed? While ragdolled the physics ragdoll needs real
     -- collisions (otherwise you clip through the floor and the game's get-up can break/desync),
     -- so NoClip must PAUSE for the whole ragdoll and auto-resume once it clears.
+    -- Robust ragdoll/knock detection. The Ragdoll/Downed ATTRIBUTES are correct (that's what the
+    -- game reads everywhere), BUT they get set a frame or two AFTER the physics ragdoll engages —
+    -- and in that gap our per-frame CanCollide=false makes the loose body fall through the floor.
+    -- So we ALSO watch signals that flip at the very start of the ragdoll:
+    --   • Humanoid.PlatformStand == true  (game uses this as a ragdoll signal — SmoothShiftLock:792)
+    --   • Humanoid state Physics / FallingDown / Ragdoll / GettingUp / Seated
+    --   • RagdollLaunchApplied attribute (the cinematic knockback fling)
+    local RAGDOLL_STATES = {
+        [Enum.HumanoidStateType.Physics]     = true,
+        [Enum.HumanoidStateType.FallingDown] = true,
+        [Enum.HumanoidStateType.Ragdoll]     = true,
+        [Enum.HumanoidStateType.GettingUp]   = true,
+        [Enum.HumanoidStateType.Seated]      = true,
+    }
     local function selfRagdolled(char)
-        return char:GetAttribute("Ragdoll") == true or char:GetAttribute("Downed") == true
+        if char:GetAttribute("Ragdoll") == true or char:GetAttribute("Downed") == true
+           or char:GetAttribute("RagdollLaunchApplied") == true then
+            return true
+        end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            if hum.PlatformStand == true then return true end
+            local ok, st = pcall(function() return hum:GetState() end)
+            if ok and RAGDOLL_STATES[st] then return true end
+        end
+        return false
     end
 
-    local _noclipActive = false
+    local RAGDOLL_GRACE = 0.5     -- keep collisions this long AFTER ragdoll clears (let get-up finish)
+    local _noclipActive, _ragdollClearedAt = false, 0
     local function stepNoClip()
         if not Config.NoClip_On then
             if _noclipActive then restoreCollide(); _noclipActive = false end
             return
         end
         local char = getChar(); if not char then return end
-        -- Ragdoll pause: restore collisions and wait until we're out of ragdoll (per user request).
+        -- Ragdoll pause: restore real collisions and wait until we're fully out of ragdoll +
+        -- a short grace window (so the get-up animation settles on the floor, not through it).
         if selfRagdolled(char) then
+            _ragdollClearedAt = os.clock() + RAGDOLL_GRACE
+            if _noclipActive then restoreCollide(); _noclipActive = false end
+            return
+        end
+        if os.clock() < _ragdollClearedAt then
             if _noclipActive then restoreCollide(); _noclipActive = false end
             return
         end
