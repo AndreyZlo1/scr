@@ -68,8 +68,7 @@ return function(Lib, Core)
         AutoDraw = {
             Url        = "",     -- image URL to download and draw
             File       = "",     -- image file in the executor workspace
-            Detail     = 100,    -- vertical resolution (rows) — higher = finer + slower
-            Speed      = 45,     -- strokes sent per SECOND (higher = faster, riskier)
+            Quality    = 60,     -- 1-100: single knob for detail + colour fidelity
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
             SkipBg     = true,   -- skip near-black pixels (board background is black)
             Mono       = false,  -- draw everything in chalk white instead of colour
@@ -423,6 +422,23 @@ return function(Lib, Core)
         return _netClient or nil
     end
 
+    -- Is ANY chalk currently equipped on our character? The game stores the equipped
+    -- item's name on the Character as the "ItemEquipped" attribute and its state as
+    -- "ItemPhase" (== "Equipped" when fully out). The server only replicates whiteboard
+    -- strokes while chalk is equipped, so we check this before syncing. (Verified in
+    -- ItemServiceClient: char:GetAttribute("ItemEquipped") / "ItemPhase".)
+    local function hasChalkEquipped()
+        local char = LocalPlayer and LocalPlayer.Character
+        if not char then return false end
+        local ok, equipped = pcall(function() return char:GetAttribute("ItemEquipped") end)
+        if not ok or type(equipped) ~= "string" then return false end
+        if not equipped:lower():find("chalk") then return false end
+        local okP, phase = pcall(function() return char:GetAttribute("ItemPhase") end)
+        -- Accept any phase except an explicit "Unequipping"; some builds leave phase nil.
+        if okP and phase == "Unequipping" then return false end
+        return true
+    end
+
     local function b8(v)
         v = math.floor(v + 0.5)
         if v < 0 then return 0 elseif v > 255 then return 255 end
@@ -523,14 +539,26 @@ return function(Lib, Core)
     end
 
     -- Render one stroke locally onto the board's EditableImage. Returns true on success.
+    -- Horizontal runs (the vast majority — our rasteriser emits horizontal same-colour
+    -- runs) are drawn as ONE solid DrawRectangle instead of hundreds of faint DrawCircles:
+    -- this is far faster AND crisper (no alpha speckle), which is what makes an image
+    -- reproduction look sharp. Non-horizontal segments (only the Test Stroke) fall back
+    -- to the chalk-dot line.
     local function localStroke(part, brush, r, g, b, u1, v1, u2, v2)
         local img = getBoardImage(part)
         if not img then return false end
         local col = Color3.fromRGB(b8(r), b8(g), b8(b))
         local ok = pcall(function()
-            if u1 == u2 and v1 == v2 then
-                img:DrawCircle(Vector2.new(math.round(uvClamp(u1) * 512), math.round(uvClamp(v1) * 384)),
-                    brush, col, 0.05 + math.random() * 0.18, Enum.ImageCombineType.AlphaBlend)
+            if v1 == v2 then
+                local x0 = uvClamp(math.min(u1, u2)) * 512
+                local x1 = uvClamp(math.max(u1, u2)) * 512
+                local h  = math.max(1, brush * 2)
+                local w  = math.max(1, x1 - x0)
+                local y  = uvClamp(v1) * 384 - h / 2
+                img:DrawRectangle(
+                    Vector2.new(math.round(x0), math.round(y)),
+                    Vector2.new(math.round(w), math.round(h)),
+                    col, 0, Enum.ImageCombineType.Overwrite)
             else
                 chalkSegmentLocal(img, uvClamp(u1), uvClamp(v1), uvClamp(u2), uvClamp(v2), brush, col)
             end
@@ -545,6 +573,29 @@ return function(Lib, Core)
         local shown = localStroke(board.part, brush, r, g, b, u1, v1, u2, v2)
         if sync then fireRun(board.id, brush, r, g, b, u1, v1, u2, v2) end
         return shown
+    end
+
+    -- Clear the board both locally (paint the whole EditableImage black, exactly like
+    -- the game's clearImage, WhiteboardServiceClient:243) and on the server via the
+    -- WhiteboardClear remote so it persists / other players see it cleared too.
+    local function clearBoard(board, serverToo)
+        local cleared = false
+        local img = getBoardImage(board.part)
+        if img then
+            local ok = pcall(function()
+                img:DrawRectangle(Vector2.new(0, 0), Vector2.new(BOARD_W, BOARD_H),
+                    Color3.new(0, 0, 0), 0, Enum.ImageCombineType.Overwrite)
+            end)
+            cleared = cleared or ok
+        end
+        if serverToo then
+            local net = getNet()
+            if net and net.WhiteboardClear then
+                pcall(function() net.WhiteboardClear.Fire({ BoardId = math.floor(board.id) }) end)
+                cleared = true
+            end
+        end
+        return cleared
     end
 
     -- Nearest tagged whiteboard with a valid WhiteboardId; returns board + distance.
@@ -1083,12 +1134,25 @@ return function(Lib, Core)
             end
             return b
         end
+        local POW2 = {[0]=1,2,4,8,16,32,64,128,256}
+        local MASK = {[0]=0,1,3,7,15,31,63,127,255}
+        local band, rshift = bit32.band, bit32.rshift
         local function getBit()
             if bitCnt==0 then bitBuf=nextByte(); bitCnt=8 end
             bitCnt = bitCnt - 1
-            return math.floor(bitBuf / (2^bitCnt)) % 2
+            return band(rshift(bitBuf, bitCnt), 1)
         end
-        local function getBits(s) local v=0 for _=1,s do v=v*2+getBit() end return v end
+        local function getBits(s)
+            local v = 0
+            while s > 0 do
+                if bitCnt==0 then bitBuf=nextByte(); bitCnt=8 end
+                local take = s < bitCnt and s or bitCnt
+                bitCnt = bitCnt - take
+                v = v * POW2[take] + band(rshift(bitBuf, bitCnt), MASK[take])
+                s = s - take
+            end
+            return v
+        end
         local function receiveExtend(s)
             if s==0 then return 0 end
             local v = getBits(s)
@@ -1127,13 +1191,15 @@ return function(Lib, Core)
         end
         local coef, tmp = {}, {}
         for i=0,63 do coef[i]=0; tmp[i]=0 end
+        local dirty = {}
         local function decodeBlock(c, bx, by)
-            for i=0,63 do coef[i]=0 end
             local qt = quant[c.qt]
             local t = huffDecode(huffDC[c.td]); if t==nil then return false end
             c.pred = c.pred + receiveExtend(t)
-            coef[0] = c.pred * qt[0]
+            local dc = c.pred * qt[0]
+            coef[0] = dc
             local k = 1
+            local dirtyN = 0
             while k < 64 do
                 local rs = huffDecode(huffAC[c.ta]); if rs==nil then return false end
                 local r,s = math.floor(rs/16), rs%16
@@ -1142,7 +1208,25 @@ return function(Lib, Core)
                     k=k+r; if k>63 then break end
                     local p2 = ZIGZAG[k]
                     coef[p2] = receiveExtend(s)*qt[p2]; k=k+1
+                    dirtyN = dirtyN + 1; dirty[dirtyN] = p2
                 end
+            end
+            local plane,pw = c.plane, c.planeW
+            local ox,oy = bx*8, by*8
+            -- Fast path: no AC coefficients → the whole 8x8 block is one flat value.
+            -- (Very common in smooth photo regions; skips the ~1k-op IDCT entirely.)
+            if dirtyN == 0 then
+                local val = dc * 0.125 + 128
+                if val<0 then val=0 elseif val>255 then val=255 end
+                for y=0,7 do
+                    local rowoff=(oy+y)*pw+ox
+                    buffer.writeu8(plane,rowoff,val);   buffer.writeu8(plane,rowoff+1,val)
+                    buffer.writeu8(plane,rowoff+2,val); buffer.writeu8(plane,rowoff+3,val)
+                    buffer.writeu8(plane,rowoff+4,val); buffer.writeu8(plane,rowoff+5,val)
+                    buffer.writeu8(plane,rowoff+6,val); buffer.writeu8(plane,rowoff+7,val)
+                end
+                coef[0] = 0
+                return true
             end
             local M = IDCT_M
             for y=0,7 do
@@ -1153,8 +1237,6 @@ return function(Lib, Core)
                     tmp[base+x]=Mx[0]*c0+Mx[1]*c1+Mx[2]*c2+Mx[3]*c3+Mx[4]*c4+Mx[5]*c5+Mx[6]*c6+Mx[7]*c7
                 end
             end
-            local plane,pw = c.plane, c.planeW
-            local ox,oy = bx*8, by*8
             for x=0,7 do
                 local t0,t1,t2,t3,t4,t5,t6,t7 = tmp[x],tmp[8+x],tmp[16+x],tmp[24+x],tmp[32+x],tmp[40+x],tmp[48+x],tmp[56+x]
                 for y=0,7 do
@@ -1164,6 +1246,8 @@ return function(Lib, Core)
                     buffer.writeu8(plane,(oy+y)*pw+(ox+x),val)
                 end
             end
+            coef[0] = 0
+            for i=1,dirtyN do coef[dirty[i]] = 0 end
             return true
         end
         local mcuCount = 0
@@ -1292,8 +1376,8 @@ return function(Lib, Core)
     -- opts: { path, detail, speed, threshold, skipbg, mono, preserve }, notify(title,body)
     local function runDraw(board, opts, notify)
         _fireErrLogged = false
-        adlog("runDraw: start boardId=%s path='%s' detail=%d speed=%d",
-            tostring(board.id), tostring(opts.path), opts.detail, opts.speed)
+        adlog("runDraw: start boardId=%s path='%s' quality=%d",
+            tostring(board.id), tostring(opts.path), opts.quality or 60)
         local px, err = decodeImage(opts.path)
         if not px then _drawing = false; adlog("runDraw: image load FAILED: %s", tostring(err)); notify("Auto Draw", tostring(err)); return end
 
@@ -1311,22 +1395,57 @@ return function(Lib, Core)
         -- Show the live preview (highlight board + region outline) while drawing.
         showPreview(board, u0, v0, u1v, v1v, nil)
 
-        -- Detail = number of horizontal scanlines. With a fixed 4px-thick brush,
-        -- rows >= ~96 fully cover the 384px canvas; lower rows give a sketchier look.
-        local rows    = math.clamp(math.floor(opts.detail), 16, 300)
+        -- ── Quality → concrete knobs ────────────────────────────────────────
+        -- A single 1-100 dial drives BOTH how many scanlines we lay down (spatial
+        -- detail) and how finely colour is quantised (tonal fidelity). The brush is
+        -- 4px thick, so ~96 rows already fully cover the 384px canvas; we scale rows
+        -- from a sketchy 48 up to a dense 240 (oversampled = crisp). Colour buckets
+        -- shrink from very coarse (72) to near-lossless (6) so high quality removes
+        -- the banding the old fixed qstep=40 produced.
+        local q = math.clamp(math.floor(opts.quality or 60), 1, 100)
+        local qf = (q - 1) / 99
+        local rows    = math.floor(48 + qf * (240 - 48) + 0.5)
         local rowStep = drawH / rows
-        local colStep = math.max(1.5, rowStep)          -- ~square sampling cells
+        local colStep = math.max(1.0, rowStep)          -- ~square sampling cells
         local cols    = math.max(1, math.floor(drawW / colStep + 0.5))
         colStep = drawW / cols
 
         -- Colour quantisation buckets so flat regions merge into long runs.
-        local qstep = 40
+        local qstep = math.floor(72 - qf * (72 - 6) + 0.5)
+        local half  = math.floor(qstep / 2)
         local function quant(v)
-            local q = math.floor(v / qstep) * qstep + math.floor(qstep / 2)
-            if q > 255 then q = 255 end
-            return q
+            local qb = math.floor(v / qstep) * qstep + half
+            if qb > 255 then qb = 255 end
+            return qb
         end
         local monoR, monoG, monoB = b8(CHALK_COLOR.R * 255), b8(CHALK_COLOR.G * 255), b8(CHALK_COLOR.B * 255)
+
+        -- Cell-averaged sampler: instead of one nearest-neighbour pixel per cell
+        -- (which aliases badly when a big photo is squeezed onto the board — the main
+        -- cause of the "quality dropped" look), average a small grid over the cell's
+        -- source footprint. Sample count scales with quality (1..3 per axis).
+        local srcCellW = (drawW > 0) and (iw / cols) or 1
+        local srcCellH = (drawH > 0) and (ih / rows) or 1
+        local aa = 1 + math.floor(qf * 2 + 0.5)          -- 1, 2 or 3 samples per axis
+        local function sampleCell(cx, cy)
+            local x0 = math.floor(cx * srcCellW)
+            local y0 = math.floor(cy * srcCellH)
+            local x1 = math.max(x0, math.floor((cx + 1) * srcCellW) - 1)
+            local y1 = math.max(y0, math.floor((cy + 1) * srcCellH) - 1)
+            local nx = math.min(aa, x1 - x0 + 1)
+            local ny = math.min(aa, y1 - y0 + 1)
+            local sr, sg, sb, n = 0, 0, 0, 0
+            for sy = 0, ny - 1 do
+                local iy = (ny == 1) and y0 or (y0 + math.floor(sy * (y1 - y0) / (ny - 1)))
+                for sx = 0, nx - 1 do
+                    local ix = (nx == 1) and x0 or (x0 + math.floor(sx * (x1 - x0) / (nx - 1)))
+                    local pr, pg, pb = samplePix(px, ix, iy)
+                    sr = sr + pr; sg = sg + pg; sb = sb + pb; n = n + 1
+                end
+            end
+            if n == 0 then return 0, 0, 0 end
+            return sr / n, sg / n, sb / n
+        end
 
         -- ── Phase 1: rasterise into a flat stroke list (fast; occasional yield) ──
         -- Each stroke is a horizontal same-colour run: {r,g,b,u1,u2,v}.
@@ -1336,7 +1455,6 @@ return function(Lib, Core)
             if token ~= _drawToken then break end
             local py = offY + (r + 0.5) * rowStep
             local v  = py / BOARD_H
-            local iy = math.floor((py - offY) / drawH * ih)
 
             local runActive, rr, rg, rb, runU1, runU2 = false, 0, 0, 0, 0, 0
             local function flush()
@@ -1348,8 +1466,7 @@ return function(Lib, Core)
 
             for c = 0, cols - 1 do
                 local pxx = offX + (c + 0.5) * colStep
-                local ix  = math.floor((pxx - offX) / drawW * iw)
-                local sr, sg, sb = samplePix(px, ix, iy)
+                local sr, sg, sb = sampleCell(c, r)
                 local bright = 0.299 * sr + 0.587 * sg + 0.114 * sb
                 if opts.skipbg and bright < opts.threshold then
                     flush()
@@ -1385,53 +1502,37 @@ return function(Lib, Core)
             adlog("runDraw: first stroke sample rgb=(%d,%d,%d) at v=%.3f", strokes[1].r, strokes[1].g, strokes[1].b, strokes[1].v)
         end
 
-        -- ── Phase 2: draw the strokes ────────────────────────────────────────
+        -- ── Phase 2: draw the strokes — MAXIMUM SPEED ───────────────────────
         -- Every stroke is rendered LOCALLY onto the board's EditableImage so we
         -- actually see it (the server never echoes our own batches back to us).
-        -- When Sync is on we ALSO fire the draw remote so the server persists the
-        -- drawing and other players see it — that path is rate-limited because the
-        -- unreliable channel drops packets if flooded. With Sync off we just blast
-        -- the local render as fast as possible (yielding to keep the frame alive).
+        -- When Sync is on we ALSO fire the draw remote so the drawing persists and
+        -- other players see it. Per the user's request there is NO rate limiting —
+        -- we blast strokes as fast as the client can push them. We only yield the
+        -- thread periodically (by wall-clock, not per-stroke) so the game stays
+        -- responsive and the watchdog never kills the script; this keeps throughput
+        -- at the hardware limit instead of being pinned to a strokes/second budget.
         local sync = opts.sync
         local sent = 0
         local drewLocal = false
+        local YIELD_EVERY = 0.010            -- seconds of work between thread yields
+        local lastYield = os.clock()
 
-        if not sync then
-            for i = 1, total do
-                if token ~= _drawToken then break end
-                local s = strokes[i]
-                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
-                    drewLocal = true
-                end
-                if (i % 120) == 0 then RunService.Heartbeat:Wait() end
+        for i = 1, total do
+            if token ~= _drawToken then break end
+            local s = strokes[i]
+            if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                drewLocal = true
             end
-        else
-            local perSec   = math.clamp(math.floor(opts.speed), 5, 200)
-            local burstCap = math.clamp(math.floor(perSec / 12), 2, 8)
-            local budget, lastClock = 0, os.clock()
-            for i = 1, total do
-                if token ~= _drawToken then break end
-                local nowc = os.clock()
-                budget = budget + (nowc - lastClock) * perSec
-                lastClock = nowc
-                if budget > burstCap then budget = burstCap end
-                while budget < 1 do
-                    RunService.Heartbeat:Wait()
-                    if token ~= _drawToken then break end
-                    nowc = os.clock()
-                    budget = budget + (nowc - lastClock) * perSec
-                    lastClock = nowc
-                end
-                if token ~= _drawToken then break end
-                budget = budget - 1
-
-                local s = strokes[i]
-                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
-                    drewLocal = true
-                end
+            if sync then
                 if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
                     sent = sent + 1
                 end
+            end
+            -- Yield based on elapsed time, not stroke count, so tiny images finish
+            -- in a single frame while huge ones stay responsive — max throughput.
+            if os.clock() - lastYield >= YIELD_EVERY then
+                RunService.Heartbeat:Wait()
+                lastYield = os.clock()
             end
         end
 
@@ -1504,9 +1605,18 @@ return function(Lib, Core)
         _drawing = true
         notify("Auto Draw", "drawing… press Stop to cancel")
 
+        -- Server replication requires an equipped chalk (server-side gate). If the
+        -- user wants Sync but no chalk is out, warn and fall back to a local-only
+        -- render so they still see the image instead of getting nothing.
+        local syncWanted = ad.Sync
+        if syncWanted and not hasChalkEquipped() then
+            notify("Auto Draw", "equip any chalk for it to replicate — drawing locally only for now")
+            syncWanted = false
+        end
+
         local opts = {
-            path = path, detail = ad.Detail, speed = ad.Speed, threshold = ad.Threshold,
-            skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve, sync = ad.Sync,
+            path = path, quality = ad.Quality, threshold = ad.Threshold,
+            skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve, sync = syncWanted,
             scale = (ad.Scale or 100) / 100, alignx = (ad.AlignX or 50) / 100, aligny = (ad.AlignY or 50) / 100,
         }
         task.spawn(function()
@@ -1703,17 +1813,11 @@ return function(Lib, Core)
         sAD:Divider()
         sAD:Header({ Name = "Quality" })
         slider(sAD, {
-            Name = "Detail", Flag = "Misc_AutoDraw_Detail",
-            Default = ad.Detail, Min = 16, Max = 200, Precision = 0, Suffix = " rows",
-            Callback = function(v) ad.Detail = v end,
+            Name = "Quality", Flag = "Misc_AutoDraw_Quality",
+            Default = ad.Quality, Min = 1, Max = 100, Precision = 0, Suffix = " %",
+            Callback = function(v) ad.Quality = v end,
         })
-        sAD:SubLabel({ Text = "Vertical resolution. Higher = finer image but more strokes and slower drawing." })
-        slider(sAD, {
-            Name = "Speed", Flag = "Misc_AutoDraw_Speed",
-            Default = ad.Speed, Min = 5, Max = 4000, Precision = 0, Suffix = " /sec",
-            Callback = function(v) ad.Speed = v end,
-        })
-        sAD:SubLabel({ Text = "Strokes sent per second. The draw remote is unreliable, so very high rates drop packets (gaps) or risk a kick. 30-60 is a safe sweet spot." })
+        sAD:SubLabel({ Text = "One dial for the whole image: higher = more scanlines, finer colour and anti-aliased sampling (sharper, slower); lower = coarse and fast. Drawing always runs at maximum speed." })
         slider(sAD, {
             Name = "Skip Threshold", Flag = "Misc_AutoDraw_Threshold",
             Default = ad.Threshold, Min = 0, Max = 80, Precision = 0,
@@ -1736,7 +1840,7 @@ return function(Lib, Core)
             Name = "Sync to Server", Default = ad.Sync,
             Callback = function(v) ad.Sync = v end,
         }, ctx.flag("Misc_AutoDraw_Sync"))
-        sAD:SubLabel({ Text = "ON: also sends strokes to the server so the drawing persists and other players see it (slower, rate-limited). OFF: renders instantly on your screen only." })
+        sAD:SubLabel({ Text = "ON: also sends strokes to the server so the drawing persists and other players see it — requires ANY chalk equipped in your hand. OFF: renders instantly on your screen only." })
 
         sAD:Divider()
         sAD:Header({ Name = "Size & Position" })
@@ -1775,6 +1879,25 @@ return function(Lib, Core)
         sAD:Divider()
         sAD:Button({ Name = "Draw", Callback = function() startAutoDraw(notify) end })
         sAD:Button({ Name = "Stop", Callback = function() stopAutoDraw(); notify("Auto Draw", "stopped") end })
+        sAD:Button({
+            Name = "Clear Board",
+            Callback = function()
+                local board, dist = findNearestBoard()
+                if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
+                if dist and dist > 22 then
+                    notify("Auto Draw", ("too far from a whiteboard (%.0f studs) — move closer"):format(dist)); return
+                end
+                stopAutoDraw()
+                local wantServer = Config.AutoDraw.Sync and hasChalkEquipped()
+                local ok = clearBoard(board, wantServer)
+                if ok then
+                    notify("Auto Draw", wantServer and "board cleared (synced)" or "board cleared locally")
+                else
+                    notify("Auto Draw", "could not clear the board — see debug log")
+                end
+            end,
+        })
+        sAD:SubLabel({ Text = "Wipes the nearest board. Clears your local view instantly; also clears it for everyone if Sync is on and chalk is equipped." })
 
         uiReady = true
     end
