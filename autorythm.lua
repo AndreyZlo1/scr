@@ -54,6 +54,7 @@ return function(Lib, Core)
     local AssetService      = game:GetService("AssetService")
     local CollectionService = game:GetService("CollectionService")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Workspace         = game:GetService("Workspace")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -73,6 +74,7 @@ return function(Lib, Core)
             SkipBg     = true,   -- skip near-black pixels (board background is black)
             Mono       = false,  -- draw everything in chalk white instead of colour
             Preserve   = true,   -- preserve the image aspect ratio on the board
+            Debug      = false,  -- print step-by-step diagnostics to the console
         },
     }
 
@@ -274,7 +276,125 @@ return function(Lib, Core)
 
     -- ═══════════════════════════ AUTO DRAW ══════════════════════════════════
     local CHALK_COLOR = Color3.fromRGB(242, 242, 238)
-    local BOARD_W, BOARD_H = 512, 384
+    local BOARD_W, BOARD_H = 512, 384   -- EditableImage canvas (WhiteboardServiceClient:189)
+
+    -- Debug logging, gated by the UI toggle. Prints to the executor console with a
+    -- clear prefix so the user can trace exactly which step succeeds or fails.
+    local function adlog(fmt, ...)
+        if not Config.AutoDraw.Debug then return end
+        local ok, msg = pcall(string.format, fmt, ...)
+        print("[AutoDraw] " .. (ok and msg or tostring(fmt)))
+    end
+
+    -- Replicates WhiteboardServiceClient.uvToWorldPos (dump line 176): maps a board
+    -- UV (0..1) to a world position on the correct face. Used purely for the visual
+    -- preview so the user can see WHERE the image will land before drawing.
+    local function uvToWorldPos(part, face, u, v)
+        local S = part.Size
+        local off
+        if face == Enum.NormalId.Front then
+            off = Vector3.new((0.5 - u) * S.X, (0.5 - v) * S.Y, -S.Z / 2)
+        elseif face == Enum.NormalId.Back then
+            off = Vector3.new((u - 0.5) * S.X, (0.5 - v) * S.Y, S.Z / 2)
+        elseif face == Enum.NormalId.Left then
+            off = Vector3.new(-S.X / 2, (0.5 - v) * S.Y, (u - 0.5) * S.Z)
+        elseif face == Enum.NormalId.Right then
+            off = Vector3.new(S.X / 2, (0.5 - v) * S.Y, (0.5 - u) * S.Z)
+        elseif face == Enum.NormalId.Top then
+            off = Vector3.new((u - 0.5) * S.X, S.Y / 2, (v - 0.5) * S.Z)
+        else -- Bottom
+            off = Vector3.new((u - 0.5) * S.X, -S.Y / 2, (0.5 - v) * S.Z)
+        end
+        return part.CFrame:PointToWorldSpace(off)
+    end
+
+    -- Discover which SurfaceGui face a board draws on (defaults to Front).
+    local function boardFace(part)
+        local sg = part:FindFirstChildOfClass("SurfaceGui")
+        if sg and sg.Face then return sg.Face end
+        return Enum.NormalId.Front
+    end
+
+    -- ── Visual preview: highlight the detected board + outline the draw region ──
+    local _previewFolder
+    local function clearPreview()
+        if _previewFolder then
+            pcall(function() _previewFolder:Destroy() end)
+            _previewFolder = nil
+        end
+    end
+
+    -- Build a thin neon beam between two world points (one wireframe edge).
+    local function edgePart(parent, a, b, color)
+        local mid = (a + b) / 2
+        local len = (a - b).Magnitude
+        local p = Instance.new("Part")
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.Material = Enum.Material.Neon
+        p.Color = color
+        p.Size = Vector3.new(0.15, 0.15, math.max(len, 0.05))
+        p.CFrame = CFrame.lookAt(mid, b)
+        p.Parent = parent
+        return p
+    end
+
+    -- Compute the aspect-preserving letterbox region (in board pixels), exactly as
+    -- runDraw does. Pass imgW/imgH when known; nil → assume the region fills the
+    -- board. Returns UV rect u0,v0,u1,v1.
+    local function computeRegion(preserve, imgW, imgH)
+        local drawW, drawH
+        if preserve and imgW and imgH and imgW > 0 and imgH > 0 then
+            local imgA, boardA = imgW / imgH, BOARD_W / BOARD_H
+            if imgA > boardA then drawW, drawH = BOARD_W, BOARD_W / imgA
+            else drawW, drawH = BOARD_H * imgA, BOARD_H end
+        else
+            drawW, drawH = BOARD_W, BOARD_H
+        end
+        local offX, offY = (BOARD_W - drawW) / 2, (BOARD_H - drawH) / 2
+        return offX / BOARD_W, offY / BOARD_H, (offX + drawW) / BOARD_W, (offY + drawH) / BOARD_H
+    end
+
+    -- Draw a highlight over the board + a green outline of the UV rect (u0,v0,u1,v1).
+    local function showPreview(board, u0, v0, u1, v1, ttl)
+        clearPreview()
+        local part = board.part
+        local face = boardFace(part)
+
+        local folder = Instance.new("Folder")
+        folder.Name = "SyllinseAutoDrawPreview"
+        folder.Parent = Workspace
+
+        -- Highlight the whole board so the user sees which one was picked.
+        local hl = Instance.new("Highlight")
+        hl.FillColor = Color3.fromRGB(70, 170, 255)
+        hl.FillTransparency = 0.7
+        hl.OutlineColor = Color3.fromRGB(120, 200, 255)
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Adornee = part
+        hl.Parent = folder
+
+        -- Outline the draw region on the board face (4 corners → 4 edges).
+        local green = Color3.fromRGB(80, 255, 120)
+        local TL = uvToWorldPos(part, face, u0, v0)
+        local TR = uvToWorldPos(part, face, u1, v0)
+        local BR = uvToWorldPos(part, face, u1, v1)
+        local BL = uvToWorldPos(part, face, u0, v1)
+        edgePart(folder, TL, TR, green)
+        edgePart(folder, TR, BR, green)
+        edgePart(folder, BR, BL, green)
+        edgePart(folder, BL, TL, green)
+
+        _previewFolder = folder
+
+        if ttl and ttl > 0 then
+            task.delay(ttl, function()
+                if _previewFolder == folder then clearPreview() end
+            end)
+        end
+    end
 
     -- Lazily grab the game's network Client (cached ModuleScript singleton).
     local _netClient
@@ -287,6 +407,9 @@ return function(Lib, Core)
             return client and require(client)
         end)
         _netClient = (ok and mod) or false
+        adlog("getNet: ok=%s hasClient=%s hasRemote=%s",
+            tostring(ok), tostring(_netClient ~= false),
+            tostring(_netClient and _netClient.WhiteboardDrawBatch ~= nil))
         return _netClient or nil
     end
 
@@ -301,6 +424,7 @@ return function(Lib, Core)
     end
 
     -- Fire one stroke (a line from (u1,v1) to (u2,v2), or a dot if identical).
+    local _fireErrLogged = false
     local function fireRun(boardId, brush, r, g, b, u1, v1, u2, v2)
         local net = getNet()
         if not net or not net.WhiteboardDrawBatch then return false end
@@ -318,7 +442,12 @@ return function(Lib, Core)
             buffer.writef32(buf, 16, uvClamp(u2))
             buffer.writef32(buf, 20, uvClamp(v2))
         end
-        return (pcall(function() net.WhiteboardDrawBatch.Fire(buf) end))
+        local ok, err = pcall(function() net.WhiteboardDrawBatch.Fire(buf) end)
+        if not ok and not _fireErrLogged then
+            _fireErrLogged = true
+            adlog("fireRun: Fire() ERROR: %s", tostring(err))
+        end
+        return ok
     end
 
     -- Nearest tagged whiteboard with a valid WhiteboardId; returns board + distance.
@@ -328,16 +457,24 @@ return function(Lib, Core)
         if char then root = char:FindFirstChild("HumanoidRootPart") end
         local best, bestD
         local ok, tagged = pcall(function() return CollectionService:GetTagged("Whiteboard") end)
-        if not ok or type(tagged) ~= "table" then return nil end
+        if not ok or type(tagged) ~= "table" then
+            adlog("findNearestBoard: GetTagged('Whiteboard') failed or empty")
+            return nil
+        end
+        local withId = 0
         for _, part in ipairs(tagged) do
             if typeof(part) == "Instance" and part:IsA("BasePart") then
                 local id = part:GetAttribute("WhiteboardId")
                 if type(id) == "number" then
+                    withId = withId + 1
                     local d = root and (root.Position - part.Position).Magnitude or math.huge
                     if not bestD or d < bestD then best, bestD = { id = id, part = part }, d end
                 end
             end
         end
+        adlog("findNearestBoard: tagged=%d withId=%d nearestId=%s dist=%s root=%s",
+            #tagged, withId, best and tostring(best.id) or "nil",
+            bestD and string.format("%.1f", bestD) or "nil", tostring(root ~= nil))
         return best, bestD
     end
 
@@ -351,6 +488,7 @@ return function(Lib, Core)
         if not pcall(function() asset = getAsset(path) end) or not asset then
             return nil, "getcustomasset failed for '" .. tostring(path) .. "'"
         end
+        adlog("loadImage: getcustomasset ok, asset='%s'", tostring(asset))
         local content
         pcall(function() content = Content.fromUri(asset) end)
 
@@ -358,10 +496,12 @@ return function(Lib, Core)
         local ok1 = content and pcall(function()
             img = AssetService:CreateEditableImageAsync(content)
         end)
+        adlog("loadImage: CreateEditableImageAsync(content) ok=%s img=%s", tostring(ok1), tostring(img ~= nil))
         if not (ok1 and img) then
             local ok2 = pcall(function()
                 img = AssetService:CreateEditableImageAsync(asset)
             end)
+            adlog("loadImage: fallback CreateEditableImageAsync(asset) ok=%s img=%s", tostring(ok2), tostring(img ~= nil))
             if not (ok2 and img) then
                 return nil, "CreateEditableImageAsync failed (format unsupported or image too large; max 1024x1024)"
             end
@@ -407,6 +547,7 @@ return function(Lib, Core)
     local function stopAutoDraw()
         _drawing = false
         _drawToken = _drawToken + 1
+        clearPreview()
     end
 
     -- The game always draws chalk at brush radius 2 (WhiteboardServiceClient:406
@@ -417,25 +558,27 @@ return function(Lib, Core)
 
     -- opts: { path, detail, speed, threshold, skipbg, mono, preserve }, notify(title,body)
     local function runDraw(board, opts, notify)
+        _fireErrLogged = false
+        adlog("runDraw: start boardId=%s path='%s' detail=%d speed=%d",
+            tostring(board.id), tostring(opts.path), opts.detail, opts.speed)
         local img, err = loadEditableImage(opts.path)
-        if not img then _drawing = false; notify("Auto Draw", tostring(err)); return end
+        if not img then _drawing = false; adlog("runDraw: image load FAILED: %s", tostring(err)); notify("Auto Draw", tostring(err)); return end
         local px = readPixels(img)
         pcall(function() img:Destroy() end)
-        if not px then _drawing = false; notify("Auto Draw", "could not read image pixels"); return end
+        if not px then _drawing = false; adlog("runDraw: readPixels FAILED"); notify("Auto Draw", "could not read image pixels"); return end
 
         local token = _drawToken
         local iw, ih = px.w, px.h
+        adlog("runDraw: image %dx%d, pixels read via %s", iw, ih, px.buf and "buffer" or "array")
 
         -- Fit the image onto the board, preserving aspect if requested.
-        local drawW, drawH
-        if opts.preserve then
-            local imgA, boardA = iw / ih, BOARD_W / BOARD_H
-            if imgA > boardA then drawW, drawH = BOARD_W, BOARD_W / imgA
-            else drawW, drawH = BOARD_H * imgA, BOARD_H end
-        else
-            drawW, drawH = BOARD_W, BOARD_H
-        end
-        local offX, offY = (BOARD_W - drawW) / 2, (BOARD_H - drawH) / 2
+        local u0, v0, u1v, v1v = computeRegion(opts.preserve, iw, ih)
+        local drawW, drawH = (u1v - u0) * BOARD_W, (v1v - v0) * BOARD_H
+        local offX, offY = u0 * BOARD_W, v0 * BOARD_H
+        adlog("runDraw: region uv[%.3f,%.3f]-[%.3f,%.3f] (%.0fx%.0f px)", u0, v0, u1v, v1v, drawW, drawH)
+
+        -- Show the live preview (highlight board + region outline) while drawing.
+        showPreview(board, u0, v0, u1v, v1v, nil)
 
         -- Detail = number of horizontal scanlines. With a fixed 4px-thick brush,
         -- rows >= ~96 fully cover the 384px canvas; lower rows give a sketchier look.
@@ -500,10 +643,15 @@ return function(Lib, Core)
         end
 
         local total = #strokes
-        if token ~= _drawToken then _drawing = false; return end
+        adlog("runDraw: rasterised %d strokes (rows=%d cols=%d capped=%s)", total, rows, cols, tostring(capped))
+        if token ~= _drawToken then _drawing = false; adlog("runDraw: cancelled after rasterise"); return end
         if total == 0 then
             _drawing = false
+            adlog("runDraw: 0 strokes — everything skipped (SkipBg=%s Threshold=%s)", tostring(opts.skipbg), tostring(opts.threshold))
             notify("Auto Draw", "nothing to draw (try lowering Skip Threshold)"); return
+        end
+        if opts.skipbg then
+            adlog("runDraw: first stroke sample rgb=(%d,%d,%d) at v=%.3f", strokes[1].r, strokes[1].g, strokes[1].b, strokes[1].v)
         end
 
         -- ── Phase 2: send strokes, rate-limited (unreliable remote drops if flooded) ──
@@ -538,6 +686,7 @@ return function(Lib, Core)
         end
 
         _drawing = false
+        adlog("runDraw: DONE sent=%d/%d (fireErr=%s)", sent, total, tostring(_fireErrLogged))
         if token == _drawToken then
             notify("Auto Draw", ("done — %d/%d strokes%s"):format(sent, total, capped and " (detail capped)" or ""))
         end
@@ -602,8 +751,36 @@ return function(Lib, Core)
         }
         task.spawn(function()
             local ok, err = pcall(runDraw, board, opts, notify)
-            if not ok then _drawing = false; notify("Auto Draw", "error: " .. tostring(err)) end
+            if not ok then _drawing = false; adlog("runDraw: pcall ERROR: %s", tostring(err)); notify("Auto Draw", "error: " .. tostring(err)) end
         end)
+    end
+
+    -- Preview WITHOUT drawing: highlight the nearest board and outline the region the
+    -- image will occupy. If a workspace file is set we load it briefly to get the
+    -- exact aspect-ratio letterbox; otherwise we outline the whole board.
+    local function previewBoard(notify)
+        local board, dist = findNearestBoard()
+        if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
+        adlog("preview: boardId=%s dist=%s part='%s' face=%s size=%s",
+            tostring(board.id), dist and string.format("%.1f", dist) or "?",
+            board.part:GetFullName(), tostring(boardFace(board.part)), tostring(board.part.Size))
+
+        local ad = Config.AutoDraw
+        local iw, ih
+        if ad.File and ad.File ~= "" and not ad.File:match("^%(")
+           and type(isfile) == "function" and isfile(ad.File) then
+            local img = loadEditableImage(ad.File)
+            if img then
+                local sz = img.Size
+                iw, ih = math.floor(sz.X), math.floor(sz.Y)
+                pcall(function() img:Destroy() end)
+            end
+        end
+
+        local u0, v0, u1v, v1v = computeRegion(ad.Preserve, iw, ih)
+        showPreview(board, u0, v0, u1v, v1v, 12)
+        notify("Auto Draw", ("preview: board #%s at %.0f studs%s")
+            :format(tostring(board.id), dist or 0, iw and (" ("..iw.."x"..ih..")") or ""))
     end
 
     -- List image files in the executor workspace root (for the file dropdown).
@@ -702,7 +879,7 @@ return function(Lib, Core)
         sAR:Divider()
         sAR:SubLabel({ Text = "Grabs the live RhythmEngine and plays it directly, so the game sees a clean PERFECT run. Just start a song and enable." })
 
-        -- ─────────────── Section: Auto Draw (Right) ───────────────
+        -- ─────────────── Section: Auto Draw (Right) ──���────────────
         local ad = Config.AutoDraw
         local sAD = Misc:Section({ Side = "Right" })
         sAD:Header({ Name = "Auto Draw" })
@@ -765,6 +942,17 @@ return function(Lib, Core)
             Name = "Preserve Aspect Ratio", Default = ad.Preserve,
             Callback = function(v) ad.Preserve = v end,
         }, ctx.flag("Misc_AutoDraw_Preserve"))
+
+        sAD:Divider()
+        sAD:Header({ Name = "Preview & Debug" })
+        sAD:Button({ Name = "Preview Board", Callback = function() previewBoard(notify) end })
+        sAD:SubLabel({ Text = "Highlights the nearest board (blue) and outlines where the image will be drawn (green). Auto-clears after ~12s." })
+        sAD:Button({ Name = "Clear Preview", Callback = function() clearPreview(); notify("Auto Draw", "preview cleared") end })
+        sAD:Toggle({
+            Name = "Debug Logging", Default = ad.Debug,
+            Callback = function(v) ad.Debug = v end,
+        }, ctx.flag("Misc_AutoDraw_Debug"))
+        sAD:SubLabel({ Text = "Prints step-by-step diagnostics to the executor console (prefixed [AutoDraw]). Enable this if nothing draws." })
 
         sAD:Divider()
         sAD:Button({ Name = "Draw", Callback = function() startAutoDraw(notify) end })
