@@ -77,6 +77,14 @@ return function(Lib, Core)
         Fly_Vertical = 60,        -- vertical studs/sec
         Fly_Face     = true,      -- PlatformStand + move relative to camera pitch
 
+        -- NoClip — CanCollide=false on our own parts each PreSimulation frame (before physics),
+        -- so we phase through walls/floors. Carry-aware: when we're carrying/gripping an enemy
+        -- (they're welded to us), their parts collide with the wall and would block/rubberband us,
+        -- so we un-collide the carried victim's parts too → pass through even with someone on our
+        -- shoulders. Restores original CanCollide on disable.
+        NoClip_On    = false,
+        NoClip_Carry = true,      -- also un-collide an enemy we're carrying/gripping
+
         -- No Slowdown (master + per-type) — hooks MovementServiceUtils.SetSpeed
         NS_On     = false,
         NS_Attack = true,         -- M1/M2/windup movement lock
@@ -131,7 +139,7 @@ return function(Lib, Core)
         return c, hum, root
     end
 
-    -- ══════════════════����� IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
+    -- ══════════════════������ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
     -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
     -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
     -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
@@ -310,6 +318,74 @@ return function(Lib, Core)
         else -- CFrame (no rubberbanding — velocity zeroed each frame)
             root.AssemblyLinearVelocity = Vector3.zero
             root.CFrame = root.CFrame + ((horizontal + vertical) * dt)
+        end
+    end
+
+    -- ═══════════════════════════════ NOCLIP ═════════════════════════════════
+    -- Standard client noclip: force CanCollide=false on our parts every PreSimulation frame
+    -- (before physics resolves), so the world can't stop us. We remember each part's original
+    -- CanCollide so disabling NoClip restores it exactly (HRP is normally false, Torso/Head true).
+    local _noclipTouched = {}     -- [BasePart] = originalCanCollide
+    local function unCollide(model)
+        if not model then return end
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") and d.CanCollide then
+                if _noclipTouched[d] == nil then _noclipTouched[d] = d.CanCollide end
+                d.CanCollide = false
+            end
+        end
+    end
+    local function restoreCollide()
+        for part, orig in pairs(_noclipTouched) do
+            if typeof(part) == "Instance" and part.Parent then
+                pcall(function() part.CanCollide = orig end)
+            end
+        end
+        table.clear(_noclipTouched)
+    end
+
+    -- Find an enemy character we are CARRYING/GRIPPING (they're welded to us). The carry/grip
+    -- weld lives under the VICTIM's HRP (CarryWeld/GripWeld — RagdollServiceClient.isCarriedOrGripped),
+    -- and one of its Part0/Part1 belongs to OUR character. Cached ~0.25s (carry state rarely
+    -- flips) so we don't scan every player every frame.
+    local _carryCacheT, _carryVictim = 0, nil
+    local function getCarriedVictim(myChar)
+        local now = os.clock()
+        if (now - _carryCacheT) < 0.25 then
+            return (_carryVictim and _carryVictim.Parent) and _carryVictim or nil
+        end
+        _carryCacheT = now
+        _carryVictim = nil
+        for _, pl in ipairs(Players:GetPlayers()) do
+            local oc = pl.Character
+            if oc and oc ~= myChar then
+                local hrp = oc:FindFirstChild("HumanoidRootPart")
+                local weld = hrp and (hrp:FindFirstChild("CarryWeld") or hrp:FindFirstChild("GripWeld"))
+                if weld and (weld:IsA("Weld") or weld:IsA("WeldConstraint") or weld:IsA("Motor6D")) then
+                    local p0, p1 = weld.Part0, weld.Part1
+                    if (p0 and p0:IsDescendantOf(myChar)) or (p1 and p1:IsDescendantOf(myChar)) then
+                        _carryVictim = oc
+                        break
+                    end
+                end
+            end
+        end
+        return _carryVictim
+    end
+
+    local _noclipActive = false
+    local function stepNoClip()
+        if not Config.NoClip_On then
+            if _noclipActive then restoreCollide(); _noclipActive = false end
+            return
+        end
+        local char = getChar(); if not char then return end
+        _noclipActive = true
+        unCollide(char)
+        -- carry-aware: also phase the enemy we're carrying so their body can't wedge on the wall
+        if Config.NoClip_Carry then
+            local victim = getCarriedVictim(char)
+            if victim then unCollide(victim) end
         end
     end
 
@@ -978,6 +1054,7 @@ return function(Lib, Core)
         dt = (typeof(dt) == "number" and dt > 0) and dt or (1 / 60)
         pcall(stepSpeed, dt)
         pcall(stepFly, dt)
+        pcall(stepNoClip)
     end)
     PostStep:Connect(function()
         driveNoDelay()
@@ -998,11 +1075,14 @@ return function(Lib, Core)
         _myChar = char       -- keep the hook's fast-path pointer compare valid after respawn
         flyActive = false
         clearFlyInput()
+        table.clear(_noclipTouched)   -- old parts are gone; new char re-uncollides while NoClip on
+        _carryVictim, _carryCacheT = nil, 0
+        _noclipActive = Config.NoClip_On
         task.wait(0.5)
         if Config.Sprint_On then setSprint(true) end
     end)
 
-    -- ═══════════════════���══════════�� UI ═════════════════════════════════════
+    -- ═══════════════════���══════════�� UI ══���══════════════════════════════════
     local M = {}
 
     function M.start()
@@ -1104,6 +1184,19 @@ return function(Lib, Core)
         slider(sFly, { Name = "Vertical Speed", Flag = "MV_FlyVert", Default = Config.Fly_Vertical,
             Min = 10, Max = 250, Suffix = " studs", Callback = function(v) Config.Fly_Vertical = v end })
 
+        -- ─────────────── Section: NoClip (Left) ───────────────
+        local sNoClip = MV:Section({ Side = "Left" })
+        sNoClip:Header({ Name = "NoClip" })
+        feature(sNoClip, {
+            Title = "NoClip", Flag = "MV_NoClip",
+            get = function() return Config.NoClip_On end,
+            set = function(v) Config.NoClip_On = v end,
+            Desc = "phase through walls/floors (CanCollide off each frame)\npair with Fly for full freedom",
+        })
+        boolToggle(sNoClip, "Carry-Aware", "NoClip Carry-Aware",
+            function() return Config.NoClip_Carry end, function(v) Config.NoClip_Carry = v end)
+        sNoClip:SubLabel({ Text = "Carry-Aware also phases an enemy you're carrying/gripping → walk through walls with them on your shoulders." })
+
         -- ─────────────── Section 3: No Slowdown (Right) ───────────────
         local sNS = MV:Section({ Side = "Right" })
         sNS:Header({ Name = "No Slowdown" })
@@ -1188,8 +1281,9 @@ return function(Lib, Core)
             Title = "Infinite Stamina", Flag = "MV_InfStamina",
             get = function() return Config.InfStamina_On end,
             set = function(v) Config.InfStamina_On = v end,
-            Desc = "ud inf stamina, if u dont know what is this u r dumb",
+            Desc = "endless sprint via the client stamina-gate flag\nNEVER writes the Stamina attribute (undetectable)",
         })
+        sStam:SubLabel({ Text = "Holds the sprint controller's stamina gate open — sprint never drains out" })
 
         -- ─────────────── Section 6: Dodge (Left) ───────────────
         local sDodge = MV:Section({ Side = "Left" })
@@ -1212,7 +1306,7 @@ return function(Lib, Core)
                     restoreDodge()        -- put the game's own numbers back
                 end
             end,
-            Desc = "tweaks ur OWN dodge",
+            Desc = "tweaks your OWN dodge (speed + cooldown)\ncooldown is a real client-side gate, any value 0–1.5s",
         })
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
@@ -1229,14 +1323,14 @@ return function(Lib, Core)
                     clearDodgeGrant()     -- drop the bypass → cooldown/gates return to normal
                 end
             end)
-        sDodge:SubLabel({ Text = "Enable it to change cooldowns and dodge everywhere" })
+        sDodge:SubLabel({ Text = "Everywhere = dodge in ANY state incl. when hit/blocking. Cooldown below still applies." })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
             Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
         slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
             Min = 0, Max = 1.5, Precision = 2, Suffix = " s", Callback = function(v)
                 Config.Dodge_Cooldown = v; driveDodge() end })
-        sDodge:SubLabel({ Text = "!!1server cooldown is 1.5!!!!" })
+        sDodge:SubLabel({ Text = "Real client-side cooldown, any value: 0 = spam every dash, 1.5 = vanilla. Works even with Everywhere." })
 
         -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
@@ -1248,9 +1342,9 @@ return function(Lib, Core)
                 Config.AntiRagdoll_On = v
                 if v then installCombatHook() end  -- hides the Ragdoll attr → game self-getups
             end,
-            Desc = "idk is this shit working but it should be",
+            Desc = "hides the Ragdoll attribute from the game's own sustain loop\nskips managed ones (downed / carried / gripped / dead)",
         })
-        sAR:SubLabel({ Text = "uhhh yes" })
+        sAR:SubLabel({ Text = "Hook path is flicker-free; falls back to a per-frame getup without hookmetamethod." })
 
         uiReady = true
     end
