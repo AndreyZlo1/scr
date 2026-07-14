@@ -199,14 +199,11 @@ return function(Lib, Core)
     local _heldLane    = {}                -- lane -> hold note currently held
     local _allowRelease = {}               -- lane -> true when WE authorize a release
     local _lastEngine
-    -- Seconds after a sustain's end (t+len) at which we release to score it. Must be
-    -- < the engine's BAD window (140ms) or the note despawns unscored; big enough that
-    -- the held ratio is comfortably >= 0.95 (PERFECT). 30ms sits safely in the middle.
-    local HOLD_REL_MARGIN = 0.03
 
     -- Instance-level guard over _handleLaneRelease: while a lane is auto-held, drop
     -- any release we didn't authorize (a stray InputEnded would EARLY_RELEASE the
-    -- hold). The engine's _step then auto-finalizes the sustain at t+len as PERFECT.
+    -- hold before the engine auto-finalizes it at t+len). We only allow the single
+    -- cleanup release we fire ourselves after the hold has already been scored.
     local function installReleaseGuard(engine)
         if rawget(engine, "__ar_relGuard") then return end
         local realRelease = engine._handleLaneRelease
@@ -241,29 +238,29 @@ return function(Lib, Core)
 
         table.clear(_laneHolding)
 
-        -- Lanes with a hold in progress must never be tap-released.
-        -- Use note.holding (set by _onPressLane when the press lands after note.t) rather
-        -- than note.hit, because hit=true is also set for holds that haven't started yet.
+        -- HOW HOLDS ACTUALLY WORK IN THIS ENGINE (verified in RhythmEngine._step):
+        --   1. We press a hold note ONCE near note.t → _onPressLane sets note.hit = true.
+        --   2. Every frame _step promotes any hit hold note to holding = true once
+        --      note.t <= now, and sets holdStartTime = note.t (RhythmEngine:1463-1471).
+        --   3. At note.t+len, _step AUTO-FINALIZES the hold: ratio = (now-holdStart)/len
+        --      ≈ 1.0 → PERFECT, and removes it (RhythmEngine:1582-1601).
+        -- => We must NOT call release for a hold; releasing early is scored EARLY_RELEASE.
+        --    The engine holds and scores it for us. We only press once and wait.
+
+        -- Mark lanes that have a hold in progress (pressed, not yet auto-finalized) so the
+        -- tap branch never fires a release on them. Base this on note.hit (set instantly
+        -- at press) — not note.holding, which the engine only sets a frame or two later.
         for _, note in ipairs(active) do
-            if (note.len or 0) > 0 and note.holding then
+            if (note.len or 0) > 0 and note.hit and note.holdJudgment == nil then
                 _laneHolding[note.lane] = true
             end
         end
 
-        -- Finalize holds. IMPORTANT: the engine does NOT auto-score a sustain you keep
-        -- holding — RhythmEngine._step just despawns a hold note (unscored, = a miss)
-        -- once it scrolls past t+len+BAD (BAD window = 140ms). A hold is scored ONLY by
-        -- _onReleaseLane, which grades it on the ratio held = (releaseTime - holdStart)/len.
-        -- So to bank a PERFECT we must RELEASE right at the end of the sustain, inside
-        -- that 140ms window. We release at t+len+HOLD_REL_MARGIN: since we pressed at
-        -- t (initial timing ~0 = PERFECT) the ratio is ~1.0 (>=0.95) => PERFECT.
+        -- Cleanup: once the engine has finalized a hold (holdJudgment set), fire ONE
+        -- authorized release so the lane's key state resets for future notes, then stop
+        -- tracking it. (The release comes AFTER scoring, so it can't hurt the judgment.)
         for lane, note in pairs(_heldLane) do
-            if note.holdJudgment ~= nil or note.holding == false then
-                -- Engine scored it (_onReleaseLane sets holdJudgment and holding=false) —
-                -- stop tracking this lane.
-                _heldLane[lane] = nil
-                _allowRelease[lane] = nil
-            elseif now >= note.t + (note.len or 0) + HOLD_REL_MARGIN then
+            if note.holdJudgment ~= nil or not note.hit then
                 _allowRelease[lane] = true
                 pcall(engine._handleLaneRelease, engine, lane)
                 _allowRelease[lane] = nil
@@ -277,16 +274,10 @@ return function(Lib, Core)
             if type(lane) == "number" and lane >= 1 and lane <= lanes
                and not note.hit and not note.attempted then
                 if (note.len or 0) > 0 then
-                    -- Hold: we MUST press AFTER note.t, not at or before it.
-                    -- _onPressLane line 1153-1158: if note.t > now at press time, the
-                    -- engine stores holdStartTime but does NOT set note.holding = true
-                    -- (early return). _onReleaseLane only scores notes where holding==true,
-                    -- so pressing too early means the release call finds nothing and the
-                    -- hold is never scored. Adding HOLD_PRESS_GRACE (20ms) ensures now >
-                    -- note.t at the moment we fire the press, so holding always gets set.
-                    local HOLD_PRESS_GRACE = 0.02
-                    local pressTime = note.t + HOLD_PRESS_GRACE + math.max(0, offset)
-                    if now >= pressTime and not _heldLane[lane] then
+                    -- Hold: press once at/just after note.t so _onPressLane registers a
+                    -- hit (and, since now >= note.t, sets holding immediately). Then leave
+                    -- it — the engine keeps it held and auto-scores it at note.t+len.
+                    if now >= note.t + offset and not _heldLane[lane] then
                         pcall(engine._handleLanePress, engine, lane)
                         _heldLane[lane] = note
                         _laneHolding[lane] = true
@@ -998,7 +989,7 @@ return function(Lib, Core)
             if img then return img end
         end
 
-        return nil, "CreateEditableImage failed — " .. table.concat(attempts, " | ")
+        return nil, "CreateEditableImage failed ��� " .. table.concat(attempts, " | ")
     end
 
     -- Read every pixel; returns { w, h, buf|arr } for O(1) sampling.
@@ -1350,38 +1341,58 @@ return function(Lib, Core)
     -- (dependable across executors, since getcustomasset + CreateEditableImageAsync
     -- fails on real photos on many builds); falls back to the EditableImage pipeline
     -- only for other formats. Sets _adYield during decode to avoid script timeouts.
-    local function decodeImage(path)
+    -- decodeImage(path, bytes):
+    --   * If `bytes` is given (e.g. a freshly downloaded URL image) we decode it entirely
+    --     IN MEMORY — nothing is written to the executor workspace. This is what the user
+    --     wants: a pasted link should just be drawn, not saved as a file.
+    --   * Otherwise we readfile(path) for a workspace file.
+    -- The EditableImage fallback (used only when the pure-Lua PNG/JPEG decoders can't
+    -- handle the format) does need a file on disk for getcustomasset, so for the
+    -- in-memory case we write a short-lived temp with a SAFE extension and delete it
+    -- immediately afterwards.
+    local function decodeImage(path, bytes)
         _adYield = function() RunService.Heartbeat:Wait() end
         local cleanup = function() _adYield = nil end
 
-        -- 1) Pure-Lua PNG / JPEG via readfile (no getcustomasset needed).
-        if type(readfile) == "function" then
-            local okR, bytes = pcall(readfile, path)
-            if okR and type(bytes) == "string" and #bytes > 8 then
-                local b1, b2, b3 = bytes:byte(1), bytes:byte(2), bytes:byte(3)
-                if bytes:sub(1, 8) == PNG_SIG then
-                    local px, perr = decodePNG(bytes)
-                    if px then cleanup(); adlog("decodeImage: PNG decoded %dx%d (pure-Lua)", px.w, px.h); return px end
-                    cleanup(); adlog("decodeImage: pure-Lua PNG failed: %s", tostring(perr))
-                    return nil, tostring(perr)
-                elseif b1 == 0xFF and b2 == 0xD8 then
-                    local px, jerr = decodeJPEG(bytes)
-                    if px then cleanup(); adlog("decodeImage: JPEG decoded %dx%d (pure-Lua)", px.w, px.h); return px end
-                    cleanup(); adlog("decodeImage: pure-Lua JPEG failed: %s", tostring(jerr))
-                    return nil, tostring(jerr)
-                else
-                    adlog("decodeImage: unknown format (magic %d,%d,%d) — trying EditableImage",
-                        b1 or 0, b2 or 0, b3 or 0)
-                end
-            else
-                adlog("decodeImage: readfile failed (%s) — trying EditableImage", tostring(bytes))
-            end
-        else
-            adlog("decodeImage: no readfile — trying EditableImage")
+        -- Obtain the raw bytes: prefer the in-memory buffer, else read the file.
+        if not bytes and type(readfile) == "function" and path then
+            local okR, r = pcall(readfile, path)
+            if okR and type(r) == "string" then bytes = r
+            else adlog("decodeImage: readfile failed (%s)", tostring(r)) end
         end
 
-        -- 2) EditableImage fallback (JPG / anything the decoder can't handle).
-        local img, err = loadEditableImage(path)
+        -- 1) Pure-Lua PNG / JPEG decode straight from the byte string (no getcustomasset).
+        if type(bytes) == "string" and #bytes > 8 then
+            local b1, b2, b3 = bytes:byte(1), bytes:byte(2), bytes:byte(3)
+            if bytes:sub(1, 8) == PNG_SIG then
+                local px, perr = decodePNG(bytes)
+                if px then cleanup(); adlog("decodeImage: PNG decoded %dx%d (pure-Lua)", px.w, px.h); return px end
+                cleanup(); adlog("decodeImage: pure-Lua PNG failed: %s", tostring(perr))
+                return nil, tostring(perr)
+            elseif b1 == 0xFF and b2 == 0xD8 then
+                local px, jerr = decodeJPEG(bytes)
+                if px then cleanup(); adlog("decodeImage: JPEG decoded %dx%d (pure-Lua)", px.w, px.h); return px end
+                cleanup(); adlog("decodeImage: pure-Lua JPEG failed: %s", tostring(jerr))
+                return nil, tostring(jerr)
+            else
+                adlog("decodeImage: unknown format (magic %d,%d,%d) — trying EditableImage",
+                    b1 or 0, b2 or 0, b3 or 0)
+            end
+        end
+
+        -- 2) EditableImage fallback — needs a file on disk. If we only have bytes,
+        -- write a temp file with a safe extension, then delete it once loaded.
+        local loadPath, tempPath = path, nil
+        if not loadPath and bytes and type(writefile) == "function" then
+            tempPath = "syllinse_autodraw_temp.png"  -- fixed SAFE ext (never a URL-derived one)
+            local wok = pcall(writefile, tempPath, bytes)
+            if wok then loadPath = tempPath
+            else cleanup(); return nil, "could not stage image for decoding" end
+        end
+        if not loadPath then cleanup(); return nil, "no readfile/writefile to load this image format" end
+
+        local img, err = loadEditableImage(loadPath)
+        if tempPath and type(delfile) == "function" then pcall(delfile, tempPath) end
         if not img then cleanup(); return nil, err end
         local px = readPixels(img)
         pcall(function() img:Destroy() end)
@@ -1409,9 +1420,10 @@ return function(Lib, Core)
     -- opts: { path, detail, speed, threshold, skipbg, mono, preserve }, notify(title,body)
     local function runDraw(board, opts, notify)
         _fireErrLogged = false
-        adlog("runDraw: start boardId=%s path='%s' quality=%d speed=%d",
-            tostring(board.id), tostring(opts.path), opts.quality or 60, opts.speed or 45)
-        local px, err = decodeImage(opts.path)
+        adlog("runDraw: start boardId=%s path='%s' bytes=%s quality=%d speed=%d",
+            tostring(board.id), tostring(opts.path), opts.bytes and #opts.bytes or "nil",
+            opts.quality or 60, opts.speed or 45)
+        local px, err = decodeImage(opts.path, opts.bytes)
         if not px then _drawing = false; adlog("runDraw: image load FAILED: %s", tostring(err)); notify("Auto Draw", tostring(err)); return end
 
         local token = _drawToken
@@ -1638,7 +1650,7 @@ return function(Lib, Core)
         end
 
         local ad = Config.AutoDraw
-        local path
+        local path, imgBytes
 
         -- Decide which source to use. Previously the Workspace File was ALWAYS checked
         -- first, so a leftover dropdown selection silently overrode a freshly pasted URL
@@ -1666,38 +1678,27 @@ return function(Lib, Core)
                 notify("Auto Draw", "file not found: " .. path); return
             end
         else
-            -- Download the image and write it to the executor workspace so that
-            -- getcustomasset can convert it to an rbxasset:// URL for CreateEditableImageAsync.
+            -- Download the image straight into memory and draw from there — we do NOT
+            -- save anything to the executor workspace (the user asked for this, and it
+            -- also sidesteps the old "invalid file path" bug: the previous code derived
+            -- the file extension from the URL with a regex that matched ".com" in
+            -- "discordapp.com", producing a blocked ".com" file that writefile rejected).
             --
-            -- IMPORTANT: request().Body returns a Lua string whose bytes are the raw
-            -- binary image. Potassium's writefile handles binary strings correctly, but
-            -- only when the data is obtained via httpget / game:HttpGetAsync (which return
-            -- the raw body as-is). Using request() can silently truncate at null bytes on
-            -- some executor versions, which is why "could not save" was appearing.
-            -- httpget() is the UNC-standard binary-safe HTTP getter.
-            local data
+            -- httpget() is the UNC-standard binary-safe HTTP getter; request()/http_request
+            -- can truncate binary bodies at null bytes on some builds, so they are last.
             local dlOk = pcall(function()
                 if type(httpget) == "function" then
-                    data = httpget(ad.Url)
+                    imgBytes = httpget(ad.Url)
                 elseif type(http_request) == "function" then
                     local res = http_request({ Url = ad.Url, Method = "GET" })
-                    data = res and res.Body
+                    imgBytes = res and res.Body
                 elseif type(request) == "function" then
                     local res = request({ Url = ad.Url, Method = "GET" })
-                    data = res and res.Body
+                    imgBytes = res and res.Body
                 end
             end)
-            if not dlOk or not data or #data == 0 then
+            if not dlOk or type(imgBytes) ~= "string" or #imgBytes == 0 then
                 notify("Auto Draw", "download failed — check the URL and that HTTP is enabled"); return
-            end
-            if type(writefile) ~= "function" then
-                notify("Auto Draw", "executor has no writefile — cannot load URL images"); return
-            end
-            local ext = ad.Url:match("%.([%a]%a%a%a?)%f[%A]") or "png"
-            path = "syllinse_autodraw_temp." .. ext:lower()
-            local writeOk, writeErr = pcall(writefile, path, data)
-            if not writeOk then
-                notify("Auto Draw", "writefile failed: " .. tostring(writeErr)); return
             end
         end
 
@@ -1715,7 +1716,7 @@ return function(Lib, Core)
         end
 
         local opts = {
-            path = path, quality = ad.Quality, speed = ad.Speed, threshold = ad.Threshold,
+            path = path, bytes = imgBytes, quality = ad.Quality, speed = ad.Speed, threshold = ad.Threshold,
             skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve, sync = syncWanted,
             scale = (ad.Scale or 100) / 100, alignx = (ad.AlignX or 50) / 100, aligny = (ad.AlignY or 50) / 100,
         }
