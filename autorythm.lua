@@ -248,8 +248,37 @@ return function(Lib, Core)
     -- press/release through the real handlers is what the engine trusts.
     local _laneHolding, _pressTap = {}, {}      -- reused scratch tables
     local _heldLane = {}   -- lane -> hold note we are currently holding (persists across frames)
+    local _allowRelease = {}  -- lane -> true when WE intentionally release (at t+len)
     local _gradeSeen = setmetatable({}, { __mode = "k" })  -- note -> true once we've logged its grade
     local _lastEngine  -- detect song changes to drop stale hold tracking
+    local _relLogCount = 0
+
+    -- Install an instance-level guard over _handleLaneRelease. The dump proves the
+    -- only callers are the engine's own keyboard/gamepad/touch InputEnded listeners
+    -- (RhythmEngine:216/222/241) and us. In practice a spurious InputEnded fires the
+    -- instant we press a hold, so the engine EARLY_RELEASEs it (holdEndTime ==
+    -- holdStartTime, fraction 0). We shadow the method on the instance: while a lane
+    -- is being auto-held, we DROP any release that we didn't explicitly authorize
+    -- (via _allowRelease). Our own controlled release at t+len still passes through,
+    -- and if we never release, the engine's _step auto-finalizes the hold as PERFECT
+    -- at t+len (RhythmEngine:1593-1601). Re-installed per song (fresh engine).
+    local function installReleaseGuard(engine)
+        if rawget(engine, "__ar_relGuard") then return end
+        local realRelease = engine._handleLaneRelease  -- class method (not yet shadowed)
+        if type(realRelease) ~= "function" then return end
+        rawset(engine, "_handleLaneRelease", function(self, lane)
+            if _heldLane[lane] and not _allowRelease[lane] then
+                if _relLogCount < 12 then
+                    _relLogCount = _relLogCount + 1
+                    dbg(("SUPPRESS spurious release on auto-held lane=%s"):format(tostring(lane)))
+                end
+                return
+            end
+            return realRelease(self, lane)
+        end)
+        rawset(engine, "__ar_relGuard", true)
+        dbg("release guard installed on engine")
+    end
 
     local function step()
         if not Config.AutoRythm_On then return end
@@ -260,7 +289,11 @@ return function(Lib, Core)
         if engine ~= _lastEngine then
             _lastEngine = engine
             table.clear(_heldLane)
+            table.clear(_allowRelease)
+            _relLogCount = 0
         end
+
+        installReleaseGuard(engine)
 
         local okNow, now = pcall(engine._now, engine)
         if not okNow or type(now) ~= "number" then return end
@@ -291,19 +324,27 @@ return function(Lib, Core)
 
         local nHoldStart, nHoldEnd, nTap = 0, 0, 0
 
-        -- 1) RELEASE holds whose duration has elapsed (now >= t + len). This is the
-        --    finalize a real player triggers — gives fraction ≈ 1.0 → PERFECT.
+        -- 1) Let the engine's _step auto-finalize each hold at t+len with a TRUE
+        --    judgment (PERFECT) — we keep it alive via the release guard and do NOT
+        --    release ourselves, because _onReleaseLane always stamps "EARLY_RELEASE"
+        --    (RhythmEngine:1183) even when the score is perfect. We just clear our
+        --    tracking once the engine has scored it (holdJudgment set). A safety-net
+        --    release fires only if a hold is stuck well past its end (engine paused).
         for lane, note in pairs(_heldLane) do
             local finalized = note.holdJudgment ~= nil
-            local elapsed   = now >= (note.t + (note.len or 0))
+            local stuck     = now > (note.t + (note.len or 0) + 0.5)
             if finalized then
                 _heldLane[lane] = nil                       -- engine already scored it
-            elseif elapsed then
-                local ok = pcall(engine._handleLaneRelease, engine, lane)
+                _allowRelease[lane] = nil
+                nHoldEnd = nHoldEnd + 1
+            elseif stuck then
+                _allowRelease[lane] = true
+                pcall(engine._handleLaneRelease, engine, lane)
+                _allowRelease[lane] = nil
                 _heldLane[lane] = nil
                 nHoldEnd = nHoldEnd + 1
-                dbg(("HOLD RELEASE lane=%d ok=%s at now=%.3f (t+len=%.3f) holding=%s")
-                    :format(lane, tostring(ok), now, note.t + (note.len or 0), tostring(note.holding)))
+                dbg(("HOLD SAFETY-RELEASE lane=%d at now=%.3f (t+len=%.3f)")
+                    :format(lane, now, note.t + (note.len or 0)))
             end
         end
 
