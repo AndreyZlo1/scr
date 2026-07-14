@@ -331,8 +331,36 @@ return function(Lib, Core)
                 dbg(("TAP  lane=%d press=%s release=%s"):format(lane, tostring(ok1), tostring(ok2)))
             end
         end
-        if nHold > 0 or nTap > 0 then
-            dbg(("frame fired: %d hold(s), %d tap(s)"):format(nHold, nTap))
+
+        -- ── Sustain maintenance — the actual fix for holds ───────────────────
+        -- Pressing once should be enough (the engine re-asserts holding in its own
+        -- maintenance loop), but in practice a hold can lose `holding` before it
+        -- finalizes, and the engine then drops the sustain with no score. So we
+        -- actively KEEP every hit-but-unfinished hold alive every frame:
+        --   • holding = true          → the finalize branch (RhythmEngine:1582) runs
+        --   • holdStartTime = note.t  → fraction = (t+len - t)/len = 1.0 → PERFECT
+        --     (fraction is judged by _judgeHoldNote:454; >=0.95 => PERFECT)
+        --   • _laneKeyDown[lane] = true → mirror a physically-held key so nothing
+        --     in the engine treats the key as released.
+        -- We only do this once the note has arrived (now >= note.t) and before it's
+        -- been finalized (no holdJudgment yet), matching the engine's own gating.
+        local keyDown = engine._laneKeyDown
+        local nSustain = 0
+        for _, note in ipairs(active) do
+            if (note.len or 0) > 0 and note.hit and not note.holdJudgment and now >= note.t then
+                note.holding = true
+                if note.holdStartTime == nil or note.holdStartTime > note.t then
+                    note.holdStartTime = note.t
+                end
+                if type(keyDown) == "table" and type(note.lane) == "number" then
+                    keyDown[note.lane] = true
+                end
+                nSustain = nSustain + 1
+            end
+        end
+
+        if nHold > 0 or nTap > 0 or nSustain > 0 then
+            dbgT("frame_fire", 1, ("frame: %d hold-start, %d tap, %d sustaining"):format(nHold, nTap, nSustain))
         end
     end
 
