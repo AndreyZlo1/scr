@@ -73,13 +73,14 @@ return function(Lib, Core)
             Quality    = 60,     -- 1-100: single knob for detail + colour fidelity
             Speed      = 45,     -- segments/second sent to the server (Sync on)
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
-            SkipBg     = true,   -- skip near-black pixels (board background is black)
+            SkipBg     = false,  -- OFF by default so black pixels ARE drawn (was skipping them)
             Mono       = false,  -- draw everything in chalk white instead of colour
             Preserve   = true,   -- preserve the image aspect ratio on the board
             Sync       = true,   -- also fire the draw remote (persist + show to others)
             Scale      = 100,    -- % of the board the drawing occupies (10-100)
             AlignX     = 50,     -- horizontal placement: 0 = left, 50 = center, 100 = right
             AlignY     = 50,     -- vertical placement: 0 = top, 50 = middle, 100 = bottom
+            Preview    = false,  -- show the board/region preview overlay while ON
         },
 
         Chalk = {
@@ -1766,7 +1767,7 @@ return function(Lib, Core)
     -- Preview WITHOUT drawing: highlight the nearest board and outline the region the
     -- image will occupy. If a workspace file is set we load it briefly to get the
     -- exact aspect-ratio letterbox; otherwise we outline the whole board.
-    local function previewBoard(notify)
+    local function previewBoard(notify, persist)
         local board, dist = findNearestBoard()
         if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
         adlog("preview: boardId=%s dist=%s part='%s' face=%s size=%s",
@@ -1789,7 +1790,9 @@ return function(Lib, Core)
 
         local u0, v0, u1v, v1v = computeRegion(ad.Preserve, iw, ih,
             (ad.Scale or 100) / 100, (ad.AlignX or 50) / 100, (ad.AlignY or 50) / 100)
-        showPreview(board, u0, v0, u1v, v1v, 12)
+        -- persist == true (toggle-driven) keeps the overlay up until toggled off;
+        -- otherwise it auto-clears after 12s (one-shot button behaviour).
+        showPreview(board, u0, v0, u1v, v1v, persist and nil or 12)
         notify("Auto Draw", ("preview: board #%s at %.0f studs%s")
             :format(tostring(board.id), dist or 0, iw and (" ("..iw.."x"..ih..")") or ""))
     end
@@ -1852,17 +1855,79 @@ return function(Lib, Core)
     local CHALK_COLORS = { "White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet" }
     local ChalkState = { conn = nil, idx = 0, nextAt = 0 }
 
+    -- A valid AuthServiceClient is any table exposing a NextForKey function.
+    local function authIsValid(v)
+        return type(v) == "table" and type(rawget(v, "NextForKey") or v.NextForKey) == "function"
+    end
+
+    -- The game DESTROYS the AuthServiceClient ModuleScript after requiring it
+    -- (anti-tamper), so it is gone from the normal tree — that's why the plain
+    -- FindFirstChild path returned "unavailable". It still lives in memory, so we
+    -- resolve it through executor globals, trying the cheapest paths first:
+    --   1) normal tree require (works if not yet destroyed)
+    --   2) getloadedmodules() — every loaded ModuleScript, incl. destroyed ones
+    --   3) getnilinstances() — instances parented to nil (destroyed)
+    --   4) filtergc/getgc — grab the returned table directly by its NextForKey key
     local _authClient
     local function chalkAuth()
         if _authClient ~= nil then return _authClient or nil end
-        local ok, mod = pcall(function()
+        local G = (getgenv and getgenv()) or _G
+
+        -- 1) Normal require via the tree.
+        pcall(function()
             local shared = ReplicatedStorage:FindFirstChild("Shared")
             local svc    = shared and shared:FindFirstChild("Services")
             local auth   = svc and svc:FindFirstChild("AuthService")
             local client = auth and auth:FindFirstChild("AuthServiceClient")
-            return client and require(client)
+            if client then
+                local mod = require(client)
+                if authIsValid(mod) then _authClient = mod end
+            end
         end)
-        _authClient = (ok and mod) or false
+
+        -- 2) getloadedmodules(): find the (possibly destroyed) ModuleScript and
+        --    re-require it — require is cached per instance, so this returns the
+        --    same live table the game uses.
+        if not _authClient and type(G.getloadedmodules) == "function" then
+            pcall(function()
+                for _, m in ipairs(G.getloadedmodules()) do
+                    if m and m.Name == "AuthServiceClient" then
+                        local mod = require(m)
+                        if authIsValid(mod) then _authClient = mod break end
+                    end
+                end
+            end)
+        end
+
+        -- 3) getnilinstances(): destroyed modules are parented to nil.
+        if not _authClient and type(G.getnilinstances) == "function" then
+            pcall(function()
+                for _, inst in ipairs(G.getnilinstances()) do
+                    if inst and inst.ClassName == "ModuleScript" and inst.Name == "AuthServiceClient" then
+                        local mod = require(inst)
+                        if authIsValid(mod) then _authClient = mod break end
+                    end
+                end
+            end)
+        end
+
+        -- 4) filtergc / getgc: pull the returned auth table straight out of the GC
+        --    by matching its NextForKey key (bypasses the ModuleScript entirely).
+        if not _authClient and type(G.filtergc) == "function" then
+            pcall(function()
+                local t = G.filtergc("table", { Keys = { "NextForKey" } }, true)
+                if authIsValid(t) then _authClient = t end
+            end)
+        end
+        if not _authClient and type(G.getgc) == "function" then
+            pcall(function()
+                for _, obj in ipairs(G.getgc(true)) do
+                    if authIsValid(obj) then _authClient = obj break end
+                end
+            end)
+        end
+
+        _authClient = _authClient or false
         return _authClient or nil
     end
 
@@ -1961,7 +2026,7 @@ return function(Lib, Core)
         end)
     end
 
-    -- ═══════════════════════════════ MODULE ═════════════════════════════════
+    -- ═══════════════════════════════ MODULE ════════════════════════════════��
     local M = {}
     local _conn
 
@@ -2121,44 +2186,62 @@ return function(Lib, Core)
             end,
         })
 
+        -- Primary actions right under the image picker so Draw is one click away.
+        sAD:Button({ Name = "Draw", Callback = function() startAutoDraw(notify) end })
+        sAD:Button({ Name = "Stop", Callback = function() stopAutoDraw(); notify("Auto Draw", "stopped") end })
+        sAD:SubLabel({ Text = "Pick a URL or workspace file above, then press Draw. Equip chalk + stand near a board if Sync is on." })
+
+        -- ── Image quality ──────────────────────────────────────────────
         sAD:Divider()
-        sAD:Header({ Name = "Quality" })
+        sAD:Header({ Name = "Image" })
         slider(sAD, {
             Name = "Quality", Flag = "Misc_AutoDraw_Quality",
             Default = ad.Quality, Min = 1, Max = 100, Precision = 0, Suffix = " %",
             Callback = function(v) ad.Quality = v end,
         })
-        sAD:SubLabel({ Text = "One dial for the whole image: higher = more scanlines, finer colour and anti-aliased sampling (sharper, slower); lower = coarse and fast." })
+        sAD:SubLabel({ Text = "Detail dial: higher = more scanlines + finer colour (sharper, slower); lower = coarse and fast." })
+        sAD:Toggle({
+            Name = "Colour", Default = not ad.Mono,
+            Callback = function(v) ad.Mono = not v end,
+        }, ctx.flag("Misc_AutoDraw_Colour"))
+        sAD:SubLabel({ Text = "ON: draw in the image's real colours. OFF: draw everything in chalk white." })
+        sAD:Toggle({
+            Name = "Preserve Aspect Ratio", Default = ad.Preserve,
+            Callback = function(v) ad.Preserve = v end,
+        }, ctx.flag("Misc_AutoDraw_Preserve"))
+        sAD:SubLabel({ Text = "Keep the image's proportions instead of stretching it to fill the board." })
+
+        -- ── Dark pixels ────────────────────────────────────────────────
+        sAD:Divider()
+        sAD:Header({ Name = "Dark Pixels" })
+        sAD:Toggle({
+            Name = "Skip Dark Pixels", Default = ad.SkipBg,
+            Callback = function(v) ad.SkipBg = v end,
+        }, ctx.flag("Misc_AutoDraw_SkipBg"))
+        sAD:SubLabel({ Text = "OFF (default): black/dark pixels ARE drawn. ON: leaves near-black pixels unpainted so the black board shows through (useful for line art / logos)." })
+        slider(sAD, {
+            Name = "Dark Threshold", Flag = "Misc_AutoDraw_Threshold",
+            Default = ad.Threshold, Min = 0, Max = 80, Precision = 0,
+            Callback = function(v) ad.Threshold = v end,
+        })
+        sAD:SubLabel({ Text = "Only used when Skip Dark Pixels is ON: pixels darker than this brightness (0-255) are skipped." })
+
+        -- ── Sync ───────────────────────────────────────────────────────
+        sAD:Divider()
+        sAD:Header({ Name = "Sync" })
+        sAD:Toggle({
+            Name = "Sync to Server", Default = ad.Sync,
+            Callback = function(v) ad.Sync = v end,
+        }, ctx.flag("Misc_AutoDraw_Sync"))
+        sAD:SubLabel({ Text = "ON: sends strokes to the server so the drawing persists and others see it — requires ANY chalk equipped. OFF: renders on your screen only." })
         slider(sAD, {
             Name = "Sync Speed", Flag = "Misc_AutoDraw_Speed",
             Default = ad.Speed, Min = 3, Max = 300, Precision = 0, Suffix = " /s",
             Callback = function(v) ad.Speed = v end,
         })
-        sAD:SubLabel({ Text = "Segments per second sent to the server when Sync is on. The draw remote is UNRELIABLE and the game itself sends ~1 batch per 0.08s, so high values flood it and the server drops strokes (your screen would show more than everyone else). ~45 keeps your view and the server identical; raise it to trade fidelity for speed. Ignored when Sync is off (local render is always full-speed)." })
-        slider(sAD, {
-            Name = "Skip Threshold", Flag = "Misc_AutoDraw_Threshold",
-            Default = ad.Threshold, Min = 0, Max = 80, Precision = 0,
-            Callback = function(v) ad.Threshold = v end,
-        })
-        sAD:Toggle({
-            Name = "Skip Dark Pixels", Default = ad.SkipBg,
-            Callback = function(v) ad.SkipBg = v end,
-        }, ctx.flag("Misc_AutoDraw_SkipBg"))
-        sAD:SubLabel({ Text = "Leaves near-black pixels unpainted (the board is black), so dark areas show through." })
-        sAD:Toggle({
-            Name = "Monochrome (chalk white)", Default = ad.Mono,
-            Callback = function(v) ad.Mono = v end,
-        }, ctx.flag("Misc_AutoDraw_Mono"))
-        sAD:Toggle({
-            Name = "Preserve Aspect Ratio", Default = ad.Preserve,
-            Callback = function(v) ad.Preserve = v end,
-        }, ctx.flag("Misc_AutoDraw_Preserve"))
-        sAD:Toggle({
-            Name = "Sync to Server", Default = ad.Sync,
-            Callback = function(v) ad.Sync = v end,
-        }, ctx.flag("Misc_AutoDraw_Sync"))
-        sAD:SubLabel({ Text = "ON: also sends strokes to the server so the drawing persists and other players see it — requires ANY chalk equipped in your hand. OFF: renders instantly on your screen only." })
+        sAD:SubLabel({ Text = "Segments/second sent when Sync is on. The draw remote is UNRELIABLE; ~45 keeps your view and the server identical. Higher floods it and the server drops strokes. Ignored when Sync is off." })
 
+        -- ── Size & position ────────────────────────────────────────────
         sAD:Divider()
         sAD:Header({ Name = "Size & Position" })
         slider(sAD, {
@@ -2166,7 +2249,7 @@ return function(Lib, Core)
             Default = ad.Scale, Min = 10, Max = 100, Precision = 0, Suffix = " %",
             Callback = function(v) ad.Scale = v end,
         })
-        sAD:SubLabel({ Text = "How much of the board the drawing fills. 100% = as large as fits; lower to draw a smaller image. Use Preview Board to see the exact region." })
+        sAD:SubLabel({ Text = "How much of the board the drawing fills. Turn on Preview to see the exact region." })
         slider(sAD, {
             Name = "Horizontal Align", Flag = "Misc_AutoDraw_AlignX",
             Default = ad.AlignX, Min = 0, Max = 100, Precision = 0, Suffix = " %",
@@ -2180,17 +2263,29 @@ return function(Lib, Core)
         })
         sAD:SubLabel({ Text = "0 = top, 50 = middle, 100 = bottom." })
 
+        -- ── Preview ────────────────────────────────────────────────────
         sAD:Divider()
         sAD:Header({ Name = "Preview" })
-        sAD:Button({ Name = "Preview Board", Callback = function() previewBoard(notify) end })
-        sAD:SubLabel({ Text = "Highlights the nearest board (blue) and outlines where the image will be drawn (green). Auto-clears after ~12s." })
+        sAD:Toggle({
+            Name = "Preview", Default = ad.Preview,
+            Callback = function(v)
+                ad.Preview = v and true or false
+                if ad.Preview then previewBoard(notify, true) else clearPreview() end
+            end,
+        }, ctx.flag("Misc_AutoDraw_Preview"))
+        sAD:SubLabel({ Text = "ON: highlights the nearest board (blue) and outlines where the image will land (green), staying visible until you turn it off. Move the sliders above and re-toggle to refresh the outline." })
+        sAD:Button({
+            Name = "Refresh Preview",
+            Callback = function()
+                if ad.Preview then previewBoard(notify, true) else notify("Auto Draw", "turn Preview on first") end
+            end,
+        })
         sAD:Button({ Name = "Test Stroke (X)", Callback = function() testStroke(notify) end })
-        sAD:SubLabel({ Text = "Draws a white X + border on the board (renders locally, and syncs if Sync is on). If this shows up, the draw path works and only image loading is the problem." })
-        sAD:Button({ Name = "Clear Preview", Callback = function() clearPreview(); notify("Auto Draw", "preview cleared") end })
+        sAD:SubLabel({ Text = "Draws a white X + border on the board (local, syncs if Sync is on). If it shows up, the draw path works and only image loading is the issue." })
 
+        -- ── Board tools ────────────────────────────────────────────────
         sAD:Divider()
-        sAD:Button({ Name = "Draw", Callback = function() startAutoDraw(notify) end })
-        sAD:Button({ Name = "Stop", Callback = function() stopAutoDraw(); notify("Auto Draw", "stopped") end })
+        sAD:Header({ Name = "Board" })
         sAD:Button({
             Name = "Clear Board",
             Callback = function()
