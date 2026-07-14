@@ -131,7 +131,7 @@ return function(Lib, Core)
         return c, hum, root
     end
 
-    -- ══════════════════�� IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
+    -- ══════════════════���� IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
     -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
     -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
     -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
@@ -784,23 +784,31 @@ return function(Lib, Core)
             if _evSpeedIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, wantSpeed) end
             _appliedSpeed = wantSpeed
         end
-        -- allow 0 (instant); only fall back to the game value when the slider is unset (nil)
-        local wantCd = Config.Dodge_Cooldown or _evCdBase
-        if wantCd and wantCd ~= _appliedCd then
-            if cfg and cfg.Evasive then cfg.Evasive.Cooldown = wantCd end
-            if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, wantCd) end
-            _appliedCd = wantCd
+        -- CUSTOM COOLDOWN — HONEST SCOPE: the server authoritatively validates dodges, so we can
+        -- only LOWER the effective cooldown (dodge sooner / spam), never RAISE it above the game
+        -- default (the server would just ignore a higher client value — that's why setting 4s
+        -- "did nothing"). So the slider is clamped to [0, gameDefault]; at the default it's pure
+        -- vanilla. `effCd` = the value we actually enforce.
+        local base = _evCdBase or 1.5
+        local effCd = math.clamp(Config.Dodge_Cooldown or base, 0, base)
+        local custom = effCd < base - 1e-4      -- are we actually reducing below vanilla?
+        if effCd ~= _appliedCd then
+            -- keep the Cooldown constant / config field at the VANILLA base (the constant is a
+            -- reference the game scales per-style; we do the reduction via the deadline/attribute
+            -- clamps below, not by corrupting the base). This also un-sticks the old bug where a
+            -- previous cd=0 left the field/attribute pinned at 0 forever.
+            if cfg and cfg.Evasive then cfg.Evasive.Cooldown = base end
+            if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, base) end
+            _appliedCd = effCd
         end
-
-        -- CUSTOM COOLDOWN — the real gate is `os.clock() < u6/u5/u7/u8` (Evasive.lua:573-581),
-        -- NOT the Cooldown constant. Only u6 comes from the attribute clamp; u5/u7 (ServerConfirm/
-        -- DashDuration) gate independently → that's why custom cooldown "did nothing". Fix: clamp
-        -- the live deadline upvalues DOWN to now+wantCd each frame. Only when the user lowered the
-        -- cooldown below the game default (else pure vanilla), and only ACTIVE future deadlines
-        -- (`v > now`) so we never CREATE a cooldown, only shorten one.
-        if ev and wantCd and _evCdBase and wantCd < _evCdBase - 1e-4 then
+        -- The real gate is `os.clock() < u6/u5/u7/u8` (Evasive.lua:573-581). u6 is driven by the
+        -- EvasiveCooldownRemaining attribute (clamped in the hook); u5/u7 (ServerConfirm/DashDuration,
+        -- ~0.1-0.3s) gate independently, so for a near-instant custom cd we also clamp those live
+        -- deadline upvalues DOWN to now+effCd. Only while actually reducing, and only ACTIVE future
+        -- deadlines (`v > now`, within 30s) so we never CREATE a cooldown, only shorten one.
+        if custom and ev then
             local now = os.clock()
-            local cap = now + wantCd
+            local cap = now + effCd
             for _, idx in ipairs(_evDeadlineIdxs) do
                 local ok, v = pcall(debug.getupvalue, ev.Evasive, idx)
                 if ok and type(v) == "number" and v > now and (v - now) < 30 and v > cap then
@@ -887,7 +895,11 @@ return function(Lib, Core)
             if self == _myChar then
                 local dodgeEV = Config.Dodge_On and Config.Dodge_Everywhere
                 local ragEV   = Config.AntiRagdoll_On
-                local cdOn    = Config.Dodge_On   -- custom-cooldown clamp active
+                -- custom-cooldown clamp is active ONLY while we are actually REDUCING below the
+                -- game default (else vanilla → don't touch the attribute; this is what un-sticks
+                -- the "cooldown pinned at 0" bug after raising the slider back up).
+                local base    = _evCdBase or 1.5
+                local cdOn    = Config.Dodge_On and (Config.Dodge_Cooldown or base) < base - 1e-4
                 if (dodgeEV or ragEV or cdOn) and getnamecallmethod() == "GetAttribute" then
                     local key = ...
                     if ragEV and key == "Ragdoll" then
@@ -895,12 +907,12 @@ return function(Lib, Core)
                     elseif dodgeEV and DODGE_SPOOF_SET[key] then
                         return nil                                          -- hide action-lock
                     elseif cdOn and key == "EvasiveCooldownRemaining" then
-                        -- clamp the authoritative server cooldown down to our custom value; this
-                        -- is what syncCooldownFromServer feeds into the u6 dodge gate.
+                        -- clamp the authoritative server cooldown DOWN to our custom value; this
+                        -- is what syncCooldownFromServer feeds into the u6 dodge gate. We only ever
+                        -- lower it (never raise — server owns the real validation).
                         local real = oldNamecall(self, ...)
-                        local cd = Config.Dodge_Cooldown
-                        -- cd >= 0 so a 0 slider = instant (u6 = now, dodge always ready)
-                        if type(real) == "number" and type(cd) == "number" and cd >= 0 and real > cd then
+                        local cd = math.clamp(Config.Dodge_Cooldown or base, 0, base)
+                        if type(real) == "number" and real > cd then
                             return cd
                         end
                         return real
@@ -1200,9 +1212,9 @@ return function(Lib, Core)
             Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
         slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
-            Min = 0, Max = 5, Precision = 2, Suffix = " s", Callback = function(v)
+            Min = 0, Max = 1.5, Precision = 2, Suffix = " s", Callback = function(v)
                 Config.Dodge_Cooldown = v; driveDodge() end })
-        sDodge:SubLabel({ Text = "Defaults (30 studs · 1.5s) = vanilla. Cooldown only lowers: 0 = instant, 1.5 = game." })
+        sDodge:SubLabel({ Text = "Cooldown can only be LOWERED (server owns the real one): 0 = spam, 1.5 = vanilla." })
 
         -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
