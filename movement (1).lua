@@ -1291,11 +1291,11 @@ return function(Lib, Core)
             Title = "NoClip", Flag = "MV_NoClip",
             get = function() return Config.NoClip_On end,
             set = function(v) Config.NoClip_On = v end,
-            Desc = "phase through walls/floors (CanCollide off each frame)\npair with Fly for full freedom",
+            Desc = "phase through walls/floors",
         })
         boolToggle(sNoClip, "Carry-Aware", "NoClip Carry-Aware",
             function() return Config.NoClip_Carry end, function(v) Config.NoClip_Carry = v end)
-        sNoClip:SubLabel({ Text = "Carry-Aware also phases an enemy you're carrying/gripping → walk through walls with them on your shoulders. Auto-pauses while you're ragdolled." })
+        sNoClip:SubLabel({ Text = "u can carry someone w noclip" })
 
         -- ─────────────── Section 3: No Slowdown (Right) ───────────────
         local sNS = MV:Section({ Side = "Right" })
@@ -1381,9 +1381,9 @@ return function(Lib, Core)
             Title = "Infinite Stamina", Flag = "MV_InfStamina",
             get = function() return Config.InfStamina_On end,
             set = function(v) Config.InfStamina_On = v end,
-            Desc = "endless sprint via the client stamina-gate flag\nNEVER writes the Stamina attribute (undetectable)",
+            Desc = "wow is this inf stamina??",
         })
-        sStam:SubLabel({ Text = "Holds the sprint controller's stamina gate open — sprint never drains out" })
+        sStam:SubLabel({ Text = "inf stamina (ud)" })
 
         -- ─────────────── Section 6: Dodge (Left) ───────────────
         local sDodge = MV:Section({ Side = "Left" })
@@ -1406,7 +1406,7 @@ return function(Lib, Core)
                     restoreDodge()        -- put the game's own numbers back
                 end
             end,
-            Desc = "tweaks your OWN dodge (speed + cooldown)\ncooldown is a real client-side gate, any value 0–1.5s",
+            Desc = "tweaks ur OWN dodge",
         })
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
@@ -1423,14 +1423,14 @@ return function(Lib, Core)
                     clearDodgeGrant()     -- drop the bypass → cooldown/gates return to normal
                 end
             end)
-        sDodge:SubLabel({ Text = "Everywhere = dodge in ANY state incl. when hit/blocking. Cooldown below still applies." })
+        sDodge:SubLabel({ Text = "Enable it to set cooldown (hook startup)" })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
             Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
         slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
             Min = 0, Max = 1.5, Precision = 2, Suffix = " s", Callback = function(v)
                 Config.Dodge_Cooldown = v; driveDodge() end })
-        sDodge:SubLabel({ Text = "Real client-side cooldown, any value: 0 = spam every dash, 1.5 = vanilla. Works even with Everywhere." })
+        sDodge:SubLabel({ Text = "client-side cooldown" })
 
         -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
@@ -1442,9 +1442,9 @@ return function(Lib, Core)
                 Config.AntiRagdoll_On = v
                 if v then installCombatHook() end  -- hides the Ragdoll attr → game self-getups
             end,
-            Desc = "hides the Ragdoll attribute from the game's own sustain loop\nskips managed ones (downed / carried / gripped / dead)",
+            Desc = "idfk is this shit working or no anyway idk why u need it",
         })
-        sAR:SubLabel({ Text = "Hook path is flicker-free; falls back to a per-frame getup without hookmetamethod." })
+        sAR:SubLabel({ Text = "penis" })
 
         uiReady = true
     end
