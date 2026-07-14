@@ -540,17 +540,26 @@ return function(Lib, Core)
     end
 
     -- Render one stroke locally onto the board's EditableImage. Returns true on success.
-    -- Horizontal runs (the vast majority — our rasteriser emits horizontal same-colour
-    -- runs) are drawn as ONE solid DrawRectangle instead of hundreds of faint DrawCircles:
-    -- this is far faster AND crisper (no alpha speckle), which is what makes an image
-    -- reproduction look sharp. Non-horizontal segments (only the Test Stroke) fall back
-    -- to the chalk-dot line.
-    local function localStroke(part, brush, r, g, b, u1, v1, u2, v2)
+    --
+    -- `faithful` controls HOW we paint, and it matters a lot:
+    --   * faithful = true  → paint EXACTLY like the server does when it broadcasts our
+    --     batch to everyone else (applyDrawBuffer → a polyline of alpha-blended chalk
+    --     dots, radius 2, AlphaBlend, alpha 0.05-0.23). This makes OUR screen identical
+    --     to what other players see. Use this whenever Sync is on — otherwise the server
+    --     render (soft, textured, blended) looks "way better" than a crude local fill,
+    --     and any hard local fill would show a picture the server doesn't actually have.
+    --   * faithful = false → fast path: horizontal runs become ONE solid DrawRectangle.
+    --     Only safe for local-only preview (Sync off), where there is no server to match
+    --     and raw speed matters.
+    local function localStroke(part, brush, r, g, b, u1, v1, u2, v2, faithful)
         local img = getBoardImage(part)
         if not img then return false end
         local col = Color3.fromRGB(b8(r), b8(g), b8(b))
         local ok = pcall(function()
-            if v1 == v2 then
+            if faithful then
+                -- Identical to the game's own rendering of the batch we just sent.
+                chalkSegmentLocal(img, uvClamp(u1), uvClamp(v1), uvClamp(u2), uvClamp(v2), brush, col)
+            elseif v1 == v2 then
                 local x0 = uvClamp(math.min(u1, u2)) * 512
                 local x1 = uvClamp(math.max(u1, u2)) * 512
                 local h  = math.max(1, brush * 2)
@@ -571,7 +580,9 @@ return function(Lib, Core)
     -- fire the remote so the server persists it and other players see it too.
     -- `board` is the { id, part } table from findNearestBoard.
     local function drawStroke(board, brush, r, g, b, u1, v1, u2, v2, sync)
-        local shown = localStroke(board.part, brush, r, g, b, u1, v1, u2, v2)
+        -- When syncing, render faithfully (matches the server broadcast); otherwise use
+        -- the fast local path.
+        local shown = localStroke(board.part, brush, r, g, b, u1, v1, u2, v2, sync and true or false)
         if sync then fireRun(board.id, brush, r, g, b, u1, v1, u2, v2) end
         return shown
     end
@@ -1522,11 +1533,13 @@ return function(Lib, Core)
         local drewLocal = false
 
         if not sync then
+            -- Local-only preview: no server to match, so use the fast (faithful=false)
+            -- path and render at full speed.
             local lastYield = os.clock()
             for i = 1, total do
                 if token ~= _drawToken then break end
                 local s = strokes[i]
-                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v, false) then
                     drewLocal = true
                 end
                 -- Yield by wall-clock so tiny images finish in one frame and huge
@@ -1556,13 +1569,17 @@ return function(Lib, Core)
                 budget = budget - 1
 
                 local s = strokes[i]
-                -- LOCKSTEP: fire to the server, then mirror the exact same stroke
-                -- locally, so the screen only ever shows what we've actually sent.
+                -- LOCKSTEP: fire to the server, then — ONLY if the fire succeeded —
+                -- mirror the exact same stroke locally with the FAITHFUL renderer, so
+                -- our screen shows precisely what the server received and what other
+                -- players see (soft alpha-blended chalk, not a hard local fill). If the
+                -- fire fails we skip the local paint so no "phantom" stroke appears that
+                -- isn't actually on the server.
                 if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
                     sent = sent + 1
-                end
-                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
-                    drewLocal = true
+                    if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v, true) then
+                        drewLocal = true
+                    end
                 end
             end
         end
