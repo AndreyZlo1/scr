@@ -87,20 +87,31 @@ return function(Lib, Core)
         return "{ " .. table.concat(names, ", ") .. " }"
     end
 
-    -- ── Engine acquisition — filtergc for the live RhythmEngine instance ─────
-    -- The RhythmServiceClient singleton does NOT store the play session (its keys
-    -- are just _ampRelayActive/_characterJanitor/_initialized/_janitor/
-    -- _startPlayGateUntil/_startPlaySeq — no session field, even mid-song). The
-    -- actual playable object is the RhythmEngine INSTANCE created per song
-    -- (RhythmEngine:100-160), so we grab THAT directly by its unique instance
-    -- fields: _liveNotes, _active, _windows, _lanes, _judgeCounts, _scrollPxPerSec.
-    -- Methods (_now/_handleLanePress/_handleLaneRelease) live on the class metatable
-    -- and are reachable through the instance. The engine is destroyed after each
-    -- song (_destroyed=true), so we validate every frame and rescan when it dies —
-    -- filtergc(filterOne) is cheap (no full-heap copy like the getgc that froze).
+    -- ── Engine acquisition — client._session (freeze-free) + gated getgc ─────
+    -- The RhythmServiceClient singleton DOES hold the live session in ._session:
+    -- set when a song starts (RhythmServiceClient:767) and cleared to nil when it
+    -- ends (:398/:501). It's just absent in the constructor, which is why an idle
+    -- dump shows no _session key. So the freeze-free primary path is:
+    --   1) find the client ONCE via filtergc (cheap, cached forever),
+    --   2) read client._session every frame — zero scanning while playing.
+    -- Only if that fails do we fall back to a direct getgc scan for the engine,
+    -- and even then ONLY while the client says a song is active (_session set,
+    -- _ampRelayActive, or inside the start gate) so we never freeze at idle.
     local rawgetFn = rawget
 
-    local ENGINE_KEYS = { "_liveNotes", "_active", "_windows", "_lanes", "_judgeCounts", "_scrollPxPerSec" }
+    -- Client singleton signature (real keys, RhythmServiceClient:117-129).
+    local CLIENT_KEYS = { "_startPlaySeq", "_characterJanitor", "_janitor" }
+    local function looksLikeClient(o)
+        if type(o) ~= "table" then return false end
+        local ok, yes = pcall(function()
+            return rawgetFn(o, "_characterJanitor") ~= nil
+               and rawgetFn(o, "_janitor") ~= nil
+               and rawgetFn(o, "_startPlaySeq") ~= nil
+        end)
+        return ok and yes
+    end
+
+    -- Engine (RhythmPlaySession) signature (real instance keys, RhythmEngine:100-160).
     local function looksLikeEngine(o)
         if type(o) ~= "table" then return false end
         local ok, yes = pcall(function()
@@ -120,7 +131,6 @@ return function(Lib, Core)
         return mok and hasM
     end
 
-    -- A cached engine is only valid while it exists and isn't destroyed.
     local function engineAlive(e)
         if type(e) ~= "table" then return false end
         local ok, alive = pcall(function()
@@ -129,46 +139,90 @@ return function(Lib, Core)
         return ok and alive
     end
 
-    local _engine            -- cached engine for the current song
-    local _lastScan = 0
-    local SCAN_GAP = 0.5     -- min seconds between scans while searching
+    -- Find the client singleton once, cache forever.
+    local _client, _lastClientScan = nil, 0
+    local function getClient()
+        if _client then return _client end
+        if type(filtergc) ~= "function" then return nil end
+        local t = os.clock()
+        if t - _lastClientScan < 1.0 then return nil end
+        _lastClientScan = t
+        local ok, res = pcall(filtergc, "table", { Keys = CLIENT_KEYS }, true)
+        if ok and looksLikeClient(res) then
+            _client = res
+            dbg("CLIENT FOUND. keys=", dumpKeys(res))
+            return _client
+        end
+        -- list form fallback
+        local ok2, list = pcall(filtergc, "table", { Keys = CLIENT_KEYS }, false)
+        if ok2 and type(list) == "table" then
+            for i = 1, #list do
+                if looksLikeClient(list[i]) then
+                    _client = list[i]; dbg("CLIENT FOUND (list). keys=", dumpKeys(_client)); return _client
+                end
+            end
+        end
+        dbgT("no_client", 2, "client not found yet (filtergc). Retrying...")
+        return nil
+    end
+
+    -- Cheap "is a song active right now?" gate, read off the client.
+    local function songActive(client)
+        if not client then return false end
+        local ok, active = pcall(function()
+            return client._session ~= nil
+                or client._ampRelayActive == true
+                or (type(client._startPlayGateUntil) == "number" and os.clock() < client._startPlayGateUntil)
+        end)
+        return ok and active
+    end
+
+    local _engine, _lastScan = nil, 0
+    local SCAN_GAP = 0.5
     local function getEngine()
         if engineAlive(_engine) then return _engine end
-        _engine = nil        -- stale/destroyed → drop it
+        _engine = nil
 
-        if type(filtergc) ~= "function" then
-            dbgT("no_filtergc", 3, "filtergc is NOT available in this executor (type=" .. type(filtergc) .. ")")
+        local client = getClient()
+
+        -- Primary path: read the session straight off the client — no GC scan.
+        if client then
+            local ok, sess = pcall(function() return client._session end)
+            if ok and looksLikeEngine(sess) then
+                _engine = sess
+                dbg("ENGINE via client._session. keys=", dumpKeys(sess))
+                return _engine
+            end
+        end
+
+        -- Fallback: direct getgc scan, but ONLY while a song is active (so we never
+        -- freeze at idle) and throttled (one brief hitch, then cached for the song).
+        if client and not songActive(client) then
+            dbgT("idle", 3, "no song active (client._session nil, no amp relay) — not scanning")
             return nil
         end
+
         local nowClock = os.clock()
         if nowClock - _lastScan < SCAN_GAP then return nil end
         _lastScan = nowClock
 
-        -- Attempt 1: filterOne = true (single match, cheapest).
-        local ok, res = pcall(filtergc, "table", { Keys = ENGINE_KEYS }, true)
-        dbgT("scan1", 2, "scan#1 filterOne: ok=" .. tostring(ok)
-            .. " type=" .. type(res) .. " looksLikeEngine=" .. tostring(looksLikeEngine(res)))
-        if ok and looksLikeEngine(res) then
-            _engine = res
-            dbg("ENGINE FOUND (scan#1). keys=", dumpKeys(res))
-            return _engine
-        end
-
-        -- Attempt 2: filterOne = false → LIST form (some executors ignore arg 3).
-        local ok2, list = pcall(filtergc, "table", { Keys = ENGINE_KEYS }, false)
-        dbgT("scan2", 2, "scan#2 list: ok=" .. tostring(ok2)
-            .. " type=" .. type(list) .. " count=" .. (type(list) == "table" and #list or -1))
-        if ok2 and type(list) == "table" then
-            for i = 1, #list do
-                if looksLikeEngine(list[i]) then
-                    _engine = list[i]
-                    dbg("ENGINE FOUND (scan#2, index " .. i .. "). keys=", dumpKeys(_engine))
-                    return _engine
+        if type(getgc) == "function" then
+            local ok, gc = pcall(getgc, true)
+            dbgT("scan_ggc", 2, "getgc(true): ok=" .. tostring(ok)
+                .. " count=" .. (type(gc) == "table" and #gc or -1))
+            if ok and type(gc) == "table" then
+                for i = 1, #gc do
+                    local o = gc[i]
+                    if type(o) == "table" and looksLikeEngine(o) then
+                        _engine = o
+                        dbg("ENGINE via getgc. keys=", dumpKeys(o))
+                        return _engine
+                    end
                 end
             end
         end
 
-        dbgT("no_engine", 2, "no live engine this scan (no song playing yet?). Retrying...")
+        dbgT("no_engine", 2, "song seems active but engine not found this scan. Retrying...")
         return nil
     end
 
@@ -316,7 +370,7 @@ return function(Lib, Core)
 
         local Misc = ctx.tabs.Misc
 
-        -- ─────────────── Section: AutoRythm (Left) ───────────────
+        -- ─────────────── Section: AutoRythm (Left) ─��─────────────
         local sAR = Misc:Section({ Side = "Left" })
         sAR:Header({ Name = "AutoRythm" })
         feature(sAR, {
