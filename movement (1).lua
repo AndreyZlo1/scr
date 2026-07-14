@@ -125,7 +125,7 @@ return function(Lib, Core)
         AntiRagdoll_On = false,
     }
 
-    -- ═════════════════════════ Character helpers ═════════════════════��══════
+    -- ═════════════════════════ Character helpers ═════════════════════���══════
     local function getChar()
         local c = LocalPlayer.Character
         if not c or not c.Parent then return nil end
@@ -325,13 +325,36 @@ return function(Lib, Core)
     -- Standard client noclip: force CanCollide=false on our parts every PreSimulation frame
     -- (before physics resolves), so the world can't stop us. We remember each part's original
     -- CanCollide so disabling NoClip restores it exactly (HRP is normally false, Torso/Head true).
-    local _noclipTouched = {}     -- [BasePart] = originalCanCollide
+    --
+    -- [V130] PERF: the old version called model:GetDescendants() EVERY FRAME (allocates a fresh
+    -- table + walks the whole instance tree, ~20 parts) → constant GC churn = stutter. Now we CACHE
+    -- the BasePart list per model and only rebuild it on a throttle (parts almost never change mid-
+    -- life). Per frame we just walk a plain array and write CanCollide=false (cheap, no allocation).
+    local _noclipTouched = {}     -- [BasePart] = originalCanCollide (for restore)
+    local _partCache     = {}     -- [Model]   = { parts = {BasePart...}, t = lastScan }
+    local PART_RESCAN    = 1.0     -- seconds between descendant rescans per model
+    local function collideParts(model)
+        local entry = _partCache[model]
+        local now = os.clock()
+        if not entry or (now - entry.t) >= PART_RESCAN then
+            local parts = entry and entry.parts or {}
+            table.clear(parts)
+            for _, d in ipairs(model:GetDescendants()) do
+                if d:IsA("BasePart") then parts[#parts + 1] = d end
+            end
+            entry = { parts = parts, t = now }
+            _partCache[model] = entry
+        end
+        return entry.parts
+    end
     local function unCollide(model)
         if not model then return end
-        for _, d in ipairs(model:GetDescendants()) do
-            if d:IsA("BasePart") and d.CanCollide then
+        local parts = collideParts(model)
+        for i = 1, #parts do
+            local d = parts[i]
+            if d.Parent then
                 if _noclipTouched[d] == nil then _noclipTouched[d] = d.CanCollide end
-                d.CanCollide = false
+                if d.CanCollide then d.CanCollide = false end
             end
         end
     end
@@ -342,6 +365,7 @@ return function(Lib, Core)
             end
         end
         table.clear(_noclipTouched)
+        table.clear(_partCache)
     end
 
     -- Find an enemy character we are CARRYING/GRIPPING (they're welded to us). The carry/grip
