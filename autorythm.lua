@@ -61,6 +61,8 @@ return function(Lib, Core)
     -- ── Runtime config (MacLib restores flags through the config manager) ────
     local Config = {
         AutoRythm_On = false,
+        AutoRythm_Debug = false,   -- when on, prints hold-note diagnostics to the console
+
         -- Timing nudge (ms). 0 = frame-perfect. Negative = press earlier, positive
         -- = later. Only change for audio/display latency; PERFECT window is ±43ms.
         Offset = 0,
@@ -200,6 +202,21 @@ return function(Lib, Core)
     local _allowRelease = {}               -- lane -> true when WE authorize a release
     local _lastEngine
 
+    -- ── Debug logging for the hold path ────────────────────────────────────────
+    -- Toggle in-game with the "AutoRythm Debug" switch (Config.AutoRythm_Debug).
+    -- Output goes to the executor console (print). Share the HOLD lines so we can
+    -- see exactly what the engine does with our synthetic hold presses.
+    local _dbgHoldLast = setmetatable({}, { __mode = "k" })  -- weak: note -> last log time
+    local function rlog(fmt, ...)
+        if not Config.AutoRythm_Debug then return end
+        local ok, msg = pcall(string.format, fmt, ...)
+        print("[AutoRythm] " .. (ok and msg or fmt))
+    end
+    local function _inActive(active, note)
+        for i = 1, #active do if active[i] == note then return true end end
+        return false
+    end
+
     -- Instance-level guard over _handleLaneRelease: while a lane is auto-held, drop
     -- any release we didn't authorize (a stray InputEnded would EARLY_RELEASE the
     -- hold before the engine auto-finalizes it at t+len). We only allow the single
@@ -261,6 +278,9 @@ return function(Lib, Core)
         for lane, note in pairs(_heldLane) do
             local holdEnd = note.t + (note.len or 0)
             if note.holdJudgment ~= nil or now > holdEnd + 0.5 then
+                rlog("HOLD END lane=%d judged=%s holding=%s hit=%s now-end=%.3f",
+                    lane, tostring(note.holdJudgment), tostring(note.holding),
+                    tostring(note.hit), now - holdEnd)
                 _allowRelease[lane] = true
                 pcall(engine._handleLaneRelease, engine, lane)
                 _allowRelease[lane] = nil
@@ -269,6 +289,17 @@ return function(Lib, Core)
                 -- Still holding: mark the lane so the tap branch never releases it, and
                 -- let the engine keep/advance the hold on its own.
                 _laneHolding[lane] = true
+                -- Debug: report holding state a few times across the sustain.
+                if Config.AutoRythm_Debug then
+                    local key = note
+                    local last = _dbgHoldLast[key] or 0
+                    if now - last > 0.15 then
+                        _dbgHoldLast[key] = now
+                        rlog("HOLD... lane=%d t=%.3f len=%.3f now-t=%.3f holding=%s hit=%s judged=%s inActive=%s",
+                            lane, note.t, note.len or 0, now - note.t, tostring(note.holding),
+                            tostring(note.hit), tostring(note.holdJudgment), tostring(_inActive(active, note)))
+                    end
+                end
             end
         end
 
@@ -282,6 +313,10 @@ return function(Lib, Core)
                     -- engine promotes it to holding and auto-finalizes it as PERFECT.
                     if now >= note.t + offset and not _heldLane[lane] then
                         pcall(engine._handleLanePress, engine, lane)
+                        rlog("HOLD PRESS lane=%d t=%.3f len=%.3f now=%.3f dt=%.3f -> hit=%s holding=%s attempted=%s holdStart=%s",
+                            lane, note.t, note.len or 0, now, now - note.t,
+                            tostring(note.hit), tostring(note.holding),
+                            tostring(note.attempted), tostring(note.holdStartTime))
                         _heldLane[lane]    = note
                         _laneHolding[lane] = true
                     end
@@ -1881,6 +1916,13 @@ return function(Lib, Core)
             Callback = function(v) Config.Offset = v end,
         })
         sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if your client has audio/display lag. Taps stay PERFECT within about +-43ms." })
+        sAR:Divider()
+        feature(sAR, {
+            Title = "Debug holds", Flag = "Misc_AutoRythm_Debug",
+            get = function() return Config.AutoRythm_Debug end,
+            set = function(v) Config.AutoRythm_Debug = v end,
+            Desc = "prints hold-note diagnostics to the executor console\nturn on, play a song with holds, then send me the [AutoRythm] lines",
+        })
         sAR:Divider()
         sAR:SubLabel({ Text = "Grabs the live RhythmEngine and plays it directly, so the game sees a clean PERFECT run. Just start a song and enable." })
 
