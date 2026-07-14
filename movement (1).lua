@@ -131,7 +131,7 @@ return function(Lib, Core)
         return c, hum, root
     end
 
-    -- ══════════════════���� IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
+    -- ══════════════════����� IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
     -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
     -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
     -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
@@ -565,7 +565,7 @@ return function(Lib, Core)
                          "Attacking", "Casting", "ComboCooldown" }
     -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs крутится
     -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
-    -- атрибут = до 8 closure/кадр = лишний GC. Персистентная fn не аллоцирует ничего.
+    -- атрибут = до 8 closure/кадр = лишний GC. Персистентная fn не аллоциру��т ничего.
     local function _clearAttr(c, a) c:SetAttribute(a, nil) end
     local function clearGateAttrs()
         if not (Config.NoDelay_On and Config.NoDelay_Attrs) then return end
@@ -711,19 +711,18 @@ return function(Lib, Core)
     -- SPEED: the dash velocity reads the `DashSpeed` module upvalue directly (Evasive.lua:701)
     -- and the config field (Evasive.DashSpeed) — we patch both. This works.
     --
-    -- COOLDOWN — real root cause (why it "didn't work"): the gate is `os.clock() < u6`
-    -- (Evasive.lua:577). u6 is NEVER set from the `Cooldown` upvalue we were patching. It is set
-    -- by syncCooldownFromServer (Evasive.lua:64) from TWO places, in priority order:
-    --   1) the server attribute `EvasiveCooldownRemaining` (line 76-79) — AUTHORITATIVE, so our
-    --      config patch was simply ignored whenever the server set it → "sometimes works".
-    --   2) config fallback GetStyleEvasiveCooldown = Evasive.Cooldown * styleMult (line 89) when
-    --      that attribute is absent.
-    -- Fix: CLAMP the `EvasiveCooldownRemaining` attribute read in the combat __namecall hook to
-    -- our custom value (covers the authoritative path), AND patch the config field (covers the
-    -- fallback path). Now u6 = now + customCooldown on both branches. Defaults = the real game
-    -- numbers (30 studs / 1.5s) and the clamp only lowers, so leaving defaults = pure vanilla.
-    -- Honest ceiling: a cooldown BELOW the server's true value is client-prediction only — the
-    -- server still owns the real dash confirmation and i-frames.
+    -- COOLDOWN — client-authoritative, exactly like infinite sprint: the server validates a real
+    -- dodge ~once/1.5s, but nothing stops us driving the CLIENT dash at our own rate. Every prior
+    -- attempt (patching the Cooldown const / clamping deadline upvalues per-frame / clamping the
+    -- EvasiveCooldownRemaining attribute) fought the game's own logic and lost — and the Everywhere
+    -- grant (u51) zeroes u5/u6/u7/u8 EVERY call (Evasive.lua:557-561), wiping the cooldown entirely
+    -- regardless of the slider (that was the "removed immediately even at 1.5s" bug).
+    -- Fix: WRAP Evasive.Evasive (hookfunction) and make OUR `_nextDodgeAllowed` deadline the single
+    -- source of truth (installEvasiveHook). It swallows dodges inside the window and, when reducing
+    -- below vanilla, zeroes the game's native deadline gate so a faster re-dodge goes through. Works
+    -- for ANY value in [0, 1.5] and RE-IMPOSES the cooldown on top of the Everywhere grant.
+    -- Honest ceiling: i-frames/dash confirmation below ~1.5s are client-prediction; the server still
+    -- owns the authoritative i-frame grant.
     --
     -- DODGE-EVERYWHERE — two layers, matching how Evasive() gates itself (verified Evasive.lua):
     --   1) OutnumberedEvasiveGrant=true → u51 bypass (line 529). When set, Evasive INTERNALLY
@@ -743,26 +742,29 @@ return function(Lib, Core)
     local _evSpeedBase, _evCdBase = nil, nil
     local _appliedSpeed, _appliedCd = nil, nil
     local _evDeadlineIdxs = {}   -- numeric upvalue indices that may hold os.clock cooldown deadlines
+    local _evFn           = nil  -- the real Evasive.Evasive closure (for upvalue access)
+    local _nextDodgeAllowed = 0  -- OUR client-authoritative cooldown deadline (os.clock)
     local function mapEvasive()
         if _evMapped then return true end
         local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return false end
+        _evFn = ev.Evasive
         local cfg = getCombatConfig()
         local ev2 = cfg and cfg.Evasive
         _evSpeedBase = ev2 and type(ev2.DashSpeed) == "number" and ev2.DashSpeed or nil
         _evCdBase    = ev2 and type(ev2.Cooldown)  == "number" and ev2.Cooldown  or nil
         if hasDebugUpvalues() then
-            local ok, ups = pcall(debug.getupvalues, ev.Evasive)
+            local ok, ups = pcall(debug.getupvalues, _evFn)
             if ok and type(ups) == "table" then
                 for i, v in pairs(ups) do
                     if type(v) == "number" then
                         if _evSpeedBase and not _evSpeedIdx and math.abs(v - _evSpeedBase) < 1e-4 then
-                            _evSpeedIdx = i          -- DashSpeed constant
+                            _evSpeedIdx = i          -- DashSpeed constant (30) — never zero this
                         elseif _evCdBase and not _evCdIdx and math.abs(v - _evCdBase) < 1e-4 then
-                            _evCdIdx = i             -- Cooldown constant
+                            _evCdIdx = i             -- Cooldown constant (1.5) — never zero this
                         else
-                            -- everything else numeric is a deadline candidate (u5/u6/u7/u8 are
-                            -- os.clock() deadlines; small constants get filtered at clamp time
-                            -- by the `v > now` test, so listing them here is harmless).
+                            -- deadline candidates. u6/u7/u8 are os.clock() timestamps; the small
+                            -- constants (DashDuration/ServerConfirmTimeout, <1) are filtered at
+                            -- zero-time by the `v > 60` test, so listing them here is harmless.
                             _evDeadlineIdxs[#_evDeadlineIdxs + 1] = i
                         end
                     end
@@ -771,6 +773,58 @@ return function(Lib, Core)
         end
         _evMapped = true
         return true
+    end
+
+    -- Zero the game's own cooldown deadline upvalues (u6/u7/u8 = os.clock timestamps) so the
+    -- native `os.clock() < u6` gate (Evasive.lua:573-581) won't reject a re-dodge that comes
+    -- sooner than the game's 1.5s. Only os.clock-scale values (>60) are touched, so the small
+    -- constants (DashSpeed/Cooldown/DashDuration/ServerConfirmTimeout) are never corrupted.
+    local function zeroGameDeadlines()
+        if not (_evFn and hasDebugUpvalues()) then return end
+        for _, idx in ipairs(_evDeadlineIdxs) do
+            local ok, v = pcall(debug.getupvalue, _evFn, idx)
+            if ok and type(v) == "number" and v > 60 then
+                pcall(debug.setupvalue, _evFn, idx, 0)
+            end
+        end
+    end
+
+    -- ── CUSTOM DODGE COOLDOWN — client-authoritative, like infinite sprint ──────────────────
+    -- The server validates a real dodge ~once per 1.5s, but nothing stops us from driving the
+    -- CLIENT dash at our own rate. We wrap Evasive.Evasive and make OUR `_nextDodgeAllowed`
+    -- deadline the single source of truth. This works WITH the Everywhere grant (which zeroes
+    -- the game's deadlines) AND without it, and enforces ANY value in [0, base] — not just 0/1.5.
+    -- ROOT-CAUSE FIX: previously the Everywhere grant (OutnumberedEvasiveGrant→u51) zeroed
+    -- u6/u5/u7/u8 every call (Evasive.lua:557-561), so cooldown vanished entirely regardless of
+    -- the slider. Now the wrapper RE-IMPOSES the cooldown on top of the grant.
+    local _evHooked, _origEvasive = false, nil
+    local function installEvasiveHook()
+        if _evHooked then return true end
+        if type(hookfunction) ~= "function" then return false end
+        if not mapEvasive() then return false end
+        _origEvasive = hookfunction(_evFn, function(...)
+            if not Config.Dodge_On then return _origEvasive(...) end
+            local base  = _evCdBase or 1.5
+            local effCd = math.clamp(Config.Dodge_Cooldown or base, 0, base)
+            local custom = effCd < base - 1e-4          -- reducing below vanilla?
+            -- If we're NOT reducing AND the Everywhere grant isn't nuking the native cooldown,
+            -- let the game own the cooldown entirely (pure vanilla — including its correct
+            -- "don't arm cooldown on a state-rejected dodge" behaviour).
+            if not custom and not Config.Dodge_Everywhere then
+                return _origEvasive(...)
+            end
+            local now = os.clock()
+            if now < _nextDodgeAllowed then
+                return                                  -- still on OUR custom cooldown → swallow
+            end
+            if custom then
+                zeroGameDeadlines()                     -- allow a faster-than-vanilla re-dodge
+            end
+            _nextDodgeAllowed = now + effCd             -- arm our client-side cooldown
+            return _origEvasive(...)
+        end)
+        _evHooked = (_origEvasive ~= nil)
+        return _evHooked
     end
     -- Cheap per-frame keeper: writes only when the desired value actually changed.
     local function driveDodge()
@@ -784,42 +838,22 @@ return function(Lib, Core)
             if _evSpeedIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evSpeedIdx, wantSpeed) end
             _appliedSpeed = wantSpeed
         end
-        -- CUSTOM COOLDOWN — HONEST SCOPE: the server authoritatively validates dodges, so we can
-        -- only LOWER the effective cooldown (dodge sooner / spam), never RAISE it above the game
-        -- default (the server would just ignore a higher client value — that's why setting 4s
-        -- "did nothing"). So the slider is clamped to [0, gameDefault]; at the default it's pure
-        -- vanilla. `effCd` = the value we actually enforce.
+        -- CUSTOM COOLDOWN is enforced by the Evasive.Evasive wrapper (installEvasiveHook), whose
+        -- `_nextDodgeAllowed` gate is the single source of truth for ANY value in [0, base]. We
+        -- keep the Cooldown constant / config field at the vanilla base (the game scales it per
+        -- style; corrupting it caused the old "stuck at 0" bug) — the wrapper does the real work.
         local base = _evCdBase or 1.5
-        local effCd = math.clamp(Config.Dodge_Cooldown or base, 0, base)
-        local custom = effCd < base - 1e-4      -- are we actually reducing below vanilla?
-        if effCd ~= _appliedCd then
-            -- keep the Cooldown constant / config field at the VANILLA base (the constant is a
-            -- reference the game scales per-style; we do the reduction via the deadline/attribute
-            -- clamps below, not by corrupting the base). This also un-sticks the old bug where a
-            -- previous cd=0 left the field/attribute pinned at 0 forever.
+        if base ~= _appliedCd then
             if cfg and cfg.Evasive then cfg.Evasive.Cooldown = base end
             if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, base) end
-            _appliedCd = effCd
+            _appliedCd = base
         end
-        -- The real gate is `os.clock() < u6/u5/u7/u8` (Evasive.lua:573-581). u6 is driven by the
-        -- EvasiveCooldownRemaining attribute (clamped in the hook); u5/u7 (ServerConfirm/DashDuration,
-        -- ~0.1-0.3s) gate independently, so for a near-instant custom cd we also clamp those live
-        -- deadline upvalues DOWN to now+effCd. Only while actually reducing, and only ACTIVE future
-        -- deadlines (`v > now`, within 30s) so we never CREATE a cooldown, only shorten one.
-        if custom and ev then
-            local now = os.clock()
-            local cap = now + effCd
-            for _, idx in ipairs(_evDeadlineIdxs) do
-                local ok, v = pcall(debug.getupvalue, ev.Evasive, idx)
-                if ok and type(v) == "number" and v > now and (v - now) < 30 and v > cap then
-                    pcall(debug.setupvalue, ev.Evasive, idx, cap)
-                end
-            end
-        end
+        installEvasiveHook()   -- idempotent; makes the custom cooldown actually apply
 
-        -- DODGE EVERYWHERE — assert the game's own u51 bypass (zeroes cooldowns + skips the
-        -- hit/stun/guard-broken/cant-anything gates internally). The __namecall hook covers the
-        -- remaining Blocking/CombatAttacking/Greenzone/RpCombatLocked gates.
+        -- DODGE EVERYWHERE — assert the game's own u51 bypass (skips the hit/stun/guard-broken/
+        -- cant-anything gates internally). It ALSO zeroes the game's deadlines, but that no longer
+        -- wipes the cooldown because the Evasive wrapper re-imposes `_nextDodgeAllowed` on top.
+        -- The __namecall hook covers the remaining Blocking/CombatAttacking/Greenzone/RpCombatLocked.
         if Config.Dodge_Everywhere then
             local c = _myChar
             if c and c:GetAttribute("OutnumberedEvasiveGrant") ~= true then
@@ -893,29 +927,16 @@ return function(Lib, Core)
         local handler = function(self, ...)
             -- cheapest possible gate first: only our character's reads can ever be spoofed
             if self == _myChar then
+                -- custom dodge cooldown is handled entirely by the Evasive.Evasive wrapper now,
+                -- so this hook only hides action-lock state (Everywhere) + ragdoll.
                 local dodgeEV = Config.Dodge_On and Config.Dodge_Everywhere
                 local ragEV   = Config.AntiRagdoll_On
-                -- custom-cooldown clamp is active ONLY while we are actually REDUCING below the
-                -- game default (else vanilla → don't touch the attribute; this is what un-sticks
-                -- the "cooldown pinned at 0" bug after raising the slider back up).
-                local base    = _evCdBase or 1.5
-                local cdOn    = Config.Dodge_On and (Config.Dodge_Cooldown or base) < base - 1e-4
-                if (dodgeEV or ragEV or cdOn) and getnamecallmethod() == "GetAttribute" then
+                if (dodgeEV or ragEV) and getnamecallmethod() == "GetAttribute" then
                     local key = ...
                     if ragEV and key == "Ragdoll" then
                         if not isManagedRagdoll(self) then return nil end   -- hide ragdoll
                     elseif dodgeEV and DODGE_SPOOF_SET[key] then
                         return nil                                          -- hide action-lock
-                    elseif cdOn and key == "EvasiveCooldownRemaining" then
-                        -- clamp the authoritative server cooldown DOWN to our custom value; this
-                        -- is what syncCooldownFromServer feeds into the u6 dodge gate. We only ever
-                        -- lower it (never raise — server owns the real validation).
-                        local real = oldNamecall(self, ...)
-                        local cd = math.clamp(Config.Dodge_Cooldown or base, 0, base)
-                        if type(real) == "number" and real > cd then
-                            return cd
-                        end
-                        return real
                     end
                 end
             end
@@ -1183,14 +1204,16 @@ return function(Lib, Core)
                         notify("Dodge", "Evasive module not found yet"); Config.Dodge_On = false; return
                     end
                     Config.Dodge_On = true
-                    installCombatHook()   -- clamps EvasiveCooldownRemaining → custom cooldown works
+                    if not installEvasiveHook() then
+                        notify("Dodge", "custom cooldown needs hookfunction (speed still works)")
+                    end
                     driveDodge()          -- apply current slider values immediately
                 else
                     Config.Dodge_On = false
                     restoreDodge()        -- put the game's own numbers back
                 end
             end,
-            Desc = "tweaks your OWN dodge (speed + cooldown)\ndefaults match the game exactly",
+            Desc = "tweaks your OWN dodge (speed + cooldown)\ncooldown is a real client-side gate, any value 0–1.5s",
         })
         boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
             function() return Config.Dodge_Everywhere end,
@@ -1207,14 +1230,14 @@ return function(Lib, Core)
                     clearDodgeGrant()     -- drop the bypass → cooldown/gates return to normal
                 end
             end)
-        sDodge:SubLabel({ Text = "Everywhere = dodge in ANY state incl. when hit/blocking (uses the game's own grant; makes dodge instant)." })
+        sDodge:SubLabel({ Text = "Everywhere = dodge in ANY state incl. when hit/blocking. Cooldown below still applies." })
         slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
             Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
                 Config.Dodge_Speed = v; driveDodge() end })
         slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
             Min = 0, Max = 1.5, Precision = 2, Suffix = " s", Callback = function(v)
                 Config.Dodge_Cooldown = v; driveDodge() end })
-        sDodge:SubLabel({ Text = "Cooldown can only be LOWERED (server owns the real one): 0 = spam, 1.5 = vanilla." })
+        sDodge:SubLabel({ Text = "Real client-side cooldown, any value: 0 = spam every dash, 1.5 = vanilla. Works even with Everywhere." })
 
         -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
         local sAR = MV:Section({ Side = "Right" })
