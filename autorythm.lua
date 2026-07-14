@@ -242,8 +242,10 @@ return function(Lib, Core)
         table.clear(_laneHolding)
 
         -- Lanes with a hold in progress must never be tap-released.
+        -- Use note.holding (set by _onPressLane when the press lands after note.t) rather
+        -- than note.hit, because hit=true is also set for holds that haven't started yet.
         for _, note in ipairs(active) do
-            if (note.len or 0) > 0 and note.hit and not note.holdJudgment then
+            if (note.len or 0) > 0 and note.holding then
                 _laneHolding[note.lane] = true
             end
         end
@@ -256,9 +258,9 @@ return function(Lib, Core)
         -- that 140ms window. We release at t+len+HOLD_REL_MARGIN: since we pressed at
         -- t (initial timing ~0 = PERFECT) the ratio is ~1.0 (>=0.95) => PERFECT.
         for lane, note in pairs(_heldLane) do
-            if note.holdJudgment ~= nil then
-                -- Engine already scored it (our release landed, or a stray release slipped
-                -- through) — stop tracking.
+            if note.holdJudgment ~= nil or note.holding == false then
+                -- Engine scored it (_onReleaseLane sets holdJudgment and holding=false) —
+                -- stop tracking this lane.
                 _heldLane[lane] = nil
                 _allowRelease[lane] = nil
             elseif now >= note.t + (note.len or 0) + HOLD_REL_MARGIN then
@@ -275,9 +277,16 @@ return function(Lib, Core)
             if type(lane) == "number" and lane >= 1 and lane <= lanes
                and not note.hit and not note.attempted then
                 if (note.len or 0) > 0 then
-                    -- Hold: press only at/after note.t (an early press never sets holding).
-                    local holdOffset = (offset > 0) and offset or 0
-                    if now >= note.t + holdOffset and not _heldLane[lane] then
+                    -- Hold: we MUST press AFTER note.t, not at or before it.
+                    -- _onPressLane line 1153-1158: if note.t > now at press time, the
+                    -- engine stores holdStartTime but does NOT set note.holding = true
+                    -- (early return). _onReleaseLane only scores notes where holding==true,
+                    -- so pressing too early means the release call finds nothing and the
+                    -- hold is never scored. Adding HOLD_PRESS_GRACE (20ms) ensures now >
+                    -- note.t at the moment we fire the press, so holding always gets set.
+                    local HOLD_PRESS_GRACE = 0.02
+                    local pressTime = note.t + HOLD_PRESS_GRACE + math.max(0, offset)
+                    if now >= pressTime and not _heldLane[lane] then
                         pcall(engine._handleLanePress, engine, lane)
                         _heldLane[lane] = note
                         _laneHolding[lane] = true
@@ -1657,25 +1666,38 @@ return function(Lib, Core)
                 notify("Auto Draw", "file not found: " .. path); return
             end
         else
+            -- Download the image and write it to the executor workspace so that
+            -- getcustomasset can convert it to an rbxasset:// URL for CreateEditableImageAsync.
+            --
+            -- IMPORTANT: request().Body returns a Lua string whose bytes are the raw
+            -- binary image. Potassium's writefile handles binary strings correctly, but
+            -- only when the data is obtained via httpget / game:HttpGetAsync (which return
+            -- the raw body as-is). Using request() can silently truncate at null bytes on
+            -- some executor versions, which is why "could not save" was appearing.
+            -- httpget() is the UNC-standard binary-safe HTTP getter.
             local data
-            local ok = pcall(function()
-                if type(request) == "function" then
+            local dlOk = pcall(function()
+                if type(httpget) == "function" then
+                    data = httpget(ad.Url)
+                elseif type(http_request) == "function" then
+                    local res = http_request({ Url = ad.Url, Method = "GET" })
+                    data = res and res.Body
+                elseif type(request) == "function" then
                     local res = request({ Url = ad.Url, Method = "GET" })
                     data = res and res.Body
-                elseif type(game.HttpGetAsync) == "function" then
-                    data = game:HttpGetAsync(ad.Url)
                 end
             end)
-            if not ok or not data or #data == 0 then
-                notify("Auto Draw", "download failed — check the URL"); return
+            if not dlOk or not data or #data == 0 then
+                notify("Auto Draw", "download failed — check the URL and that HTTP is enabled"); return
+            end
+            if type(writefile) ~= "function" then
+                notify("Auto Draw", "executor has no writefile — cannot load URL images"); return
             end
             local ext = ad.Url:match("%.([%a]%a%a%a?)%f[%A]") or "png"
             path = "syllinse_autodraw_temp." .. ext:lower()
-            if type(writefile) ~= "function" then
-                notify("Auto Draw", "executor has no writefile"); return
-            end
-            if not pcall(writefile, path, data) then
-                notify("Auto Draw", "could not save the downloaded image"); return
+            local writeOk, writeErr = pcall(writefile, path, data)
+            if not writeOk then
+                notify("Auto Draw", "writefile failed: " .. tostring(writeErr)); return
             end
         end
 
