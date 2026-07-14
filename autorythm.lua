@@ -57,19 +57,30 @@ return function(Lib, Core)
         Offset = 0,
     }
 
-    -- ── Engine acquisition — NO getgc (that was the freeze) ──────────────────
-    -- The game exposes RhythmServiceClient as a SINGLETON: its ModuleScript ends
-    -- with `return u12:Get()`, so require() hands us the singleton directly. That
-    -- singleton holds ._session — the live RhythmPlaySession (== the "engine" with
-    -- _active / _now / _handleLanePress). No song → _session is nil (cheap check).
+    -- ── Engine acquisition — freeze-proof ────────────────────────────────────
+    -- The game exposes RhythmServiceClient as a SINGLETON (its ModuleScript ends
+    -- with `return u12:Get()`), and that singleton holds ._session — the live
+    -- RhythmPlaySession (== the "engine": _active / _now / _handleLanePress).
     --
-    -- Old code swept the WHOLE GC with getgc(true) every 0.5s while idle, copying
-    -- the entire heap into a Lua table each time → massive stutter. Now:
-    --   1) require the cached module ONCE (FindFirstChild + cached require = cheap),
-    --   2) if the path was stripped after boot, fall back to filtergc(filterOne)
-    --      ONCE to grab the singleton by field signature (like the movement module),
-    --   3) cache the singleton forever (it never dies) and just read ._session/frame.
+    -- The freeze the user saw was the GC scan (getgc/filtergc) running on a timer
+    -- even while nothing was going on. Two rules kill it for good:
+    --   • GATE: never scan unless the minigame UI (PlayerGui.RhythmServiceUI) is
+    --     actually open. That's a single cheap FindFirstChild — at idle we do zero
+    --     GC work, so no stutter when you're just walking around.
+    --   • CACHE FOREVER: the singleton never dies, so once we have it we never scan
+    --     again (not even between songs). require() is tried first (cached module =
+    --     no sweep); filtergc(filterOne) is only a one-time fallback if require is
+    --     blocked, and it only runs while the minigame is open.
     local rawgetFn = rawget
+
+    local function playerGui()
+        return LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui") or nil
+    end
+    -- Cheap gate: is the rhythm minigame actually on screen right now?
+    local function minigameOpen()
+        local pg = playerGui()
+        return pg ~= nil and pg:FindFirstChild("RhythmServiceUI") ~= nil
+    end
 
     local function tryRequire(pathParts)
         local node = ReplicatedStorage
@@ -93,34 +104,37 @@ return function(Lib, Core)
         return ok and yes
     end
 
-    local _client, _lastClientTry = nil, 0
-    local CLIENT_RETRY = 1.0   -- seconds between acquisition attempts while we have none
+    local _client            -- cached singleton (forever, once found)
+    local _requireTried      -- we only attempt require ONCE (cheap, but no point spamming)
+    local _lastScan = 0
+    local SCAN_GAP = 2.0     -- min seconds between filtergc fallbacks while searching
     local function getClient()
         if _client then return _client end
-        local nowClock = os.clock()
-        if nowClock - _lastClientTry < CLIENT_RETRY then return nil end
-        _lastClientTry = nowClock
 
         -- 1) require the cached module → returns the singleton (u12:Get()).
-        local svc = tryRequire({ "Shared", "Services", "RhythmService", "RhythmServiceClient" })
-        if looksLikeClient(svc) then
-            _client = svc
-            return _client
-        end
-        -- some builds may return the class instead of the instance → call :Get().
-        if type(svc) == "table" and type(svc.Get) == "function" then
-            local ok, inst = pcall(svc.Get, svc)
-            if ok and looksLikeClient(inst) then _client = inst; return _client end
+        --    Cheap when it works; if the executor blocks it we just move on.
+        if not _requireTried then
+            _requireTried = true
+            local svc = tryRequire({ "Shared", "Services", "RhythmService", "RhythmServiceClient" })
+            if looksLikeClient(svc) then _client = svc; return _client end
+            if type(svc) == "table" and type(svc.Get) == "function" then
+                local ok, inst = pcall(svc.Get, svc)
+                if ok and looksLikeClient(inst) then _client = inst; return _client end
+            end
         end
 
-        -- 2) fallback: filtergc for the singleton by signature, ONE match only
-        -- (filterOne = true → never sweeps/collects the whole heap → no freeze).
-        if type(filtergc) == "function" then
-            local ok, res = pcall(filtergc, "table",
-                { Keys = { "_characterJanitor", "_janitor", "_startPlaySeq" } }, true)
-            if ok and looksLikeClient(res) then _client = res; return _client end
-        end
-        return nil
+        -- 2) filtergc fallback — ONLY while the minigame is open, throttled. This is
+        --    the only potentially heavy call, and it's confined to when you're
+        --    actually playing (and runs at most once before it caches forever).
+        if not minigameOpen() then return nil end
+        if type(filtergc) ~= "function" then return nil end
+        local nowClock = os.clock()
+        if nowClock - _lastScan < SCAN_GAP then return nil end
+        _lastScan = nowClock
+        local ok, res = pcall(filtergc, "table",
+            { Keys = { "_characterJanitor", "_janitor", "_startPlaySeq" } }, true)
+        if ok and looksLikeClient(res) then _client = res end
+        return _client
     end
 
     -- Read the live engine (play session) off the singleton; nil when no song.
@@ -160,15 +174,25 @@ return function(Lib, Core)
             if note.holding then _laneHolding[note.lane] = true end
         end
 
-        -- Decide presses this frame. A note is due when now >= its hit time. Pressing
-        -- exactly then means at most ONE frame of lateness (~16ms ≪ 43ms PERFECT window).
+        -- Decide presses this frame. A note is due when now >= its hit time.
+        --
+        -- CRITICAL for holds: the engine only starts a hold (holding = true) if the
+        -- press lands at/after the note time. If you press even slightly EARLY it
+        -- takes the "future note" branch (_onPressLane:1154) — the tap is credited
+        -- but holding never turns on, so the sustain scores nothing. Taps don't care
+        -- about early vs late (any press inside the window counts), so ONLY holds
+        -- must be protected: we clamp their offset so a negative (press-earlier)
+        -- Offset can never drag a hold press before note.t.
+        local holdOffset = (offset > 0) and offset or 0
         for _, note in ipairs(active) do
             local lane = note.lane
             if type(lane) == "number" and lane >= 1 and lane <= lanes then
-                if not note.hit and not note.attempted and now >= note.t + offset then
+                if not note.hit and not note.attempted then
                     if (note.len or 0) > 0 then
-                        if not note.holding then _pressHold[lane] = true end
-                    else
+                        if not note.holding and now >= note.t + holdOffset then
+                            _pressHold[lane] = true
+                        end
+                    elseif now >= note.t + offset then
                         _pressTap[lane] = true
                     end
                 end
