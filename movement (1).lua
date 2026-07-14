@@ -85,6 +85,12 @@ return function(Lib, Core)
         NoClip_On    = false,
         NoClip_Carry = true,      -- also un-collide an enemy we're carrying/gripping
 
+        -- Carry Distance — the game reads KnockedServiceUtils.CONSTANTS.MAX_INTERACTION_DISTANCE
+        -- (default 10 studs) LIVE on every carry/grip/execute range check, so raising the field
+        -- lets us carry/grip downed players from far away. 10 = vanilla.
+        CarryDist_On = false,
+        CarryDist    = 10,
+
         -- No Slowdown (master + per-type) — hooks MovementServiceUtils.SetSpeed
         NS_On     = false,
         NS_Attack = true,         -- M1/M2/windup movement lock
@@ -125,7 +131,7 @@ return function(Lib, Core)
         AntiRagdoll_On = false,
     }
 
-    -- ═════════════════════════ Character helpers ════════════════════════════
+    -- ═════════════════════════ Character helpers ═════════════════════��══════
     local function getChar()
         local c = LocalPlayer.Character
         if not c or not c.Parent then return nil end
@@ -348,6 +354,36 @@ return function(Lib, Core)
     -- weld lives under the VICTIM's HRP (CarryWeld/GripWeld — RagdollServiceClient.isCarriedOrGripped),
     -- and one of its Part0/Part1 belongs to OUR character. Cached ~0.25s (carry state rarely
     -- flips) so we don't scan every player every frame.
+    --
+    -- Detection (verified against KnockedService): a downed victim being carried/gripped has an
+    -- ObjectValue States.BeingCarried / States.BeingGripped whose .Value is set (line 80/86 confirm
+    -- IsA("ObjectValue")). We match the victim to US two ways, name-independent so it survives
+    -- whatever the server names the weld:
+    --   1) the ObjectValue .Value references our character/HRP/player (authoritative link), OR
+    --   2) ANY weld/Motor6D under the victim connects Part0/Part1 to our character (physical link).
+    -- The old code only checked a hard-coded "CarryWeld"/"GripWeld" name under HRP → it missed the
+    -- real weld and Carry-Aware never fired. This is the fix.
+    local function refsMe(inst, myChar)
+        if not inst then return false end
+        if inst == myChar or inst == LocalPlayer then return true end
+        if typeof(inst) == "Instance" then
+            if inst:IsA("Player") then return inst.Character == myChar end
+            local ok, desc = pcall(function() return inst:IsDescendantOf(myChar) end)
+            if ok and desc then return true end
+        end
+        return false
+    end
+    local function weldLinksMe(char, myChar)
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+                local p0, p1 = d.Part0, d.Part1
+                if (p0 and p0:IsDescendantOf(myChar)) or (p1 and p1:IsDescendantOf(myChar)) then
+                    return true
+                end
+            end
+        end
+        return false
+    end
     local _carryCacheT, _carryVictim = 0, nil
     local function getCarriedVictim(myChar)
         local now = os.clock()
@@ -359,11 +395,14 @@ return function(Lib, Core)
         for _, pl in ipairs(Players:GetPlayers()) do
             local oc = pl.Character
             if oc and oc ~= myChar then
-                local hrp = oc:FindFirstChild("HumanoidRootPart")
-                local weld = hrp and (hrp:FindFirstChild("CarryWeld") or hrp:FindFirstChild("GripWeld"))
-                if weld and (weld:IsA("Weld") or weld:IsA("WeldConstraint") or weld:IsA("Motor6D")) then
-                    local p0, p1 = weld.Part0, weld.Part1
-                    if (p0 and p0:IsDescendantOf(myChar)) or (p1 and p1:IsDescendantOf(myChar)) then
+                local states = oc:FindFirstChild("States")
+                local bc = states and states:FindFirstChild("BeingCarried")
+                local bg = states and states:FindFirstChild("BeingGripped")
+                local carried = (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil)
+                if carried then
+                    -- carried by SOMEONE; is it me? (authoritative value ref OR physical weld)
+                    if refsMe(bc and bc.Value, myChar) or refsMe(bg and bg.Value, myChar)
+                       or weldLinksMe(oc, myChar) then
                         _carryVictim = oc
                         break
                     end
@@ -759,6 +798,30 @@ return function(Lib, Core)
         end
         return _combatConfig or nil
     end
+    local _knockedUtils
+    local function getKnockedUtils()
+        if _knockedUtils == nil then
+            _knockedUtils = tryRequire({ "Shared", "Services", "KnockedService", "KnockedServiceUtils" }) or false
+        end
+        return _knockedUtils or nil
+    end
+
+    -- CARRY DISTANCE — patch the live CONSTANTS field. The game reads it fresh on every range
+    -- check (KnockedServiceUtils.IsWithinInteractionDistance / GetClosestDowned), so this alone
+    -- extends carry/grip/execute reach. We remember the real 10 and restore it when disabled.
+    local _carryDistBase
+    local function driveCarryDist()
+        local ku = getKnockedUtils()
+        if not (ku and type(ku.CONSTANTS) == "table") then return end
+        if _carryDistBase == nil then
+            _carryDistBase = ku.CONSTANTS.MAX_INTERACTION_DISTANCE or 10
+        end
+        local want = Config.CarryDist_On and math.max(Config.CarryDist or _carryDistBase, _carryDistBase)
+                     or _carryDistBase
+        if ku.CONSTANTS.MAX_INTERACTION_DISTANCE ~= want then
+            ku.CONSTANTS.MAX_INTERACTION_DISTANCE = want
+        end
+    end
     local function hasDebugUpvalues()
         return type(debug) == "table" and type(debug.getupvalues) == "function"
             and type(debug.setupvalue) == "function"
@@ -1055,6 +1118,7 @@ return function(Lib, Core)
         pcall(stepSpeed, dt)
         pcall(stepFly, dt)
         pcall(stepNoClip)
+        pcall(driveCarryDist)
     end)
     PostStep:Connect(function()
         driveNoDelay()
@@ -1196,6 +1260,20 @@ return function(Lib, Core)
         boolToggle(sNoClip, "Carry-Aware", "NoClip Carry-Aware",
             function() return Config.NoClip_Carry end, function(v) Config.NoClip_Carry = v end)
         sNoClip:SubLabel({ Text = "Carry-Aware also phases an enemy you're carrying/gripping → walk through walls with them on your shoulders." })
+
+        -- ─────────────── Section: Carry Distance (Left) ───────────────
+        local sCarry = MV:Section({ Side = "Left" })
+        sCarry:Header({ Name = "Carry Distance" })
+        feature(sCarry, {
+            Title = "Extend Carry Range", Flag = "MV_CarryDist",
+            get = function() return Config.CarryDist_On end,
+            set = function(v) Config.CarryDist_On = v; driveCarryDist() end,
+            Desc = "carry / grip / execute downed players from far away\nraises the game's interaction distance",
+        })
+        slider(sCarry, { Name = "Distance", Flag = "MV_CarryDistVal", Default = Config.CarryDist,
+            Min = 10, Max = 250, Suffix = " studs", Callback = function(v)
+                Config.CarryDist = v; driveCarryDist() end })
+        sCarry:SubLabel({ Text = "10 = vanilla. Higher = reach downed enemies from further to Carry (V) / Grip (B)." })
 
         -- ─────────────── Section 3: No Slowdown (Right) ───────────────
         local sNS = MV:Section({ Side = "Right" })
