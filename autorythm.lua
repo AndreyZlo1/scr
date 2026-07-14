@@ -69,6 +69,7 @@ return function(Lib, Core)
             Url        = "",     -- image URL to download and draw
             File       = "",     -- image file in the executor workspace
             Quality    = 60,     -- 1-100: single knob for detail + colour fidelity
+            Speed      = 45,     -- segments/second sent to the server (Sync on)
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
             SkipBg     = true,   -- skip near-black pixels (board background is black)
             Mono       = false,  -- draw everything in chalk white instead of colour
@@ -1376,8 +1377,8 @@ return function(Lib, Core)
     -- opts: { path, detail, speed, threshold, skipbg, mono, preserve }, notify(title,body)
     local function runDraw(board, opts, notify)
         _fireErrLogged = false
-        adlog("runDraw: start boardId=%s path='%s' quality=%d",
-            tostring(board.id), tostring(opts.path), opts.quality or 60)
+        adlog("runDraw: start boardId=%s path='%s' quality=%d speed=%d",
+            tostring(board.id), tostring(opts.path), opts.quality or 60, opts.speed or 45)
         local px, err = decodeImage(opts.path)
         if not px then _drawing = false; adlog("runDraw: image load FAILED: %s", tostring(err)); notify("Auto Draw", tostring(err)); return end
 
@@ -1502,37 +1503,67 @@ return function(Lib, Core)
             adlog("runDraw: first stroke sample rgb=(%d,%d,%d) at v=%.3f", strokes[1].r, strokes[1].g, strokes[1].b, strokes[1].v)
         end
 
-        -- ── Phase 2: draw the strokes — MAXIMUM SPEED ───────────────────────
-        -- Every stroke is rendered LOCALLY onto the board's EditableImage so we
-        -- actually see it (the server never echoes our own batches back to us).
-        -- When Sync is on we ALSO fire the draw remote so the drawing persists and
-        -- other players see it. Per the user's request there is NO rate limiting —
-        -- we blast strokes as fast as the client can push them. We only yield the
-        -- thread periodically (by wall-clock, not per-stroke) so the game stays
-        -- responsive and the watchdog never kills the script; this keeps throughput
-        -- at the hardware limit instead of being pinned to a strokes/second budget.
+        -- ── Phase 2: draw the strokes ────────────────────────────────────────
+        -- GOAL: what you see on YOUR screen must equal what actually reached the
+        -- server (and therefore other players + the persisted board).
+        --
+        -- WhiteboardDrawBatch is an UNRELIABLE remote, and the game itself never
+        -- sends more than one batch per ~0.08s (WhiteboardServiceClient flushStroke,
+        -- lines 394/485). If we blast strokes with no limit, the flooded unreliable
+        -- channel silently DROPS packets: the server ends up with fewer strokes than
+        -- our screen shows — exactly the "local looks right, server looks wrong"
+        -- mismatch. So when Sync is on we PACE the sends with a token-bucket
+        -- (Speed = segments/second) and render each stroke LOCALLY in lockstep, i.e.
+        -- only in the same step we fire it. Screen and server advance together.
+        --
+        -- With Sync OFF there is no server involved, so we render at full speed.
         local sync = opts.sync
         local sent = 0
         local drewLocal = false
-        local YIELD_EVERY = 0.010            -- seconds of work between thread yields
-        local lastYield = os.clock()
 
-        for i = 1, total do
-            if token ~= _drawToken then break end
-            local s = strokes[i]
-            if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
-                drewLocal = true
+        if not sync then
+            local lastYield = os.clock()
+            for i = 1, total do
+                if token ~= _drawToken then break end
+                local s = strokes[i]
+                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                    drewLocal = true
+                end
+                -- Yield by wall-clock so tiny images finish in one frame and huge
+                -- ones stay responsive.
+                if os.clock() - lastYield >= 0.010 then
+                    RunService.Heartbeat:Wait()
+                    lastYield = os.clock()
+                end
             end
-            if sync then
+        else
+            -- Token-bucket: refill `perSec` tokens/second, spend one per stroke.
+            -- burstCap ≈ one heartbeat's worth so we never dump a huge burst that
+            -- the unreliable channel would drop.
+            local perSec   = math.clamp(math.floor(opts.speed or 45), 3, 300)
+            local burstCap = math.max(4, math.floor(perSec * 0.12))
+            local budget, last = 0, os.clock()
+            for i = 1, total do
+                if token ~= _drawToken then break end
+                while budget < 1 do
+                    RunService.Heartbeat:Wait()
+                    if token ~= _drawToken then break end
+                    local now = os.clock()
+                    budget = math.min(burstCap, budget + (now - last) * perSec)
+                    last = now
+                end
+                if token ~= _drawToken then break end
+                budget = budget - 1
+
+                local s = strokes[i]
+                -- LOCKSTEP: fire to the server, then mirror the exact same stroke
+                -- locally, so the screen only ever shows what we've actually sent.
                 if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
                     sent = sent + 1
                 end
-            end
-            -- Yield based on elapsed time, not stroke count, so tiny images finish
-            -- in a single frame while huge ones stay responsive — max throughput.
-            if os.clock() - lastYield >= YIELD_EVERY then
-                RunService.Heartbeat:Wait()
-                lastYield = os.clock()
+                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                    drewLocal = true
+                end
             end
         end
 
@@ -1615,7 +1646,7 @@ return function(Lib, Core)
         end
 
         local opts = {
-            path = path, quality = ad.Quality, threshold = ad.Threshold,
+            path = path, quality = ad.Quality, speed = ad.Speed, threshold = ad.Threshold,
             skipbg = ad.SkipBg, mono = ad.Mono, preserve = ad.Preserve, sync = syncWanted,
             scale = (ad.Scale or 100) / 100, alignx = (ad.AlignX or 50) / 100, aligny = (ad.AlignY or 50) / 100,
         }
@@ -1817,7 +1848,13 @@ return function(Lib, Core)
             Default = ad.Quality, Min = 1, Max = 100, Precision = 0, Suffix = " %",
             Callback = function(v) ad.Quality = v end,
         })
-        sAD:SubLabel({ Text = "One dial for the whole image: higher = more scanlines, finer colour and anti-aliased sampling (sharper, slower); lower = coarse and fast. Drawing always runs at maximum speed." })
+        sAD:SubLabel({ Text = "One dial for the whole image: higher = more scanlines, finer colour and anti-aliased sampling (sharper, slower); lower = coarse and fast." })
+        slider(sAD, {
+            Name = "Sync Speed", Flag = "Misc_AutoDraw_Speed",
+            Default = ad.Speed, Min = 3, Max = 300, Precision = 0, Suffix = " /s",
+            Callback = function(v) ad.Speed = v end,
+        })
+        sAD:SubLabel({ Text = "Segments per second sent to the server when Sync is on. The draw remote is UNRELIABLE and the game itself sends ~1 batch per 0.08s, so high values flood it and the server drops strokes (your screen would show more than everyone else). ~45 keeps your view and the server identical; raise it to trade fidelity for speed. Ignored when Sync is off (local render is always full-speed)." })
         slider(sAD, {
             Name = "Skip Threshold", Flag = "Misc_AutoDraw_Threshold",
             Default = ad.Threshold, Min = 0, Max = 80, Precision = 0,
