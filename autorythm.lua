@@ -459,34 +459,42 @@ return function(Lib, Core)
     -- firing alone shows NOTHING on our own screen. To actually SEE the drawing we
     -- must render onto the board's EditableImage ourselves, exactly like the game.
     --
-    -- We locate that board map by scanning the GC for the table whose entries look
-    -- like { part = BasePart, editableImage = <EditableImage>, surfaceGui = ... }.
-    local _boardMap
-    local function resolveBoardMap()
-        if _boardMap then
-            -- Validate the cache still holds live entries.
-            local k, v = next(_boardMap)
-            if type(v) == "table" and typeof(v.part) == "Instance" then return _boardMap end
-            _boardMap = nil
-        end
-        if type(getgc) ~= "function" then
-            adlog("resolveBoardMap: getgc unavailable")
-            return nil
-        end
-        for _, o in ipairs(getgc(true)) do
-            if type(o) == "table" then
-                local k, v = next(o)
-                if type(k) == "number" and type(v) == "table"
-                   and typeof(v.part) == "Instance" and v.editableImage ~= nil
-                   and v.surfaceGui ~= nil then
-                    _boardMap = o
-                    adlog("resolveBoardMap: found board map (%s entries)", tostring(#o))
-                    return o
-                end
+    -- We reach that EditableImage through the INSTANCE TREE (never getgc — a full GC
+    -- scan on the main thread hard-freezes the client). The game builds each board
+    -- as: part → SurfaceGui → Canvas(Frame) → ImageLabel, where the ImageLabel's
+    -- ImageContent wraps the EditableImage via Content.fromObject (dump line 204).
+    -- The new Content datatype exposes the wrapped instance as `.Object`, so we can
+    -- pull the live EditableImage straight out of the ImageLabel. Cached per part.
+    local _eiCache = setmetatable({}, { __mode = "k" })
+    local function getBoardImage(part)
+        if typeof(part) ~= "Instance" then return nil end
+        local cached = _eiCache[part]
+        if cached then return cached end
+
+        local sg = part:FindFirstChildOfClass("SurfaceGui")
+        if not sg then adlog("getBoardImage: no SurfaceGui on '%s'", part.Name); return nil end
+        local root = sg:FindFirstChild("Canvas") or sg
+
+        local label = root:FindFirstChildOfClass("ImageLabel")
+        if not label then
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("ImageLabel") then label = d; break end
             end
         end
-        adlog("resolveBoardMap: board map NOT found in GC")
-        return nil
+        if not label then adlog("getBoardImage: no ImageLabel under SurfaceGui"); return nil end
+
+        local img
+        pcall(function()
+            local content = label.ImageContent
+            if content and content.Object then img = content.Object end
+        end)
+        if not img then
+            adlog("getBoardImage: ImageContent has no .Object (unexpected Content form)")
+            return nil
+        end
+        _eiCache[part] = img
+        adlog("getBoardImage: resolved EditableImage for '%s'", part.Name)
+        return img
     end
 
     -- Replica of the game's chalkSegment (WhiteboardServiceClient:245): draw a dotted
@@ -506,11 +514,9 @@ return function(Lib, Core)
     end
 
     -- Render one stroke locally onto the board's EditableImage. Returns true on success.
-    local function localStroke(boardId, brush, r, g, b, u1, v1, u2, v2)
-        local map = resolveBoardMap()
-        local entry = map and map[boardId]
-        if not entry or not entry.editableImage then return false end
-        local img = entry.editableImage
+    local function localStroke(part, brush, r, g, b, u1, v1, u2, v2)
+        local img = getBoardImage(part)
+        if not img then return false end
         local col = Color3.fromRGB(b8(r), b8(g), b8(b))
         local ok = pcall(function()
             if u1 == u2 and v1 == v2 then
@@ -525,9 +531,10 @@ return function(Lib, Core)
 
     -- Draw a stroke: always render locally (so WE see it) and, when sync is on, also
     -- fire the remote so the server persists it and other players see it too.
-    local function drawStroke(boardId, brush, r, g, b, u1, v1, u2, v2, sync)
-        local shown = localStroke(boardId, brush, r, g, b, u1, v1, u2, v2)
-        if sync then fireRun(boardId, brush, r, g, b, u1, v1, u2, v2) end
+    -- `board` is the { id, part } table from findNearestBoard.
+    local function drawStroke(board, brush, r, g, b, u1, v1, u2, v2, sync)
+        local shown = localStroke(board.part, brush, r, g, b, u1, v1, u2, v2)
+        if sync then fireRun(board.id, brush, r, g, b, u1, v1, u2, v2) end
         return shown
     end
 
@@ -1100,7 +1107,7 @@ return function(Lib, Core)
             for i = 1, total do
                 if token ~= _drawToken then break end
                 local s = strokes[i]
-                if localStroke(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
                     drewLocal = true
                 end
                 if (i % 120) == 0 then RunService.Heartbeat:Wait() end
@@ -1126,7 +1133,7 @@ return function(Lib, Core)
                 budget = budget - 1
 
                 local s = strokes[i]
-                if localStroke(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
+                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
                     drewLocal = true
                 end
                 if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
@@ -1257,12 +1264,12 @@ return function(Lib, Core)
         adlog("testStroke: drawing X on boardId=%s dist=%.1f sync=%s", tostring(id), dist or -1, tostring(sync))
         -- Two diagonals + a rectangle border, all as connected 2-point strokes.
         local shown = false
-        shown = drawStroke(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.95, sync) or shown
-        drawStroke(id, 2, W, W, W, 0.95, 0.05, 0.05, 0.95, sync)
-        drawStroke(id, 2, W, W, W, 0.05, 0.05, 0.95, 0.05, sync)
-        drawStroke(id, 2, W, W, W, 0.95, 0.05, 0.95, 0.95, sync)
-        drawStroke(id, 2, W, W, W, 0.95, 0.95, 0.05, 0.95, sync)
-        drawStroke(id, 2, W, W, W, 0.05, 0.95, 0.05, 0.05, sync)
+        shown = drawStroke(board, 2, W, W, W, 0.05, 0.05, 0.95, 0.95, sync) or shown
+        drawStroke(board, 2, W, W, W, 0.95, 0.05, 0.05, 0.95, sync)
+        drawStroke(board, 2, W, W, W, 0.05, 0.05, 0.95, 0.05, sync)
+        drawStroke(board, 2, W, W, W, 0.95, 0.05, 0.95, 0.95, sync)
+        drawStroke(board, 2, W, W, W, 0.95, 0.95, 0.05, 0.95, sync)
+        drawStroke(board, 2, W, W, W, 0.05, 0.95, 0.05, 0.05, sync)
         showPreview(board, 0, 0, 1, 1, 8)
         if shown then
             notify("Auto Draw", ("test X drawn on board #%s (%.0f studs)"):format(tostring(id), dist or 0))
