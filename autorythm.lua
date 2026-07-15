@@ -71,7 +71,7 @@ return function(Lib, Core)
             File       = "",     -- image file in the executor workspace
             Source     = "",     -- "url" | "file": which input the user touched last
             Quality    = 80,     -- 1-100: single knob for detail + colour fidelity
-            Speed      = 120,    -- segments/second sent to the server (Sync on); local render is full-speed regardless
+            Speed      = 400,    -- points/second painted (local+server together); batched into ≤24-pt packets so few packets are sent
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
             SkipBg     = false,  -- OFF by default so black pixels ARE drawn (was skipping them)
             Mono       = false,  -- draw everything in chalk white instead of colour
@@ -529,7 +529,7 @@ return function(Lib, Core)
         return ok
     end
 
-    -- ── Local rendering ──────────────────────��───────────────────────────────
+    -- ── Local rendering ─────────��────────────��───────────────────────────────
     -- CRITICAL: the game renders each board CLIENT-SIDE onto an EditableImage held
     -- in a module-local board map (WhiteboardServiceClient `u2`). When we fire the
     -- draw remote, the server only broadcasts to OTHER players — it never echoes to
@@ -629,6 +629,10 @@ return function(Lib, Core)
         return img
     end
 
+    -- The game hardcodes the chalk radius to 2 everywhere (chalkSegment / DrawCircle
+    -- calls) and sends it as byte 4 of every draw buffer, so we use the identical value.
+    local BRUSH_R = 2
+
     -- Replica of the game's chalkSegment (WhiteboardServiceClient:245): draw a dotted
     -- line between two UV points onto an EditableImage.
     local function chalkSegmentLocal(img, x1, y1, x2, y2, brush, col)
@@ -691,6 +695,64 @@ return function(Lib, Core)
         local shown = localStroke(board.part, brush, r, g, b, u1, v1, u2, v2, sync and true or false)
         if sync then fireRun(board.id, brush, r, g, b, u1, v1, u2, v2) end
         return shown
+    end
+
+    -- Draw a whole POLYLINE (up to 24 points) in one go — the exact unit the game
+    -- itself uses (WhiteboardServiceClient.flushStroke / applyDrawBuffer): one colour,
+    -- a connected path of {x=u, y=v} points. This is the key to both fidelity and
+    -- speed:
+    --   • LOCAL render walks the same connected path with the same chalkSegment the
+    --     game runs for received broadcasts, so what WE see is produced by the exact
+    --     same code as what everyone else sees — not a separate "all at once" pass.
+    --   • ONE Fire() carries up to 23 segments instead of one, so a drawing that used
+    --     to need thousands of packets now needs a fraction as many (the "compression"
+    --     — far less load, far faster, and the unreliable remote drops far less).
+    -- pts must have 1..24 entries. Returns (renderedOk, firedOk).
+    local function drawBatch(board, r, g, b, pts, sync)
+        local n = #pts
+        if n < 1 then return false, false end
+        local col = Color3.fromRGB(b8(r), b8(g), b8(b))
+
+        -- Local render: mirror applyDrawBuffer exactly (first point = a dot, then each
+        -- subsequent point connected to the previous with chalkSegment).
+        local img = getBoardImage(board.part)
+        local rendered = false
+        if img then
+            rendered = pcall(function()
+                local p1 = pts[1]
+                img:DrawCircle(
+                    Vector2.new(math.round(uvClamp(p1.x) * 512), math.round(uvClamp(p1.y) * 384)),
+                    BRUSH_R, col, 0.05 + math.random() * 0.18, Enum.ImageCombineType.AlphaBlend)
+                for i = 2, n do
+                    local a, b2 = pts[i - 1], pts[i]
+                    chalkSegmentLocal(img, uvClamp(a.x), uvClamp(a.y), uvClamp(b2.x), uvClamp(b2.y), BRUSH_R, col)
+                end
+            end)
+        end
+
+        -- Server fire: pack the game's exact buffer (u32 boardId, u8 radius=2, RGB,
+        -- then f32 x,y per point).
+        local fired = false
+        if sync then
+            local net = getNet()
+            if net and net.WhiteboardDrawBatch then
+                fired = pcall(function()
+                    local buf = buffer.create(n * 8 + 8)
+                    buffer.writeu32(buf, 0, math.floor(board.id))
+                    buffer.writeu8(buf, 4, BRUSH_R)
+                    buffer.writeu8(buf, 5, b8(r))
+                    buffer.writeu8(buf, 6, b8(g))
+                    buffer.writeu8(buf, 7, b8(b))
+                    for i = 1, n do
+                        local off = (i - 1) * 8 + 8
+                        buffer.writef32(buf, off, uvClamp(pts[i].x))
+                        buffer.writef32(buf, off + 4, uvClamp(pts[i].y))
+                    end
+                    net.WhiteboardDrawBatch.Fire(buf)
+                end)
+            end
+        end
+        return rendered, fired
     end
 
     -- Clear the board both locally (paint the whole EditableImage black, exactly like
@@ -1547,14 +1609,18 @@ return function(Lib, Core)
         -- the banding the old fixed qstep=40 produced.
         local q = math.clamp(math.floor(opts.quality or 60), 1, 100)
         local qf = (q - 1) / 99
-        -- Spatial detail: scanline count. The board canvas is 384px tall and the
-        -- brush is ~4px, so ~96 rows already cover it; we go up to 384 (1 row/px =
-        -- fully oversampled) so high quality loses no vertical detail.
-        local rows    = math.floor(64 + qf * (384 - 64) + 0.5)
+        -- Spatial detail is tied to ACTUAL pixel size on the board, not a fixed row
+        -- count. The chalk brush has radius 2 (⌀4px), so scanlines spaced ~2px already
+        -- overlap and fully cover the canvas — spacing tighter than that is pure
+        -- redundant work (the old "up to 384 rows" oversampled a 384px board 2-3x,
+        -- which is a big chunk of why it drew so slowly). Spacing goes 4px (q=1, fast
+        -- sketch) → 1.5px (q=100, crisp). Because it scales with drawH/drawW, drawing
+        -- into a small (scaled-down) region also does proportionally less work.
+        local spacing = 4.0 - qf * 2.5                   -- px between scanlines / cells
+        local rows    = math.clamp(math.floor(drawH / spacing + 0.5), 8, 384)
+        local cols    = math.clamp(math.floor(drawW / spacing + 0.5), 8, 512)
         local rowStep = drawH / rows
-        local colStep = math.max(1.0, rowStep)          -- ~square sampling cells
-        local cols    = math.max(1, math.floor(drawW / colStep + 0.5))
-        colStep = drawW / cols
+        local colStep = drawW / cols
 
         -- Colour quantisation buckets. This ONLY exists to merge truly-flat regions
         -- into longer runs (fewer strokes); it must NOT posterise the photo. The old
@@ -1619,7 +1685,7 @@ return function(Lib, Core)
             local runActive, rr, rg, rb, runU1, runU2 = false, 0, 0, 0, 0, 0
             local function flush()
                 if runActive then
-                    strokes[#strokes + 1] = { r = rr, g = rg, b = rb, u1 = runU1, u2 = runU2, v = v }
+                    strokes[#strokes + 1] = { r = rr, g = rg, b = rb, u1 = runU1, u2 = runU2, v = v, row = r }
                     runActive = false
                 end
             end
@@ -1662,72 +1728,112 @@ return function(Lib, Core)
             adlog("runDraw: first stroke sample rgb=(%d,%d,%d) at v=%.3f", strokes[1].r, strokes[1].g, strokes[1].b, strokes[1].v)
         end
 
-        -- ── Phase 2: draw the strokes ────────────────────────────────────────
-        -- We render onto the GAME'S OWN canonical EditableImage (see getBoardImage),
-        -- i.e. the exact surface every other player sees. So local render and the
-        -- server broadcast target the identical pixels — there is no longer a "looks
-        -- different / wrong size locally" gap, and the two no longer have to advance
-        -- in lockstep. That lets us DECOUPLE them:
-        --
-        --   • LOCAL render runs at FULL SPEED, so the picture appears on your screen
-        --     almost immediately (this is what fixes the painfully slow draw).
-        --   • The SERVER fire stays PACED with a token bucket, because
-        --     WhiteboardDrawBatch is UNRELIABLE and flooding it makes the server drop
-        --     packets. Other players simply see the image fill in over a few seconds;
-        --     the final server state is identical to what you already see locally.
-        local sync = opts.sync
-        local sent = 0
-        local drewLocal = false
+        -- ── Phase 1b: chain runs into POLYLINES (compression) ───────────────
+        -- A single horizontal run is only 2 points, but the game's draw unit is a
+        -- connected polyline of up to 24 points, and applyDrawBuffer connects
+        -- consecutive points. So we SNAKE-chain vertically-adjacent runs of the SAME
+        -- colour whose x-ranges overlap: the connector between them stays inside the
+        -- filled region (correct fill, no stray lines), and a solid area that used to
+        -- cost dozens of packets collapses into a handful of 24-point polylines.
+        -- This is the "compression" — it slashes both packets and draw calls.
+        local COLOR = function(s) return s.r * 65536 + s.g * 256 + s.b end
+        local byColor = {}
+        for _, s in ipairs(strokes) do
+            local key = COLOR(s)
+            local c = byColor[key]
+            if not c then c = { rows = {}, order = {} }; byColor[key] = c end
+            local rl = c.rows[s.row]; if not rl then rl = {}; c.rows[s.row] = rl end
+            rl[#rl + 1] = s
+            c.order[#c.order + 1] = s
+        end
+        -- deterministic start order: top-to-bottom, then left-to-right
+        for _, c in pairs(byColor) do
+            table.sort(c.order, function(a, b)
+                if a.row ~= b.row then return a.row < b.row end
+                return a.u1 < b.u1
+            end)
+        end
 
-        -- Full-speed local render (faithful = same soft chalk look as the real board).
-        do
-            local lastYield = os.clock()
-            for i = 1, total do
-                if token ~= _drawToken then break end
-                local s = strokes[i]
-                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v, true) then
-                    drewLocal = true
-                end
-                if os.clock() - lastYield >= 0.012 then
-                    RunService.Heartbeat:Wait()
-                    lastYield = os.clock()
+        local batches = {}
+        for _, c in pairs(byColor) do
+            if token ~= _drawToken then break end
+            for _, seed in ipairs(c.order) do
+                if not seed.used then
+                    local pts = { { x = seed.u1, y = seed.v }, { x = seed.u2, y = seed.v } }
+                    seed.used = true
+                    local cur, endedRight = seed, true
+                    while #pts <= 22 do
+                        local nrow = c.rows[cur.row + 1]
+                        local px = endedRight and cur.u2 or cur.u1
+                        local best, bestd
+                        if nrow then
+                            for _, cand in ipairs(nrow) do
+                                if not cand.used and cand.u2 >= cur.u1 and cand.u1 <= cur.u2 then
+                                    local d = math.min(math.abs(cand.u1 - px), math.abs(cand.u2 - px))
+                                    if not bestd or d < bestd then best, bestd = cand, d end
+                                end
+                            end
+                        end
+                        if not best then break end
+                        if math.abs(best.u1 - px) <= math.abs(best.u2 - px) then
+                            pts[#pts + 1] = { x = best.u1, y = best.v }
+                            pts[#pts + 1] = { x = best.u2, y = best.v }
+                            endedRight = true
+                        else
+                            pts[#pts + 1] = { x = best.u2, y = best.v }
+                            pts[#pts + 1] = { x = best.u1, y = best.v }
+                            endedRight = false
+                        end
+                        best.used = true
+                        cur = best
+                    end
+                    batches[#batches + 1] = { r = seed.r, g = seed.g, b = seed.b, pts = pts }
                 end
             end
         end
+        local nbatch = #batches
+        adlog("runDraw: %d runs → %d polyline batches", total, nbatch)
 
-        -- Paced server fire (only when syncing). Runs after the local image is already
-        -- visible, so the slow part no longer blocks what you see.
-        if sync then
-            local perSec   = math.clamp(math.floor(opts.speed or 120), 3, 2000)
-            local burstCap = math.max(6, math.floor(perSec * 0.12))
-            local budget, last = 0, os.clock()
-            for i = 1, total do
+        -- ── Phase 2: draw the batches PROGRESSIVELY ─────────────────────────
+        -- Each batch is rendered locally AND fired to the server together, through the
+        -- SAME polyline path the game uses for broadcasts (drawBatch). So the picture
+        -- builds up the same way everyone else sees it — not "all at once" with a
+        -- separate local look. Pacing is by POINTS/second (opts.speed): the unreliable
+        -- WhiteboardDrawBatch remote drops packets if flooded, but because each packet
+        -- now carries up to 23 segments we send far fewer packets for the same paint
+        -- rate, so it finishes much faster and cleaner than the old 1-segment-per-fire.
+        local sync     = opts.sync
+        local sent, rendered = 0, false
+        local perSec   = math.clamp(math.floor(opts.speed or 400), 30, 4000)
+        local burstCap = math.max(24, math.floor(perSec * 0.15))
+        local budget, last = 0, os.clock()
+        for bi = 1, nbatch do
+            if token ~= _drawToken then break end
+            local batch = batches[bi]
+            local cost = #batch.pts
+            while budget < cost do
+                RunService.Heartbeat:Wait()
                 if token ~= _drawToken then break end
-                while budget < 1 do
-                    RunService.Heartbeat:Wait()
-                    if token ~= _drawToken then break end
-                    local now = os.clock()
-                    budget = math.min(burstCap, budget + (now - last) * perSec)
-                    last = now
-                end
-                if token ~= _drawToken then break end
-                budget = budget - 1
-                local s = strokes[i]
-                if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
-                    sent = sent + 1
-                end
+                local now = os.clock()
+                budget = math.min(burstCap, budget + (now - last) * perSec)
+                last = now
             end
+            if token ~= _drawToken then break end
+            budget = budget - cost
+            local rok, fok = drawBatch(board, batch.r, batch.g, batch.b, batch.pts, sync)
+            if rok then rendered = true end
+            if fok then sent = sent + 1 end
         end
 
         _drawing = false
-        adlog("runDraw: DONE local=%s synced=%d/%d (fireErr=%s)", tostring(drewLocal), sent, total, tostring(_fireErrLogged))
+        adlog("runDraw: DONE local=%s firedPackets=%d/%d (fireErr=%s)", tostring(rendered), sent, nbatch, tostring(_fireErrLogged))
         if token == _drawToken then
-            if not drewLocal then
+            if not rendered then
                 notify("Auto Draw", "could not access the board image (local render failed) — see debug log")
             elseif sync then
-                notify("Auto Draw", ("done — %d/%d strokes synced%s"):format(sent, total, capped and " (detail capped)" or ""))
+                notify("Auto Draw", ("done — %d runs in %d packets synced%s"):format(total, sent, capped and " (detail capped)" or ""))
             else
-                notify("Auto Draw", ("done — %d strokes (local only)%s"):format(total, capped and " (detail capped)" or ""))
+                notify("Auto Draw", ("done — %d runs (local only)%s"):format(total, capped and " (detail capped)" or ""))
             end
         end
     end
@@ -1746,8 +1852,11 @@ return function(Lib, Core)
 
         local board, dist = findNearestBoard()
         if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
-        if dist and dist > 22 then
-            notify("Auto Draw", ("too far from a whiteboard (%.0f studs) — move closer"):format(dist))
+        -- The server itself only accepts draws within ~16 studs (WhiteboardServiceClient
+        -- isNearBoard), so require ≤15 before we even start — otherwise every stroke is
+        -- silently rejected and nothing appears for other players.
+        if dist and dist > 15 then
+            notify("Auto Draw", ("too far from the whiteboard (%.0f studs) — move within 15"):format(dist))
             return
         end
 
@@ -2471,11 +2580,11 @@ return function(Lib, Core)
         }, ctx.flag("Misc_AutoDraw_Sync"))
         sAD:SubLabel({ Text = "ON: sends strokes to the server so the drawing persists and others see it — requires ANY chalk equipped. OFF: renders on your screen only." })
         slider(sAD, {
-            Name = "Sync Speed", Flag = "Misc_AutoDraw_Speed",
-            Default = ad.Speed, Min = 3, Max = 600, Precision = 0, Suffix = " /s",
+            Name = "Draw Speed", Flag = "Misc_AutoDraw_Speed",
+            Default = ad.Speed, Min = 30, Max = 4000, Precision = 0, Suffix = " pts/s",
             Callback = function(v) ad.Speed = v end,
         })
-        sAD:SubLabel({ Text = "Segments/second sent to the SERVER (for other players / persistence). Your own screen now renders at full speed no matter what, so this only affects how fast others see it fill in. The remote is unreliable, so very high values may drop some strokes for others." })
+        sAD:SubLabel({ Text = "Points/second painted. Your screen and the server fill in together through the game's own draw path, so both look identical. Strokes are batched into ≤24-point packets (compression), so even high speeds send few packets — but the draw remote is unreliable, so extreme values may drop some strokes for others." })
 
         -- ── Size & position ────────────────────────────────────────────
         sAD:Divider()
@@ -2527,8 +2636,8 @@ return function(Lib, Core)
             Callback = function()
                 local board, dist = findNearestBoard()
                 if not board then notify("Auto Draw", "no whiteboard found — stand near one"); return end
-                if dist and dist > 22 then
-                    notify("Auto Draw", ("too far from a whiteboard (%.0f studs) — move closer"):format(dist)); return
+                if dist and dist > 15 then
+                    notify("Auto Draw", ("too far from the whiteboard (%.0f studs) — move within 15"):format(dist)); return
                 end
                 stopAutoDraw()
                 local wantServer = Config.AutoDraw.Sync and hasChalkEquipped()
