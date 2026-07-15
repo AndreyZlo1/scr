@@ -70,7 +70,7 @@ return function(Lib, Core)
             Url        = "",     -- image URL to download and draw
             File       = "",     -- image file in the executor workspace
             Source     = "",     -- "url" | "file": which input the user touched last
-            Quality    = 60,     -- 1-100: single knob for detail + colour fidelity
+            Quality    = 80,     -- 1-100: single knob for detail + colour fidelity
             Speed      = 45,     -- segments/second sent to the server (Sync on)
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
             SkipBg     = false,  -- OFF by default so black pixels ARE drawn (was skipping them)
@@ -84,9 +84,11 @@ return function(Lib, Core)
         },
 
         Chalk = {
-            Auto  = false,      -- endlessly take + drop chalk
-            Mode  = "Rainbow",  -- "Rainbow" | "Random" | a color key (White/Red/...)
-            Delay = 0.35,       -- seconds between take/drop actions
+            Auto     = false,       -- endlessly take + drop items
+            Items    = "Alternate", -- "Alternate" (chalk<->sponge) | "Chalk" | "Sponge"
+            Mode     = "Rainbow",   -- chalk colour: "Rainbow" | "Random" | a color key
+            Delay    = 0.35,        -- seconds between take/drop actions
+            Cooldown = 3,           -- seconds a rate-limited item type is skipped
         },
     }
 
@@ -1475,8 +1477,12 @@ return function(Lib, Core)
         local offX, offY = u0 * BOARD_W, v0 * BOARD_H
         adlog("runDraw: region uv[%.3f,%.3f]-[%.3f,%.3f] (%.0fx%.0f px)", u0, v0, u1v, v1v, drawW, drawH)
 
-        -- Show the live preview (highlight board + region outline) while drawing.
-        showPreview(board, u0, v0, u1v, v1v, nil)
+        -- Show the board/region outline while drawing ONLY if the Preview toggle is on.
+        -- (Previously this always fired, so the overlay appeared on Draw even with
+        -- Preview off.)
+        if Config.AutoDraw.Preview then
+            showPreview(board, u0, v0, u1v, v1v, nil)
+        end
 
         -- ── Quality → concrete knobs ────────────────────────────────────────
         -- A single 1-100 dial drives BOTH how many scanlines we lay down (spatial
@@ -1487,41 +1493,58 @@ return function(Lib, Core)
         -- the banding the old fixed qstep=40 produced.
         local q = math.clamp(math.floor(opts.quality or 60), 1, 100)
         local qf = (q - 1) / 99
-        local rows    = math.floor(48 + qf * (240 - 48) + 0.5)
+        -- Spatial detail: scanline count. The board canvas is 384px tall and the
+        -- brush is ~4px, so ~96 rows already cover it; we go up to 384 (1 row/px =
+        -- fully oversampled) so high quality loses no vertical detail.
+        local rows    = math.floor(64 + qf * (384 - 64) + 0.5)
         local rowStep = drawH / rows
         local colStep = math.max(1.0, rowStep)          -- ~square sampling cells
         local cols    = math.max(1, math.floor(drawW / colStep + 0.5))
         colStep = drawW / cols
 
-        -- Colour quantisation buckets so flat regions merge into long runs.
-        local qstep = math.floor(72 - qf * (72 - 6) + 0.5)
-        local half  = math.floor(qstep / 2)
+        -- Colour quantisation buckets. This ONLY exists to merge truly-flat regions
+        -- into longer runs (fewer strokes); it must NOT posterise the photo. The old
+        -- code used huge buckets (qstep 32 at default quality → 8 levels/channel),
+        -- which is exactly the banded, washed-out "old phone" look. Now buckets are
+        -- small: qstep 12 (q=1) down to 1 (q=100, lossless). And quant() ROUNDS and
+        -- clamps so the top bucket reaches a true 255 — the previous floor()+half
+        -- capped whites at ~240, killing highlights and glare. Default quality gives
+        -- ~50+ levels/channel, so smooth gradients stay smooth.
+        local qstep = math.max(1, math.floor(12 - qf * 11 + 0.5))
         local function quant(v)
-            local qb = math.floor(v / qstep) * qstep + half
-            if qb > 255 then qb = 255 end
+            if qstep <= 1 then
+                local iv = math.floor(v + 0.5)
+                return iv < 0 and 0 or (iv > 255 and 255 or iv)
+            end
+            local qb = math.floor(v / qstep + 0.5) * qstep
+            if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
             return qb
         end
         local monoR, monoG, monoB = b8(CHALK_COLOR.R * 255), b8(CHALK_COLOR.G * 255), b8(CHALK_COLOR.B * 255)
 
-        -- Cell-averaged sampler: instead of one nearest-neighbour pixel per cell
-        -- (which aliases badly when a big photo is squeezed onto the board — the main
-        -- cause of the "quality dropped" look), average a small grid over the cell's
-        -- source footprint. Sample count scales with quality (1..3 per axis).
+        -- Proper AREA-AVERAGE downscaler. The old sampler took at most a 3x3 grid of
+        -- nearest pixels per cell, so when a big photo was squeezed onto the board most
+        -- source pixels were never looked at — small highlights/specular dots simply
+        -- vanished ("some pixels not seen"). Here we average EVERY source pixel in the
+        -- cell footprint (capped at a generous grid that still SPANS the whole cell, so
+        -- nothing between sample points is skipped). This is the correct box filter for
+        -- downscaling and preserves bright detail as a proper average instead of luck.
         local srcCellW = (drawW > 0) and (iw / cols) or 1
         local srcCellH = (drawH > 0) and (ih / rows) or 1
-        local aa = 1 + math.floor(qf * 2 + 0.5)          -- 1, 2 or 3 samples per axis
+        local aaCap = 4 + math.floor(qf * 8 + 0.5)        -- 4..12 samples per axis, spanning the cell
         local function sampleCell(cx, cy)
             local x0 = math.floor(cx * srcCellW)
             local y0 = math.floor(cy * srcCellH)
             local x1 = math.max(x0, math.floor((cx + 1) * srcCellW) - 1)
             local y1 = math.max(y0, math.floor((cy + 1) * srcCellH) - 1)
-            local nx = math.min(aa, x1 - x0 + 1)
-            local ny = math.min(aa, y1 - y0 + 1)
+            local fw, fh = x1 - x0 + 1, y1 - y0 + 1
+            local nx = math.min(aaCap, fw)
+            local ny = math.min(aaCap, fh)
             local sr, sg, sb, n = 0, 0, 0, 0
             for sy = 0, ny - 1 do
-                local iy = (ny == 1) and y0 or (y0 + math.floor(sy * (y1 - y0) / (ny - 1)))
+                local iy = (ny == 1) and y0 or (y0 + math.floor((sy + 0.5) * fh / ny))
                 for sx = 0, nx - 1 do
-                    local ix = (nx == 1) and x0 or (x0 + math.floor(sx * (x1 - x0) / (nx - 1)))
+                    local ix = (nx == 1) and x0 or (x0 + math.floor((sx + 0.5) * fw / nx))
                     local pr, pg, pb = samplePix(px, ix, iy)
                     sr = sr + pr; sg = sg + pg; sb = sb + pb; n = n + 1
                 end
@@ -1859,7 +1882,12 @@ return function(Lib, Core)
     -- after load (anti-tamper), so we resolve them from memory (getloadedmodules).
     -- You must still be standing next to a chalk box (the server checks proximity).
     local CHALK_COLORS = { "White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet" }
-    local ChalkState = { conn = nil, idx = 0, nextAt = 0 }
+    -- item     : the item type used on the last take ("chalk" | "eraser") — Alternate flips off this
+    -- cool     : os.clock() until which a type is rate-limited (set when a request is rejected)
+    -- pendType : the item type of a take we fired but haven't seen resolve yet
+    -- pendAt   : when that take was fired (for a timeout safeguard)
+    local ChalkState = { conn = nil, idx = 0, nextAt = 0, item = "chalk",
+        cool = { chalk = 0, eraser = 0 }, pendType = nil, pendAt = 0 }
 
     -- A valid AuthServiceClient is any table exposing a NextForKey function.
     local function authIsValid(v)
@@ -1956,8 +1984,9 @@ return function(Lib, Core)
     end
 
     -- Each action returns (ok, reason) so the UI can report the ACTUAL failure
-    -- point instead of a vague "failed". reason is nil on success.
-    local function chalkRequest(colorKey)
+    -- point instead of a vague "failed". reason is nil on success. Fallback path
+    -- used only when the game's dispenser singleton can't be resolved.
+    local function chalkRequestRaw(dispName, optionKey)
         local net = getNet()
         if not net then return false, "network Client unavailable" end
         if not net.DispenserRequest then return false, "DispenserRequest remote missing" end
@@ -1967,8 +1996,8 @@ return function(Lib, Core)
         if nonce == 0 then return false, "auth returned no token (rate limited?)" end
         local ok, err = pcall(function()
             net.DispenserRequest.Fire({
-                DispenserName = "ChalkCarton",
-                OptionKey     = colorKey,
+                DispenserName = dispName,
+                OptionKey     = optionKey,
                 Token         = token,
                 Check         = check,
                 Nonce         = nonce,
@@ -2038,17 +2067,18 @@ return function(Lib, Core)
         return _dispClient or nil
     end
 
-    -- Find the NEAREST chalk dispenser under workspace.Dispensers. Returns
-    -- (name, distance). Falls back to "ChalkCarton" if the folder isn't found yet.
-    local function chalkNearestDispenser()
+    -- Find the NEAREST dispenser under workspace.Dispensers whose name contains the
+    -- keyword ("chalk" or "eraser"). Returns (name, distance). Falls back to the
+    -- canonical carton name if none is found yet.
+    local function chalkNearestByKind(keyword, fallback)
         local folder = workspace:FindFirstChild("Dispensers")
         local char   = LocalPlayer and LocalPlayer.Character
         local root   = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
         local origin = root and root.Position
-        local bestName, bestDist = "ChalkCarton", nil
+        local bestName, bestDist = fallback, nil
         if folder then
             for _, m in ipairs(folder:GetChildren()) do
-                if m:IsA("Model") and m.Name:lower():find("chalk") then
+                if m:IsA("Model") and m.Name:lower():find(keyword) then
                     local d = 0
                     if origin then
                         local ok, pos = pcall(function() return m:GetPivot().Position end)
@@ -2061,49 +2091,109 @@ return function(Lib, Core)
         return bestName, bestDist
     end
 
-    -- Take chalk. Prefer driving the game's own singleton (correct rolling-token
-    -- flow + single-in-flight guard); fall back to a manual request only if the
-    -- singleton can't be resolved. Returns (ok, reason).
-    local function chalkTakeChalk()
-        local color = chalkNextColor()
-        local disp  = chalkDispenser()
+    -- Take one item of the given type ("chalk" | "eraser"). Chalk uses a colour
+    -- OptionKey (ColorWheel dispenser); eraser/sponge is a Direct dispenser and uses
+    -- the fixed "default" OptionKey (DispenserCatalog + DispenserServiceClient:124).
+    -- Prefer driving the game's own singleton (correct rolling-token flow +
+    -- single-in-flight guard); fall back to a manual request if it can't be resolved.
+    local function chalkTake(itemType)
+        local name, optionKey
+        if itemType == "eraser" then
+            name = chalkNearestByKind("eraser", "EraserCarton")
+            optionKey = "default"
+        else
+            name = chalkNearestByKind("chalk", "ChalkCarton")
+            optionKey = chalkNextColor()
+        end
+        local disp = chalkDispenser()
         if disp then
             if rawget(disp, "_pendingRequest") == true then
                 return false, "waiting for previous request"
             end
-            local name = chalkNearestDispenser()
-            local ok, err = pcall(function() disp:_requestDispense(name, color) end)
+            local ok, err = pcall(function() disp:_requestDispense(name, optionKey) end)
             if not ok then return false, "request error: " .. tostring(err) end
             return true
         end
-        return chalkRequest(color)
+        return chalkRequestRaw(name, optionKey)
     end
 
-    -- One full cycle driver. Held item -> drop it; empty hands -> take chalk. Pacing
-    -- comes from the singleton's _pendingRequest flag (never fire mid-flight), which
-    -- is what fixes the "something went wrong" nonce races.
+    -- Choose which item type to take next, honouring the Items mode and per-type
+    -- cooldowns. In Alternate mode we flip off the last-used type each time (so both
+    -- dispensers share the load) and, when one type is rate-limited, we use the other
+    -- until its cooldown expires. Returns nil if BOTH types are currently cooling down.
+    local function chalkPickItem(now)
+        local mode      = Config.Chalk.Items or "Alternate"
+        local chalkOk   = now >= (ChalkState.cool.chalk or 0)
+        local eraserOk  = now >= (ChalkState.cool.eraser or 0)
+        if mode == "Chalk"  then return chalkOk  and "chalk"  or nil end
+        if mode == "Sponge" then return eraserOk and "eraser" or nil end
+        -- Alternate: prefer the opposite of what we used last time.
+        local prefer = (ChalkState.item == "chalk") and "eraser" or "chalk"
+        local other  = (prefer == "chalk") and "eraser" or "chalk"
+        local function okOf(t) return (t == "chalk" and chalkOk) or (t == "eraser" and eraserOk) end
+        if okOf(prefer) then return prefer end
+        if okOf(other)  then return other  end
+        return nil
+    end
+
+    -- One full cycle driver. Held item -> drop it; empty hands -> take an item.
+    -- Pacing comes from the singleton's _pendingRequest flag (never fire mid-flight),
+    -- which is what fixes the "something went wrong" nonce races. When a take is
+    -- rejected (the request resolved but no item ended up in hand — i.e. a rate
+    -- limit), we put that item type on cooldown so the picker switches to the other.
     local function chalkTick()
-        local now = os.clock()
+        local now      = os.clock()
+        local equipped = chalkCharAttr("ItemEquipped")
+        local disp     = chalkDispenser()
+        local pending  = disp and rawget(disp, "_pendingRequest") == true
+
+        -- Resolve an outstanding take before doing anything else.
+        if ChalkState.pendType then
+            if equipped ~= nil then
+                ChalkState.pendType = nil            -- got the item: success
+            elseif not pending then
+                -- Server responded but our hands are empty → rejected (rate limited).
+                ChalkState.cool[ChalkState.pendType] = now + math.max(0.5, Config.Chalk.Cooldown or 3)
+                ChalkState.pendType = nil
+            elseif now - ChalkState.pendAt > 4 then
+                -- Safeguard: never wait forever on a lost result.
+                ChalkState.cool[ChalkState.pendType] = now + math.max(0.5, Config.Chalk.Cooldown or 3)
+                ChalkState.pendType = nil
+            end
+            if ChalkState.pendType then return end   -- still waiting
+        end
+
         if now < ChalkState.nextAt then return end
         local interval = math.max(0.1, Config.Chalk.Delay or 0.35)
-        local equipped = chalkCharAttr("ItemEquipped")
+
         if equipped ~= nil then
             if chalkDrop() then ChalkState.nextAt = now + interval end
             return
         end
-        local disp = chalkDispenser()
-        if disp and rawget(disp, "_pendingRequest") == true then
-            return  -- a request is already outstanding; wait for the server's result
+
+        if pending then return end                   -- a request is still outstanding
+
+        local item = chalkPickItem(now)
+        if not item then                             -- both types cooling down
+            ChalkState.nextAt = now + 0.25
+            return
         end
-        if chalkTakeChalk() then ChalkState.nextAt = now + interval end
+        if chalkTake(item) then
+            ChalkState.item     = item
+            ChalkState.pendType = item
+            ChalkState.pendAt   = now
+            ChalkState.nextAt   = now + interval
+        end
     end
 
-    -- Manual one-shot: hold something -> drop it; empty hands -> take chalk.
-    -- Returns (ok, reason) so the button can show the real failure cause.
+    -- Manual one-shot: hold something -> drop it; empty hands -> take one item
+    -- (respects the Items mode / cooldowns). Returns (ok, reason).
     local function chalkTakeAndDropOnce()
         local equipped = chalkCharAttr("ItemEquipped")
         if equipped ~= nil then return chalkDrop() end
-        return chalkTakeChalk()
+        local item = chalkPickItem(os.clock()) or "chalk"
+        ChalkState.item = item
+        return chalkTake(item)
     end
 
     local function chalkStop()
@@ -2206,13 +2296,13 @@ return function(Lib, Core)
         local chk = Config.Chalk
         local sCH = Misc:Section({ Side = "Right" })
         sCH:Header({ Name = "Chalk Spammer" })
-        sCH:SubLabel({ Text = "Endlessly takes chalk from a chalk box and drops it, littering the floor. Stand right next to a chalk carton." })
+        sCH:SubLabel({ Text = "Endlessly takes chalk / sponges from the nearest box and drops them, littering the floor. Stand right next to a chalk or eraser carton." })
         sCH:Button({
             Name = "Take & Drop Once",
             Callback = function()
                 local ok, reason = chalkTakeAndDropOnce()
                 if ok then
-                    notify("Chalk Spammer", "took / dropped chalk")
+                    notify("Chalk Spammer", "took / dropped item")
                 else
                     notify("Chalk Spammer", "failed: " .. tostring(reason or "unknown"))
                 end
@@ -2222,21 +2312,33 @@ return function(Lib, Core)
             Title = "Auto Spam", Flag = "Misc_Chalk_Auto",
             get = function() return chk.Auto end,
             set = function(v) chk.Auto = v and true or false end,
-            Desc = "loops take + drop as fast as the delay allows to build a chalk pile",
+            Desc = "loops take + drop as fast as the delay allows to build a pile",
         })
         sCH:Divider()
         sCH:Dropdown({
-            Name = "Color", Default = chk.Mode,
+            Name = "Item", Default = chk.Items,
+            Options = { "Alternate", "Chalk", "Sponge" },
+            Callback = function(v) chk.Items = v or "Alternate" end,
+        }, ctx.flag("Misc_Chalk_Items"))
+        sCH:SubLabel({ Text = "Alternate = switch between chalk and sponge each grab (recommended): when one hits the game's rate limit, it automatically uses the other while that one cools down. Chalk / Sponge lock to a single item." })
+        sCH:Dropdown({
+            Name = "Chalk Color", Default = chk.Mode,
             Options = { "Rainbow", "Random", "White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet" },
             Callback = function(v) chk.Mode = v or "Rainbow" end,
         }, ctx.flag("Misc_Chalk_Mode"))
-        sCH:SubLabel({ Text = "Rainbow cycles through all 8 colors; Random rolls each time; or pick one fixed color." })
+        sCH:SubLabel({ Text = "Colour used when taking chalk. Rainbow cycles all 8; Random rolls each time; or pick one. (Ignored for sponges.)" })
         slider(sCH, {
             Name = "Delay", Flag = "Misc_Chalk_Delay",
             Default = chk.Delay, Min = 0.1, Max = 2, Precision = 2, Suffix = "s",
             Callback = function(v) chk.Delay = v end,
         })
-        sCH:SubLabel({ Text = "Time between each take/drop action. Lower = faster mess, but too fast may get throttled by the server." })
+        sCH:SubLabel({ Text = "Time between each take/drop action. Lower = faster mess, but too fast trips the rate limit sooner." })
+        slider(sCH, {
+            Name = "Rate-limit Cooldown", Flag = "Misc_Chalk_Cooldown",
+            Default = chk.Cooldown, Min = 0.5, Max = 10, Precision = 1, Suffix = "s",
+            Callback = function(v) chk.Cooldown = v end,
+        })
+        sCH:SubLabel({ Text = "When a grab is rejected (rate limited), that item type is skipped for this long while the other keeps going." })
 
         -- ─────────────── Section: Auto Draw (Right) ──���────────────
         local ad = Config.AutoDraw
