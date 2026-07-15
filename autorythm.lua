@@ -2429,7 +2429,7 @@ return function(Lib, Core)
             Title = "AutoRythm", Flag = "Misc_AutoRythm",
             get = function() return Config.AutoRythm_On end,
             set = function(v) Config.AutoRythm_On = v end,
-            Desc = "auto-plays the rhythm minigame\nframe-perfect PERFECT on every note (taps + holds)",
+            Desc = "auto-plays the rhythm minigame",
         })
         sAR:Divider()
         sAR:Header({ Name = "Timing" })
@@ -2438,15 +2438,13 @@ return function(Lib, Core)
             Default = Config.Offset, Min = -60, Max = 60, Precision = 0, Suffix = " ms",
             Callback = function(v) Config.Offset = v end,
         })
-        sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if your client has audio/display lag. Taps stay PERFECT within about +-43ms." })
-        sAR:Divider()
-        sAR:SubLabel({ Text = "Grabs the live RhythmEngine and plays it directly, so the game sees a clean PERFECT run. Just start a song and enable." })
+        sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if ur client has audio/display lag. Taps stay PERFECT within about +-43ms." })
 
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
         local sCH = Misc:Section({ Side = "Right" })
         sCH:Header({ Name = "Chalk Spammer" })
-        sCH:SubLabel({ Text = "Endlessly takes chalk / sponges from the nearest box and drops them, littering the floor. Stand right next to a chalk or eraser carton." })
+        sCH:SubLabel({ Text = "useless shit, just added it to test my auth bypass" })
         sCH:Button({
             Name = "Take & Drop Once",
             Callback = function()
@@ -2462,7 +2460,7 @@ return function(Lib, Core)
             Title = "Auto Spam", Flag = "Misc_Chalk_Auto",
             get = function() return chk.Auto end,
             set = function(v) chk.Auto = v and true or false end,
-            Desc = "loops take + drop as fast as the delay allows to build a pile",
+            Desc = "idk why u need it",
         })
         sCH:Divider()
         sCH:Dropdown({
@@ -2470,31 +2468,30 @@ return function(Lib, Core)
             Options = { "Alternate", "Chalk", "Sponge" },
             Callback = function(v) chk.Items = v or "Alternate" end,
         }, ctx.flag("Misc_Chalk_Items"))
-        sCH:SubLabel({ Text = "Alternate = switch between chalk and sponge each grab (recommended): when one hits the game's rate limit, it automatically uses the other while that one cools down. Chalk / Sponge lock to a single item." })
+        sCH:SubLabel({ Text = "Alternate = switch between chalk and sponge each grab" })
         sCH:Dropdown({
             Name = "Chalk Color", Default = chk.Mode,
             Options = { "Rainbow", "Random", "White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet" },
             Callback = function(v) chk.Mode = v or "Rainbow" end,
         }, ctx.flag("Misc_Chalk_Mode"))
-        sCH:SubLabel({ Text = "Colour used when taking chalk. Rainbow cycles all 8; Random rolls each time; or pick one. (Ignored for sponges.)" })
+        sCH:SubLabel({ Text = "Colour used when taking chalk. Rainbow cycles all 8; Random rolls each time; or pick one" })
         slider(sCH, {
             Name = "Delay", Flag = "Misc_Chalk_Delay",
             Default = chk.Delay, Min = 0.1, Max = 2, Precision = 2, Suffix = "s",
             Callback = function(v) chk.Delay = v end,
         })
-        sCH:SubLabel({ Text = "Time between each take/drop action. Lower = faster mess, but too fast trips the rate limit sooner." })
+        sCH:SubLabel({ Text = "Time between each take/drop action. Lower = faster mess, but too fast trips the rate limit sooner" })
         slider(sCH, {
             Name = "Rate-limit Cooldown", Flag = "Misc_Chalk_Cooldown",
             Default = chk.Cooldown, Min = 0.5, Max = 10, Precision = 1, Suffix = "s",
             Callback = function(v) chk.Cooldown = v end,
         })
-        sCH:SubLabel({ Text = "When a grab is rejected (rate limited), that item type is skipped for this long while the other keeps going." })
 
         -- ─────────────── Section: Auto Draw (Right) ──���────────────
         local ad = Config.AutoDraw
         local sAD = Misc:Section({ Side = "Right" })
         sAD:Header({ Name = "Auto Draw" })
-        sAD:SubLabel({ Text = "Draws a PNG or JPEG on the nearest chalk whiteboard. Equip Chalk and stand within ~16 studs of a board." })
+        sAD:SubLabel({ Text = "Draws a PNG or JPEG on the nearest chalk whiteboard. Equip Chalk and stand within ~16 studs of a board" })
 
         sAD:Input({
             Name = "Image URL", Placeholder = "https://.../image.png", Default = ad.Url,
@@ -2534,7 +2531,7 @@ return function(Lib, Core)
         -- Primary actions right under the image picker so Draw is one click away.
         sAD:Button({ Name = "Draw", Callback = function() startAutoDraw(notify) end })
         sAD:Button({ Name = "Stop", Callback = function() stopAutoDraw(); notify("Auto Draw", "stopped") end })
-        sAD:SubLabel({ Text = "Pick a URL or workspace file above, then press Draw. Equip chalk + stand near a board if Sync is on." })
+        sAD:SubLabel({ Text = "Pick a URL or workspace file above, then press Draw. Equip chalk + stand near a board if Sync is on" })
 
         -- ── Image quality ──────────────────────────────────────────────
         sAD:Divider()
@@ -2544,17 +2541,17 @@ return function(Lib, Core)
             Default = ad.Quality, Min = 1, Max = 100, Precision = 0, Suffix = " %",
             Callback = function(v) ad.Quality = v end,
         })
-        sAD:SubLabel({ Text = "Detail dial: higher = more scanlines + finer colour (sharper, slower); lower = coarse and fast." })
+        sAD:SubLabel({ Text = "higher = more scanlines + finer colour, lower = coarse and fast." })
         sAD:Toggle({
             Name = "Colour", Default = not ad.Mono,
             Callback = function(v) ad.Mono = not v end,
         }, ctx.flag("Misc_AutoDraw_Colour"))
-        sAD:SubLabel({ Text = "ON: draw in the image's real colours. OFF: draw everything in chalk white." })
+        sAD:SubLabel({ Text = "draw everything in chalk white." })
         sAD:Toggle({
             Name = "Preserve Aspect Ratio", Default = ad.Preserve,
             Callback = function(v) ad.Preserve = v end,
         }, ctx.flag("Misc_AutoDraw_Preserve"))
-        sAD:SubLabel({ Text = "Keep the image's proportions instead of stretching it to fill the board." })
+        sAD:SubLabel({ Text = "Keep the images proportions instead of stretching it to fill the board" })
 
         -- ── Dark pixels ────────────────────────────────────────────────
         sAD:Divider()
@@ -2563,13 +2560,13 @@ return function(Lib, Core)
             Name = "Skip Dark Pixels", Default = ad.SkipBg,
             Callback = function(v) ad.SkipBg = v end,
         }, ctx.flag("Misc_AutoDraw_SkipBg"))
-        sAD:SubLabel({ Text = "OFF (default): black/dark pixels ARE drawn. ON: leaves near-black pixels unpainted so the black board shows through (useful for line art / logos)." })
+        sAD:SubLabel({ Text = "OFF: black/dark pixels ARE drawn. ON: leaves near-black pixels unpainted so the black board shows through (useful for line art / logos)" })
         slider(sAD, {
             Name = "Dark Threshold", Flag = "Misc_AutoDraw_Threshold",
             Default = ad.Threshold, Min = 0, Max = 80, Precision = 0,
             Callback = function(v) ad.Threshold = v end,
         })
-        sAD:SubLabel({ Text = "Only used when Skip Dark Pixels is ON: pixels darker than this brightness (0-255) are skipped." })
+        sAD:SubLabel({ Text = "Only used when Skip Dark Pixels is ON: pixels darker than this brightness (0-255) are skipped" })
 
         -- ── Sync ───────────────────────────────────────────────────────
         sAD:Divider()
@@ -2578,13 +2575,13 @@ return function(Lib, Core)
             Name = "Sync to Server", Default = ad.Sync,
             Callback = function(v) ad.Sync = v end,
         }, ctx.flag("Misc_AutoDraw_Sync"))
-        sAD:SubLabel({ Text = "ON: sends strokes to the server so the drawing persists and others see it — requires ANY chalk equipped. OFF: renders on your screen only." })
+        sAD:SubLabel({ Text = "ON: sends strokes to the server so the drawing persists and others see it" })
         slider(sAD, {
             Name = "Draw Speed", Flag = "Misc_AutoDraw_Speed",
             Default = ad.Speed, Min = 30, Max = 4000, Precision = 0, Suffix = " pts/s",
             Callback = function(v) ad.Speed = v end,
         })
-        sAD:SubLabel({ Text = "Points/second painted. Your screen and the server fill in together through the game's own draw path, so both look identical. Strokes are batched into ≤24-point packets (compression), so even high speeds send few packets — but the draw remote is unreliable, so extreme values may drop some strokes for others." })
+        sAD:SubLabel({ Text = "Points/second painted. Your screen and the server fill in together through the game's own draw path, so both look identical" })
 
         -- ── Size & position ────────────────────────────────────────────
         sAD:Divider()
@@ -2594,7 +2591,7 @@ return function(Lib, Core)
             Default = ad.Scale, Min = 10, Max = 100, Precision = 0, Suffix = " %",
             Callback = function(v) ad.Scale = v end,
         })
-        sAD:SubLabel({ Text = "How much of the board the drawing fills. Turn on Preview to see the exact region." })
+        sAD:SubLabel({ Text = "How much of the board the drawing fills" })
         slider(sAD, {
             Name = "Horizontal Align", Flag = "Misc_AutoDraw_AlignX",
             Default = ad.AlignX, Min = 0, Max = 100, Precision = 0, Suffix = " %",
@@ -2618,7 +2615,7 @@ return function(Lib, Core)
                 if ad.Preview then previewBoard(notify, true) else clearPreview() end
             end,
         }, ctx.flag("Misc_AutoDraw_Preview"))
-        sAD:SubLabel({ Text = "ON: highlights the nearest board (blue) and outlines where the image will land (green), staying visible until you turn it off. Move the sliders above and re-toggle to refresh the outline." })
+        sAD:SubLabel({ Text = "ON: highlights the nearest board (blue)" })
         sAD:Button({
             Name = "Refresh Preview",
             Callback = function()
@@ -2626,7 +2623,7 @@ return function(Lib, Core)
             end,
         })
         sAD:Button({ Name = "Test Stroke (X)", Callback = function() testStroke(notify) end })
-        sAD:SubLabel({ Text = "Draws a white X + border on the board (local, syncs if Sync is on). If it shows up, the draw path works and only image loading is the issue." })
+        sAD:SubLabel({ Text = "Draws a white X" })
 
         -- ── Board tools ────────────────────────────────────────────────
         sAD:Divider()
@@ -2649,7 +2646,7 @@ return function(Lib, Core)
                 end
             end,
         })
-        sAD:SubLabel({ Text = "Wipes the nearest board. Clears your local view instantly; also clears it for everyone if Sync is on and chalk is equipped." })
+        sAD:SubLabel({ Text = "Wipes the nearest board" })
 
         uiReady = true
     end
