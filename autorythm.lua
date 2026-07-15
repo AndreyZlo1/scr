@@ -71,7 +71,7 @@ return function(Lib, Core)
             File       = "",     -- image file in the executor workspace
             Source     = "",     -- "url" | "file": which input the user touched last
             Quality    = 80,     -- 1-100: single knob for detail + colour fidelity
-            Speed      = 45,     -- segments/second sent to the server (Sync on)
+            Speed      = 120,    -- segments/second sent to the server (Sync on); local render is full-speed regardless
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
             SkipBg     = false,  -- OFF by default so black pixels ARE drawn (was skipping them)
             Mono       = false,  -- draw everything in chalk white instead of colour
@@ -529,7 +529,7 @@ return function(Lib, Core)
         return ok
     end
 
-    -- ── Local rendering ──────────────────────────────────────────────────────
+    -- ── Local rendering ──────────────────────��───────────────────────────────
     -- CRITICAL: the game renders each board CLIENT-SIDE onto an EditableImage held
     -- in a module-local board map (WhiteboardServiceClient `u2`). When we fire the
     -- draw remote, the server only broadcasts to OTHER players — it never echoes to
@@ -543,12 +543,66 @@ return function(Lib, Core)
     -- ImageContent wraps the EditableImage via Content.fromObject (dump line 204).
     -- The new Content datatype exposes the wrapped instance as `.Object`, so we can
     -- pull the live EditableImage straight out of the ImageLabel. Cached per part.
-    local _eiCache = setmetatable({}, { __mode = "k" })
+    -- Resolve the GAME'S OWN canonical EditableImage for a board.
+    --
+    -- WHY THIS MATTERS (the "what I see ≠ what others see, even the size" bug):
+    -- the game creates ONE EditableImage per board — AssetService:CreateEditableImage
+    -- {Size=512x384} — stores it in a board record `{ part, canvas, surfaceGui, face,
+    -- editableImage }`, and renders BOTH its own drawing AND every received broadcast
+    -- onto THAT instance (WhiteboardServiceClient u2[id].editableImage). That is the
+    -- surface every other player sees. Our old code instead re-derived an image by
+    -- walking part→SurfaceGui→Canvas→ImageLabel→ImageContent.Object, which can resolve
+    -- a different/rescaled image object — so our local view diverged in size + look
+    -- from the real board. Now we grab the game's exact record (matched by our part)
+    -- from memory, so local render == the true board == what others see.
+    local _eiCache   = setmetatable({}, { __mode = "k" })
+    local _recCache  = setmetatable({}, { __mode = "k" })
+
+    -- Find the game's board record whose `.part` is exactly this part, using the
+    -- executor GC scanners. A record is a table carrying editableImage + part + face.
+    local function gameRecordForPart(part)
+        local cached = _recCache[part]
+        if cached ~= nil then return cached or nil end
+        local G = (getgenv and getgenv()) or _G
+        local found
+        local function scan(list)
+            for _, t in ipairs(list) do
+                if type(t) == "table" then
+                    local ei = rawget(t, "editableImage")
+                    if ei ~= nil and rawget(t, "part") == part and rawget(t, "face") ~= nil then
+                        found = t; return true
+                    end
+                end
+            end
+            return false
+        end
+        if type(G.filtergc) == "function" then
+            pcall(function()
+                local list = G.filtergc("table", { Keys = { "editableImage", "part", "face" } }, false)
+                if type(list) == "table" then scan(list) end
+            end)
+        end
+        if not found and type(G.getgc) == "function" then
+            pcall(function() scan(G.getgc(true)) end)
+        end
+        _recCache[part] = found or false
+        return found
+    end
+
     local function getBoardImage(part)
         if typeof(part) ~= "Instance" then return nil end
         local cached = _eiCache[part]
         if cached then return cached end
 
+        -- 1) Preferred: the game's own canonical EditableImage (matches every client).
+        local rec = gameRecordForPart(part)
+        if rec and typeof(rec.editableImage) == "Instance" then
+            _eiCache[part] = rec.editableImage
+            adlog("getBoardImage: using GAME canonical EditableImage for '%s'", part.Name)
+            return rec.editableImage
+        end
+
+        -- 2) Fallback: derive it from the GUI tree (previous behaviour).
         local sg = part:FindFirstChildOfClass("SurfaceGui")
         if not sg then adlog("getBoardImage: no SurfaceGui on '%s'", part.Name); return nil end
         local root = sg:FindFirstChild("Canvas") or sg
@@ -571,7 +625,7 @@ return function(Lib, Core)
             return nil
         end
         _eiCache[part] = img
-        adlog("getBoardImage: resolved EditableImage for '%s'", part.Name)
+        adlog("getBoardImage: resolved EditableImage (GUI fallback) for '%s'", part.Name)
         return img
     end
 
@@ -1609,46 +1663,43 @@ return function(Lib, Core)
         end
 
         -- ── Phase 2: draw the strokes ────────────────────────────────────────
-        -- GOAL: what you see on YOUR screen must equal what actually reached the
-        -- server (and therefore other players + the persisted board).
+        -- We render onto the GAME'S OWN canonical EditableImage (see getBoardImage),
+        -- i.e. the exact surface every other player sees. So local render and the
+        -- server broadcast target the identical pixels — there is no longer a "looks
+        -- different / wrong size locally" gap, and the two no longer have to advance
+        -- in lockstep. That lets us DECOUPLE them:
         --
-        -- WhiteboardDrawBatch is an UNRELIABLE remote, and the game itself never
-        -- sends more than one batch per ~0.08s (WhiteboardServiceClient flushStroke,
-        -- lines 394/485). If we blast strokes with no limit, the flooded unreliable
-        -- channel silently DROPS packets: the server ends up with fewer strokes than
-        -- our screen shows — exactly the "local looks right, server looks wrong"
-        -- mismatch. So when Sync is on we PACE the sends with a token-bucket
-        -- (Speed = segments/second) and render each stroke LOCALLY in lockstep, i.e.
-        -- only in the same step we fire it. Screen and server advance together.
-        --
-        -- With Sync OFF there is no server involved, so we render at full speed.
+        --   • LOCAL render runs at FULL SPEED, so the picture appears on your screen
+        --     almost immediately (this is what fixes the painfully slow draw).
+        --   • The SERVER fire stays PACED with a token bucket, because
+        --     WhiteboardDrawBatch is UNRELIABLE and flooding it makes the server drop
+        --     packets. Other players simply see the image fill in over a few seconds;
+        --     the final server state is identical to what you already see locally.
         local sync = opts.sync
         local sent = 0
         local drewLocal = false
 
-        if not sync then
-            -- Local-only preview: no server to match, so use the fast (faithful=false)
-            -- path and render at full speed.
+        -- Full-speed local render (faithful = same soft chalk look as the real board).
+        do
             local lastYield = os.clock()
             for i = 1, total do
                 if token ~= _drawToken then break end
                 local s = strokes[i]
-                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v, false) then
+                if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v, true) then
                     drewLocal = true
                 end
-                -- Yield by wall-clock so tiny images finish in one frame and huge
-                -- ones stay responsive.
-                if os.clock() - lastYield >= 0.010 then
+                if os.clock() - lastYield >= 0.012 then
                     RunService.Heartbeat:Wait()
                     lastYield = os.clock()
                 end
             end
-        else
-            -- Token-bucket: refill `perSec` tokens/second, spend one per stroke.
-            -- burstCap ≈ one heartbeat's worth so we never dump a huge burst that
-            -- the unreliable channel would drop.
-            local perSec   = math.clamp(math.floor(opts.speed or 45), 3, 300)
-            local burstCap = math.max(4, math.floor(perSec * 0.12))
+        end
+
+        -- Paced server fire (only when syncing). Runs after the local image is already
+        -- visible, so the slow part no longer blocks what you see.
+        if sync then
+            local perSec   = math.clamp(math.floor(opts.speed or 120), 3, 2000)
+            local burstCap = math.max(6, math.floor(perSec * 0.12))
             local budget, last = 0, os.clock()
             for i = 1, total do
                 if token ~= _drawToken then break end
@@ -1661,19 +1712,9 @@ return function(Lib, Core)
                 end
                 if token ~= _drawToken then break end
                 budget = budget - 1
-
                 local s = strokes[i]
-                -- LOCKSTEP: fire to the server, then — ONLY if the fire succeeded —
-                -- mirror the exact same stroke locally with the FAITHFUL renderer, so
-                -- our screen shows precisely what the server received and what other
-                -- players see (soft alpha-blended chalk, not a hard local fill). If the
-                -- fire fails we skip the local paint so no "phantom" stroke appears that
-                -- isn't actually on the server.
                 if fireRun(board.id, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v) then
                     sent = sent + 1
-                    if localStroke(board.part, BRUSH, s.r, s.g, s.b, s.u1, s.v, s.u2, s.v, true) then
-                        drewLocal = true
-                    end
                 end
             end
         end
@@ -2431,10 +2472,10 @@ return function(Lib, Core)
         sAD:SubLabel({ Text = "ON: sends strokes to the server so the drawing persists and others see it — requires ANY chalk equipped. OFF: renders on your screen only." })
         slider(sAD, {
             Name = "Sync Speed", Flag = "Misc_AutoDraw_Speed",
-            Default = ad.Speed, Min = 3, Max = 300, Precision = 0, Suffix = " /s",
+            Default = ad.Speed, Min = 3, Max = 600, Precision = 0, Suffix = " /s",
             Callback = function(v) ad.Speed = v end,
         })
-        sAD:SubLabel({ Text = "Segments/second sent when Sync is on. The draw remote is UNRELIABLE; ~45 keeps your view and the server identical. Higher floods it and the server drops strokes. Ignored when Sync is off." })
+        sAD:SubLabel({ Text = "Segments/second sent to the SERVER (for other players / persistence). Your own screen now renders at full speed no matter what, so this only affects how fast others see it fill in. The remote is unreliable, so very high values may drop some strokes for others." })
 
         -- ── Size & position ────────────────────────────────────────────
         sAD:Divider()
