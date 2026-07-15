@@ -1840,18 +1840,24 @@ return function(Lib, Core)
     end
 
     -- ═══════════════════════════ CHALK SPAMMER ══════════════════════════════
-    -- Endlessly takes chalk from a ChalkCarton dispenser and immediately drops it,
-    -- littering the floor with chalk. Mirrors exactly what the game itself does:
-    --   • take:  Client.DispenserRequest.Fire{ DispenserName="ChalkCarton",
-    --            OptionKey=<color>, Token/Check/Nonce } — auth via
-    --            AuthServiceClient:NextForKey("Dispenser.Request")
-    --            (DispenserServiceClient:72-101). Blocked while ItemEquipped ~= nil.
-    --   • drop:  Remotes.ItemUnequip:FireServer(Token, Check, Nonce) — auth via
-    --            NextForKey("Item.Unequip") (ItemServiceClient:473-497). The server
-    --            drops the item into workspace.Items, i.e. the "mess".
-    -- Because both actions are server-validated with real auth tokens, this is a
-    -- faithful automation of the normal take/drop, not an exploit of fake state.
-    -- You must be standing next to a chalk box (the server checks proximity).
+    -- Endlessly takes chalk from the NEAREST chalk box and drops it, littering the
+    -- floor. The naive "fire a request every N seconds" approach caused the game's
+    -- own "Something went wrong" popup: the auth tokens (Token/Check/Nonce) form a
+    -- ROLLING SEQUENCE per key, and the game only ever has ONE dispense request in
+    -- flight (_pendingRequest guard, DispenserServiceClient:72-101) — it waits for
+    -- Client.DispenserResult before sending the next. Spamming requests interleaves
+    -- nonces out of order, so the server rejects them.
+    --
+    -- Fix: we DRIVE THE GAME'S OWN dispenser singleton — call its :_requestDispense
+    -- directly so we inherit its exact token flow, its single-in-flight guard and
+    -- its result handling. We pace purely on its _pendingRequest flag (never fire
+    -- while a request is outstanding), which eliminates the nonce races entirely.
+    --   • take:  disp:_requestDispense(<nearestBoxName>, <colorKey>)
+    --   • drop:  Remotes.ItemUnequip:FireServer(Token/Check/Nonce) — auth via
+    --            AuthServiceClient:NextForKey("Item.Unequip"). Drops into workspace.Items.
+    -- Both the auth client and the dispenser client are DESTROYED from the tree
+    -- after load (anti-tamper), so we resolve them from memory (getloadedmodules).
+    -- You must still be standing next to a chalk box (the server checks proximity).
     local CHALK_COLORS = { "White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet" }
     local ChalkState = { conn = nil, idx = 0, nextAt = 0 }
 
@@ -1986,23 +1992,110 @@ return function(Lib, Core)
         return true
     end
 
-    -- One full cycle driver. Held item -> drop it; empty hands -> request chalk.
-    -- Gated by ItemPhase so we never fire mid-transition (which the server rejects).
+    -- The dispenser SINGLETON instance (not the metatable) exposes _requestDispense
+    -- (via __index) and owns a _pendingRequest field. Match both so getgc can't hand
+    -- us the metatable by mistake (which would take a wrong `self`).
+    local function dispIsValid(v)
+        return type(v) == "table"
+            and type(v._requestDispense) == "function"
+            and rawget(v, "_pendingRequest") ~= nil
+    end
+
+    -- Resolve the game's DispenserServiceClient singleton from memory (same reasons
+    -- as chalkAuth: the ModuleScript is destroyed from the tree after load).
+    local _dispClient
+    local function chalkDispenser()
+        if _dispClient ~= nil then return _dispClient or nil end
+        local G = (getgenv and getgenv()) or _G
+        pcall(function()
+            local shared = ReplicatedStorage:FindFirstChild("Shared")
+            local svc    = shared and shared:FindFirstChild("Services")
+            local ds     = svc and svc:FindFirstChild("DispenserService")
+            local client = ds and ds:FindFirstChild("DispenserServiceClient")
+            if client then
+                local mod = require(client)
+                if dispIsValid(mod) then _dispClient = mod end
+            end
+        end)
+        if not _dispClient and type(G.getloadedmodules) == "function" then
+            pcall(function()
+                for _, m in ipairs(G.getloadedmodules()) do
+                    if m and m.Name == "DispenserServiceClient" then
+                        local mod = require(m)
+                        if dispIsValid(mod) then _dispClient = mod break end
+                    end
+                end
+            end)
+        end
+        if not _dispClient and type(G.getgc) == "function" then
+            pcall(function()
+                for _, obj in ipairs(G.getgc(true)) do
+                    if dispIsValid(obj) then _dispClient = obj break end
+                end
+            end)
+        end
+        _dispClient = _dispClient or false
+        return _dispClient or nil
+    end
+
+    -- Find the NEAREST chalk dispenser under workspace.Dispensers. Returns
+    -- (name, distance). Falls back to "ChalkCarton" if the folder isn't found yet.
+    local function chalkNearestDispenser()
+        local folder = workspace:FindFirstChild("Dispensers")
+        local char   = LocalPlayer and LocalPlayer.Character
+        local root   = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        local origin = root and root.Position
+        local bestName, bestDist = "ChalkCarton", nil
+        if folder then
+            for _, m in ipairs(folder:GetChildren()) do
+                if m:IsA("Model") and m.Name:lower():find("chalk") then
+                    local d = 0
+                    if origin then
+                        local ok, pos = pcall(function() return m:GetPivot().Position end)
+                        if ok and pos then d = (pos - origin).Magnitude end
+                    end
+                    if not bestDist or d < bestDist then bestName, bestDist = m.Name, d end
+                end
+            end
+        end
+        return bestName, bestDist
+    end
+
+    -- Take chalk. Prefer driving the game's own singleton (correct rolling-token
+    -- flow + single-in-flight guard); fall back to a manual request only if the
+    -- singleton can't be resolved. Returns (ok, reason).
+    local function chalkTakeChalk()
+        local color = chalkNextColor()
+        local disp  = chalkDispenser()
+        if disp then
+            if rawget(disp, "_pendingRequest") == true then
+                return false, "waiting for previous request"
+            end
+            local name = chalkNearestDispenser()
+            local ok, err = pcall(function() disp:_requestDispense(name, color) end)
+            if not ok then return false, "request error: " .. tostring(err) end
+            return true
+        end
+        return chalkRequest(color)
+    end
+
+    -- One full cycle driver. Held item -> drop it; empty hands -> take chalk. Pacing
+    -- comes from the singleton's _pendingRequest flag (never fire mid-flight), which
+    -- is what fixes the "something went wrong" nonce races.
     local function chalkTick()
         local now = os.clock()
         if now < ChalkState.nextAt then return end
         local interval = math.max(0.1, Config.Chalk.Delay or 0.35)
         local equipped = chalkCharAttr("ItemEquipped")
-        local phase    = chalkCharAttr("ItemPhase")
         if equipped ~= nil then
-            if phase == nil or phase == "Equipped" then
-                if chalkDrop() then ChalkState.nextAt = now + interval end
-            end
-        else
-            if phase == nil then
-                if chalkRequest(chalkNextColor()) then ChalkState.nextAt = now + interval end
-            end
+            if chalkDrop() then ChalkState.nextAt = now + interval end
+            return
         end
+        local disp = chalkDispenser()
+        if disp and rawget(disp, "_pendingRequest") == true then
+            return  -- a request is already outstanding; wait for the server's result
+        end
+        if chalkTakeChalk() then ChalkState.nextAt = now + interval end
     end
 
     -- Manual one-shot: hold something -> drop it; empty hands -> take chalk.
@@ -2010,7 +2103,7 @@ return function(Lib, Core)
     local function chalkTakeAndDropOnce()
         local equipped = chalkCharAttr("ItemEquipped")
         if equipped ~= nil then return chalkDrop() end
-        return chalkRequest(chalkNextColor())
+        return chalkTakeChalk()
     end
 
     local function chalkStop()
