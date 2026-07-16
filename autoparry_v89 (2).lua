@@ -334,7 +334,7 @@ local Config = {
 	-- (TimePosition ползёт по чуть-чуть), стойл не детекти��������������ся → contactAbs тикал к
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
-	-- контакт сч��тается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
+	-- контакт ��ч��тается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
 	-- (hitTL - tp) / max(liveSpeed, floor). При замедлении окно едет с ударом.
 	LiveHeavyTimer    = true,
 	LiveSpeedFloor    = 0.15,   -- ниже этой доли номинала скорость не считаем (антидел/0)
@@ -522,7 +522,7 @@ local Config = {
 	-- дэшит В УПОР (радиально) + толкается влев��/вправо (боково) → блок, не парри»: старый единый
 	-- кап (7 студ) на ВЕСЬ вектор vel*lead → большая РАДИАЛЬНАЯ скорость дэша съе��ала весь бюджет
 	-- → БОКОВАЯ коррекция (та, что задаёт угол facing) обрезалась пропорционально → лицо отставало
-	-- (в логе face=0.2/-0.6 BACK! при валидном press → сервер даунгрейдит перфект в обычный блок).
+	-- (в логе face=0.2/-0.6 BACK! при валидном press → сервер даун��рейдит перфект в обычный блок).
 	-- Фикс: раскладываем vel на радиаль (враг↔я, почти не влияет на угол) и боковую (задаёт угол),
 	-- капим РАЗДЕЛЬНО. Боковой лимит щедрый (угол важен), радиальный маленький (анти-��ерелёт в упор).
 	FaceLatMaxStuds = 18,        -- кап БОКОВОГО lead (перпендикуляр линии врагу) — главный для угла
@@ -3269,7 +3269,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff)
 	-- performDodge → выключив AutoDodge, юзер убирает ЛЮБОЙ ОПЦИОНАЛЬНЫЙ додж (одно место истины).
 	-- [V128] ИСКЛЮЧЕНИЕ — must-dodge (bypassAutoOff=true): грэбы/анблокаблы НЕЛЬЗЯ блокнуть, их
 	-- гасит только додж (i-frames). Это обязательная защита, а не удобство, поэтому она обязана
-	-- срабатывать даже при выключенном Auto Dodge. Свой тумблер у неё есть (Config.MustDodge,
+	-- срабатывать даже при выключенном Auto Dodge. Свой ��умблер у неё есть (Config.MustDodge,
 	-- проверяется в isMustDodge), так что полностью отключить её всё равно можно.
 	if Config.AutoDodge == false and not bypassAutoOff then
 		if State.lastDodgeRefuse ~= "AutoDodge-off" then
@@ -4935,7 +4935,7 @@ local function raknetScanSendHook(packet)
 	if pid and pid >= 0 and pid < RAK_SLOTS then
 		local slot = pid + 1
 		if os.clock() < RaknetScan.window then
-			RaknetScan.near[slot] = RaknetScan.near[slot] + 1   -- IN-PLACE, слот уже существует
+			RaknetScan.near[slot] = RaknetScan.near[slot] + 1   -- IN-PLACE, с��от уже существует
 		else
 			RaknetScan.far[slot] = RaknetScan.far[slot] + 1
 		end
@@ -4978,7 +4978,7 @@ end
 --   • Сеть игры = Blink: бой/движение шлётся через BLINK_RELIABLE_REMOTE:FireServer(buffer,
 --     instances) раз в Heartbeat — это ОБ��Ч��ЫЙ RemoteEvent, а НЕ raknet. Значит desync
 --     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
---     эта игра ��го не де��ектит, и он НЕ крашит). Это отдел��ная фича — включим по запросу.
+--     эта игра ��го не де��ектит, и о�� НЕ крашит). Это отдел��ная фича — включим по запросу.
 _ = raknetScanSendHook  -- функция сохран��на в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
 _ = reportRaknetScan
 local function runRaknetScanSession()
@@ -5599,42 +5599,49 @@ local function drawTargetHitbox(cam, model, hrp)
 	for i = 0, CONE_SEG - 1 do drawWorldSeg(cam, wArc[i], wArc[i + 1], col, 2) end
 end
 
+-- [V132] PERF/REGISTER FIX: вложенная функция arc была замыканием внутри drawRestrictZone,
+-- захватывая cam, cx, cz, y, Config.RestrictCol как upvalues. В do-блоке уже ~200 активных
+-- локалов (лимит регистров Luau VM) → «out of local registers when trying to allocate
+-- drawRestrictZone» под Luraph-виртуализацией. Решение: выносим arc на уровень do-блока
+-- как drawRestrictArc с явными параметрами (нет capture → нет роста счётчика регистров
+-- в drawRestrictZone). Нулевое изменение поведения.
+local function drawRestrictArc(cam, cx, cz, y, col, a0, a1, rr, thick, steps)
+	steps = steps or 6
+	local prev
+	for i = 0, steps do
+		local a = a0 + (a1 - a0) * (i / steps)
+		local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
+		if prev then drawWorldSeg(cam, prev, p, col, thick) end
+		prev = p
+	end
+end
+
 local function drawRestrictZone(cam)
 	if not (Config.RestrictZone and Config.RestrictShowZone) then return end
 	local z = activeRestrictZone(os.clock()); if not z then return end
 	local aHRP = z.th.attackerHRP; if not (aHRP and aHRP.Parent) then return end
 	local y  = footYOf(z.th.attackerModel, aHRP)
 	local cx, cz = z.center.X, z.center.Z
-	local r  = z.keepOut * (1 + math.sin(Viz.t * 4) * 0.02)
+	local r   = z.keepOut * (1 + math.sin(Viz.t * 4) * 0.02)
+	local col = Config.RestrictCol
 	local center3 = Vector3.new(cx, y, cz)
-
-	local function arc(a0, a1, rr, thick, steps)
-		steps = steps or 6
-		local prev
-		for i = 0, steps do
-			local a = a0 + (a1 - a0) * (i / steps)
-			local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
-			if prev then drawWorldSeg(cam, prev, p, Config.RestrictCol, thick) end
-			prev = p
-		end
-	end
 
 	local bracket = math.rad(34)
 	for k = 0, 3 do
 		local mid = math.rad(45) + k * math.rad(90)
-		arc(mid - bracket / 2, mid + bracket / 2, r, 3, 7)
+		drawRestrictArc(cam, cx, cz, y, col, mid - bracket / 2, mid + bracket / 2, r, 3, 7)
 	end
 
 	local ch = math.max(r * 0.14, 0.7)
-	drawWorldSeg(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), Config.RestrictCol, 2)
-	drawWorldSeg(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), Config.RestrictCol, 2)
+	drawWorldSeg(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), col, 2)
+	drawWorldSeg(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), col, 2)
 
 	if z.aPos then
 		local from = Vector3.new(z.aPos.X, y, z.aPos.Z)
 		local dir  = Vector3.new(cx - z.aPos.X, 0, cz - z.aPos.Z)
 		if dir.Magnitude > 0.1 then
 			local edge = center3 - dir.Unit * r
-			drawWorldSeg(cam, from, edge, Config.RestrictCol, 1.5)
+			drawWorldSeg(cam, from, edge, col, 1.5)
 		end
 	end
 end
