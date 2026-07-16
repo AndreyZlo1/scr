@@ -239,7 +239,7 @@ local Config = {
 	-- [V94] Подняты капы: диаг2 показал реальный RTT=345ms, а прежние UplinkMax=0.33/PingCap=0.32
 	-- САМИ резали компенсацию до ~330ms → на высоком пинге блок недокомпенсировался даже с верным
 	-- getPingRaw. Теперь тянем до 0.5с. На умеренном пинге (60–150) это ни на что не влияет (там
-	-- кл��мпы не достигаются), а на 300–450ms пинге даёт полный round-trip lead.
+	-- клампы не достигаются), а на 300–450ms пинге даёт полный round-trip lead.
 	UplinkMax     = 0.500,
 	PingCap       = 0.500,
 	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ (замена EMA+peak-hold). Peak-hold ЛАТЧИЛ случайный спайк
@@ -267,7 +267,7 @@ local Config = {
 
 	-- [V120] МАСТЕР-ТУМБЛЕР ДОДЖА. Раньше было 7 независимых додж-триггеров (iframe-cluster,
 	-- must-dodge, blatant, outnumbered/combo/exposed-escape, heavy), каждый со СВОИМ саб-тумблером,
-	-- но БЕЗ единого выключателя — все дефолтом ON. Отсюда ��доджит с нихуя»: юзер гасил один флаг,
+	-- но БЕЗ единого выключателя — все дефолтом ON. Отсюда «доджит с нихуя»: юзер гасил один флаг,
 	-- а остальные продолжали. Теперь ВСЕ доджи проходят через performDodge → один гейт AutoDodge.
 	-- false = скрипт НЕ доджит НИКОГДА (даже must-dodge/грэбы), только блок/перфект. Дефолт ON.
 	AutoDodge     = true,
@@ -334,7 +334,7 @@ local Config = {
 	-- (TimePosition ползёт по чуть-чуть), стойл не детекти��������������ся → contactAbs тикал к
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
-	-- контакт ����ч��тается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
+	-- контакт считается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
 	-- (hitTL - tp) / max(liveSpeed, floor). При замедлении окно едет с ударом.
 	LiveHeavyTimer    = true,
 	LiveSpeedFloor    = 0.15,   -- ниже этой доли номинала скорость не считаем (антидел/0)
@@ -408,7 +408,7 @@ local Config = {
 	AP_MaxPerSec      = 8,
 	AP_MinSendGap     = 0.08,   -- = server min interval (ClientMinInterval M1.ServerCheck=0.08)
 	AP_M2Stun         = 1.0,    -- CombatConfig ParryStun.M2 (стан после M2-парри)
-	AP_M1Stun         = 0.5,    -- оцен��а стана после M1-парри (RecoveryLockout врага)
+	AP_M1Stun         = 0.5,    -- оценка стана после M1-парри (RecoveryLockout врага)
 	AP_PollGap        = 0,      -- [V101] троттл поллинга tryM1 = 0 (пробуем КАЖДЫЙ кадр; настоящий
 	                            -- рейт держит игровая tryM1 по AttackDuration 0.45с). Макс��мальная
 	                            -- скорость реакции: как только сервер снимает parry-lockout 0.15с — бьём.
@@ -513,7 +513,7 @@ local Config = {
 	FaceLead      = 0.07,   -- сек упреждения по скорости врага
 	FaceLeadMax   = 4,      -- студы: кап упрежде��ия
 	-- [V97] PING-SCALED предикт facing (applyFacing). Упреждение = vel * (ping * FacePingLead),
-	-- т.к. ра��синхрон позиции врага прямо пропорционален латентности. FaceLeadCap — верхний предел
+	-- т.к. рассинхрон позиции врага прямо пропорционален латентности. FaceLeadCap — верхний предел
 	-- по времени (сек), FaceLeadMaxStuds — по расстоянию (fallback-кап, когда цель почти в упор).
 	FacePingLead  = 1.0,
 	FaceLeadCap   = 0.28,        -- [V118] 0.22→0.28: пинг в логе до 244ms, даём полный desync-lead
@@ -522,7 +522,7 @@ local Config = {
 	-- дэшит В УПОР (радиально) + толкается влев��/вправо (боково) → блок, не парри»: старый единый
 	-- кап (7 студ) на ВЕСЬ вектор vel*lead → большая РАДИАЛЬНАЯ скорость дэша съе��ала весь бюджет
 	-- → БОКОВАЯ коррекция (та, что задаёт угол facing) обрезалась пропорционально → лицо отставало
-	-- (в логе face=0.2/-0.6 BACK! при валидном press → сервер даун��рейдит перфект в обычный блок).
+	-- (в логе face=0.2/-0.6 BACK! при валидном press → сервер даунгрейдит перфект в обычный блок).
 	-- Фикс: раскладываем vel на радиаль (враг↔я, почти не влияет на угол) и боковую (задаёт угол),
 	-- капим РАЗДЕЛЬНО. Боковой лимит щедрый (угол важен), радиальный маленький (анти-��ерелёт в упор).
 	FaceLatMaxStuds = 18,        -- кап БОКОВОГО lead (перпендикуляр линии врагу) — главный для угла
@@ -684,31 +684,10 @@ local ResidByKS    = {}
 local ComboState = {}
 local Pending = {}
 
--- [V132] PERF: O(1) кольцевой буфер вместо массива с table.remove(DiagLog, 1).
--- Прежняя схема при заполнении до 4000 делала СДВИГ всех ~4000 элементов на КАЖДЫЙ
--- diagPush (O(n)). diagPush зовётся десятки раз/с в активном бою (SWING/OUT/CLUSTER/…),
--- поэтому это давало нарастающую нагрузку CPU/GC — ровно «фпс дроп, особенно со временем»,
--- и особенно тяжело под Luraph-виртуализацией. Ринг пишет за O(1); хронологический порядок
--- восстанавливаем только при сохранении/копировании лога (diagLines()).
-local DIAG_MAX = 4000
-local DiagLog = {}              -- сырой ринг: слоты 1..DIAG_MAX
-local _diagN, _diagHead = 0, 1  -- сколько записей всего; индекс следующей записи
+local DiagLog, DIAG_MAX = {}, 4000
 local function diagPush(line)
-	DiagLog[_diagHead] = line
-	_diagHead = _diagHead % DIAG_MAX + 1
-	if _diagN < DIAG_MAX then _diagN = _diagN + 1 end
-end
--- Разворачивает ринг в хронологический массив (старые→новые).
-local function diagLines()
-	local out = {}
-	if _diagN < DIAG_MAX then
-		for i = 1, _diagN do out[i] = DiagLog[i] end
-	else
-		local idx = 0
-		for i = _diagHead, DIAG_MAX do idx = idx + 1; out[idx] = DiagLog[i] end
-		for i = 1, _diagHead - 1 do idx = idx + 1; out[idx] = DiagLog[i] end
-	end
-	return out
+	DiagLog[#DiagLog+1] = line
+	if #DiagLog > DIAG_MAX then table.remove(DiagLog, 1) end
 end
 
 -- [V75] отдельный буфер desync-дебага (сохраняется в свой файл, чтобы слать мне).
@@ -746,7 +725,7 @@ end
 -- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса ��грока,
 -- доступен в ЛЮБОМ контексте, не бросает; возвращает one-way в секундах → RTT = ×2). Stats
 -- Data Ping (уже RTT в мс) — как второй источник; берём МАКСИМУМ (перекомпенсация безопаснее
--- недокомпенсации для парри). Если о��а недоступны — отдаём последнее валидное значение, а НЕ
+-- недокомпенсации для парри). Если оба недоступны — отдаём последнее валидное значение, а НЕ
 -- хардкод 60. Итог: и hot-path, и header видят один настоящий RTT.
 local _lastGoodPing = 0.08
 local function getPingRaw()
@@ -780,7 +759,7 @@ end
 local V93 = {
 	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Кольцо сырых сэмплов RTT; getPing() = медиана окна.
 	-- Медиана игнориру��т одиночные спайки/пр��валы Data Ping (пилообразный шум) и отслеживае��
-	-- устойчивый RTT — без залипания на пике (прежн��й peak-hold) и без петли о��учения.
+	-- устойчивый RTT — без залипания на пике (прежний peak-hold) и без петли о��учения.
 	pingBuf   = {},   -- кольцевой буфер сырых сэмплов (сек)
 	pingBufN  = 0,    -- сколько сэмплов накоплено (≤ PingWindow)
 	pingBufI  = 0,    -- индекс записи (0-based, крутится по PingWindow)
@@ -803,6 +782,11 @@ local V93 = {
 	-- ТОЛЬКО внутри кадра (не escape'ят в State/поля угроз — только читаются и ставят th-флаги).
 	imminentBuf = {},
 	clusterBuf  = {},
+	-- [V132] persistent cluster attacker-seen table (no per-frame allocation)
+	seenAttackers = {},
+	-- [V132] reusable RaycastParams for dodge wall-check
+	dodgeParams = nil,
+	dodgeChar = nil,
 }
 
 -- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Прежний EMA+peak-hold ЛАТЧИЛ спай�� (в логе header ping=224
@@ -1034,7 +1018,8 @@ local function hitboxIndex()
 		V93.hbFolder = folder
 	end
 	if not folder then return byOwner end
-	for _, child in ipairs(folder:GetChildren()) do
+	for idx, child in ipairs(folder:GetChildren()) do
+		if idx > 60 then break end
 		if child:IsA("BasePart") then
 			local owner = child:FindFirstChild("Owner")
 			local atk   = child:FindFirstChild("AttackName")
@@ -1101,7 +1086,7 @@ local function hitboxGeom(th)
 		if toMeG.Magnitude > 0.05 then
 			toMeG = toMeG.Unit
 			local closeAmt = lead:Dot(toMeG)               -- >0 = идёт на нас (по velocity)
-			-- [V102] ИЗМЕРЕННОЕ сближ��ние (студ/с) кадр-к-кадру. AssemblyLinearVelocity у
+			-- [V102] ИЗМЕРЕННОЕ сближение (студ/с) кадр-к-кадру. AssemblyLinearVelocity у
 			-- бегающего игрока часто занижен/шумит (Humanoid move, CFrame-твины) → predA не
 			-- доводился до нас и geom-бокс мазал по врагу, который вбегает и бьёт «на возврате».
 			-- Берём МАКС velocity- и измеренног�� сближения → бокс честно доводится к контакту.
@@ -1204,7 +1189,7 @@ local function willHitMe(th)
 	local mode = Config.AccuracyMode or "Low"
 
 	-- [V93] В High доверяемся ТОЛЬКО ground-truth (реальный па��т) и ч��стой геометр��и; latch из
-	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипа��» бы на угрозах,
+	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипал» бы на угрозах,
 	-- которые в нас не попадают. Свой latch в High ставит лишь подтверждённое пересечение
 	-- реального игрового хитбокса (th.gtConfirmed) в ветке ниже.
 	if mode == "High" then
@@ -1294,7 +1279,7 @@ local function willHitMe(th)
 	end
 	local dyaw  = math.clamp(rotSign * rotRate * tHit, -capR, capR)
 	-- [V89] поворот rawL вокруг Y БЕЗ аллокации CFrame. CFrame.Angles(0,dyaw,0)*rawL
-	-- соз��авал временный CFrame НА КАЖ��УЮ угрозу КАЖДЫЙ кадр — в мясорубке (2+ атакующих
+	-- соз��авал временный CFrame НА КАЖДУЮ угрозу КАЖДЫЙ кадр — в мясорубке (2+ атакующих
 	-- по нескольку треков) это давило GC и роняло FPS scheduler'а → он «переставал
 	-- успевать». Ручная матрица Y-вращения даёт тот же вектор без мусора.
 	local cy, sy   = math.cos(dyaw), math.sin(dyaw)
@@ -1312,7 +1297,7 @@ local function willHitMe(th)
 	-- пропускал «закрученные» атаки). Два независимых источника доворота, любого достаточно:
 	--   • physics-предикт: predLook уже развёрнут к нам сильнее те��ущего (faceDotPred > rawDot)
 	--   • измере��ный ��оворот за п��ошлый кадр: facing реально стал ближе к нам (prevLook→rawL)
-	-- Порог с��орости — DragTurnMinDeg (ниже прежних ~69°/с, ловим снап раньше). Дальность —
+	-- Порог скорости — DragTurnMinDeg (ниже прежних ~69°/с, ловим снап раньше). Дальность —
 	-- DragTrustRange (шире обычного trust: drag часто начинают с�� средней дистанции).
 	local turningToward = false
 	if Config.DragDetect then
@@ -1415,6 +1400,45 @@ local function willHitMe(th)
 			end
 		end
 
+		-- [V132] M2 HIGH-MODE FALLBACK. Long-windup M2s (Capoeira, MuayThai, Karate, Hakari,
+		-- Boxing, Wrestling) часто двигаются боком/под углом, но их hitbox большой и delayed.
+		-- Строгий предикт-бокс отбраковывал реальные M2 → "never-in-hitbox" MISS. Если враг в
+		-- радиусе досягаемости lunge и не явно разворачивается от нас, лучше лишний блок, чем
+		-- пропустить тяжёлый. Срабатывает ТОЛЬКО в High (в Low уже покрывает HeavyTrust).
+		if mode == "High" and th.kind == "M2" and not th.trustLatch then
+			local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
+			local toMeUnit = (dist > 0.05) and toMe or flatLook
+			local velClose = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit)
+			local measClose = 0
+			if th.prevPos and th.prevPosT then
+				local dtp = nowW - th.prevPosT
+				if dtp > 1e-3 and dtp < 0.5 then
+					local pdx  = th.prevPos.X - myHRP.Position.X
+					local pdz  = th.prevPos.Z - myHRP.Position.Z
+					local prevD = math.sqrt(pdx * pdx + pdz * pdz)
+					measClose = (prevD - dist) / dtp
+				end
+			end
+			local closing = math.max(velClose, measClose)
+			-- long-windup M2 = стиль с M2HitboxDelay > 0.45; это практически всегда выпад/схватка
+			loadGameModules()
+			local m2Delay = 0.45
+			pcall(function()
+				if GameData.cfg and GameData.cfg.GetStyleM2HitboxDelay then
+					m2Delay = GameData.cfg.GetStyleM2HitboxDelay(th.style or "basic", th.mom or false)
+				end
+			end)
+			local longM2 = (type(m2Delay) == "number" and m2Delay > 0.45)
+			local inLunge = dist <= (Config.HeavyLungeRange or 36)
+			local facesUs = faceDotPred >= (Config.HighFaceMin or 0.25)
+			local closingOk = closing > 4
+			local alreadyClose = dist <= (Config.HeavyTrustRange or 14)
+			if inLunge and (longM2 or alreadyClose) and (facesUs or closingOk) then
+				th.trustedHit = true; th.trustLatch = true
+				return true
+			end
+		end
+
 		-- [V114] M1 APPROACH-TRUST: аналог HeavyTrust, но для ЛЁГКОГО M1 и с более узкими рамками.
 		-- Ловит «враг в ~10 studs, во время замаха подходит и бьёт�� — раньше High-бокс накрывал нас
 		-- поздно (closing≈0 в начале замаха) → willHitMe=false почти до контакта → LATE (pressDt=0).
@@ -1457,7 +1481,13 @@ local function willHitMe(th)
 			-- workspace.Hitboxes — проверяем пересечение с нами тем же методом, что и
 			-- VictimHitboxService (GetPartBoundsInBox по нашему персонажу). Это авторитетно и
 			-- пинг-независимо по геометрии; вертикаль/ориентация учтены самим партом.
-			local gt = realHitboxHitsMe(th.name)
+			-- [V132] ground-truth hitbox check is expensive (GetPartBoundsInBox per part). Only
+			-- run it close to contact or on every 3rd frame; otherwise rely on geometry.
+			local gt = nil
+			local tHit = math.clamp((th.contactAbs or nowW) - nowW, 0, 0.6)
+			if tHit < 0.18 or (FrameId % 3 == 0) then
+				gt = realHitboxHitsMe(th.name)
+			end
 			if gt == true then
 				th.gtConfirmed = true      -- латчим: удар реально в нас, держим блок до ко��ца свинга
 				th.trustedHit  = true
@@ -1520,7 +1550,7 @@ local function willHitMe(th)
 			local cphi, sphi = math.cos(phi), math.sin(phi)
 			local aimLook = Vector3.new(rawL.X * cphi - rawL.Z * sphi, 0, rawL.X * sphi + rawL.Z * cphi)
 			aimLook = (aimLook.Magnitude > 0.05) and aimLook.Unit or rawL
-			-- [V96] POINT-BLANK дове��ие (как в LOW-ветке): в упор враг физич��ски достаёт хитбокс��м
+			-- [V96] POINT-BLANK дове��ие (как в LOW-ветке): в упор враг физически достаёт хитбоксом
 			-- НЕЗАВИСИМО от facing, а серверный do��орот довершится к контакту. Прежде High жёстко
 			-- резал ближние удары facing-гейтом → в логе валидные комбо-M1 (dist 3–6) п��дали в
 			-- `MISS never-in-hitbox` → NO-PRESS/поздний блок. Ниже PointBlank сразу доверяем.
@@ -1595,13 +1625,32 @@ local function loadGameModules()
 		if cfgMod then GameData.cfg = require(cfgMod) end
 		local cauMod = shared and shared:FindFirstChild("Utils") and shared.Utils:FindFirstChild("CombatAnimationUtils")
 		if cauMod then GameData.cau = require(cauMod) end
-		-- [V71] CombatUtils.GetAttackSpeedMultiplier(height): игра делит задер��ку удара
+		-- [V132] CombatPingAnimUtils: реальная скорость анимации M2/M1 затормаживается на пинге
+		-- (PingAnimSpeedMultiplier), поэтому контакт прилетает позже, чем base / aMult.
+		local pauMod = shared and shared:FindFirstChild("Utils") and shared.Utils:FindFirstChild("CombatPingAnimUtils")
+		if pauMod then GameData.pau = require(pauMod) end
+		-- [V71] CombatUtils.GetAttackSpeedMultiplier(height): игра делит задержку удара
 		-- на этот множитель (см. GetScaledHitboxDelay). Нужен, чтобы предсказывать
 		-- реальную скорость атаки быстрых (низкорослых) врагов.
 		local pkgs = ReplicatedStorage:FindFirstChild("Packages")
 		local cuMod = pkgs and pkgs:FindFirstChild("CombatUtils")
 		if cuMod then GameData.cu = require(cuMod) end
 	end)
+end
+
+-- [V132] Получить множитель замедления анимации на пинге (CombatPingAnimUtils).
+local function getPingAnimMult(scaledDelay)
+	loadGameModules()
+	local pau = GameData.pau
+	if pau and pau.GetPingAnimSpeedMultiplier then
+		local ok, mult = pcall(function()
+			return pau.GetPingAnimSpeedMultiplier(scaledDelay, LocalPlayer)
+		end)
+		if ok and type(mult) == "number" and mult > 0.05 and mult < 1 then
+			return mult
+		end
+	end
+	return 1
 end
 
 -- [V71] множитель скорости атаки конкретного АТАКУЮЩЕГО. Задержка удара в игре =
@@ -1872,14 +1921,9 @@ local function hitTimelineBase(info, combo)
 		-- и мы жали блок на 130мс позже (predErr=-128ms LATE → HIT). Теперь маркер-страховка
 		-- применяется ТОЛЬКО к мультиhit-стилям (Boxing), где реальный значимый контакт ~749мс
 		-- и голый первый удар занижает окно. Одноhitовые (Basic/Capoeira/…) = чистый конфиг.
-		-- [V132] МУЛЬТИХИТ (Boxing M2MultiHitCount=2): press ЦЕЛИМ В ПЕРВЫЙ страйк (cfgv =
-		-- серверный M2HitboxDelay=0.43), а НЕ в поздний маркер "Hit" анимации (~0.617 = ВТОРОЙ
-		-- страйк). Механика: перфект-парри ПЕРВОГО удара станит атакующего и ОТМЕНЯЕТ второй —
-		-- это и есть штатный counter. Прежний math.max(cfgv, info.hit) целил во ВТОРОЙ страйк,
-		-- из-за чего перфект-окно первого (~442мс) мы пропускали → первый удар не станил →
-		-- второй прилетал (жалоба: «попадаем под 2-й удар боксинга»). Второй страйк теперь
-		-- страхуется РАСШИРЕННЫМ hold'ом (th.multiGap, см. onAttack + scheduler): если первый
-		-- press сел как обычный блок, а не перфект, второй удар накрыт поднятым guard'ом.
+		if multi > 1 and info.hit and info.hit > 0 then
+			return math.max(cfgv, info.hit)
+		end
 		return cfgv
 	end
 
@@ -1896,25 +1940,6 @@ local function hitTimelineBase(info, combo)
 	return base + WINDUP_EXTRA
 end
 
--- [V132] Мультихит-инфа M2 (Boxing M2MultiHitCount=2). Возвращает (isMulti, secondGap):
--- secondGap = зазор между ПЕРВЫМ серверным страйком (M2HitboxDelay — наша press-цель) и поздним
--- маркером "Hit" анимации (второй страйк), масштабированный ростом атакующего (сервер делит
--- задержки на mult). scheduler держит guard на этот зазор, чтобы второй удар не прошёл, если
--- первый press сел обычным блоком, а не перфектом. Топ-левел sibling hitTimelineBase — доступен
--- из onAttack (НЕ вложенная функция).
-local function m2MultiHitInfo(info, mult)
-	if not info or info.t ~= "M2" then return false, 0 end
-	loadGameModules()
-	if not GameData.cfg then return false, 0 end
-	local okc, mc = pcall(function() return GameData.cfg.GetStyleNumber(info.s, "M2MultiHitCount", 1) end)
-	if not (okc and type(mc) == "number" and mc > 1) then return false, 0 end
-	if not (info.hit and info.hit > 0) then return true, 0 end
-	local first = hitTimelineBase(info, nil)   -- первый страйк (cfgv)
-	local m = (type(mult) == "number" and mult > 0.05) and mult or 1
-	local gap = math.max(0, info.hit - first) / m
-	return true, gap
-end
-
 -- [V71] реальная задержка = base / attackSpeedMult(attacker). Это р��в����о то, что
 -- ��елает игра (GetScaledHitboxDelay: delay/mult). ��дин общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
@@ -1925,6 +1950,12 @@ local function hitTimeline(info, combo, mult)
 	-- [V124] Сервер делит ВСЕ hitbox-задержки на mult роста атакующего (GetScaledHitboxDelay:
 	-- delay/mult) — и M1, и M2, и скиллы. Диаг подтвердил: Basic M2 0.525/1.09=482мс = measured
 	-- 485мс. Прошлый V123-демпфер (m→1 для M2) был ОШИБКОЙ — он и ломал M2 (pred 617 vs 485).
+	-- [V132] Учитываем PingAnimSpeedMultiplier: игра проигрывает анимацию МЕДЛЕННЕЕ на пинге,
+	-- поэтому реальный контакт = base / (aMult * pingMult). Без этого M2/M1 приходят раньше
+	-- предсказания, особенно на высоком пинге, и парри оказывается поздним (LATE / HIT).
+	local scaled = base / m
+	local pingMult = getPingAnimMult(scaled)
+	m = m * math.max(pingMult, 0.05)
 	return base / m
 end
 
@@ -2342,7 +2373,7 @@ local function fireBoxingCounter(th)
 end
 
 -- Главная точка входа: если можем контрить — находим БЛИЖАЙШЕГО атакующего в радиусе и
--- МОМЕНТАЛЬНО бьём M2. Возвращает true, если counter выстрелил (scheduler пропускае�� блок).
+-- МОМЕНТАЛЬНО бьём M2. Возвращает true, если counter выстрелил (scheduler пропускает блок).
 local function tryBoxingCounter(now)
 	if not counterReady() then return false end
 	local myHRP = localHRP()
@@ -2434,7 +2465,7 @@ end
 -- M1/M2 в принципе блокируется/перфактится (сетевые исходы: M2Blocked / M2PerfectBlocked /
 -- M2GuardBroken). Реальн�� сквозь атрибут Blocking проходят только грэбы/с��эмы — прежде всего
 -- Wrestling M2 (гарантированный захват, см. M2GrabTargetForwardOffset в CombatConfig). Их
--- нельзя блокнуть, с��а��ает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
+-- нельзя блокнуть, с��асает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
 -- ._isSuppressed гасит урон при IFRAMES/Ragdoll/Downed/UltraInstinct). Список собираем по
 -- стилю/��ипу через Config.MustDodgeStyles (расширяется ��ез правки движка) + живой сигнал по
 -- атрибуту атакующего, е��ли игра е��о выставит в момент замаха.
@@ -2959,7 +2990,7 @@ local function refreshContact(th)
 		end
 
 		-- [V96] Live-TP коррекция теперь И для M1 (раньше только M2/SKILL). M1 предсказывался
-		-- чистым обратным отсчё��ом contact0-elapsed, без учёта РЕАЛЬНОГО прогресс�� анимации → при
+		-- чистым обратным отсчётом contact0-elapsed, без учёта РЕАЛЬНОГО прогресс�� анимации → при
 		-- desync/ускорении атаки contactAbs уплыв��л (в логе predErr скакал от -290 до +138ms). Для
 		-- M1 окно короткое, поэтому корректируем через ту же live-скорость, но с более высоким полом
 		-- (M1 редко «придерживают», агрессивный пол убирает шум коротких треков).
@@ -3057,7 +3088,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- [V83] АНТИ-DECOY: настоящий игрок физически не может выдать два свинга подряд за
 	-- <AntiDecoyGap. Флуд атак-decoy (наши prerun/idlemask и такие же трюки врага) прилетает
 	-- пачкой с почти нулевым интервалом → это НЕ отдельные удары. Регистрируем только ПЕРВЫЙ
-	-- и глушим быстрые по��торы, чтобы ��раг не спамил ложные тайминги в наш парри.
+	-- и глушим быстрые повторы, чтобы ��раг не спамил ложные тайминги в наш парри.
 	if Config.AntiDecoy then
 		local sig = State.antiDecoySig; if not sig then sig = {}; State.antiDecoySig = sig end
 		local nowc = os.clock()
@@ -3094,11 +3125,6 @@ local function onAttack(attackerHRP, info, model, id, track)
 	local remaining0 = math.max(0, hitTL - already)
 	if remaining0 > Config.MaxWait then return end
 
-	-- [V132] МУЛЬТИХИТ (Boxing M2, 2 страйка). multiGap = зазор между первым (наша press-цель)
-	-- и вторым страйком. Если >0 — scheduler удержит guard дополнительно на этот зазор, чтобы
-	-- ВТОРОЙ удар не прошёл, когда первый press сел обычным блоком, а не перфект-станом.
-	local isMulti, multiGap = m2MultiHitInfo(info, aMult)
-
 	local vlead = velLead(attackerHRP)
 	local nowClock  = os.clock()
 	local nowServer = Workspace:GetServerTimeNow()
@@ -3110,7 +3136,6 @@ local function onAttack(attackerHRP, info, model, id, track)
 		attackerHRP = attackerHRP, attackerModel = model,
 		heightAttr = heightAttr, bodyHeightScale = bodyHeightScale, modelHeight = modelHeight,
 		attackMult = aMult,
-		isMulti = isMulti, multiGap = multiGap or 0, multiCovered = false,
 		pressed = false, dodged = false,
 		pressDt = nil,
 		faceDot = nil,
@@ -3119,7 +3144,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 
 	-- [V113] Трекинг КАДЕНСА свингов по атакующему (для boxing combo-guard). Запоминаем интервал
 	-- между двумя последними свингами этого врага: короткий интервал = активная комбо-цепочка.
-	-- Поля на State (таблица — без новых top-level лок��лов, лимит 200/функция не тронут).
+	-- Поля на State (таблица — без новых top-level локалов, лимит 200/функция не тронут).
 	do
 		local key = model or attackerHRP or name
 		if key then
@@ -3199,16 +3224,24 @@ end
 
 local function dirIsClear(origin, dir)
 	if not Config.DodgeWallCheck then return true end
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local ignore = { localChar() }
-	local ok = pcall(function() params.FilterDescendantsInstances = ignore end)
-	if not ok then return true end
+	local char = localChar()
+	if not char then return true end
+	local params = V93.dodgeParams
+	if not params then
+		params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		V93.dodgeParams = params
+	end
+	if V93.dodgeChar ~= char then
+		V93.dodgeChar = char
+		local ok = pcall(function() params.FilterDescendantsInstances = { char } end)
+		if not ok then return true end
+	end
 	local hit
 	pcall(function() hit = Workspace:Raycast(origin, dir.Unit * Config.DodgeWallDist, params) end)
 	if not hit then return true end
 	local part = hit.Instance
-	if part and (not part.CanCollide or part:IsDescendantOf(localChar() or part)) then return true end
+	if part and (not part.CanCollide or part:IsDescendantOf(char or part)) then return true end
 	return false
 end
 
@@ -3269,7 +3302,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff)
 	-- performDodge → выключив AutoDodge, юзер убирает ЛЮБОЙ ОПЦИОНАЛЬНЫЙ додж (одно место истины).
 	-- [V128] ИСКЛЮЧЕНИЕ — must-dodge (bypassAutoOff=true): грэбы/анблокаблы НЕЛЬЗЯ блокнуть, их
 	-- гасит только додж (i-frames). Это обязательная защита, а не удобство, поэтому она обязана
-	-- срабатывать даже при выключенном Auto Dodge. Свой ��умблер у неё есть (Config.MustDodge,
+	-- срабатывать даже при выключенном Auto Dodge. Свой тумблер у неё есть (Config.MustDodge,
 	-- проверяется в isMustDodge), так что полностью отключить её всё равно можно.
 	if Config.AutoDodge == false and not bypassAutoOff then
 		if State.lastDodgeRefuse ~= "AutoDodge-off" then
@@ -3420,16 +3453,6 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					-- врагами. Компенсация задержки — только физическая (lead + uplink + velLead).
 					local pressAt = th.contactAbs - lead - up - th.velLead
 					local holdEnd = th.contactAbs + hold
-					-- [V132] МУЛЬТИХИТ (Boxing M2, 2 страйка): держим guard до ВТОРОГО удара.
-					-- press целит в первый страйк (perfect-parry которого станит и отменяет второй),
-					-- НО если парри не идеальное и прошло обычным блоком — второй страйк ещё прилетит
-					-- через th.multiGap. Раньше holdEnd = contactAbs + hold закрывался ПОСЛЕ первого,
-					-- guard опускался, и второй удар боксинга проходил (жалоба юзера). Продлеваем окно
-					-- удержания на multiGap (+HoldAfter-хвост уже включён в hold), чтобы блок стоял
-					-- сквозь оба удара. НЕ трогает pressAt → перфект-тайминг первого не сдвигается.
-					if th.isMulti and (th.multiGap or 0) > 0 then
-						holdEnd = holdEnd + th.multiGap
-					end
 				-- [V66] диаг-трекинг: минимальный зазор до момента нажатия и факт
 				-- входа в окн�� — для точного post-mortem причины пропуска.
 				local dtToPress = pressAt - now
@@ -3490,7 +3513,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
 	local cluster = V93.clusterBuf   -- [V123] персистентный буфер (без аллокации таблицы/кадр)
 	table.clear(cluster)
-	local seenAttackers = {}
+	local seenAttackers = V93.seenAttackers
+	for k in pairs(seenAttackers) do seenAttackers[k] = nil end
 	local clusterHeavy = false
 	for _, th in ipairs(imminent) do
 		local key = th.attackerModel or th.attackerHRP or th.name
@@ -3827,15 +3851,6 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		-- последующий удар любого врага ловится как normal-block (BLOCKABLE↑, HIT↓).
 		local base = wantBlock.contactAbs
 		if multiThreat and farContact and farContact > base then base = farContact end
-		-- [V132] МУЛЬТИХИТ (Boxing M2): второй страйк прилетает через multiGap ПОСЛЕ первого
-		-- (нашей press-цели). Тянем реальный guard (holdUntil) минимум до второго удара, иначе
-		-- клавиша отпускается после первого и второй проходит. holdEnd в селекторе выше даёт
-		-- этой же угрозе оставаться кандидатом весь этот срок — оба окна согласованы.
-		if wantBlock.isMulti and (wantBlock.multiGap or 0) > 0 then
-			local secondContact = wantBlock.contactAbs + wantBlock.multiGap
-			if secondContact > base then base = secondContact end
-			wantBlock.multiCovered = true
-		end
 		State.holdUntil = math.max(State.holdUntil,
 			base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra)
 	elseif State.blocking then
@@ -4007,7 +4022,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	-- [V64] Замер эффективности per-hit rearm: к��пим ре��ультаты по позиции удара
 	-- в ком��о. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
-	-- rearm работает и сервер перевз��од��т перфект от свежего Activated.
+	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
 	do
 		State.comboStat = State.comboStat or { opener = {}, tail = {} }
 		local bucket = ((rec.combo or 0) >= 3) and State.comboStat.tail or State.comboStat.opener
@@ -4935,7 +4950,7 @@ local function raknetScanSendHook(packet)
 	if pid and pid >= 0 and pid < RAK_SLOTS then
 		local slot = pid + 1
 		if os.clock() < RaknetScan.window then
-			RaknetScan.near[slot] = RaknetScan.near[slot] + 1   -- IN-PLACE, с��от уже существует
+			RaknetScan.near[slot] = RaknetScan.near[slot] + 1   -- IN-PLACE, слот уже существует
 		else
 			RaknetScan.far[slot] = RaknetScan.far[slot] + 1
 		end
@@ -4978,7 +4993,7 @@ end
 --   • Сеть игры = Blink: бой/движение шлётся через BLINK_RELIABLE_REMOTE:FireServer(buffer,
 --     instances) раз в Heartbeat — это ОБ��Ч��ЫЙ RemoteEvent, а НЕ raknet. Значит desync
 --     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
---     эта игра ��го не де��ектит, и о�� НЕ крашит). Это отдел��ная фича — включим по запросу.
+--     эта игра ��го не де��ектит, и он НЕ крашит). Это отдел��ная фича — включим по запросу.
 _ = raknetScanSendHook  -- функция сохран��на в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
 _ = reportRaknetScan
 local function runRaknetScanSession()
@@ -5131,7 +5146,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	if (Config.DesyncMode or "delay") ~= "delay" then return end
 	-- [V88] ФИКС "delay л��мал [": [ и idlemask крутят СВОИ decoy-треки, у к��торых тоже
 	-- срабатывает AnimationPlayed. Раньше delay-хук хватал их и делал Stop/replay ��� decoy
-	-- дёргался. Пропускаем наши собственные decoy-треки — трогаем только реальные атак��.
+	-- дёргался. Пропускаем наши собственные decoy-треки — трогаем только реальные атаки.
 	if track == _testTrack or track == _decoyTrack then return end
 
 	local window = (Config.DesyncDelayMs or 0) / 1000 + 0.05
@@ -5371,12 +5386,11 @@ local function summary()
 end
 
 local function saveDiag()
-	local lines = diagLines()
-	local body = summary() .. "\n\n" .. table.concat(lines, "\n") .. "\n"
+	local body = summary() .. "\n\n" .. table.concat(DiagLog, "\n") .. "\n"
 	local fname = ("autoparry_diag_%d.txt"):format(os.time() % 1000000)
 	local ok = pcall(function() if writefile then writefile(fname, body) end end)
 	if ok and writefile then
-		dbg("SAVED ->", fname, "(", #lines, "lines )")
+		dbg("SAVED ->", fname, "(", #DiagLog, "lines )")
 		if setclipboard then pcall(setclipboard, fname) end
 	else
 		statusPush(summary())
@@ -5599,6 +5613,46 @@ local function drawTargetHitbox(cam, model, hrp)
 	for i = 0, CONE_SEG - 1 do drawWorldSeg(cam, wArc[i], wArc[i + 1], col, 2) end
 end
 
+local function drawRestrictZone(cam)
+	if not (Config.RestrictZone and Config.RestrictShowZone) then return end
+	local z = activeRestrictZone(os.clock()); if not z then return end
+	local aHRP = z.th.attackerHRP; if not (aHRP and aHRP.Parent) then return end
+	local y  = footYOf(z.th.attackerModel, aHRP)
+	local cx, cz = z.center.X, z.center.Z
+	local r  = z.keepOut * (1 + math.sin(Viz.t * 4) * 0.02)
+	local center3 = Vector3.new(cx, y, cz)
+
+	local function arc(a0, a1, rr, thick, steps)
+		steps = steps or 6
+		local prev
+		for i = 0, steps do
+			local a = a0 + (a1 - a0) * (i / steps)
+			local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
+			if prev then drawWorldSeg(cam, prev, p, Config.RestrictCol, thick) end
+			prev = p
+		end
+	end
+
+	local bracket = math.rad(34)
+	for k = 0, 3 do
+		local mid = math.rad(45) + k * math.rad(90)
+		arc(mid - bracket / 2, mid + bracket / 2, r, 3, 7)
+	end
+
+	local ch = math.max(r * 0.14, 0.7)
+	drawWorldSeg(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), Config.RestrictCol, 2)
+	drawWorldSeg(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), Config.RestrictCol, 2)
+
+	if z.aPos then
+		local from = Vector3.new(z.aPos.X, y, z.aPos.Z)
+		local dir  = Vector3.new(cx - z.aPos.X, 0, cz - z.aPos.Z)
+		if dir.Magnitude > 0.1 then
+			local edge = center3 - dir.Unit * r
+			drawWorldSeg(cam, from, edge, Config.RestrictCol, 1.5)
+		end
+	end
+end
+
 function vizUpdate(dt)
 	if not LinePool.ok then return end
 	local cam = Workspace.CurrentCamera
@@ -5622,64 +5676,10 @@ function vizUpdate(dt)
 		if Config.VizHitbox ~= false then drawTargetHitbox(cam, model, hrp) end
 		if Config.VizRing ~= false then drawFlatRing(cam, model, hrp, hot) end
 	end
-	-- [V132 v2] _drawRestrictZoneImpl живёт вне do-блока (fix регистров). drawWorldSeg и
-	-- footYOf — upvalues vizUpdate (захвачены do-блоком), передаём явно как параметры.
-	if Config.VizRestrict ~= false then
-		_drawRestrictZoneImpl(cam, drawWorldSeg, footYOf, Viz.t)
-	end
+	if Config.VizRestrict ~= false then drawRestrictZone(cam) end
 	LinePool:finish(); TriPool:finish()
 end
 end   -- [V130] close AutoParry visuals module (do-block for register budget)
-
--- [V132 v2] REGISTER FIX: drawRestrictArc и drawRestrictZone вынесены за пределы do-блока.
--- do-блок упирался в лимит Luau VM (~200 активных регистров под Luraph-виртуализацией).
--- Функции объявляются ПОСЛЕ end блока: они могут ссылаться на модульные глобали (Config,
--- activeRestrictZone), но НЕ на locals do-блока (drawWorldSeg, footYOf, Viz, LinePool).
--- Решение: нужные helpers перенесены как forward-refs ДО do-блока и назначены внутри него
--- через upvalue, либо переданы как параметры. drawWorldSeg — передаётся параметром segFn.
--- _drawRestrictZone вызывается из vizUpdate (уже за пределами do).
-
-local function _drawRestrictArc(segFn, cam, cx, cz, y, col, a0, a1, rr, thick, steps)
-	steps = steps or 6
-	local prev
-	for i = 0, steps do
-		local a = a0 + (a1 - a0) * (i / steps)
-		local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
-		if prev then segFn(cam, prev, p, col, thick) end
-		prev = p
-	end
-end
-
--- segFn, footFn, segT: injected by vizUpdate so no do-block upvalues needed.
-local function _drawRestrictZoneImpl(cam, segFn, footFn, vizT, segT)
-	if not (Config.RestrictZone and Config.RestrictShowZone) then return end
-	local z = activeRestrictZone(os.clock()); if not z then return end
-	local aHRP = z.th.attackerHRP; if not (aHRP and aHRP.Parent) then return end
-	local y  = footFn(z.th.attackerModel, aHRP)
-	local cx, cz = z.center.X, z.center.Z
-	local r   = z.keepOut * (1 + math.sin(vizT * 4) * 0.02)
-	local col = Config.RestrictCol
-	local center3 = Vector3.new(cx, y, cz)
-
-	local bracket = math.rad(34)
-	for k = 0, 3 do
-		local mid = math.rad(45) + k * math.rad(90)
-		_drawRestrictArc(segFn, cam, cx, cz, y, col, mid - bracket / 2, mid + bracket / 2, r, 3, 7)
-	end
-
-	local ch = math.max(r * 0.14, 0.7)
-	segFn(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), col, 2)
-	segFn(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), col, 2)
-
-	if z.aPos then
-		local from = Vector3.new(z.aPos.X, y, z.aPos.Z)
-		local dir  = Vector3.new(cx - z.aPos.X, 0, cz - z.aPos.Z)
-		if dir.Magnitude > 0.1 then
-			local edge = center3 - dir.Unit * r
-			segFn(cam, from, edge, col, 1.5)
-		end
-	end
-end
 
 -- [V95] ЕДИНЫЙ АППЛИКАТОР ПОВОРОТА. Единственное место, где ��ишется HRP.CFrame ради facing.
 -- Работает в RenderStepped ПОСЛЕ игрового AutoRotate/SmoothShiftLock (��ы подключаемся позже —
@@ -6275,7 +6275,7 @@ return function(_Lib, _Core)
 		dbDiag:Button({
 			Name = "Save AutoParry diag",
 			Callback = function()
-				local body  = summary() .. "\n\n" .. table.concat(diagLines(), "\n") .. "\n"
+				local body  = summary() .. "\n\n" .. table.concat(DiagLog, "\n") .. "\n"
 				local fname = ("autoparry_diag_%d.txt"):format(os.time() % 1000000)
 				local wrote = pcall(function() if writefile then writefile(fname, body) end end) and (writefile ~= nil)
 				if copyDiag and type(setclipboard) == "function" then
