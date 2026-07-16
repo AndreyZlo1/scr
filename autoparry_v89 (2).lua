@@ -361,11 +361,22 @@ local Config = {
 	-- contact−0.16с, ComboGuard по каденсу, PingCeil, Solo/MinGap-л��гика, pre-face окно) УДАЛЕНЫ —
 	-- именно они и ломали: counter ждал момента contact−lead и часто отменялся гейтами, из-за чего
 	-- M2 не летел, а guard уже был сброшен → скрипт «стоял и ничего не делал» и мазал парри.
+	-- [V133] BOXING COUNTER = DEFENSE via I-FRAMES, not "skip parry".
+	-- CombatConfig.Styles.boxing.M2GrantsIFrames = true
+	-- CombatPerks Untouchable: "M2ing throws a two-punch combo with IFrames for the whole
+	-- animation. Each punch is its own attack."
+	-- VictimHitboxService suppresses damage while IFRAMES=true. So on OUR Boxing style, the
+	-- correct answer to an incoming hit in range is INSTANT M2 (iframes cover the contact),
+	-- NOT perfect-block. CantAnything during our M2 is EXPECTED — block path must yield and
+	-- mark threats coveredByIFrames (not MISS / not BLOCK?).
 	BoxingCounter     = false,
-	BoxingCounterReach= 5.5,   -- макс. плоская дистанция до атакующего, студы (ТЗ юзера)
-	BoxingCounterGap  = 0.30,  -- анти-даблфайр: не слать M2 повторно чаще (сек). НЕ задержка перед 1-м
-	                           -- ударом — только защита от двойной отправки в сетевом окне до того,
-	                           -- как появится атрибут M2Cooldown (реальный кулдаун держит игра).
+	BoxingCounterReach= 5.5,   -- flat studs: enemy swing inside this → candidate for iframe-M2
+	BoxingCounterGap  = 0.30,  -- anti double-fire until M2Cooldown attribute appears
+	-- Duration we treat as "under Boxing M2 iframes" after a successful counter FireServer.
+	-- Anim has Hit@0.60 and Hit@1.05; iframes last whole anim — use ~full multi-hit span + slack.
+	BoxingM2IFrameDur = 1.15,
+	-- Perfect press clamp (still useful on pure block path for non-Boxing / M2-on-CD).
+	PerfectAdvanceFrac = 0.85,
 
 	-- Skill Addons: per-style combat behaviors that plug into the parry brain.
 	-- Each maps to a REAL mechanic found in CombatConfig, not a placeholder.
@@ -641,6 +652,8 @@ local State = {
 	                        -- (внутреннее намерение), чтобы гарантированно снимать guard даже
 	                        -- если blocking ��брошен в обход releaseBlock (dodge/counter/outcome).
 	holdUntil    = 0,
+	lastPerfectAt = 0,
+	iframeCoverUntil = 0,
 	status       = "ARMED",
 	lastThreat   = nil,
 	parryCount   = 0,
@@ -1188,6 +1201,13 @@ local function willHitMe(th)
 	-- реального игрового хитбокса (th.gtConfirmed) в ветке ниже.
 	if mode == "High" then
 		if th.gtConfirmed then return true end
+		-- [V133] Heavy latch in High: delayed M2 hitbox appears only near contact, so gtConfirmed
+		-- is TOO LATE for Perfect press planning. Once HeavyTrust (or geom) accepted an M2/SKILL
+		-- this swing, keep it — do not re-roll face noise every frame (log: never-in-hitbox whole
+		-- path on Boxing/Hakari M2 mid-windup). M1 stays strict (bait / off-target).
+		if th.trustLatch and (th.kind == "M2" or th.kind == "SKILL") then
+			return true
+		end
 	elseif th.trustLatch then
 		return true
 	end
@@ -2252,9 +2272,9 @@ local function sendDodge(dir)
 	State.status     = "DODGE"
 end
 
--- [V122] BOXING COUNTER — полный переписанный блок. Модель проста и агрессивна (ТЗ юзера):
--- «вместо парирования МОМЕНТАЛЬНО бить M2, если стиль Boxing, враг атаковал в радиусе 5.5 и
--- M2 не на кулдауне». Ни задержек, ни ожидания контакта, ни каденс/пинг-гейтов.
+-- [V133] BOXING COUNTER — defense via M2GrantsIFrames (whole anim), not aggression.
+-- Instant M2 when enemy swings in reach: IFRAMES suppress VictimHitConfirm damage.
+-- CantAnything during our M2 is expected; threats are coveredByIFrames, block path yields.
 
 -- Атрибуты, при которых наш перс физически НЕ может запустить M2 (тогда counter невозможен).
 local BOXING_BLOCK_ATTRS = {
@@ -2315,29 +2335,72 @@ end
 -- Главная точка входа: если можем контрить — находим БЛИЖАЙШЕГО атакующего в радиусе и
 -- МОМЕНТАЛЬНО бьём M2. Возвращает true, если counter выстрелил (scheduler пропускает блок).
 local function tryBoxingCounter(now)
+	-- [V133] I-FRAME DEFENSE (not "punish after perfect", not "skip parry because lazy").
+	-- Our Boxing M2 grants IFRAMES for the whole animation (config + Untouchable perk text).
+	-- Incoming damage is suppressed by VictimHitboxService while IFRAMES. Instant M2 is the
+	-- correct defensive transaction when: Boxing style, M2 ready, enemy swing in reach that
+	-- actually threatens us. After fire we COVER threats until BoxingM2IFrameDur — scheduler
+	-- must NOT try block (CantAnything is normal) and must NOT log MISS.
 	if not counterReady() then return false end
 	local myHRP = localHRP()
 	if not myHRP then return false end
+
 	local reach = Config.BoxingCounterReach or 5.5
 	local myPos = myHRP.Position
 	local best, bestDist
 	for i = 1, #Threats do
 		local th = Threats[i]
 		local aHRP = th.attackerHRP
-		-- «враг атаковал» = активная угроза (свинг задетекчен) и контакт ещё не прошёл давно.
 		if aHRP and aHRP.Parent and not th.feinted and not th.dodged
-		   and (th.contactAbs - now) > -0.15 then
-			local dx, dz = myPos.X - aHRP.Position.X, myPos.Z - aHRP.Position.Z
+		   and not th.coveredByIFrames
+		   and (th.contactAbs - now) > -0.10 then
+			local dx = myPos.X - aHRP.Position.X
+			local dz = myPos.Z - aHRP.Position.Z
 			local dist = math.sqrt(dx * dx + dz * dz)
-			if dist <= reach and (not bestDist or dist < bestDist) then
-				best, bestDist = th, dist
+			if dist <= reach then
+				-- Prefer swings that geometry says will hit us; fall back to nearest in reach
+				-- (Boxing counter is also used when High geom is still noisy mid-windup).
+				local threatens = th.threatens
+				if threatens == nil then
+					threatens = willHitMe(th)
+					th.threatens = threatens
+				end
+				local score = dist
+				if threatens then score = score - 100 end  -- prioritize true threats
+				if not bestDist or score < bestDist then
+					best, bestDist = th, score
+				end
 			end
 		end
 	end
 	if not best then return false end
+
+	-- Prefer actual threat; if only non-threat in reach, still allow (user: react to swing in range)
 	fireBoxingCounter(best)
-	diagPush(("COUNTER t=%.2f  %s  %s  dist=%.1f  (instant M2)")
-		:format(now, best.name or "?", best.kind or "?", bestDist))
+
+	local coverFor = Config.BoxingM2IFrameDur or 1.15
+	State.iframeCoverUntil = math.max(State.iframeCoverUntil or 0, now + coverFor)
+	-- Mark every live threat whose contact falls under our iframe window as covered.
+	for i = 1, #Threats do
+		local th = Threats[i]
+		if th and not th.feinted then
+			local cAbs = th.lastContactAbs or th.contactAbs or now
+			if cAbs <= State.iframeCoverUntil + 0.05 then
+				th.coveredByIFrames = true
+				th.pressed = true  -- EDF / miss post-mortem: serviced
+				th.everThreatened = true
+			end
+		end
+	end
+
+	local realDist = bestDist
+	if best.attackerHRP then
+		local dx = myPos.X - best.attackerHRP.Position.X
+		local dz = myPos.Z - best.attackerHRP.Position.Z
+		realDist = math.sqrt(dx * dx + dz * dz)
+	end
+	diagPush(("COUNTER t=%.2f  %s  %s  dist=%.1f  iframe=%.0fms (Boxing M2GrantsIFrames)")
+		:format(now, best.name or "?", best.kind or "?", realDist, coverFor * 1000))
 	return true
 end
 
@@ -3352,8 +3415,14 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local coveredByGuard = th.coveredByHeldGuard == true
 				or (Config.OmniBlock and State.blocking and th.enteredWindow
 					and th.contactAbs <= (State.holdUntil or 0) + 0.05)
+			local coveredByIFrames = th.coveredByIFrames == true
+				or (State.iframeCoverUntil and os.clock() < (State.iframeCoverUntil or 0)
+					and th.detectClock and th.detectClock <= (State.iframeCoverUntil or 0))
 			if th.coveredByDodge then
 				-- Explicitly serviced by the cluster iframe; not a miss and not guard coverage.
+			elseif coveredByIFrames then
+				-- [V133] Boxing M2 counter IFrames covered this swing — not a miss.
+				State.iframeCovered = (State.iframeCovered or 0) + 1
 			elseif coveredByGuard then
 				State.guardCovered = (State.guardCovered or 0) + 1
 			elseif Config.DeepDiag and not th.pressed and not th.dodged and not th.deadLogged then
@@ -3380,7 +3449,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				State.independentMiss = (State.independentMiss or 0) + 1
 			end
 			table.remove(Threats, i)
-		elseif not th.dodged then
+		elseif not th.dodged and not th.coveredByIFrames then
+			-- [V133] under our Boxing M2 IFrames: no block press (CantAnything is normal)
 			local threatens = willHitMe(th)
 			th.threatens = threatens
 			if threatens then th.everThreatened = true end
@@ -3399,10 +3469,18 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			lead = lead + w
 			hold = hold + w
 		end
-					-- [V116] ЧИСТО МАТЕМАТИЧЕСКИЙ предикт: press строго от сырого contactAbs (таймлайн
-					-- анимации + живой TimePosition). Никакой выученной коррекции — она отравляла между
-					-- врагами. Компенсация задержки — только физическая (lead + uplink + velLead).
+					-- [V116/V132] press = contact - lead - uplink - velLead, BUT clamp so Perfect
+					-- window still covers contact. Full-RTT uplink + lead on ~200ms ping → press ~310ms
+					-- early; PerfectBlocking only lasts 125ms after attribute → expires before contact
+					-- → regular Block → Hakari M2 GUARDBREAK (diag EARLY+204 / pressDt=309).
 					local pressAt = th.contactAbs - lead - up - th.velLead
+					do
+						local pwin = Config.PerfectWindow or 0.125
+						local frac = Config.PerfectAdvanceFrac or 0.85
+						-- earliest legal press: contact - uplink - (window*frac)  (Perfect starts ~press+up)
+						local earliest = th.contactAbs - up - (pwin * frac)
+						if pressAt < earliest then pressAt = earliest end
+					end
 					local holdEnd = th.contactAbs + hold
 				-- [V66] диаг-трекинг: минимальный зазор до момента нажатия и факт
 				-- входа в окн�� — для точного post-mortem причины пропуска.
@@ -3925,7 +4003,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	end
 
 	-- [V97] AutoPlay: идеальное парри → враг в стане → запускаем окно добивания.
-	if result == "PERFECT" then State.ap.onPerfectParry(attacker, kind) end
+	if result == "PERFECT" then State.lastPerfectAt = os.clock(); State.ap.onPerfectParry(attacker, kind) end
 
 	-- rec/followUp уже вычислены в начале функции (до мутаций state).
 	if not rec then
