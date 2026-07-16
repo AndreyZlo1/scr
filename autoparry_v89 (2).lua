@@ -113,8 +113,8 @@ local Config = {
 		-- смотрящий мимо и не идущий на нас, по-прежнему НЕ парируется (нет ложняка).
 		HeavyLungeRange   = 36,     -- макс. дистанция, с которой доверяем реально дэшущему выпаду
 		HeavyLungeClosing = 14,     -- скорость сближения (студ/с), выше которой это точно дэш на нас
-		HeavyFaceRange    = 30,     -- расширенный радиус facing-доверия для тяжёлых
-		HeavyFarFaceMin   = 0.85,   -- на средней дистанции доверяем, только если нацелен ТОЧНО в нас (~32° конус)
+		HeavyFaceRange    = 20,     -- [V135] was 30: mid-range false M2 (diag dist=18) without aim
+		HeavyFarFaceMin   = 0.90,   -- razor aim only at mid range
 		-- [V101] BROADPHASE для High: дешёвый ранний отказ явно недосягаемым/неприближающимся
 		-- угрозам ДО дорогого предикта ротации/GetPartBoundsInBox. В разы разгружает scheduler в
 		-- мультибое (парри перестают опаздывать из-за CPU), при этом реально долетающие
@@ -299,9 +299,7 @@ local Config = {
 	UseServerCooldown = true,
 	DodgeCooldown = 2.05,       -- local floor; game Evasive also uses IFRAMECD + style CD
 	DodgeMinSpacing = 0.35,  -- hard min between FireServer Evasive (anti-spam)
-	-- [V134] Max seconds to keep guard after lastPress (anti stuck-block). Multi-hit Boxing
-	-- last strike is ~1.05s; 1.45 covers that + HoldAfter + slack without eternal hold.
-	BlockHoldMax = 1.45,
+
 	OutnumberEscape = true,
 	ExposedEscapeDodge = true,
 	ExposedDodgeWindow = 0.28,
@@ -1399,13 +1397,9 @@ local function willHitMe(th)
 			if dist <= heavyRange then
 				local trustHeavy
 				if mode == "High" then
-					-- [V130] long-windup M2: hitbox DELAYED — mid-windup aim is noisy. Soft gate.
-					-- Log: Boxing M2 dist=9 never-in-hitbox whole path (faceDotPred<0.5, not closing).
-					local longWind = (th.hitTL or 0) >= 0.45 or (th.lastTL or 0) >= 0.45
-					local faceMinH = longWind and 0.15 or (Config.HeavyHighFaceMin or 0.5)
-					trustHeavy = closingOk
-						or (faceDotPred >= faceMinH)
-						or (longWind and rawDot >= -0.10)
+					-- [V135] No soft rawDot>=-0.1 (diag: M2 dist=18 not at us still trusted).
+					-- High: real lunge OR clearly aimed (HeavyHighFaceMin ~0.5 ≈ 60°).
+					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyHighFaceMin or 0.5))
 				else
 					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyFaceMin or -0.30))
 				end
@@ -1413,11 +1407,10 @@ local function willHitMe(th)
 					th.trustedHit = true; th.trustLatch = true
 					return true
 				end
-			-- (3) СРЕДНЯЯ ДИСТАНЦИЯ (heavyRange..HeavyFaceRange): дове��яем ТОЛЬКО е����ли тяжёлый
-			-- нацелен ТОЧНО в нас узким конусом (HeavyFarFaceMin) — на такой дистанции это почти
-			-- наверняка готовящийся выпад. Смотрит мимо / не идёт на нас → не парируем (нет ложняка).
-			elseif dist <= (Config.HeavyFaceRange or 30) then
-				if faceDotPred >= (Config.HeavyFarFaceMin or 0.85) then
+			-- (3) Mid range: only razor-aimed heavies (not casual M2 across the street)
+			elseif dist <= (Config.HeavyFaceRange or 22) then
+				local farMin = (mode == "High") and (Config.HeavyFarFaceMin or 0.90) or (Config.HeavyFarFaceMin or 0.85)
+				if faceDotPred >= farMin and (closingOk or rawDot >= 0.35) then
 					th.trustedHit = true; th.trustLatch = true
 					return true
 				end
@@ -3014,8 +3007,10 @@ local function refreshContact(th)
 		local firstTL = th.firstTL or th.hitTL
 		local lastTL  = th.lastTL or th.hitTL
 
+		-- [V135] Live-TP only STRETCHES positive remaining (charge/slow). Never REVIVES a
+		-- swing whose wall-clock contact already passed — that created immortal threats.
 		if th.kind == "M1" and playing and Config.LiveM1Timer ~= false then
-			if tp < firstTL - 0.001 then
+			if remFirst > 0 and tp < firstTL - 0.001 then
 				local nominal = math.max(th.initSpeed or 1, 0.05)
 				local floor   = nominal * (Config.LiveM1SpeedFloor or 0.45)
 				local sp      = math.max(th.liveSpeed or nominal, floor)
@@ -3028,10 +3023,10 @@ local function refreshContact(th)
 				local nominal = math.max(th.initSpeed or 1, 0.05)
 				local floor   = nominal * (Config.LiveSpeedFloor or 0.15)
 				local sp      = math.max(th.liveSpeed or nominal, floor)
-				if tp < firstTL - 0.001 then
+				if remFirst > 0 and tp < firstTL - 0.001 then
 					remFirst = math.max(remFirst, (firstTL - tp) / sp)
 				end
-				if tp < lastTL - 0.001 then
+				if remLast > 0 and tp < lastTL - 0.001 then
 					local liveLast = (lastTL - tp) / sp
 					remLast = math.max(remLast, liveLast)
 					th.heldBy = (th.liveSpeed and th.liveSpeed < nominal * 0.6) and
@@ -3039,9 +3034,9 @@ local function refreshContact(th)
 				end
 			else
 				local stalledFor = now - (th.lastAdvanceClock or th.detectClock)
-				if tp < lastTL - 0.001 and stalledFor > (Config.ChargeStallMs / 1000) then
+				if remLast > 0 and tp < lastTL - 0.001 and stalledFor > (Config.ChargeStallMs / 1000) then
 					remLast = math.max(remLast, lastTL - tp)
-					if tp < firstTL - 0.001 then remFirst = math.max(remFirst, firstTL - tp) end
+					if remFirst > 0 and tp < firstTL - 0.001 then remFirst = math.max(remFirst, firstTL - tp) end
 				end
 			end
 		end
@@ -3057,8 +3052,13 @@ local function refreshContact(th)
 	end
 
 	th.trackPlaying = playing
-	th.contactAbs     = now + math.max(remFirst, 0)
-	th.lastContactAbs = now + math.max(remLast, 0)
+	-- [V135] Keep signed remaining for expiry. Old code clamped contactAbs to now+max(rem,0)
+	-- so after contact dt was ALWAYS 0 → threats never hit dtLife<-0.35 → immortal threats →
+	-- eternal face, CLUSTER spam, stuck guard (diag: CLUSTER contacts=[+0,+0], BLOCK-REL holdMax).
+	th.remFirst = remFirst
+	th.remLast  = remLast
+	th.contactAbs     = now + remFirst   -- may be in the past (negative rem)
+	th.lastContactAbs = now + remLast
 
 	-- [V130] multi-hit re-arm after first strike window → target last Hit (Boxing 1.05s)
 	if th.multiHit and th.pressed and remFirst < -0.05 and remLast > 0.08 then
@@ -3067,10 +3067,11 @@ local function refreshContact(th)
 			th.pressed = false
 			th.contactAbs = th.lastContactAbs
 			th.contact0 = th.lastContact0 or th.contact0
+			th.remFirst = remLast
 		end
 	end
 
-	return remLast  -- threat lifetime driven by LAST strike
+	return remLast  -- signed; caller expires when remLast < -grace
 end
 
 local function insideAutoFOV(attackerHRP)
@@ -3398,16 +3399,14 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local th = Threats[i]
 			local trackGone = th.track and th.track.Parent == nil
 			refreshContact(th)
-			-- [V130] life/expiry by LAST strike; press still uses contactAbs (first/next)
-			local dtLife = (th.lastContactAbs or th.contactAbs) - now
+			-- [V135] SIGNED remaining (not clamped). Expiry uses remLast < -grace.
+			local remLife = th.remLast or ((th.lastContactAbs or th.contactAbs) - now)
 			local dt = th.contactAbs - now
-			-- [V90 FIX] Угрозы БЕЗ трека (хитбокс-детект / сетевые свинги) не могут истечь по
-			-- dt: refreshContact клампит contactAbs в now+max(remaining,0), поэтому dt застревает
-			-- на 0 и НИКОГДА не ухо��ит ниже -0.35, а trackGone для них тоже false. Без трека ��гроза
-			-- ��тановилас�� бессмертной → wantBlock де��жался вечно → guard не отпускался (баг «блок
-			-- не снимается»). Даём таким угрозам жёсткий wall-clock TTL: живут contact0 + грейс.
+			local holdGrace = (Config.HoldAfter or 0.12) + 0.08
 			local noTrackExpired = (not th.track)
 				and (now - th.detectClock) > (((th.lastContact0 or th.contact0) or 0) + 0.35)
+			-- wall-clock absolute TTL: detect + max wait for this swing + grace (no immortals)
+			local wallExpired = (now - th.detectClock) > (((th.lastContact0 or th.contact0) or 0) + 0.50)
 
 			if th.feinted then
 				if not th.feintLogged then
@@ -3416,16 +3415,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 						:format(now, th.name, th.kind, (th.maxTP or 0) / math.max(th.hitTL, 0.001) * 100))
 				end
 				table.remove(Threats, i)
-			-- [V121] КОРЕНЬ «скрипт ВООБЩЕ не парирует M2»: у M2 анимационный трек уничтожается
-			-- (Parent=nil) ~0.5с в замах, а реальный удар (delayed hitbox, M2HitboxDelay) прилетает
-			-- на 0.78-0.84с. Прежнее `trackGone and elapsed>0.5` убивало угрозу РОВНО на 0.5с — за
-			-- 30-110мс ДО того как откроется press-окно (pressAt) → M2 никогда не нажимался (в логе
-			-- обе M2 удалены точно через 0.5с, dt ещё +250..+300мс). Track-gone угрозы и так тикают
-			-- по wall-clock (remaining=contact0-elapsed) → catch-all `dt<-0.35` гарантирует удаление.
-			-- Поэтому 0.5с-TTL применяем ТОЛЬКО когда контакт уже практически наступил (dt<lead) —
-			-- отменённый/финтовый свинг с прошедшим контактом чистится, а delayed-M2 доживает до press.
-			elseif dtLife < -0.35 or noTrackExpired
-				or (trackGone and (now - th.detectClock) > 0.5 and dtLife < Config.PerfectLead and not th.multiHit) then
+			-- Expire when last strike is past hold-grace, or trackless TTL, or absolute wall TTL.
+			-- Multi-hit delayed M2: remLife tracks last Hit; first may be past while last still live.
+			elseif remLife < -holdGrace or noTrackExpired or wallExpired
+				or (trackGone and (now - th.detectClock) > 0.5 and remLife < Config.PerfectLead and not th.multiHit) then
 			-- [V66] POST-MORTEM: угроза уходит. Если на неё ни разу не нажали и не
 			-- задоджили — это независимый пропуск. Логируем ТОЧН��Ю прич��ну, чтобы
 			-- закрыть "скрипт проёбывает атаку" по фактам, а не догадкам.
@@ -3511,16 +3504,9 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				if now < pressAt and (th.contactAbs - now) < lead then
 					th.contactPassedFast = true
 				end
-				if now >= pressAt and now <= holdEnd then
+				-- Only schedule press while contact is still upcoming or within short hold tail
+				if now >= pressAt and now <= holdEnd and dt > -(Config.HoldAfter or 0.12) then
 					th.enteredWindow = true
-					-- [V65] EDF (Earliest Deadline First) с приоритетом НЕОБСЛУЖЕННЫМ.
-					-- Баг до V65: выбирался просто минимальный contactAbs. У Boxing-комбо
-					-- быстрый M1 (contact=352ms) всегда имел contactAbs меньше медленной
-					-- M2 (contact=832ms), поэтому п��сле перфекта M1 медленная M2 НИКОГДА
-					-- не становилась целью → NO-PRESS → полный хит (твой клип). Теперь
-					-- снача��а берём угрозы без н��жати�� (unpressed), сред��� ��их — с самым
-					-- ранним дедлайном. Так после блока быстрого heavy получает своё
-					-- собственное нажатие (guard держится → бло�� тяжёлой).
 					local take = false
 					if not wantBlock then
 						take = true
@@ -3531,25 +3517,22 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					end
 					if take then wantBlock = th end
 				end
-				-- [V95] окно кандидата на поворот РАСШИРЕНО на RTT (up): хард-снап нужен за
-				-- (BlockFaceHardDt + up) до контакта, иначе на высоком пинге кандидат появлялся
-				-- бы слишком поздно и мы прессили бы блок ещё ��е довернувшись → сервер от��лонял.
-				if dt <= (Config.FaceLeadWindow + up) and dt >= -Config.HoldAfter then
-					-- [V65] лицом к т��му, кто бьёт СЛЕДУЮЩИМ среди ещё не прилетевших
-					-- ударов (contactAbs >= now). После блока быстро���� разворачиваемся
-					-- к ме��ленной тяжёлой к её контакту ("rotate to active target").
-					local grace = now - 0.03
+				-- [V135] Face ONLY near real contact, not FaceLeadWindow+fullRTT forever.
+				-- Diag: constant look-at while immortal threats had dt≈0. Window = pre-contact
+				-- BlockFaceHardDt + small uplink fraction, and only if contact still ahead/near.
+				local faceWin = (Config.BlockFaceHardDt or 0.30) + math.min(up, 0.12)
+				if dt <= faceWin and dt >= -0.06 then
 					local take = false
 					if not faceTgt then
 						take = true
 					else
-						local fUp, thUp = faceTgt.contactAbs >= grace, th.contactAbs >= grace
+						local fUp, thUp = faceTgt.contactAbs >= now - 0.03, th.contactAbs >= now - 0.03
 						if thUp ~= fUp then take = thUp
 						else take = th.contactAbs < faceTgt.contactAbs end
 					end
 					if take then faceTgt = th end
 				end
-				if dt <= Config.DodgeHorizon and dt >= -Config.HoldAfter then
+				if dt <= Config.DodgeHorizon and dt >= -0.05 then
 					imminent[#imminent+1] = th
 				end
 			end
@@ -3769,17 +3752,23 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- пересчитывает��я каждый кадр, поэтому как только удар первого разрешился — мгновенно
 	-- перекид��ваемся на следующего (тайм-мультиплекс поворота по времени контакта). wantBlock —
 	-- запасная цель, если facing-кандидата в окне ещё нет.
-	local turnTo = faceTgt or wantBlock
+	-- [V135] Face only when we are about to press / holding block on a live contact.
+	-- Never magnet-look at every threat for the whole windup (user: "constantly stares at enemy").
+	local turnTo = nil
+	if wantBlock and wantBlock.attackerHRP then
+		local dtc = wantBlock.contactAbs - now
+		if dtc > -0.08 and dtc < ((Config.BlockFaceHardDt or 0.30) + math.min(up, 0.12)) then
+			turnTo = wantBlock
+		end
+	elseif faceTgt and faceTgt.attackerHRP and State.blocking then
+		turnTo = faceTgt
+	end
 	if turnTo and turnTo.attackerHRP then
 		local dtc = turnTo.contactAbs - now
-		-- HARD-снап должен успеть ДО разрешения удара: victim-репорт читает наш facing у контакта,
-		-- а пакет летит к серверу ~пол-RTT. Значит жёстко доворачиваемся заранее — за (окно + RTT)
-		-- до контакта. В мультибое (2+) — всегда hard, чтобы мг��овенно перекидываться ме��ду целями
-		-- и не терять кадры на лерп. Иначе (одиночная, далеко) — плавный трекинг.
-		local hardWin = (Config.BlockFaceHardDt or 0.30) + up
-		local hard = (dtc <= hardWin) or (Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2))
-		-- держим цель до контакта + грейс (перекрывает ��ам момент оверлапа и пару ��адров после)
-		setFaceGoal(turnTo.attackerHRP, hard, math.max(dtc, 0) + (Config.HoldAfter or 0.12) + 0.06)
+		local hard = dtc <= ((Config.BlockFaceHardDt or 0.30) + math.min(up, 0.10))
+			or (Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2) and State.blocking)
+		-- Short hold: only through contact + tiny grace (not multi-second lock)
+		setFaceGoal(turnTo.attackerHRP, hard, math.max(dtc, 0) + 0.10)
 		State.vizTarget = { hrp = turnTo.attackerHRP, model = turnTo.attackerModel }
 	else
 		State.vizTarget = nil
@@ -3901,45 +3890,41 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 		if wantBlock then
 			local holdExtra = (wantBlock.kind == "M2" and Config.M2WidenWindow) and Config.M2WidenHold or 0
-			-- [V130] hold through LAST multi-hit; [V134] hard cap so zombie threats can't pin guard
+			-- Hold to LAST strike of THIS wantBlock (or cluster far edge), not a global timer crutch
 			local base = wantBlock.lastContactAbs or wantBlock.contactAbs
 			if multiThreat and farContact and farContact > base then base = farContact end
-			local desired = base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra
-			local holdMax = Config.BlockHoldMax or 1.45
-			local capAt = (State.lastPress > 0 and (State.lastPress + holdMax)) or desired
-			State.holdUntil = math.min(math.max(State.holdUntil, desired), capAt)
+			-- Only extend hold if base is still meaningful (not years in the past)
+			if base > now - 0.05 then
+				local desired = base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra
+				State.holdUntil = math.max(State.holdUntil, desired)
+			end
 		end
 	end
 
-	-- [V134] UNIFIED release (runs even when wantBlock still set). Old code only released in
-	-- `elseif State.blocking` — so a sticky wantBlock (zombie threat) never dropped guard.
+	-- [V135] Release when no live covering need — NOT a fixed holdMax timer.
+	-- Root fix is signed rem + threat expiry; this is the correct policy:
+	--   release if holdUntil passed AND (no multi latch OR no live threats).
 	if State.blocking then
-		local keepForCluster = (multiThreat and farContact
-			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0)))
-			or (State.multiHoldUntil and now < State.multiHoldUntil)
-		-- Live threats still needing cover?
-		local liveThreat = false
+		local liveCover = false
 		for i = 1, #Threats do
 			local th = Threats[i]
-			if th and not th.feinted and not th.dodged and not th.coveredByIFrames then
-				local endAbs = th.lastContactAbs or th.contactAbs or 0
-				if endAbs > now - 0.08 then liveThreat = true; break end
+			if th and not th.feinted and not th.dodged and not th.coveredByIFrames
+			   and (th.threatens or th.enteredWindow or th.pressed) then
+				local rem = th.remLast or ((th.lastContactAbs or th.contactAbs or 0) - now)
+				if rem > -(Config.HoldAfter or 0.12) then liveCover = true; break end
 			end
 		end
-		if not liveThreat then
-			keepForCluster = false
+		if not liveCover then
 			State.multiHoldUntil = 0
 		end
-		local holdMax = Config.BlockHoldMax or 1.45
-		local pastMax = State.lastPress > 0 and (now - State.lastPress) >= holdMax
-		local pastHold = now >= (State.holdUntil or 0)
-		local pastGap  = State.lastPress > 0 and (now - State.lastPress) > (Config.ReleaseGap or 0.40)
-			and not liveThreat
-		if pastMax or (not keepForCluster and (pastHold or pastGap)) then
-			if Config.DeepDiag and pastMax then
-				diagPush(("BLOCK-REL t=%.2f  reason=holdMax(%.2fs) liveThreat=%s")
-					:format(now, holdMax, tostring(liveThreat)))
-			end
+		local keepForCluster = liveCover and (
+			(multiThreat and farContact and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0)))
+			or (State.multiHoldUntil and now < State.multiHoldUntil)
+		)
+		if not keepForCluster and now >= (State.holdUntil or 0) then
+			releaseBlock()
+		elseif not liveCover and (now - (State.lastPress or 0)) > (Config.ReleaseGap or 0.40) then
+			-- No threat needs cover and we've held past ReleaseGap → drop even if holdUntil skewed
 			releaseBlock()
 		end
 	end
