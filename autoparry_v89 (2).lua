@@ -239,7 +239,7 @@ local Config = {
 	-- [V94] Подняты капы: диаг2 показал реальный RTT=345ms, а прежние UplinkMax=0.33/PingCap=0.32
 	-- САМИ резали компенсацию до ~330ms → на высоком пинге блок недокомпенсировался даже с верным
 	-- getPingRaw. Теперь тянем до 0.5с. На умеренном пинге (60–150) это ни на что не влияет (там
-	-- клампы не достигаются), а на 300–450ms пинге даёт полный round-trip lead.
+	-- кл��мпы не достигаются), а на 300–450ms пинге даёт полный round-trip lead.
 	UplinkMax     = 0.500,
 	PingCap       = 0.500,
 	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ (замена EMA+peak-hold). Peak-hold ЛАТЧИЛ случайный спайк
@@ -334,7 +334,7 @@ local Config = {
 	-- (TimePosition ползёт по чуть-чуть), стойл не детекти��������������ся → contactAbs тикал к
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
-	-- контакт ��ч��тается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
+	-- контакт ����ч��тается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
 	-- (hitTL - tp) / max(liveSpeed, floor). При замедлении окно едет с ударом.
 	LiveHeavyTimer    = true,
 	LiveSpeedFloor    = 0.15,   -- ниже этой доли номинала скорость не считаем (антидел/0)
@@ -746,7 +746,7 @@ end
 -- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса ��грока,
 -- доступен в ЛЮБОМ контексте, не бросает; возвращает one-way в секундах → RTT = ×2). Stats
 -- Data Ping (уже RTT в мс) — как второй источник; берём МАКСИМУМ (перекомпенсация безопаснее
--- недокомпенсации для парри). Если оба недоступны — отдаём последнее валидное значение, а НЕ
+-- недокомпенсации для парри). Если о��а недоступны — отдаём последнее валидное значение, а НЕ
 -- хардкод 60. Итог: и hot-path, и header видят один настоящий RTT.
 local _lastGoodPing = 0.08
 local function getPingRaw()
@@ -780,7 +780,7 @@ end
 local V93 = {
 	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Кольцо сырых сэмплов RTT; getPing() = медиана окна.
 	-- Медиана игнориру��т одиночные спайки/пр��валы Data Ping (пилообразный шум) и отслеживае��
-	-- устойчивый RTT — без залипания на пике (прежний peak-hold) и без петли о��учения.
+	-- устойчивый RTT — без залипания на пике (прежн��й peak-hold) и без петли о��учения.
 	pingBuf   = {},   -- кольцевой буфер сырых сэмплов (сек)
 	pingBufN  = 0,    -- сколько сэмплов накоплено (≤ PingWindow)
 	pingBufI  = 0,    -- индекс записи (0-based, крутится по PingWindow)
@@ -1204,7 +1204,7 @@ local function willHitMe(th)
 	local mode = Config.AccuracyMode or "Low"
 
 	-- [V93] В High доверяемся ТОЛЬКО ground-truth (реальный па��т) и ч��стой геометр��и; latch из
-	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипал» бы на угрозах,
+	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипа��» бы на угрозах,
 	-- которые в нас не попадают. Свой latch в High ставит лишь подтверждённое пересечение
 	-- реального игрового хитбокса (th.gtConfirmed) в ветке ниже.
 	if mode == "High" then
@@ -1520,7 +1520,7 @@ local function willHitMe(th)
 			local cphi, sphi = math.cos(phi), math.sin(phi)
 			local aimLook = Vector3.new(rawL.X * cphi - rawL.Z * sphi, 0, rawL.X * sphi + rawL.Z * cphi)
 			aimLook = (aimLook.Magnitude > 0.05) and aimLook.Unit or rawL
-			-- [V96] POINT-BLANK дове��ие (как в LOW-ветке): в упор враг физически достаёт хитбокс��м
+			-- [V96] POINT-BLANK дове��ие (как в LOW-ветке): в упор враг физич��ски достаёт хитбокс��м
 			-- НЕЗАВИСИМО от facing, а серверный do��орот довершится к контакту. Прежде High жёстко
 			-- резал ближние удары facing-гейтом → в логе валидные комбо-M1 (dist 3–6) п��дали в
 			-- `MISS never-in-hitbox` → NO-PRESS/поздний блок. Ниже PointBlank сразу доверяем.
@@ -2434,7 +2434,7 @@ end
 -- M1/M2 в принципе блокируется/перфактится (сетевые исходы: M2Blocked / M2PerfectBlocked /
 -- M2GuardBroken). Реальн�� сквозь атрибут Blocking проходят только грэбы/с��эмы — прежде всего
 -- Wrestling M2 (гарантированный захват, см. M2GrabTargetForwardOffset в CombatConfig). Их
--- нельзя блокнуть, с��асает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
+-- нельзя блокнуть, с��а��ает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
 -- ._isSuppressed гасит урон при IFRAMES/Ragdoll/Downed/UltraInstinct). Список собираем по
 -- стилю/��ипу через Config.MustDodgeStyles (расширяется ��ез правки движка) + живой сигнал по
 -- атрибуту атакующего, е��ли игра е��о выставит в момент замаха.
@@ -3057,7 +3057,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- [V83] АНТИ-DECOY: настоящий игрок физически не может выдать два свинга подряд за
 	-- <AntiDecoyGap. Флуд атак-decoy (наши prerun/idlemask и такие же трюки врага) прилетает
 	-- пачкой с почти нулевым интервалом → это НЕ отдельные удары. Регистрируем только ПЕРВЫЙ
-	-- и глушим быстрые повторы, чтобы ��раг не спамил ложные тайминги в наш парри.
+	-- и глушим быстрые по��торы, чтобы ��раг не спамил ложные тайминги в наш парри.
 	if Config.AntiDecoy then
 		local sig = State.antiDecoySig; if not sig then sig = {}; State.antiDecoySig = sig end
 		local nowc = os.clock()
@@ -3119,7 +3119,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 
 	-- [V113] Трекинг КАДЕНСА свингов по атакующему (для boxing combo-guard). Запоминаем интервал
 	-- между двумя последними свингами этого врага: короткий интервал = активная комбо-цепочка.
-	-- Поля на State (таблица — без новых top-level локалов, лимит 200/функция не тронут).
+	-- Поля на State (таблица — без новых top-level лок��лов, лимит 200/функция не тронут).
 	do
 		local key = model or attackerHRP or name
 		if key then
@@ -4007,7 +4007,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	-- [V64] Замер эффективности per-hit rearm: к��пим ре��ультаты по позиции удара
 	-- в ком��о. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
-	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
+	-- rearm работает и сервер перевз��од��т перфект от свежего Activated.
 	do
 		State.comboStat = State.comboStat or { opener = {}, tail = {} }
 		local bucket = ((rec.combo or 0) >= 3) and State.comboStat.tail or State.comboStat.opener
@@ -5599,53 +5599,6 @@ local function drawTargetHitbox(cam, model, hrp)
 	for i = 0, CONE_SEG - 1 do drawWorldSeg(cam, wArc[i], wArc[i + 1], col, 2) end
 end
 
--- [V132] PERF/REGISTER FIX: вложенная функция arc была замыканием внутри drawRestrictZone,
--- захватывая cam, cx, cz, y, Config.RestrictCol как upvalues. В do-блоке уже ~200 активных
--- локалов (лимит регистров Luau VM) → «out of local registers when trying to allocate
--- drawRestrictZone» под Luraph-виртуализацией. Решение: выносим arc на уровень do-блока
--- как drawRestrictArc с явными параметрами (нет capture → нет роста счётчика регистров
--- в drawRestrictZone). Нулевое изменение поведения.
-local function drawRestrictArc(cam, cx, cz, y, col, a0, a1, rr, thick, steps)
-	steps = steps or 6
-	local prev
-	for i = 0, steps do
-		local a = a0 + (a1 - a0) * (i / steps)
-		local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
-		if prev then drawWorldSeg(cam, prev, p, col, thick) end
-		prev = p
-	end
-end
-
-local function drawRestrictZone(cam)
-	if not (Config.RestrictZone and Config.RestrictShowZone) then return end
-	local z = activeRestrictZone(os.clock()); if not z then return end
-	local aHRP = z.th.attackerHRP; if not (aHRP and aHRP.Parent) then return end
-	local y  = footYOf(z.th.attackerModel, aHRP)
-	local cx, cz = z.center.X, z.center.Z
-	local r   = z.keepOut * (1 + math.sin(Viz.t * 4) * 0.02)
-	local col = Config.RestrictCol
-	local center3 = Vector3.new(cx, y, cz)
-
-	local bracket = math.rad(34)
-	for k = 0, 3 do
-		local mid = math.rad(45) + k * math.rad(90)
-		drawRestrictArc(cam, cx, cz, y, col, mid - bracket / 2, mid + bracket / 2, r, 3, 7)
-	end
-
-	local ch = math.max(r * 0.14, 0.7)
-	drawWorldSeg(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), col, 2)
-	drawWorldSeg(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), col, 2)
-
-	if z.aPos then
-		local from = Vector3.new(z.aPos.X, y, z.aPos.Z)
-		local dir  = Vector3.new(cx - z.aPos.X, 0, cz - z.aPos.Z)
-		if dir.Magnitude > 0.1 then
-			local edge = center3 - dir.Unit * r
-			drawWorldSeg(cam, from, edge, col, 1.5)
-		end
-	end
-end
-
 function vizUpdate(dt)
 	if not LinePool.ok then return end
 	local cam = Workspace.CurrentCamera
@@ -5669,10 +5622,64 @@ function vizUpdate(dt)
 		if Config.VizHitbox ~= false then drawTargetHitbox(cam, model, hrp) end
 		if Config.VizRing ~= false then drawFlatRing(cam, model, hrp, hot) end
 	end
-	if Config.VizRestrict ~= false then drawRestrictZone(cam) end
+	-- [V132 v2] _drawRestrictZoneImpl живёт вне do-блока (fix регистров). drawWorldSeg и
+	-- footYOf — upvalues vizUpdate (захвачены do-блоком), передаём явно как параметры.
+	if Config.VizRestrict ~= false then
+		_drawRestrictZoneImpl(cam, drawWorldSeg, footYOf, Viz.t)
+	end
 	LinePool:finish(); TriPool:finish()
 end
 end   -- [V130] close AutoParry visuals module (do-block for register budget)
+
+-- [V132 v2] REGISTER FIX: drawRestrictArc и drawRestrictZone вынесены за пределы do-блока.
+-- do-блок упирался в лимит Luau VM (~200 активных регистров под Luraph-виртуализацией).
+-- Функции объявляются ПОСЛЕ end блока: они могут ссылаться на модульные глобали (Config,
+-- activeRestrictZone), но НЕ на locals do-блока (drawWorldSeg, footYOf, Viz, LinePool).
+-- Решение: нужные helpers перенесены как forward-refs ДО do-блока и назначены внутри него
+-- через upvalue, либо переданы как параметры. drawWorldSeg — передаётся параметром segFn.
+-- _drawRestrictZone вызывается из vizUpdate (уже за пределами do).
+
+local function _drawRestrictArc(segFn, cam, cx, cz, y, col, a0, a1, rr, thick, steps)
+	steps = steps or 6
+	local prev
+	for i = 0, steps do
+		local a = a0 + (a1 - a0) * (i / steps)
+		local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
+		if prev then segFn(cam, prev, p, col, thick) end
+		prev = p
+	end
+end
+
+-- segFn, footFn, segT: injected by vizUpdate so no do-block upvalues needed.
+local function _drawRestrictZoneImpl(cam, segFn, footFn, vizT, segT)
+	if not (Config.RestrictZone and Config.RestrictShowZone) then return end
+	local z = activeRestrictZone(os.clock()); if not z then return end
+	local aHRP = z.th.attackerHRP; if not (aHRP and aHRP.Parent) then return end
+	local y  = footFn(z.th.attackerModel, aHRP)
+	local cx, cz = z.center.X, z.center.Z
+	local r   = z.keepOut * (1 + math.sin(vizT * 4) * 0.02)
+	local col = Config.RestrictCol
+	local center3 = Vector3.new(cx, y, cz)
+
+	local bracket = math.rad(34)
+	for k = 0, 3 do
+		local mid = math.rad(45) + k * math.rad(90)
+		_drawRestrictArc(segFn, cam, cx, cz, y, col, mid - bracket / 2, mid + bracket / 2, r, 3, 7)
+	end
+
+	local ch = math.max(r * 0.14, 0.7)
+	segFn(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), col, 2)
+	segFn(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), col, 2)
+
+	if z.aPos then
+		local from = Vector3.new(z.aPos.X, y, z.aPos.Z)
+		local dir  = Vector3.new(cx - z.aPos.X, 0, cz - z.aPos.Z)
+		if dir.Magnitude > 0.1 then
+			local edge = center3 - dir.Unit * r
+			segFn(cam, from, edge, col, 1.5)
+		end
+	end
+end
 
 -- [V95] ЕДИНЫЙ АППЛИКАТОР ПОВОРОТА. Единственное место, где ��ишется HRP.CFrame ради facing.
 -- Работает в RenderStepped ПОСЛЕ игрового AutoRotate/SmoothShiftLock (��ы подключаемся позже —
