@@ -297,8 +297,11 @@ local Config = {
 	IFrameDur     = 0.30,
 	DodgeLead     = 0.10,
 	UseServerCooldown = true,
-	DodgeCooldown = 2.05,
-	DodgeMinSpacing = 0.35,
+	DodgeCooldown = 2.05,       -- local floor; game Evasive also uses IFRAMECD + style CD
+	DodgeMinSpacing = 0.35,  -- hard min between FireServer Evasive (anti-spam)
+	-- [V134] Max seconds to keep guard after lastPress (anti stuck-block). Multi-hit Boxing
+	-- last strike is ~1.05s; 1.45 covers that + HoldAfter + slack without eternal hold.
+	BlockHoldMax = 1.45,
 	OutnumberEscape = true,
 	ExposedEscapeDodge = true,
 	ExposedDodgeWindow = 0.28,
@@ -385,12 +388,11 @@ local Config = {
 	SA_DirtyGrab      = true,   -- enemy Dirty grab/M2 (GrappleDirtyHit, ImmuneToRagdollM2) → force dodge
 	SA_HakariRead     = true,   -- widen window for Hakari momentum M2 (HakariMomentumM2HitboxDelay 0.62)
 	SA_HakariWiden    = 0.05,   -- extra front/hold seconds applied to a Hakari M2
-	-- [V131] GRAPPLE WIN. Настоящее состояние борьбы = атрибут Grappling==true на персонаже.
-	-- В окне клэша (Grapple.Duration=2.29) сервер отдаёт победу тому, кто в борьбе жмёт M2
-	-- непрерывно/последним (проигравшему летит GrappleWinnerStun). Поэтому, ПОКА мы в грэппле,
-	-- спамим M2 — так остаёмся «последним атакующим». Вне грэппла (Grappling≠true) фича молчит,
-	-- поэтому в обычном бою M2 больше НЕ фаерится (это была причина ложных срабатываний).
-	SA_GrappleWin     = false,  -- while Grappling==true, spam M2 to stay the last attacker & win the clash
+	-- [V134] GRAPPLE WIN. Attribute Grappling==true (M2.lua / MovementService). Clash winner =
+	-- last/continuous M2 commits (loser gets GrappleWinnerStun). Old path used fireBoxingCounter
+	-- → CombatAttacking gate → only ONE M2 then stuck. Now: dedicated spam ~10 Hz, no attack gate.
+	SA_GrappleWin     = false,
+	GrappleM2Interval = 0.10,   -- seconds between M2 ServerCheck while Grappling
 	-- [V91] BLATANT force-dodge. Игра НЕ даёт додж, когда мы застряли в собственной атаке
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��етит, а мы залочены
@@ -670,6 +672,8 @@ local State = {
 	lastDodge    = -99,
 	lastDodgeInfo   = nil,
 	lastDodgeRefuse = nil,
+	lastGrappleM2   = -99,
+	multiHoldUntil  = 0,
 	lastAct      = -99,
 	lastDeact    = -99,
 	flashUntil   = 0,
@@ -2411,56 +2415,58 @@ end
 -- пока Grappling==true у НАС: в окне клэша (Grapple.Duration=2.29) сервер отдаёт победу тому, кто
 -- в борьбе жмёт M2 непрерывно/последним (проигравшему летит GrappleWinnerStun). Поэтому мы просто
 -- спамим M2 весь grapple — так гарантированно остаёмся «последним атакующим».
-local function grappleM2Ready()
+-- [V134] GRAPPLE WIN — dedicated mash, NOT boxing-counter path.
+-- Clash: last continuous M2 commits win; GrappleWinnerStun on loser.
+-- Must NOT gate on CombatAttacking (that's set by our own M2 → old code fired once then died).
+local function tryGrappleWin(now)
 	if not Config.SkillAddon or not Config.SA_GrappleWin then return false end
 	local c = localChar()
 	if not c then return false end
-	-- ГЛАВНЫЙ гейт: мы должны реально быть В БОРЬБЕ. Вне грэппла фича молчит.
 	if c:GetAttribute("Grappling") ~= true then return false end
-	-- анти-даблфайр: не спамим M2 быстрее BoxingCounterGap (реальный кулдаун держит игра).
-	if (os.clock() - (State.lastCounter or 0)) < (Config.BoxingCounterGap or 0.30) then return false end
-	for _, attr in ipairs(BOXING_BLOCK_ATTRS) do
-		if c:GetAttribute(attr) then return false end
-	end
-	if c:GetAttribute("CantAnything") and not c:GetAttribute("CombatRecovery") then return false end
+	-- Already lost the clash
+	if c:GetAttribute("GrappleWinnerStun") == true then return false end
+	if c:GetAttribute("Ragdoll") == true or c:GetAttribute("Downed") == true then return false end
 	if c:GetAttribute("Equip") == false then return false end
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
-	if c:GetAttribute("M2Cooldown") == true or c:GetAttribute("M2CD") == true then return false end
-	if c:GetAttribute("GrappleWinnerStun") == true then return false end   -- уже проиграли клэш
 	local hum = c:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 then return false end
-	return true
-end
 
--- Найти оппонента по борьбе: ближайший игрок, у которого тоже Grappling==true (для снапа лицом).
--- Может вернуть nil — тогда просто фаерим M2 без снапа (в грэппле вы и так залочены друг на друга).
-local function findGrappleFoe(myHRP)
-	local myPos = myHRP.Position
-	local best, bestDist
-	for _, pl in ipairs(Players:GetPlayers()) do
-		if pl ~= LocalPlayer then
-			local oc = pl.Character
-			local ohrp = oc and oc:FindFirstChild("HumanoidRootPart")
-			if ohrp and oc:GetAttribute("Grappling") == true then
-				local d = (ohrp.Position - myPos).Magnitude
-				if not bestDist or d < bestDist then best, bestDist = ohrp, d end
+	-- Drop guard if somehow still up (M2 won't accept while Blocking)
+	if State.blocking or State.guardUp then
+		State.blocking, State.holdUntil, State.multiHoldUntil = false, 0, 0
+		pcall(sendDeactivate, true)
+	end
+
+	local gap = Config.GrappleM2Interval or 0.10
+	if (now - (State.lastGrappleM2 or -99)) >= gap then
+		-- Snap face to nearest grappling foe (optional, helps look-vector checks)
+		local myHRP = localHRP()
+		if myHRP then
+			local best, bestD
+			for _, pl in ipairs(Players:GetPlayers()) do
+				if pl ~= LocalPlayer then
+					local oc = pl.Character
+					local ohrp = oc and oc:FindFirstChild("HumanoidRootPart")
+					if ohrp and oc:GetAttribute("Grappling") == true then
+						local d = (ohrp.Position - myHRP.Position).Magnitude
+						if not bestD or d < bestD then best, bestD = ohrp, d end
+					end
+				end
+			end
+			if best then
+				local d = flatDirTo(myHRP.Position, best.Position)
+				if d then myHRP.CFrame = CFrame.lookAt(myHRP.Position, myHRP.Position + d) end
 			end
 		end
+		ServerRemote:FireServer({ Type = "Combat", Action = "M2", Func = "ServerCheck" })
+		State.lastGrappleM2 = now
+		State.status = "GRAPPLE-WIN"
+		if Config.DeepDiag and (now - (State.lastGrappleLog or 0)) > 0.4 then
+			State.lastGrappleLog = now
+			diagPush(("GRAPPLE-WIN t=%.2f  M2 mash (interval=%.0fms)"):format(now, gap * 1000))
+		end
 	end
-	return best
-end
-
--- Пока мы в борьбе (Grappling==true) — непрерывно бьём M2, чтобы быть последним атакующим и
--- выиграть клэш. Переиспользуем fireBoxingCounter (снап лицом при наличии цели, сброс guard,
--- FireServer M2). Срабатывает ТОЛЬКО в грэппле, поэтому в обычном бою больше не мешает.
-local function tryGrappleWin(now)
-	if not grappleM2Ready() then return false end
-	local myHRP = localHRP()
-	if not myHRP then return false end
-	local foe = findGrappleFoe(myHRP)
-	fireBoxingCounter({ attackerHRP = foe, name = "grapple-foe", kind = "GRAPPLE" })
-	State.status = "GRAPPLE-WIN"
-	diagPush(("GRAPPLE-WIN t=%.2f  (M2 spam in grapple)"):format(now))
+	-- Always true while Grappling: skip parry/block (clash owns the state machine)
 	return true
 end
 
@@ -2906,16 +2912,25 @@ local function evasiveGranted()
 end
 
 local function dodgeReady()
-	if evasiveGranted() then return true end
+	-- [V134] Always enforce local spacing + local CD floor. Game Evasive (Evasive.lua) uses
+	-- IFRAMECD + EvasiveCooldownRemaining, but those attrs lag after FireServer — old code
+	-- returned true as soon as rem was nil → dodge while still on CD.
+	local now = os.clock()
+	if (now - State.lastDodge) < (Config.DodgeMinSpacing or 0.35) then return false end
+	local localReady = (now - State.lastDodge) >= (Config.DodgeCooldown or 2.05)
+	local granted = evasiveGranted()
+	-- Outnumbered grant: game clears IFRAMECD and allows free dashes — still keep MinSpacing.
+	if granted then return true end
 	local c = localChar()
-	if (os.clock() - State.lastDodge) < Config.DodgeMinSpacing then return false end
 	if Config.UseServerCooldown and c then
 		if c:GetAttribute("IFRAMECD") == true then return false end
 		local rem = c:GetAttribute("EvasiveCooldownRemaining")
-		if type(rem) == "number" and rem > 0 then return false end
-		return true
+		if type(rem) == "number" and rem > 0.02 then return false end
+		-- Server says free, but require local CD unless rem is explicitly a fresh 0 after CD
+		-- (we only trust rem==0 when IFRAMECD was recently observed; otherwise local floor).
+		return localReady
 	end
-	return (os.clock() - State.lastDodge) >= Config.DodgeCooldown
+	return localReady
 end
 
 -- force=true (blatant override): пропускаем ТОЛЬКО софт-состояния (Stunned/CantAnything),
@@ -2941,10 +2956,15 @@ local function canDodgeNow(force)
 end
 
 local function releaseBlock()
-	if not State.blocking then return end
+	if not State.blocking and not State.guardUp then
+		State.holdUntil = 0
+		State.multiHoldUntil = 0
+		return
+	end
 	State.blocking  = false
 	State.holdUntil = 0
-	sendDeactivate(true)   -- принудительно: намерение уже снято, guard обязан опуститься
+	State.multiHoldUntil = 0
+	sendDeactivate(true)   -- force: intent cleared, guard must drop
 end
 
 local function fireBlock(tsServer)
@@ -3838,18 +3858,18 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			-- «времени нет» = до контакта меньше, чем нужно на нажатие+RTT (тогда прессим как есть)
 			local lastResort = dtc <= ((Config.PerfectLead or 0.0625) + up + 0.02)
 			if fd ~= nil and fd < faceFloor and not lastResort then
-				-- держим ��ель поворота на этого атакующего и ЖДЁМ — нажатие в этот кадр п��опускаем
+				-- [V134] Do NOT return out of scheduler — that skipped unified release and stuck guard.
 				setFaceGoal(wantBlock.attackerHRP, true, math.max(dtc, 0) + (Config.HoldAfter or 0.12) + 0.06)
 				if not wantBlock.faceWaitLogged then
 					wantBlock.faceWaitLogged = true
 					diagPush(("FACEWAIT t=%.2f %s %s face=%.2f<%.2f dt=%+.0fms → rotating, hold press")
 						:format(now, wantBlock.name or "?", wantBlock.kind or "?", fd, faceFloor, dtc * 1000))
 				end
-				return
+				wantBlock = nil  -- skip fire this frame; still run release logic below
 			end
 		end
 		-- Single-attacker path retains per-hit re-arm; multi held-guard cannot re-arm.
-		if not wantBlock.pressed then
+		if wantBlock and not wantBlock.pressed then
 			local sent = fireBlock(serverNow)
 			if sent then
 				wantBlock.pressed  = true
@@ -3879,28 +3899,48 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				end
 			end
 		end
-		local holdExtra = (wantBlock.kind == "M2" and Config.M2WidenWindow) and Config.M2WidenHold or 0
-		-- [V62] в м��ль��ибое тянем guard до САМОГО ДАЛЬНЕГО контакта кластера, а не
-		-- только б��ижайше��о — так guard не отпускается в се��едине burst и каждый
-		-- последующий удар любого врага ловится как normal-block (BLOCKABLE↑, HIT↓).
-		-- [V130] hold through LAST multi-hit strike (Boxing Hit@1.05), not only first contact
-		local base = wantBlock.lastContactAbs or wantBlock.contactAbs
-		if multiThreat and farContact and farContact > base then base = farContact end
-		State.holdUntil = math.max(State.holdUntil,
-			base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra)
-	elseif State.blocking then
-		-- [V62] пока в кла��тере есть нез��крытые угр��зы — не отпуск��ем guard даже
-		-- е��ли ближайший holdUntil истёк (иначе дыра между волнами burst).
-		-- [V92] guard держим пока: (а) активен мультиугрозный кластер прямо сейчас, ИЛИ
-		-- (б) не истёк ЛАТЧ кластера (State.multiHoldUntil) ��� даже если остался 1 атакующий,
-		-- это выживший из кластера, и его удар ещё летит. Так вторая волн�� бо��ьше не проходит.
+		if wantBlock then
+			local holdExtra = (wantBlock.kind == "M2" and Config.M2WidenWindow) and Config.M2WidenHold or 0
+			-- [V130] hold through LAST multi-hit; [V134] hard cap so zombie threats can't pin guard
+			local base = wantBlock.lastContactAbs or wantBlock.contactAbs
+			if multiThreat and farContact and farContact > base then base = farContact end
+			local desired = base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra
+			local holdMax = Config.BlockHoldMax or 1.45
+			local capAt = (State.lastPress > 0 and (State.lastPress + holdMax)) or desired
+			State.holdUntil = math.min(math.max(State.holdUntil, desired), capAt)
+		end
+	end
+
+	-- [V134] UNIFIED release (runs even when wantBlock still set). Old code only released in
+	-- `elseif State.blocking` — so a sticky wantBlock (zombie threat) never dropped guard.
+	if State.blocking then
 		local keepForCluster = (multiThreat and farContact
 			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0)))
 			or (State.multiHoldUntil and now < State.multiHoldUntil)
-		if not keepForCluster
-		   and (now >= State.holdUntil or (now - State.lastPress) > Config.ReleaseGap) then
-			releaseBlock()
+		-- Live threats still needing cover?
+		local liveThreat = false
+		for i = 1, #Threats do
+			local th = Threats[i]
+			if th and not th.feinted and not th.dodged and not th.coveredByIFrames then
+				local endAbs = th.lastContactAbs or th.contactAbs or 0
+				if endAbs > now - 0.08 then liveThreat = true; break end
+			end
+		end
+		if not liveThreat then
+			keepForCluster = false
 			State.multiHoldUntil = 0
+		end
+		local holdMax = Config.BlockHoldMax or 1.45
+		local pastMax = State.lastPress > 0 and (now - State.lastPress) >= holdMax
+		local pastHold = now >= (State.holdUntil or 0)
+		local pastGap  = State.lastPress > 0 and (now - State.lastPress) > (Config.ReleaseGap or 0.40)
+			and not liveThreat
+		if pastMax or (not keepForCluster and (pastHold or pastGap)) then
+			if Config.DeepDiag and pastMax then
+				diagPush(("BLOCK-REL t=%.2f  reason=holdMax(%.2fs) liveThreat=%s")
+					:format(now, holdMax, tostring(liveThreat)))
+			end
+			releaseBlock()
 		end
 	end
 
