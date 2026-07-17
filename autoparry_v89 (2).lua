@@ -235,7 +235,7 @@ local Config = {
 	-- которая ПОЛНАЯ при ping→0 и линейно гаснет к нулю на LowPingThresh (при среднем/высоком
 	-- пинге = 0 → рабочий сетап автора НЕ трогаем).
 	LowPingFloor   = 0.030,   -- макс. добавка к lead при ping→0 (сек)
-	LowPingThresh  = 0.090,   -- пинг (сек), выше которого добавка = 0
+	LowPingThresh  = 0.090,   -- пинг (сек), выше которого ��обавка = 0
 	-- [V94] Подняты капы: диаг2 показал реальный RTT=345ms, а прежние UplinkMax=0.33/PingCap=0.32
 	-- САМИ резали компенсацию до ~330ms → на высоком пинге блок недокомпенсировался даже с верным
 	-- getPingRaw. Теперь тянем до 0.5с. На умеренном пинге (60–150) это ни на что не влияет (там
@@ -477,6 +477,13 @@ local Config = {
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
 	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-режим
+	-- [V73] multi-target knobs
+	BlockCooldown     = 0.50,
+	SequentialSpread  = 0.78,
+	MultiFaceAngleMax = 70,
+	MultiFaceJitter   = 0.30,
+	MultiFaceOnlyFront= true,
+	MinActGap         = 0.030,
 	-- [V62] desync flicker: НИКОГДА не переиспользовать реальные геймплейные
 	-- дорожки (walk/run/emote) как decoy — только whitelisted idle или выделенный
 	-- decoy-т����ек. Иначе flicker д������ргал твою реальную анимацию на 90Гц.
@@ -508,7 +515,7 @@ local Config = {
 	FaceLeadWindow= 0.30,
 	FaceGoodDot   = 0.55,
 	-- [V91] ПРЕДИКТ РОТАЦИИ автофейса: целимся чуть НАПЕРЁД движения врага (ведём его
-	-- позицию по скорости на FaceLead сек), чтобы facing не отставал от стрейфа/забегания
+	-- позицию по скорости на FaceLead сек), чтобы facing не отставал от ст��ейфа/забегания
 	-- за спину. Держим предикт малым (иначе перелёт при резкой смене направления).
 	FaceLead      = 0.07,   -- сек упреждения по скорости врага
 	FaceLeadMax   = 4,      -- студы: кап упрежде��ия
@@ -675,6 +682,7 @@ local State = {
 	faceGoalHard  = false,
 	faceGoalUntil = 0,
 	faceHum       = nil,
+	faceGoalPos   = nil,   -- [V73] midpoint facing goal
 }
 
 local Threats = {}
@@ -960,6 +968,63 @@ end
 -- сам момент контакта и пару кадров после). Velocity-lead УБРАН: сервер валидирует facing на
 -- ФАКТИЧЕСКУЮ позици�� атакующего в момент удара, упреждение по скорости уводило прицел вбок
 -- (в логах давало face=0.5 BACK на стрейфящем враге) → блок отклонялся.
+local function computeMultiFaceGoal()
+	if not Config.AutoFace then return nil end
+	local me = localHRP(); if not me then return nil end
+	local mePos = me.Position
+	local flatMe = me.CFrame.LookVector; flatMe = Vector3.new(flatMe.X, 0, flatMe.Z)
+	flatMe = flatMe.Magnitude > 0.05 and flatMe.Unit or Vector3.new(0, 0, 1)
+	local t = {}
+	for _, th in ipairs(Threats) do
+		if th.threatens and th.attackerHRP and th.attackerHRP.Parent then
+			local to = th.attackerHRP.Position - mePos
+			local d = Vector3.new(to.X, 0, to.Z)
+			local dist = d.Magnitude
+			if dist > 0.05 then
+				d = d.Unit
+				local front = flatMe:Dot(d) > 0.05
+				local key = th.attackerModel or th.attackerHRP or th.name
+				t[#t+1] = {k=key, dir=d, dist=dist, front=front}
+			end
+		end
+	end
+	if #t < 2 then return nil end
+	local best, bestAng = nil, nil
+	local maxA = math.rad(Config.MultiFaceAngleMax or 70)
+	for i = 1, #t-1 do for j = i+1, #t do
+		local a, b = t[i], t[j]
+		if a.k ~= b.k then
+			local ok = (not Config.MultiFaceOnlyFront) or (a.front and b.front)
+			if ok then
+				local ang = math.acos(math.clamp(a.dir:Dot(b.dir), -1, 1))
+				if ang <= maxA and (bestAng == nil or ang < bestAng) then
+					bestAng = ang; best = {a, b}
+				end
+			end
+		end
+	end end
+	if not best then return nil end
+	local a, b = best[1], best[2]
+	local bis = a.dir + b.dir
+	if bis.Magnitude < 0.05 then return nil end
+	bis = bis.Unit
+	local td = math.min(a.dist, b.dist) + math.abs(a.dist - b.dist)*0.35
+	local base = mePos + bis*td
+	local j = (Config.MultiFaceJitter or 0.30)
+	local side = (math.sin((FrameId % 12)/12 * math.pi * 2) + 1) * 0.5
+	local perp = Vector3.new(-bis.Z, 0, bis.X)
+	return base + perp * (math.min(a.dist, b.dist) * j * (side - 0.5) * 2)
+end
+
+local function setFaceGoalPos(pos, hard, holdFor)
+	if not Config.AutoFace then return end
+	if not pos then return end
+	State.faceGoalHRP = nil
+	State.faceGoalPos = pos
+	State.faceGoalHard = hard and true or false
+	State.faceGoalUntil = os.clock() + (holdFor or 0.15)
+end
+
 local function setFaceGoal(targetHRP, hard, holdFor)
 	if not Config.AutoFace then return end
 	if not targetHRP or not targetHRP.Parent then return end
@@ -1293,7 +1358,7 @@ local function willHitMe(th)
 	-- текущий (rawDot) → он поворачивается в нашу сторо��у. Работает и в High, и в Low.
 	local rawDot = rawL:Dot(toMe)
 	-- [V90] DRAG/SNAP-TURN — ловим по ЗНАКУ д��вор��та (facing приближается к нам между кадрами),
-	-- а не по мгновенной angY (она шумная и ч��сто 0 между physics-степами → старый детект
+	-- а не по мгновенной angY (она шумная и ч����сто 0 между physics-степами → старый детект
 	-- пропускал «закрученные» атаки). Два независимых источника доворота, любого достаточно:
 	--   • physics-предикт: predLook уже развёрнут к нам сильнее те��ущего (faceDotPred > rawDot)
 	--   • измере��ный ��оворот за п��ошлый кадр: facing реально стал ближе к нам (prevLook→rawL)
@@ -1536,7 +1601,7 @@ local function willHitMe(th)
 			-- [V94] AIM-AWARE пр��дикт facing к МОМЕ��ТУ contact. Серверный хитбокс строится по yaw
 			-- атакующего в момент удара (дамп VictimHitboxService). Прежний predLook капался жёстко
 			-- на RotPredMaxDegHigh=55° → враг, доворачивающийся к нам со спины/сбоку, «не долетал»
-			-- предиктом → back-facing gate его резал → MISS/поздний ответ (жалоба «бьёт и
+			-- предиктом → back-facing gate его резал → MISS/поздний отве�� (жалоба «бьёт и
 			-- поворачивается — скрипт не вовремя»). Считаем знаковый угол rawL→toMe и сколько враг
 			-- РЕАЛЬНО успеет повернуть за tHit (rotRate = макс физической и измеренной кадр-к-кадру
 			-- угловой скорости). Поворачиваем rawL к нам не больше, чем позволяет скорость:
@@ -1606,10 +1671,22 @@ end
 local function nextCombo(attacker)
 	local now = os.clock()
 	local c = ComboState[attacker]
-	if not c or (now - c.last) > COMBO_RESET then c = { idx = 0, last = now } end
+	local isNew = not c or (now - c.last) > COMBO_RESET
+	if isNew then c = { idx = 0, last = now } end
 	c.idx  = (c.idx % 4) + 1
 	c.last = now
 	ComboState[attacker] = c
+	-- [V73] FPS: cap stale combo-state to avoid unbounded growth across many players
+	ComboState._count = (ComboState._count or 0) + (isNew and 1 or 0)
+	if ComboState._count > 64 then
+		local oldest, oldestName = math.huge, nil
+		for name, rec in pairs(ComboState) do
+			if type(rec) == "table" and rec.last and rec.last < oldest then
+				oldest = rec.last; oldestName = name
+			end
+		end
+		if oldestName then ComboState[oldestName] = nil; ComboState._count = ComboState._count - 1 end
+	end
 	return c.idx
 end
 
@@ -1625,7 +1702,7 @@ local function loadGameModules()
 		if cfgMod then GameData.cfg = require(cfgMod) end
 		local cauMod = shared and shared:FindFirstChild("Utils") and shared.Utils:FindFirstChild("CombatAnimationUtils")
 		if cauMod then GameData.cau = require(cauMod) end
-		-- [V132] CombatPingAnimUtils: реальная скорость анимации M2/M1 затормаживается на пинге
+		-- [V132] CombatPingAnimUtils: реальная скорость аним��ции M2/M1 затормаживается на пинге
 		-- (PingAnimSpeedMultiplier), поэтому контакт прилетает позже, чем base / aMult.
 		local pauMod = shared and shared:FindFirstChild("Utils") and shared.Utils:FindFirstChild("CombatPingAnimUtils")
 		if pauMod then GameData.pau = require(pauMod) end
@@ -1760,6 +1837,13 @@ local function resolveAnimMeta(id)
 		if legacy then meta.kind = legacy.t end
 	end
 	AnimMeta[id] = meta
+	-- [V73] FPS: cap metadata cache
+	if not AnimMetaCount then AnimMetaCount = 0 end
+	AnimMetaCount = AnimMetaCount + 1
+	if AnimMetaCount > 250 then
+		for k in pairs(AnimMeta) do AnimMeta[k] = nil end
+		AnimMetaCount = 0
+	end
 	return meta
 end
 
@@ -1833,7 +1917,7 @@ local function indexAllAnims()
 							-- Теперь любая не-защитная / не-реакционная / не-idle анимка боевого стиля = SKILL.
 							-- Ловится по keyframe-таймлайну (hitTimelineBase). Ложняков нет: реакции/блок/
 							-- idle/walk/dash уже исключены, а папка гарантированно боевая (есть M1/M2).
-							-- Список keyword'ов больше не нужен — покрываем ВСЕ текущие и будущие спец-удары.
+							-- Список keyword'ов больше не нужен — покрываем ВСЕ текущие и ��удущие спец-удары.
 							if not kind and isStyleFolder then kind = "SKILL" end
 						end
 						local id = animIdOf(child)
@@ -2149,7 +2233,9 @@ local function playBlockAnim()
 	if h and h.LoadAnim then
 		local ok, tr = pcall(function() return h.LoadAnim(char, "Blocking", anim, nil, false) end)
 		if ok and tr then
+			local oldTr = AnimLib.tracks.Blocking
 			AnimLib.tracks.Blocking = tr
+			pcall(function() if oldTr and oldTr ~= tr and oldTr.Destroy then oldTr:Destroy() end end)
 			pcall(function() if not tr.IsPlaying then tr:Play(0.08) end end)
 			return
 		end
@@ -2159,7 +2245,11 @@ local function playBlockAnim()
 	local tr = AnimLib.tracks.Blocking
 	if not tr or not tr.IsPlaying then
 		pcall(function()
-			if not tr then tr = animator:LoadAnimation(anim); AnimLib.tracks.Blocking = tr end
+			if not tr then
+				local oldTr = AnimLib.tracks.Blocking
+				tr = animator:LoadAnimation(anim); AnimLib.tracks.Blocking = tr
+				pcall(function() if oldTr and oldTr ~= tr and oldTr.Destroy then oldTr:Destroy() end end)
+			end
 			tr.Priority = Enum.AnimationPriority.Action
 			if not tr.IsPlaying then tr:Play(0.08) end
 		end)
@@ -3531,7 +3621,19 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	local clusterStrategy = nil
 	if Config.MultiThreatGuard and clusterN >= (Config.MultiThreatMinN or 2) then
 		local iframeSpan = math.max(0, (Config.IFrameDur or 0.30) - 0.07)
-		clusterStrategy = clusterSpread <= iframeSpan and "IFRAME_CLUSTER" or "HELD_GUARD"
+		local blockCd = Config.BlockCooldown or 0.5
+		local seqSpread = Config.SequentialSpread or 0.78
+		-- [V73] SEQUENTIAL: separate presses if spread is enough and second press clears cooldown
+		if clusterN == 2 and clusterSpread >= seqSpread and not clusterHeavy then
+			local a, b = cluster[1], cluster[2]
+			local spreadOk = (b.contactAbs - a.contactAbs) >= blockCd + Config.PerfectLead + Config.MinActGap + 0.05
+			if not isMustDodge(a) and not isMustDodge(b) and spreadOk then
+				clusterStrategy = "SEQUENTIAL"
+			end
+		end
+		if not clusterStrategy then
+			clusterStrategy = clusterSpread <= iframeSpan and "IFRAME_CLUSTER" or "HELD_GUARD"
+		end
 		for _, th in ipairs(cluster) do
 			th.clusterStrategy = clusterStrategy
 		end
@@ -3568,7 +3670,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- MustDodge is its own protection path, independent of DodgeHeavy and cluster policy.
 	-- Scan all live imminent threats before any legacy heavy/escape decision.
 	-- [V128] Работает даже при выключенном Auto Dodge: анблокабл-грэбы блоком не остановить,
-	-- поэтому передаём bypassAutoOff=true (последний аргумент performDodge). Свой тумблер
+	-- поэтому передаём bypassAutoOff=true (последний аргумен�� performDodge). Свой тумблер
 	-- (Config.MustDodge) остаётся — им и отключается эта защита при желании.
 	local mustDodgeThreat = nil
 	for _, candidate in ipairs(imminent) do
@@ -3680,7 +3782,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				-- Пока parry доступен (canBlockNow) — блокируем/перфектим ВСЁ, что блокируемо, и НЕ
 				-- тратим додж. Все эвристики ниже (heavy/multi/burst/guardbreak) выполняем только
 				-- когда блок реально невозможен прямо сейчас. Неблокируемые атаки идут выше отдельным
-				-- путём must-dodge (isMustDodge), он не завязан на это условие.
+				-- ��утём must-dodge (isMustDodge), он не завязан на это условие.
 				local blockUp = canBlockNow()
 				if not blockUp and Config.DodgeOnParryCooldown ~= false then
 					-- A non-coverable multi cluster owns its strategy: keep one continuous guard.
@@ -3717,6 +3819,19 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- пересчитывает��я каждый кадр, поэтому как только удар первого разрешился — мгновенно
 	-- перекид��ваемся на следующего (тайм-мультиплекс поворота по времени контакта). wantBlock —
 	-- запасная цель, если facing-кандидата в окне ещё нет.
+	-- [V73] midpoint facing for close-angle multi-targets
+	local midPos = computeMultiFaceGoal()
+	if midPos then
+		local nearest = math.huge
+		for _, th in ipairs(imminent) do
+			local dt = (th.contactAbs or now) - now
+			if dt < nearest then nearest = dt end
+		end
+		local hard = nearest <= (Config.BlockFaceHardDt or 0.30) + up
+		setFaceGoalPos(midPos, hard, math.max(nearest, 0) + (Config.HoldAfter or 0.12) + 0.08)
+		faceTgt = nil
+	end
+
 	local turnTo = faceTgt or wantBlock
 	if turnTo and turnTo.attackerHRP then
 		local dtc = turnTo.contactAbs - now
@@ -3773,7 +3888,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- атакующему в радиусе, если наш стиль Boxing и M2 не на кулдауне. Стоит ПОСЛЕ must-dodge
 	-- (грэбы всё равно доджим) и обычных додж��й, но ДО блока — counter ЗАМЕНЯЕТ парри. НЕ зависит
 	-- от wantBlock/willHitMe (тот баговал на delayed-hitbox M2) — скан идёт по сырым Threats, так
-	-- что counter срабатывает даже когда предиктор-геометрия отказала. Выстрелил → скип блока.
+	-- что counter срабатывает даже когда предиктор-геометрия отка��ала. Выстрелил → скип блока.
 	-- [V129] GRAPPLE WIN — оспорить вражеский тяжёлый нашим M2 (последний коммит в клэш). Стоит
 	-- ПОСЛЕ must-dodge (грэбы всё равно доджим первым приоритетом) и ДО boxing-counter/блока.
 	if tryGrappleWin(now) then return end
@@ -3850,7 +3965,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		-- только б��ижайше��о — так guard не отпускается в се��едине burst и каждый
 		-- последующий удар любого врага ловится как normal-block (BLOCKABLE↑, HIT↓).
 		local base = wantBlock.contactAbs
-		if multiThreat and farContact and farContact > base then base = farContact end
+		-- [V73] SEQUENTIAL: do not extend hold to far contact, so we can re-press for the second
+		if multiThreat and farContact and farContact > base and clusterStrategy ~= "SEQUENTIAL" then
+			base = farContact
+		end
 		State.holdUntil = math.max(State.holdUntil,
 			base + Config.HoldAfter + (Config.HoldLateGrace or 0) + holdExtra)
 	elseif State.blocking then
@@ -3862,8 +3980,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		local keepForCluster = (multiThreat and farContact
 			and now < (farContact + Config.HoldAfter + (Config.HoldLateGrace or 0)))
 			or (State.multiHoldUntil and now < State.multiHoldUntil)
-		if not keepForCluster
-		   and (now >= State.holdUntil or (now - State.lastPress) > Config.ReleaseGap) then
+		-- [V73] do not release guard by ReleaseGap while in multi-threat/cluster latch
+		local releaseByGap = (not multiThreat) and (not (State.multiHoldUntil and now < State.multiHoldUntil))
+			and (now - State.lastPress) > Config.ReleaseGap
+		if not keepForCluster and (now >= State.holdUntil or releaseByGap) then
 			releaseBlock()
 			State.multiHoldUntil = 0
 		end
@@ -3987,6 +4107,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	local ksKey = tostring(kind) .. ":" .. tostring(rec.style or "?")
 	local ks = ResidByKS[ksKey]; if not ks then ks = { sum = 0, n = 0 }; ResidByKS[ksKey] = ks end
 	ks.sum = ks.sum + predErr; ks.n = ks.n + 1
+	if ks.n > 100 then ks.sum = ks.sum * (100 / ks.n); ks.n = 100 end  -- [V73] cap
 	local resAvg = ks.sum / ks.n
 	local resNShown = ks.n
 
@@ -4012,6 +4133,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	if rec.faceDot ~= nil then
 		local b = FaceByResult[result]; if not b then b = { sum = 0, n = 0 }; FaceByResult[result] = b end
 		b.sum = b.sum + rec.faceDot; b.n = b.n + 1
+		if b.n > 100 then b.sum = b.sum * (100 / b.n); b.n = 100 end  -- [V73] cap
 	end
 
 	local reasonStr = rec.blockedReason and (" STATE:" .. rec.blockedReason) or ""
@@ -4816,7 +4938,7 @@ DZ.cycleDesyncMode = cycleDesyncMode
 end  -- do (DESYNC-РЕЖИМЫ)
 if type(getgenv) == "function" then getgenv().AP_DESYNC_MODE = DZ.cycleDesyncMode end
 
--- ═��═════════════════ INVISIBLE + GHOST ═══════════════════
+-- ����═════════════════ INVISIBLE + GHOST ═══════════════════
 -- Ед��нственный top-level локал IV (как DZ) — ��тобы не упереться в лимит регистров.
 local IV = {}
 do
@@ -4968,7 +5090,7 @@ local function reportRaknetScan()
 	end
 	table.sort(cand, function(a, b) return (a.near / (a.far + 1)) > (b.near / (b.far + 1)) end)
 	if #cand == 0 then
-		aclog("[DESYNC-SCAN] 0 пакетов поймано — либо raknet-хук не видит трафик в этой сбо��ке, л��бо не св��нгал во время сессии.")
+		aclog("[DESYNC-SCAN] 0 пакетов поймано — либо raknet-хук не видит трафик в ��той сбо��ке, л��бо не св��нгал во время сессии.")
 		desyncPush("[SCAN] 0 packets captured (hook saw no traffic, or no swing during session)")
 		return
 	end
@@ -5002,7 +5124,7 @@ local function runRaknetScanSession()
 end
 if type(getgenv) == "function" then getgenv().AP_RAKNET_SCAN = runRaknetScanSession end
 
--- [V74] DESYNC SELF-VERIFY. Как понять, работает ли desync ВООБЩЕ, без второго
+-- [V74] DESYNC SELF-VERIFY. К��к понять, работает ли desync ВООБЩЕ, без второго
 -- аккаунта: Animator.AnimationPlayed срабатывает на КАЖДЫЙ т��ек, который стартует на
 -- нашем аниматоре — а это ровно то, что Roblox реплицируе�� другим клиентам. Значит
 -- если при свинге сюда прилетают И реальная атака, И decoy-idle — оба уходят в сеть,
@@ -5217,7 +5339,7 @@ task.spawn(function()
 			return oldNamecall(self, ...)
 		end
 		-- наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без обраб��тки,
-		-- иначе он снова отложится (бесконечный цикл) или потеряется.
+		-- иначе ��н снова отложится (бесконечный цикл) или потеряется.
 		if State.desyncPassthrough then return oldNamecall(self, ...) end
 
 		local a1 = (select(1, ...))
@@ -5369,7 +5491,7 @@ local function summary()
 	local blockable = total - stateHits
 	local acc = blockable > 0 and (100 * ((t.PERFECT or 0) + (t.EARLY or 0)) / blockable) or 0
 	return table.concat({
-		"===== AUTOPARRY V71 DIAG =====",
+		"===== AUTOPARRY V73 DIAG =====",
 		("player=%s  ping=%.0fms  uplink=%.0fms  mode=%s  autoface=%s"):format(LocalPlayer.Name, getPingRaw()*1000, uplink()*1000, Config.Mode, tostring(Config.AutoFace)),
 		("model: PURE anim timeline + live TimePosition (NO calibration) | ping=robust median; lead=%.0fms hold=%.0fms window=[%.0f,%.0f]ms")
 			:format(Config.PerfectLead*1000, Config.HoldAfter*1000, Config.PerfectMin*1000, Config.PerfectWindow*1000),
@@ -5687,6 +5809,7 @@ end   -- [V130] close AutoParry visuals module (do-block for register budget)
 -- Пока есть активная цель — гасим Humanoid.AutoRotate, чтобы игра не докручивала HRP к движению
 -- (это и рвало снап + давало д��рганье). Как только цель истекла — О��ИН раз возвращаем AutoRotate.
 local function applyFacing()
+	local goalPos = State.faceGoalPos   -- [V73]
 	local goalHRP = State.faceGoalHRP
 	-- [V101] EQUIP-ГЕЙТ ротации (юзер: скрипт крути�� перса без одетых рук). Игра запрещает
 	-- блок/парри/M1 при Equip ~= true (isInBlockingPreventedState), значит и доворачиваться
@@ -5694,10 +5817,12 @@ local function applyFacing()
 	-- истечении цели), чтобы отдать управление игроку. Кросс-платформенно (атрибут, не клавиша T).
 	local ec = localChar()
 	local equipped = ec and ec:GetAttribute("Equip") == true
-	if not goalHRP or os.clock() > (State.faceGoalUntil or 0) or not goalHRP.Parent
+	if not (goalHRP or goalPos) or os.clock() > (State.faceGoalUntil or 0)
+	   or (goalHRP and not goalHRP.Parent)
 	   or (Config.RequireEquip ~= false and not equipped) then
 		if State.faceHum then pcall(function() State.faceHum.AutoRotate = true end); State.faceHum = nil end
 		State.faceGoalHRP = nil
+		State.faceGoalPos = nil
 		return
 	end
 	if not Config.AutoFace then return end
@@ -5713,7 +5838,7 @@ local function applyFacing()
 	-- = vel*latency растёт → мы смотрим туда, где враг БЫЛ, сервер видит спину → блок отклонён.
 	-- Упреждаем: aim = pos + flatVel * (ping-based lead). Стоит на месте (vel≈0) �� lead≈0 → как
 	-- раньше (нет регресса на статичном боксинге). Рывок → смотрим на СЕРВЕРНУЮ позицию врага.
-	local aimPos = goalHRP.Position
+	local aimPos = goalPos or goalHRP.Position
 	local lead   = math.clamp(getPing() * (Config.FacePingLead or 1.0), 0, Config.FaceLeadCap or 0.28)
 	if lead > 0 then
 		-- прямое чтение свойства (goalHRP уже проверен на .Parent) — БЕЗ pcall-замыкания,
