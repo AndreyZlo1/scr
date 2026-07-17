@@ -13,7 +13,6 @@ do
 	local G = (type(getgenv) == "function") and getgenv() or _G
 	if not G[k] then G[k] = function(f) return f end end
 end
-​
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
