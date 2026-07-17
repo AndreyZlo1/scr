@@ -5638,24 +5638,24 @@ local Viz = { t = 0 }
 
 local NEAR = 0.6
 
-local function rotY(v, ang)
+Viz.rotY = function(v, ang)
 	local c, s = math.cos(ang), math.sin(ang)
 	return Vector3.new(v.X * c - v.Z * s, 0, v.X * s + v.Z * c)
 end
 
-local function proj(cam, world)
+Viz.proj = function(cam, world)
 	local sp = cam:WorldToViewportPoint(world)
 	return Vector2.new(sp.X, sp.Y), sp.Z
 end
 
-local function drawWorldSeg(cam, a, b, color, thick)
-	local a2d, az = proj(cam, a)
-	local b2d, bz = proj(cam, b)
+Viz.drawWorldSeg = function(cam, a, b, color, thick)
+	local a2d, az = Viz.proj(cam, a)
+	local b2d, bz = Viz.proj(cam, b)
 	if az <= NEAR and bz <= NEAR then return end
 	if az <= NEAR or bz <= NEAR then
 		local t = (NEAR - az) / (bz - az)
 		local mid = a:Lerp(b, t)
-		local m2d = proj(cam, mid)
+		local m2d = Viz.proj(cam, mid)
 		if az <= NEAR then a2d = m2d else b2d = m2d end
 	end
 	local ln = LinePool:get(); if not ln then return end
@@ -5663,7 +5663,7 @@ local function drawWorldSeg(cam, a, b, color, thick)
 	ln.Color, ln.Thickness, ln.Transparency, ln.Visible = color, thick, 1, true
 end
 
-local function pickTarget()
+Viz.pickTarget = function()
 	local vt = State.vizTarget
 	if vt and vt.model and vt.model.Parent and vt.hrp and vt.hrp.Parent then
 		return vt.model, vt.hrp
@@ -5709,7 +5709,7 @@ Viz.bboxOf = function(model)
 	return nil
 end
 
-local function drawFlatRing(cam, model, hrp, hot)
+Viz.drawFlatRing = function(cam, model, hrp, hot)
 	local footY = hrp.Position.Y - 2.8
 	local radius = 3.2
 	local bc, bs = Viz.bboxOf(model)
@@ -5732,17 +5732,17 @@ local function drawFlatRing(cam, model, hrp, hot)
 	for i = 0, RING_SEG - 1 do
 		local j = (i + 1) % RING_SEG
 		local f = 0.5 + 0.5 * math.sin(i / RING_SEG * math.pi * 2 + t * 2.2)
-		drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
+		Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
 	end
 end
 
-local function footYOf(model, hrp)
+Viz.footYOf = function(model, hrp)
 	local y = hrp.Position.Y - 2.8
 	local bc, bs = Viz.bboxOf(model)
 	if bc and bs then y = bc.Y - bs.Y * 0.5 + 0.05 end
 	return y
 end
-local function drawTargetHitbox(cam, model, hrp)
+Viz.drawTargetHitbox = function(cam, model, hrp)
 	local look = hrp.CFrame.LookVector
 	local flook = Vector3.new(look.X, 0, look.Z)
 	if flook.Magnitude < 0.05 then return end
@@ -5751,7 +5751,7 @@ local function drawTargetHitbox(cam, model, hrp)
 	local style = styleOf(model)
 	local reach = math.max(styleForward(style, "M1"), styleForward(style, "M2")) + VIZ_CONE_PAD
 	local half  = VIZ_CONE_HALF
-	local y = footYOf(model, hrp)
+	local y = Viz.footYOf(model, hrp)
 	local origin = Vector3.new(hrp.Position.X, y, hrp.Position.Z)
 
 		local col = Config.ConeSafe
@@ -5771,11 +5771,11 @@ local function drawTargetHitbox(cam, model, hrp)
 	local wArc = Viz.coneW   -- [V112] переиспользуемые буферы, без аллокации таблиц/кадр
 	for i = 0, CONE_SEG do
 		local ang = -half + (i / CONE_SEG) * (half * 2)
-		wArc[i] = origin + rotY(flook, ang) * reach
+		wArc[i] = origin + Viz.rotY(flook, ang) * reach
 	end
-	local o2d, oz = proj(cam, origin)
+	local o2d, oz = Viz.proj(cam, origin)
 	local a2d, az = Viz.cone2d, Viz.coneZ
-	for i = 0, CONE_SEG do a2d[i], az[i] = proj(cam, wArc[i]) end
+	for i = 0, CONE_SEG do a2d[i], az[i] = Viz.proj(cam, wArc[i]) end
 	for i = 0, CONE_SEG - 1 do
 		if oz > NEAR and az[i] > NEAR and az[i + 1] > NEAR then
 			local tr = TriPool:get()
@@ -5785,16 +5785,16 @@ local function drawTargetHitbox(cam, model, hrp)
 			end
 		end
 	end
-	drawWorldSeg(cam, origin, wArc[0], col, 2)
-	drawWorldSeg(cam, origin, wArc[CONE_SEG], col, 2)
-	for i = 0, CONE_SEG - 1 do drawWorldSeg(cam, wArc[i], wArc[i + 1], col, 2) end
+	Viz.drawWorldSeg(cam, origin, wArc[0], col, 2)
+	Viz.drawWorldSeg(cam, origin, wArc[CONE_SEG], col, 2)
+	for i = 0, CONE_SEG - 1 do Viz.drawWorldSeg(cam, wArc[i], wArc[i + 1], col, 2) end
 end
 
-local function drawRestrictZone(cam)
+Viz.drawRestrictZone = function(cam)
 	if not (Config.RestrictZone and Config.RestrictShowZone) then return end
 	local z = activeRestrictZone(os.clock()); if not z then return end
 	local aHRP = z.th.attackerHRP; if not (aHRP and aHRP.Parent) then return end
-	local y  = footYOf(z.th.attackerModel, aHRP)
+	local y  = Viz.footYOf(z.th.attackerModel, aHRP)
 	local cx, cz = z.center.X, z.center.Z
 	local r  = z.keepOut * (1 + math.sin(Viz.t * 4) * 0.02)
 	local center3 = Vector3.new(cx, y, cz)
@@ -5805,7 +5805,7 @@ local function drawRestrictZone(cam)
 		for i = 0, steps do
 			local a = a0 + (a1 - a0) * (i / steps)
 			local p = Vector3.new(cx + math.cos(a) * rr, y, cz + math.sin(a) * rr)
-			if prev then drawWorldSeg(cam, prev, p, Config.RestrictCol, thick) end
+			if prev then Viz.drawWorldSeg(cam, prev, p, Config.RestrictCol, thick) end
 			prev = p
 		end
 	end
@@ -5817,15 +5817,15 @@ local function drawRestrictZone(cam)
 	end
 
 	local ch = math.max(r * 0.14, 0.7)
-	drawWorldSeg(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), Config.RestrictCol, 2)
-	drawWorldSeg(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), Config.RestrictCol, 2)
+	Viz.drawWorldSeg(cam, Vector3.new(cx - ch, y, cz), Vector3.new(cx + ch, y, cz), Config.RestrictCol, 2)
+	Viz.drawWorldSeg(cam, Vector3.new(cx, y, cz - ch), Vector3.new(cx, y, cz + ch), Config.RestrictCol, 2)
 
 	if z.aPos then
 		local from = Vector3.new(z.aPos.X, y, z.aPos.Z)
 		local dir  = Vector3.new(cx - z.aPos.X, 0, cz - z.aPos.Z)
 		if dir.Magnitude > 0.1 then
 			local edge = center3 - dir.Unit * r
-			drawWorldSeg(cam, from, edge, Config.RestrictCol, 1.5)
+			Viz.drawWorldSeg(cam, from, edge, Config.RestrictCol, 1.5)
 		end
 	end
 end
@@ -5847,13 +5847,13 @@ function vizUpdate(dt)
 	Viz.lastDraw = nowc
 
 	LinePool:begin(); TriPool:begin()
-	local model, hrp = pickTarget()
+	local model, hrp = Viz.pickTarget()
 	if model and hrp then
 		local hot = (State.status == "PARRY" or State.status == "DODGE")
-		if Config.VizHitbox ~= false then drawTargetHitbox(cam, model, hrp) end
-		if Config.VizRing ~= false then drawFlatRing(cam, model, hrp, hot) end
+		if Config.VizHitbox ~= false then Viz.drawTargetHitbox(cam, model, hrp) end
+		if Config.VizRing ~= false then Viz.drawFlatRing(cam, model, hrp, hot) end
 	end
-	if Config.VizRestrict ~= false then drawRestrictZone(cam) end
+	if Config.VizRestrict ~= false then Viz.drawRestrictZone(cam) end
 	LinePool:finish(); TriPool:finish()
 end
 end   -- [V130] close AutoParry visuals module (do-block for register budget)
