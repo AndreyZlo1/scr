@@ -1,6 +1,5 @@
 -- ИЗМЕНЕНО: 2026-07-17 02:21:20 UTC | AutoParry V74 | hitbox-driven dodge + Boxing M2 timing
 -- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
-​
 -- Luraph macro raw shim. The per-Heartbeat scheduler is wrapped in a
 -- LPH_NO_VIRTUALIZE(function() ... end) macro so Luraph keeps the parry-timing
 -- path native (virtualized timing math = missed parries). You CANNOT declare a
