@@ -1285,18 +1285,14 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	end
 
 	local sz = V93.sizes[th.kind]
+	-- Do not extrapolate the local Humanoid's instantaneous velocity across the whole windup.
+	-- TRACE 385833 proved that this regression moved recognition from +5ms to +250..430ms while
+	-- server overlap/contact stayed on the normal timeline. Humanoid input velocity is not a
+	-- ballistic trajectory; compare the predicted attacker box against our live position each
+	-- Heartbeat instead. Step-in remains handled by attacker prediction above.
 	local myAt = myHRP.Position
-	if mode == "High" and tHit > 0 then
-		-- Server overlap happens at contact time for BOTH characters. Comparing projected
-		-- attacker geometry to our current position caused false positives while leaving the
-		-- box and late negatives while moving into it.
-		local mv = safeGet(myHRP, "AssemblyLinearVelocity", Vector3.zero)
-		local mLead = Vector3.new(mv.X * tHit, 0, mv.Z * tHit)
-		local cap = Config.WillHitCloseCap or 12
-		if mLead.Magnitude > cap then mLead = mLead.Unit * cap end
-		myAt = myAt + mLead
-	end
-	local halfW = (sz and sz.X * 0.5 or Config.HitHalfWidth or 3) + (mode == "High" and (Config.HighSlack or 0.35) or (Config.HitboxSlack or 0))
+	local halfW = (sz and sz.X * 0.5 or Config.HitHalfWidth or 3)
+		+ (mode == "High" and (Config.HighSlack or 0.35) or (Config.HitboxSlack or 0))
 	local halfH = (sz and sz.Y * 0.5 or 3) + 1.5
 	local halfD = sz and sz.Z * 0.5 or (Config.HitboxDepth or 4)
 	if math.abs(myAt.Y - origin.Y) > halfH then return false end
