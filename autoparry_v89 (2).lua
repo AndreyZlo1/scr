@@ -681,7 +681,10 @@ local V93 = {
 	hbChar = nil,
 	hbFrame = -1,
 	byOwner = {},                      -- Owner.Value → { part, ... } за текущий FrameId
-	-- [V111] PERF: кэш getPing по времени (пересчёт не чаще ~раза в кадр). Держим полями V93,
+	hbFirstSeen = setmetatable({}, { __mode = "k" }), -- part → first local observation clock
+	hbClaimBySid = {},                 -- VictimSwingId → threat/group currently owning that server swing
+	hbLiveSid = {},                    -- persistent scratch set for bounded claim cleanup
+	-- [V111] PERF:
 	-- НЕ отдельными local — лимит 200 живых локалов на функцию (модуль впритык).
 	pingCacheClock = -1,
 	pingCacheVal   = 0.08,
@@ -988,6 +991,8 @@ local hitboxIndex = LPH_NO_VIRTUALIZE(function()
 	V93.hbFrame = FrameId
 	local byOwner = V93.byOwner
 	for k in pairs(byOwner) do byOwner[k] = nil end
+	local liveSid = V93.hbLiveSid
+	for k in pairs(liveSid) do liveSid[k] = nil end
 	local folder = V93.hbFolder
 	if not (folder and folder.Parent) then
 		folder = Workspace:FindFirstChild("Hitboxes")
@@ -997,11 +1002,13 @@ local hitboxIndex = LPH_NO_VIRTUALIZE(function()
 	for idx, child in ipairs(folder:GetChildren()) do
 		if idx > 60 then break end
 		if child:IsA("BasePart") then
+			if not V93.hbFirstSeen[child] then V93.hbFirstSeen[child] = os.clock() end
 			local owner = child:FindFirstChild("Owner")
 			local atk   = child:FindFirstChild("AttackName")
 			if owner and atk and owner:IsA("StringValue") and atk:IsA("StringValue") then
 				local sid = child:GetAttribute("VictimSwingId")
 				if typeof(sid) == "string" and sid ~= "" then
+					liveSid[sid] = true
 					local aType = atk.Value
 					if aType == "M1" or aType == "M2" then V93.sizes[aType] = child.Size end
 					local nm  = owner.Value
@@ -1012,46 +1019,67 @@ local hitboxIndex = LPH_NO_VIRTUALIZE(function()
 			end
 		end
 	end
+	for sid in pairs(V93.hbClaimBySid) do
+		if not liveSid[sid] then V93.hbClaimBySid[sid] = nil end
+	end
 	return byOwner
 end)
 
--- Точная (как в игре) проверка: пересекает ли РЕАЛЬНЫЙ парт атакующего ��аш персонаж.
--- true — есть парт и он в нас; false — па��т(ы) есть, но мимо; nil — активного парта нет.
+-- Associate one replicated VictimSwingId with one animation threat/group. A same-owner/kind
+-- part is not authoritative until claimed: rapid combos overlap for HitboxDuration=0.15s.
+local function associatedHitbox(th)
+	if th.serverHitbox and th.serverHitbox.Parent then return th.serverHitbox end
+	local lst = hitboxIndex()[th.name]
+	if not lst then return nil end
+	local best, bestScore
+	for i = 1, #lst do
+		local part = lst[i]
+		local atk = part and part:FindFirstChild("AttackName")
+		local sid = part and part:GetAttribute("VictimSwingId")
+		if part.Parent and atk and atk:IsA("StringValue") and atk.Value == th.kind
+			and typeof(sid) == "string" and sid ~= "" then
+			local owner = V93.hbClaimBySid[sid]
+			local claimKey = th.group or th
+			if owner == nil or owner == claimKey then
+				local seen = V93.hbFirstSeen[part] or os.clock()
+				-- A part belonging to this animation cannot predate its detection except for tiny
+				-- replication ordering jitter. This rejects a previous combo strike's still-live part.
+				if seen >= th.detectClock - 0.035 then
+					local score = math.abs(seen - (th.contactAbs or (th.detectClock + (th.contact0 or 0))))
+					if not bestScore or score < bestScore then best, bestScore = part, score end
+				end
+			end
+		end
+	end
+	if best then
+		local sid = best:GetAttribute("VictimSwingId")
+		V93.hbClaimBySid[sid] = th.group or th
+		th.serverHitbox, th.serverSwingId = best, sid
+		if th.group then th.group.serverHitbox, th.group.serverSwingId = best, sid end
+	end
+	return best
+end
+
+-- true/false only for the exact associated server swing; nil means no authority yet.
 local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
 	if th and th.gtQueryFrame == FrameId then return th.gtQueryResult end
-	if not ownerName then return nil end
-	local lst = hitboxIndex()[ownerName]
-	if not lst or #lst == 0 then
-		if th then th.gtQueryFrame, th.gtQueryResult = FrameId, nil end
+	if not ownerName or not th then return nil end
+	local part = (th.group and th.group.serverHitbox) or th.serverHitbox or associatedHitbox(th)
+	if not (part and part.Parent) then
+		th.gtQueryFrame, th.gtQueryResult = FrameId, nil
 		return nil
 	end
 	local char = localChar()
 	if not char then return nil end
 	local params = V93.hbParams
 	if not params then
-		params = OverlapParams.new()
-		params.FilterType = Enum.RaycastFilterType.Include
-		params.MaxParts = 20
+		params = OverlapParams.new(); params.FilterType = Enum.RaycastFilterType.Include; params.MaxParts = 20
 		V93.hbParams = params
 	end
-	if V93.hbChar ~= char then
-		params.FilterDescendantsInstances = { char }
-		V93.hbChar = char
-	end
-	for i = 1, #lst do
-		local part = lst[i]
-		local atk = part and part:FindFirstChild("AttackName")
-		-- VictimHitboxService keys a real report by Owner + AttackName + VictimSwingId.
-		-- We do not have the server-created swing id in AnimationPlayed, but must at least
-		-- never correlate an M1 part to an M2 threat (or vice versa).
-		if part.Parent and atk and atk:IsA("StringValue") and (not th or atk.Value == th.kind)
-			and #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0 then
-			if th then th.gtQueryFrame, th.gtQueryResult = FrameId, true end
-			return true
-		end
-	end
-	if th then th.gtQueryFrame, th.gtQueryResult = FrameId, false end
-	return false
+	if V93.hbChar ~= char then params.FilterDescendantsInstances = { char }; V93.hbChar = char end
+	local hit = #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0
+	th.gtQueryFrame, th.gtQueryResult = FrameId, hit
+	return hit
 end)
 
 -- [V74] Return the closest hitbox part for a given owner, plus its distance to us.
@@ -1189,6 +1217,7 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local gt = realHitboxHitsMe(th.name, th)
 	if gt ~= nil then
 		th.gtConfirmed, th.trustedHit = gt == true, gt == true
+		th.recognitionSource = gt and "server-overlap" or "server-miss"
 		-- An active server part is authoritative: even a previously predicted candidate
 		-- is cancelled when the game's actual box misses us.
 		if not gt then th.predictLatched = false end
@@ -1197,7 +1226,10 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	-- Before the server part exists, preserve a positive High projection until ground-truth
 	-- arrives. This prevents interpolation/yaw jitter from deleting a long-windup M2 between
 	-- its valid early projection and the server's delayed Hitbox part.
-	if mode == "High" and th.predictLatched then return true end
+	if mode == "High" and th.predictLatched then
+		th.recognitionSource = "predicted-latch"
+		return true
+	end
 
 	local _, forward, predA, rawLook = hitboxGeom(th)
 	if not predA or not rawLook then return Config.FilterFailSafe end
@@ -1224,15 +1256,28 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	end
 
 	local sz = V93.sizes[th.kind]
+	local myAt = myHRP.Position
+	if mode == "High" and tHit > 0 then
+		-- Server overlap happens at contact time for BOTH characters. Comparing projected
+		-- attacker geometry to our current position caused false positives while leaving the
+		-- box and late negatives while moving into it.
+		local mv = safeGet(myHRP, "AssemblyLinearVelocity", Vector3.zero)
+		local mLead = Vector3.new(mv.X * tHit, 0, mv.Z * tHit)
+		local cap = Config.WillHitCloseCap or 12
+		if mLead.Magnitude > cap then mLead = mLead.Unit * cap end
+		myAt = myAt + mLead
+	end
 	local halfW = (sz and sz.X * 0.5 or Config.HitHalfWidth or 3) + (mode == "High" and (Config.HighSlack or 0.35) or (Config.HitboxSlack or 0))
 	local halfH = (sz and sz.Y * 0.5 or 3) + 1.5
 	local halfD = sz and sz.Z * 0.5 or (Config.HitboxDepth or 4)
-	if math.abs(myHRP.Position.Y - origin.Y) > halfH then return false end
-	local ox, oz = myHRP.Position.X - origin.X, myHRP.Position.Z - origin.Z
+	if math.abs(myAt.Y - origin.Y) > halfH then return false end
+	local ox, oz = myAt.X - origin.X, myAt.Z - origin.Z
 	local depth = ox * look.X + oz * look.Z
 	local side = math.abs(ox * (-look.Z) + oz * look.X)
 	local hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
 	th.trustedHit = hit
+	th.recognitionSource = hit and (mode == "High" and "predicted-overlap" or "current-overlap")
+		or (mode == "High" and "predicted-miss" or "current-miss")
 	if mode == "High" and hit then th.predictLatched = true end
 	if not hit then th.offTarget = true end
 	return hit
@@ -3109,6 +3154,13 @@ local function updateDodgeTxn(now)
 	local c = localChar()
 	if not tx.confirmed and c and c:GetAttribute("IFRAMES") == true then
 		tx.confirmed = true
+		-- Planning uses expected network confirmation; authoritative coverage starts when
+		-- the replicated IFRAMES flag is actually observed.
+		tx.lo, tx.hi = now, now + Config.IFrameDur
+		tx.untilAt = tx.hi + 0.08
+		if State.lastDodgeInfo then
+			State.lastDodgeInfo.iframeLo, State.lastDodgeInfo.iframeHi = tx.lo, tx.hi
+		end
 		local covered = 0
 		for _, th in ipairs(Threats) do
 			local contact = th.contactAbs
@@ -3210,9 +3262,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				th.deadLogged = true
 				local reason
 				if th.everThreatened == nil or th.everThreatened == false then
-					reason = th.offTarget
-						and "geometry-rejected (active real part missed us or predicted oriented box did not overlap)"
-						or "never-in-hitbox (no real overlap and predicted oriented box never overlapped)"
+					reason = ("geometry-rejected source=%s sid=%s")
+						:format(tostring(th.recognitionSource or "none"), tostring(th.serverSwingId or (th.group and th.group.serverSwingId) or "none"))
 					if th.offTarget then State.offTargetRej = (State.offTargetRej or 0) + 1 end
 				elseif th.enteredWindow then
 					reason = "in-window но не выбран EDF (перебит другой целью в т��т же кадр)"
