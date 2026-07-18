@@ -78,6 +78,7 @@ return function(Lib, Core)
         Ind_On      = false,
         Ind_Style   = "Panel",   -- "Panel" | "Free" | "Player" | "Simple"
         Ind_PlayerSide = "Left", -- "Left" | "Right" | "Bottom" (Player style only)
+		Ind_PlayerDesign = "Glass", -- Glass | Ribbon | Brackets | Nodes
         Ind_PlayerTextY = 0,     -- vertical text offset (px) for the Player style
         Ind_Drag    = true,      -- allow dragging the HUD (Panel / Free)
         Ind_Health  = true,
@@ -105,7 +106,10 @@ return function(Lib, Core)
 		Env_On=false, Env_Ambient=Color3.fromRGB(120,120,140), Env_Outdoor=Color3.fromRGB(100,105,120),
 		Env_FogColor=Color3.fromRGB(170,180,200), Env_FogStart=0, Env_FogEnd=1000,
 		Env_AtmosDensity=0.15, Env_AtmosColor=Color3.fromRGB(190,200,220), Env_Brightness=2, Env_ClockTime=14,
-		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(255,90,90),
+		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(88,165,255),
+		HitParticleColorB=Color3.fromRGB(165,95,255), HitParticleCount=20, HitParticleDuration=1.1,
+		HitParticleWireframe=true, HitParticleWireScale=0.4, HitParticleSpeedMin=2, HitParticleSpeedMax=32,
+		HitParticleGravity=-32, HitParticleMaxSystems=5,
 
         -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
         -- runs on Heartbeat, which fires at the monitor's refresh rate — so on a 144/240Hz screen
@@ -1155,7 +1159,10 @@ return function(Lib, Core)
         local c = drawCells[key]
         if c then return c end
         c = {
-			bg = newDrawing("Square", { Filled=true, Visible=false, Color=Color3.fromRGB(11,12,17), Transparency=0.72, ZIndex=5 }),
+            bg = newDrawing("Square", { Filled=true, Visible=false, Color=Color3.fromRGB(11,12,17), Transparency=0.72, ZIndex=5 }),
+            edgeA = newDrawing("Line", { Visible=false, Thickness=1, Color=Config.Ind_Accent, ZIndex=8 }),
+            edgeB = newDrawing("Line", { Visible=false, Thickness=1, Color=Config.Ind_Accent, ZIndex=8 }),
+            node = newDrawing("Circle", { Filled=true, Visible=false, Radius=3, NumSides=20, Color=Config.Ind_Accent, ZIndex=8 }),
             label = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMute, ZIndex = 7 }),
             value = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMain, ZIndex = 7 }),
             track = newDrawing("Line", { Thickness = 2, Visible = false, Color = WM.stroke, ZIndex = 6, Transparency = 0 }),
@@ -1166,7 +1173,7 @@ return function(Lib, Core)
         return c
     end
     local function hideDrawCell(c)
-		c.bg.Visible = false; c.label.Visible = false; c.value.Visible = false; c.track.Visible = false; c.fill.Visible = false
+		c.bg.Visible=false; c.edgeA.Visible=false; c.edgeB.Visible=false; c.node.Visible=false; c.label.Visible = false; c.value.Visible = false; c.track.Visible = false; c.fill.Visible = false
     end
     local function hideAllDrawCells()
         for _, c in pairs(drawCells) do c.alpha = 0; c.hasY = false; hideDrawCell(c) end
@@ -1207,7 +1214,17 @@ return function(Lib, Core)
                 local ratio = am and am.ratio or c.dispRatio
                 c.dispRatio = lerp(c.dispRatio, ratio, aA)
                 local col   = am and am.color or Config.Ind_Accent
-                c.bg.Position=Vector2.new(left-7*sc,rowY-4*sc); c.bg.Size=Vector2.new(width+14*sc,step-3*sc); c.bg.Color=Color3.fromRGB(11,12,17); c.bg.Transparency=c.alpha*0.78; c.bg.Visible=true
+                local design=(def==STYLE_DEFS.Player) and (Config.Ind_PlayerDesign or "Glass") or "Glass"
+                c.edgeA.Visible=false; c.edgeB.Visible=false; c.node.Visible=false
+                if design=="Glass" then
+                    c.bg.Position=Vector2.new(left-7*sc,rowY-4*sc); c.bg.Size=Vector2.new(width+14*sc,step-3*sc); c.bg.Color=Color3.fromRGB(11,12,17); c.bg.Transparency=c.alpha*0.78; c.bg.Visible=true
+                elseif design=="Ribbon" then
+                    c.bg.Position=Vector2.new(left-5*sc,rowY-2*sc); c.bg.Size=Vector2.new(width+10*sc,txtSize+8*sc); c.bg.Color=col; c.bg.Transparency=c.alpha*.18; c.bg.Visible=true
+                elseif design=="Brackets" then
+                    c.bg.Visible=false; c.edgeA.From=Vector2.new(left-7*sc,rowY-3*sc); c.edgeA.To=Vector2.new(left-7*sc,rowY+txtSize+7*sc); c.edgeB.From=Vector2.new(right+7*sc,rowY-3*sc); c.edgeB.To=Vector2.new(right+7*sc,rowY+txtSize+7*sc); c.edgeA.Color=col; c.edgeB.Color=col; c.edgeA.Transparency=c.alpha; c.edgeB.Transparency=c.alpha; c.edgeA.Visible=true; c.edgeB.Visible=true
+                else
+                    c.bg.Visible=false; c.node.Position=Vector2.new(left-7*sc,rowY+txtSize*.5); c.node.Radius=math.max(2,3*sc); c.node.Color=col; c.node.Transparency=c.alpha; c.node.Visible=true
+                end
 
                 c.label.Size = txtSize
                 c.label.Text = STAT_LABELS[key] or key
@@ -1227,7 +1244,7 @@ return function(Lib, Core)
                 -- stronger hierarchy and less bare floating text. Panel remains untouched.
                 local lineY = rowY + txtSize + 5 * sc
                 c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
-                c.track.Thickness = math.max(1, 2 * sc)
+                c.track.Thickness = math.max(1, (design=="Ribbon" and 4 or 2) * sc)
                 c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.5; c.track.Visible = true
 
                 local fillW = width * math.clamp(c.dispRatio, 0, 1)
@@ -1459,21 +1476,40 @@ return function(Lib, Core)
 
 	-- Server-authored successful hit broadcast. Subscribe to the URE directly so we do not
 	-- overwrite CombatBroadcast.On's single callback used by the game's Evasive module.
-	local HitFX={particles={}}
+	local HitFX={systems={}}
+	local TETRA={Vector3.new(1,1,1),Vector3.new(1,-1,-1),Vector3.new(-1,1,-1),Vector3.new(-1,-1,1)}
+	local TEDGES={{1,2},{1,3},{1,4},{2,3},{2,4},{3,4}}
 	local function victimRoot(name)
 		local p=Players:FindFirstChild(name); local c=p and p.Character or Workspace:FindFirstChild(name)
 		return c and c:FindFirstChild("HumanoidRootPart")
 	end
+	local function particleColor(t) return Config.HitFX_Color:Lerp(Config.HitParticleColorB,t) end
+	local function destroySystem(sys)
+		for _,p in ipairs(sys.pts) do for _,l in ipairs(p.lines) do pcall(function() l:Remove() end) end end
+	end
+	local function spawnParticles(pos)
+		while #HitFX.systems >= (Config.HitParticleMaxSystems or 5) do destroySystem(table.remove(HitFX.systems,1)) end
+		local pts={}; local count=math.clamp(Config.HitParticleCount or 20,6,32)
+		for i=1,count do local dir=Vector3.new(math.random()-.5,math.random()*.9+.15,math.random()-.5).Unit; local z=math.random(); local lines={}
+			for e=1,6 do lines[e]=newDrawing("Line",{Visible=false,Thickness=.8,Color=Config.HitFX_Color,ZIndex=80}) end
+			pts[i]={pos=pos+dir*.08,vel=dir*((Config.HitParticleSpeedMin or 2)+z*((Config.HitParticleSpeedMax or 32)-(Config.HitParticleSpeedMin or 2))),ang=Vector3.new(math.random()*6.28,math.random()*6.28,math.random()*6.28),av=Vector3.new((math.random()-.5)*14,(math.random()-.5)*14,(math.random()-.5)*14),scale=(Config.HitParticleWireScale or .4)*(.65+z*.55),z=z,lines=lines}
+		end
+		HitFX.systems[#HitFX.systems+1]={pts=pts,age=0,duration=Config.HitParticleDuration or 1.1}
+	end
 	local function confirmedHit(victim)
 		if not Config.HitFX_On then return end
 		if Config.HitSound_On then local s=Instance.new("Sound"); s.SoundId="rbxassetid://115982072912004"; s.Volume=0.75; s.Parent=SoundService; Debris:AddItem(s,4); s:Play() end
-		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if not root then return end; local sp,on=Camera:WorldToViewportPoint(root.Position); if not on then return end
-			for i=1,8 do local a=i/8*math.pi*2; local l=newDrawing("Line",{Visible=true,Thickness=2,Color=Config.HitFX_Color,ZIndex=80}); HitFX.particles[#HitFX.particles+1]={line=l,born=os.clock(),x=sp.X,y=sp.Y,dx=math.cos(a),dy=math.sin(a)} end
-		end
+		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if root then spawnParticles(root.Position) end end
 	end
-	local renderHitFX=LPH_NO_VIRTUALIZE(function(now)
-		for i=#HitFX.particles,1,-1 do local p=HitFX.particles[i]; local age=now-p.born
-			if age>0.45 then p.line:Remove(); table.remove(HitFX.particles,i) else local r=8+age*70; p.line.From=Vector2.new(p.x+p.dx*r,p.y+p.dy*r); p.line.To=Vector2.new(p.x+p.dx*(r+10),p.y+p.dy*(r+10)); p.line.Transparency=1-age/0.45 end
+	local renderHitFX=LPH_NO_VIRTUALIZE(function(dt)
+		local cam=Camera
+		for si=#HitFX.systems,1,-1 do local sys=HitFX.systems[si]; sys.age=sys.age+dt; local age=sys.age
+			if age>=sys.duration then destroySystem(sys); table.remove(HitFX.systems,si) else local alpha=age<sys.duration*.15 and age/(sys.duration*.15) or math.clamp((sys.duration-age)/(sys.duration*.25),0,1); local step=math.clamp(dt,.001,.05)
+				for _,p in ipairs(sys.pts) do p.vel=p.vel+Vector3.new(0,Config.HitParticleGravity or -32,0)*step; p.vel=p.vel*(1-step*.35); p.pos=p.pos+p.vel*step; p.ang=p.ang+p.av*step; local rot=CFrame.Angles(p.ang.X,p.ang.Y,p.ang.Z); local verts={}
+					for vi,o in ipairs(TETRA) do local sp,on=cam:WorldToViewportPoint(p.pos+rot:VectorToWorldSpace(o*p.scale)); verts[vi]={sp,on and sp.Z>.05} end
+					for ei,edge in ipairs(TEDGES) do local a,b=verts[edge[1]],verts[edge[2]]; local l=p.lines[ei]; if a[2] and b[2] then l.From=Vector2.new(a[1].X,a[1].Y); l.To=Vector2.new(b[1].X,b[1].Y); l.Color=particleColor((p.z+age*.7+ei*.06)%1); l.Transparency=alpha*(.35+.55*p.z); l.Visible=true else l.Visible=false end end
+				end
+			end
 		end
 	end)
 
@@ -1559,7 +1595,7 @@ return function(Lib, Core)
 			indicatorsWereOn = Config.Ind_On
 			pollLocalDamage()
 			if Config.HitDir_On or #hitArrows > 0 then updateHitDir() end
-			if #HitFX.particles>0 then renderHitFX(os.clock()) end
+			if #HitFX.systems>0 then renderHitFX(fdt) end
             end))
     end
 
@@ -1719,7 +1755,10 @@ return function(Lib, Core)
         slider(sEnv,{Name="Atmosphere Density",Flag="VIS_ENV_AD",Default=Config.Env_AtmosDensity,Min=0,Max=1,Precision=2,Callback=function(v) Config.Env_AtmosDensity=v; EnvCtl.apply() end}); slider(sEnv,{Name="Brightness",Flag="VIS_ENV_B",Default=Config.Env_Brightness,Min=0,Max=10,Precision=2,Callback=function(v) Config.Env_Brightness=v; EnvCtl.apply() end}); slider(sEnv,{Name="Clock Time",Flag="VIS_ENV_T",Default=Config.Env_ClockTime,Min=0,Max=24,Precision=1,Callback=function(v) Config.Env_ClockTime=v; EnvCtl.apply() end})
 
         local sFX=V:Section({Side="Left"}); sFX:Header({Name="Hit Effects"})
-        boolToggle(sFX,"Enabled","Hit Effects",function() return Config.HitFX_On end,function(v) Config.HitFX_On=v end); boolToggle(sFX,"Hit Sound","Hit Sound",function() return Config.HitSound_On end,function(v) Config.HitSound_On=v end); boolToggle(sFX,"Hit Particles","Hit Particles",function() return Config.HitParticles_On end,function(v) Config.HitParticles_On=v end); colorpick(sFX,"Color","VIS_HITFX_C",Config.HitFX_Color,function(c) Config.HitFX_Color=c end)
+        boolToggle(sFX,"Enabled","Hit Effects",function() return Config.HitFX_On end,function(v) Config.HitFX_On=v end); boolToggle(sFX,"Hit Sound","Hit Sound",function() return Config.HitSound_On end,function(v) Config.HitSound_On=v end); boolToggle(sFX,"Hit Particles","Hit Particles",function() return Config.HitParticles_On end,function(v) Config.HitParticles_On=v end)
+        colorpick(sFX,"Primary Color","VIS_HITFX_C",Config.HitFX_Color,function(c) Config.HitFX_Color=c end); colorpick(sFX,"Secondary Color","VIS_HITFX_C2",Config.HitParticleColorB,function(c) Config.HitParticleColorB=c end)
+        slider(sFX,{Name="Particle Count",Flag="VIS_HITFX_N",Default=Config.HitParticleCount,Min=6,Max=32,Callback=function(v) Config.HitParticleCount=v end}); slider(sFX,{Name="Duration",Flag="VIS_HITFX_D",Default=Config.HitParticleDuration,Min=.3,Max=2.5,Precision=1,Suffix=" s",Callback=function(v) Config.HitParticleDuration=v end})
+        slider(sFX,{Name="Wire Scale",Flag="VIS_HITFX_S",Default=Config.HitParticleWireScale,Min=.15,Max=1,Precision=2,Callback=function(v) Config.HitParticleWireScale=v end}); slider(sFX,{Name="Speed",Flag="VIS_HITFX_V",Default=Config.HitParticleSpeedMax,Min=5,Max=50,Callback=function(v) Config.HitParticleSpeedMax=v end}); slider(sFX,{Name="Gravity",Flag="VIS_HITFX_G",Default=Config.HitParticleGravity,Min=-80,Max=10,Callback=function(v) Config.HitParticleGravity=v end})
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
         local sInd = V:Section({ Side = "Right" })
@@ -1783,6 +1822,17 @@ return function(Lib, Core)
             styleEls[sideDd] = { "Player" }
         end)
 
+        -- Player: pick one of the four designs (Glass frame / Ribbon / Brackets / Nodes).
+        pcall(function()
+            local designDd = sInd:Dropdown({
+                Name = "Player Design",
+                Options = { "Glass", "Ribbon", "Brackets", "Nodes" },
+                Default = Config.Ind_PlayerDesign,
+                Callback = function(v) if type(v) == "string" and v ~= "" then Config.Ind_PlayerDesign = v end end,
+            }, ctx.flag("VIS_IND_PlayerDesign"))
+            styleEls[designDd] = { "Player" }
+        end)
+
         -- Player: vertical text nudge relative to the character.
         local playerTextY = slider(sInd, {
             Name = "Text Position", Flag = "VIS_IND_PlayerTextY", Default = math.floor(Config.Ind_PlayerTextY or 0),
@@ -1838,10 +1888,10 @@ return function(Lib, Core)
         for plr in pairs(espPool) do destroyEsp(plr) end
         for _, h in ipairs(hitArrows) do removeArrow(h) end
         hitArrows = {}
-		for _,p in ipairs(HitFX.particles) do pcall(function() p.line:Remove() end) end
-		HitFX.particles={}
+		for _,sys in ipairs(HitFX.systems) do destroySystem(sys) end
+		HitFX.systems={}
         for _, c in pairs(drawCells) do
-            for _, key in ipairs({ "bg", "label", "value", "track", "fill" }) do
+            for _, key in ipairs({ "bg", "edgeA", "edgeB", "node", "label", "value", "track", "fill" }) do
                 if c[key] then pcall(function() c[key]:Remove() end) end
             end
         end
