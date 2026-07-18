@@ -416,6 +416,7 @@ local Config = {
 	-- считает нарушением (MonitoredKeys) → риск флага. Слайдер 3..8 в apPlay/Tuning: 6 = безопаснее.
 	AP_MaxPerSec      = 8,
 	AP_MinSendGap     = 0.08,   -- = server min interval (ClientMinInterval M1.ServerCheck=0.08)
+	AP_PunishFastGap  = 0.08,   -- первый post-parry M1 получает приоритет сразу после server min interval
 	AP_M2Stun         = 1.0,    -- CombatConfig ParryStun.M2 (стан после M2-парри)
 	AP_M1Stun         = 0.5,    -- оценка стана после M1-парри (RecoveryLockout врага)
 	AP_PollGap        = 0,      -- [V101] троттл поллинга tryM1 = 0 (пробуем КАЖДЫЙ кадр; настоящий
@@ -807,6 +808,7 @@ local V93 = {
 	-- [V132] persistent cluster attacker-seen table (no per-frame allocation)
 	seenAttackers = {},
 	threatSeen = {},
+	interruptSeen = {},
 	ownM1Info = { t = "M1", s = "Basic" },
 	sortByContact = function(a, b) return a.contactAbs < b.contactAbs end,
 	-- [V132] reusable RaycastParams for dodge wall-check
@@ -913,9 +915,13 @@ local function canBlockNow()
 	local stunned = c:GetAttribute("Stunned") == true
 	local cantAny = c:GetAttribute("CantAnything") == true
 	if stunned or cantAny then
-		if Config.ComboEscape and c:GetAttribute("ParryWindowDisabled") ~= true
-		   and c:GetAttribute("ParryBuffered") == true
-		   and c:GetAttribute("PerfectBlocking") ~= true then
+		-- Block.lua штатно разрешает повторный Block во время локального parried-stun:
+		-- Parried=true обходит Stunned/CantAnything. Прежний гейт требовал ParryBuffered,
+		-- который скрипт нигде не выставлял, поэтому после запаренного AutoPlay-M1 защита молчала.
+		if c:GetAttribute("ParryWindowDisabled") ~= true
+		   and c:GetAttribute("PerfectBlocking") ~= true
+		   and (c:GetAttribute("Parried") == true
+			or (Config.ComboEscape and c:GetAttribute("ParryBuffered") == true)) then
 			return true, nil
 		end
 		return false, stunned and "Stunned" or "CantAnything"
@@ -2722,8 +2728,7 @@ State.ap = {
 	nextM1At   = 0,      -- анти-спам ПОЛЛА (сам tryM1 гейтит настоящий рей�� по AttackDuration 0.45с)
 	punishTgt  = nil,    -- модель врага, которого добиваем после ��арри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
-	interruptThreat = nil,
-	interruptUntil  = 0,
+	punishFresh= false,  -- первый post-parry свинг обходит sustained cadence, но не server min-gap
 	busyAttrs = {
 		"Stunned", "Ragdoll", "Downed", "GuardBroken", "CantAnything",
 		"M1Cooldown", "ParryAttackLockout", "BlockAttackLockout", "GrappleWinnerStun",
@@ -2850,7 +2855,7 @@ end
 -- (M1.ServerCheck: min 80мс, sustained 4/с): он вернёт false, если рано, и тогда мы НЕ двигаем u25
 -- → последовательность серверу цела (без «дыр»). combo: Fixed → ровно AP_FixedHit, иначе 1→4.
 -- wantCombo (опц.) — принудительный номер удара для тест-свинга.
-function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
+function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dropGuard)
 	local ap = State.ap
 	if not (ap.fireOK and ap.tryM1Fn) then return false end
 	local ok = false
@@ -2876,23 +2881,29 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 		-- анимация успевает, и весь стан-window заполнен. Тест-свинг (ignoreRate) шлёт всегда.
 		if not ignoreRate then
 			local rate = math.max(1, Config.AP_MaxPerSec or 6)
-			local gap  = math.max(Config.AP_MinSendGap or 0.09, (1 / rate) * 0.97)
+			-- Первый punish/interrupt не должен ждать равномерный sustained cadence. Он всё равно
+			-- соблюдает подтверждённый ServerMinInterval=80мс; последующие combo-свинги равномерные.
+			local gap = priority and (Config.AP_PunishFastGap or 0.08)
+				or math.max(Config.AP_MinSendGap or 0.09, (1 / rate) * 0.97)
 			if (now - (ap.m1SendLast or 0)) < gap then return end      -- ещё рано — не шлём
 			if (now - (ap.m1WinStart or 0)) >= 1 then ap.m1WinStart, ap.m1WinCount = now, 0 end
-			if (ap.m1WinCount or 0) >= rate then return end            -- окно 1с исчерпано
+			if (ap.m1WinCount or 0) >= rate then return end             -- server sustained-окно исчерпано
 		end
 		local anims = ap.getAnims()
 		local v53   = anims and anims[combo] or nil
 		if not v53 then return end
 		local spd = 1
 		pcall(function() spd = ap.getSpeed(char, combo) or 1 end)
-		-- Родная игра сначала синхронно запускает M1 (она сама StopAnim'ит Evasive/
-		-- PerfectBlock/EHit/Combat и грузит M1 с Action4), и лишь затем шлёт ServerCheck.
-		-- Старый task.spawn инвертировал порядок: сеть уходила первой, а косметический свинг
-		-- стартовал позже и проигрывал race другой анимации. Под Luraph это окно ещё шире.
+		-- Сначала подтверждаем, что родная M1-анимация реально запустилась. Только после этого
+		-- interrupt опускает guard; при failed play текущая защита остаётся нетронутой.
 		local played = false
 		pcall(function() played = ap.playSwing(char, combo, spd, false) == true end)
 		if not played then return end
+		if dropGuard and (State.blocking or char:GetAttribute("Blocking") == true) then
+			State.blocking, State.holdUntil = false, 0
+			stopBlockAnim()
+			pcall(sendDeactivate, true)
+		end
 		local newId = (debug.getupvalue(ap.tryM1Fn, ap.u25idx) or 0) + 1
 		-- шлём НАПРЯМУЮ: сервер ст��оит M1-хитбокс по нашему LookVector в момент приёма ServerCheck
 		ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, newId)
@@ -2910,11 +2921,11 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 end
 
 -- можем ли физически атаковать прямо сейчас (по атрибутам своего перса)
-function State.ap.canAttack()
+function State.ap.canAttack(ignoreBlocking)
 	local c = localChar()
 	if not c then return false end
 	if c:GetAttribute("Equip") ~= true then return false end   -- ��уки не одеты ��� бить нельзя
-	if c:GetAttribute("Blocking") == true then return false end -- держим guard → M1 не пройдёт
+	if not ignoreBlocking and c:GetAttribute("Blocking") == true then return false end
 	-- Те же конфликтующие combat-гейты, что стоят в родной tryM1. Custom builder их раньше
 	-- обходил и запускал M1 поверх другой своей атаки; игровой модуль затем StopAnim'ил трек.
 	if c:GetAttribute("CombatAttacking") == true or c:GetAttribute("M1") == true
@@ -3004,36 +3015,32 @@ function State.ap.interruptible(th)
 	return true
 end
 
--- Контрудар является транзакцией: он заменяет parry только после реального успешного fireM1.
--- Если к ожидаемому моменту нашего hit угроза ещё жива, suppression снимается и остаётся
--- заранее зарезервированное время на обычный block fallback.
+-- Контрудар запускает тот же AutoPlay M1 lifecycle (rotation+animation+ServerCheck), но
+-- НЕ заменяет parry: scheduler продолжает обычную защиту как страховку до контакта.
 function State.ap.tryInterrupt(now, th, threatCount)
 	local ap = State.ap
 	if not Config.AutoPlay or Config.AP_Interrupt == false then return false end
-	if ap.interruptThreat then
-		if ap.interruptThreat == th and now < (ap.interruptUntil or 0) then return true end
-		ap.interruptThreat, ap.interruptUntil = nil, 0
-	end
-	if threatCount ~= 1 or not th or th.pressed or th.dodged then return false end
+	if threatCount ~= 1 or not th or th.pressed or th.dodged or th.interruptAttempted then return false end
+	if th.kind ~= "M2" then return false end
 	-- Unblockable/grab policy всегда важнее агрессии: эти атаки уже имеют отдельный must-dodge путь.
 	if isMustDodge(th) then return false end
-	if not ap.interruptible(th) or not ap.canAttack() then return false end
+	if not ap.interruptible(th) or not ap.canAttack(true) then return false end
 	if ap.flatDist(th.attackerModel) > ap.reach() then return false end
 	local ownDelay, combo = ap.ownM1Delay()
 	if not ownDelay then return false end
 	local enemyLeft = (th.contactAbs or now) - now
 	local ownHit = ownDelay + getPingRaw() * (Config.AP_InterruptNetK or 0.5)
-	local fallback = uplink() + (Config.PerfectLead or 0.0625) + (Config.AP_InterruptMargin or 0.055)
-	if ownHit + fallback >= enemyLeft then return false end
-	if not ap.fireM1(th.attackerModel, "interrupt") then return false end
-	ap.interruptThreat = th
-	ap.interruptUntil = now + ownHit
+	local margin = Config.AP_InterruptMargin or 0.055
+	if ownHit + margin >= enemyLeft then return false end
+	if not ap.fireM1(th.attackerModel, "interrupt", true, true) then return false end
 	th.interruptAttempted = true
 	State.status = "INTERRUPT"
-	diagPush(("INTERRUPT t=%.2f %s %s(%s) combo=%d ours=%.0fms enemy=%.0fms reserve=%.0fms")
+	diagPush(("INTERRUPT t=%.2f %s %s(%s) combo=%d ours=%.0fms enemy=%.0fms margin=%.0fms guard=fallback")
 		:format(now, th.name or "?", th.kind or "?", th.style or "?", combo or 0,
-			ownHit * 1000, enemyLeft * 1000, fallback * 1000))
-	return true
+			ownHit * 1000, enemyLeft * 1000, margin * 1000))
+	-- Контрудар больше не владеет scheduler до ETA: обычный parry остаётся страховкой,
+	-- если сервер не подтвердит interruption. M1 уже ушёл с теми же animation+rotation.
+	return false
 end
 
 -- послать ЛЕГИТНЫЙ M1 по цели:
@@ -3041,11 +3048,11 @@ end
 -- (AttackDuration/lockout/стан). Наш nextM1At — лишь троттл ПОЛЛА, чтобы не звать tryM1 сотни
 -- раз в кадр; настоящий рейт держит игра. Поэтому добивание/перебивание бьёт МГНОВЕННО, как
 -- только сервер снимает лок (напр. 0.15с parry-lockout после нашего парри).
-function State.ap.fireM1(model, why)
+function State.ap.fireM1(model, why, priority, dropGuard)
 	local ap = State.ap
 	local now = os.clock()
 	if now < ap.nextM1At then return false end
-	if not ap.canAttack() then return false end
+	if not ap.canAttack(dropGuard) then return false end
 	local m1 = ap.getM1()
 	if not m1 then return false end
 	local hrp = model and model:FindFirstChild("HumanoidRootPart")
@@ -3057,7 +3064,7 @@ function State.ap.fireM1(model, why)
 	local swung = false
 	if ap.fireOK then
 		local char = localChar()
-		if char then swung = ap.fireM1Custom(char, model) end
+		if char then swung = ap.fireM1Custom(char, model, nil, false, priority, dropGuard) end
 	elseif ap.tryM1Fn then
 		local ok, res = pcall(ap.tryM1Fn)   -- true = свинг реально прошёл
 		swung = ok and res == true
@@ -3109,6 +3116,7 @@ function State.ap.onPerfectParry(attackerName, kind)
 	local stun = (kind == "M2") and (Config.AP_M2Stun or 1.0) or (Config.AP_M1Stun or 0.5)
 	State.ap.punishTgt   = model
 	State.ap.punishUntil = os.clock() + stun
+	State.ap.punishFresh = true
 end
 
 -- шаг добивания (ка��дый Heartbeat из schedulerStep, ТОЛЬКО когда нет угроз для бло��а).
@@ -3122,6 +3130,7 @@ function State.ap.step(now)
 	local hum = tgt.Parent and tgt:FindFirstChildOfClass("Humanoid")
 	if (not hum) or hum.Health <= 0 or now > ap.punishUntil then
 		ap.punishTgt = nil
+		ap.punishFresh = false
 		return
 	end
 	if ap.flatDist(tgt) > ap.reach() then return end   -- вне досягаемости — не бьём воздух
@@ -3137,7 +3146,7 @@ function State.ap.step(now)
 		stopBlockAnim()
 		pcall(sendDeactivate, true)
 	end
-	ap.fireM1(tgt, "punish")
+	if ap.fireM1(tgt, "punish", ap.punishFresh) then ap.punishFresh = false end
 end
 
 local function evasiveGranted()
@@ -3564,6 +3573,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	table.clear(imminent)
 	State.interruptCandidate = nil
 	State.interruptThreatCount = 0
+	for k in pairs(V93.interruptSeen) do V93.interruptSeen[k] = nil end
 
 	-- Grapple — отдельное подтверждённое состояние боя. Пока наш персонаж реально Grappling,
 	-- старые animation-threats не должны запускать обычные block/dodge/counter ветки.
@@ -3653,10 +3663,16 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			if threatens then th.everThreatened = true end
 			if threatens then
 				-- AutoPlay interrupt использует уже готовую геометрию/таймлайн этого же scheduler.
-				-- Кандидат нужен ДО короткого defensive window; отдельного предиктора/обхода нет.
-				State.interruptThreatCount = State.interruptThreatCount + 1
-				if not State.interruptCandidate
-				   or th.contactAbs < State.interruptCandidate.contactAbs then
+				-- Safety-count = разные атакующие, а не animation tracks одного комбо-врага.
+				local ik = th.attackerModel or th.attackerHRP or th.name
+				if ik and not V93.interruptSeen[ik] then
+					V93.interruptSeen[ik] = true
+					State.interruptThreatCount = State.interruptThreatCount + 1
+				end
+				-- Кандидат = earliest HEAVY. Раньше более ранний M1 занимал слот, затем
+				-- tryInterrupt отклонял его по kind и до лежащей рядом M2 вообще не доходил.
+				if th.kind == "M2" and (not State.interruptCandidate
+				   or th.contactAbs < State.interruptCandidate.contactAbs) then
 					State.interruptCandidate = th
 				end
 				local lead = Config.PerfectLead
@@ -3732,9 +3748,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 	end
 
-	-- Успешный контрудар временно владеет кадром; неуспех ничего не меняет и ниже штатно
-	-- продолжатся dodge/parry ветки. На следующем кадре suppression живёт лишь до own-hit ETA.
-	if State.ap.tryInterrupt(now, State.interruptCandidate, State.interruptThreatCount) then return end
+	-- Counter-M1 не владеет защитой: ниже всегда продолжается штатный dodge/parry fallback.
+	State.ap.tryInterrupt(now, State.interruptCandidate, State.interruptThreatCount)
 
 	table.sort(imminent, V93.sortByContact)
 
@@ -4239,7 +4254,8 @@ local function onOutcome(attacker, result, kind, eventClock)
 		end
 	end
 
-	-- [V97] AutoPlay: идеальное парри → враг в стане → запускаем окно добивания.
+	-- AutoPlay: идеальное парри → враг в стане. Первый безопасный scheduler-step попробует
+	-- priority M1 после server minimum gap, не ожидая обычного sustained cadence.
 	if result == "PERFECT" then State.ap.onPerfectParry(attacker, kind) end
 
 	-- rec/followUp уже вычислены в начале функции (до мутаций state).
