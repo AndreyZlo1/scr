@@ -39,6 +39,8 @@ return function(Lib, Core)
     local TweenService      = game:GetService("TweenService")
     local UserInputService  = game:GetService("UserInputService")
 	local Lighting           = game:GetService("Lighting")
+	local SoundService       = game:GetService("SoundService")
+	local Debris             = game:GetService("Debris")
 
     local LocalPlayer = Players.LocalPlayer
 	local VisualCtl
@@ -100,13 +102,10 @@ return function(Lib, Core)
 		Name_Custom = false,
 		Name_First  = "Syllinse",
 		Name_Last   = "Project",
-
-		-- Environment (event-driven; originals restored on disable)
-		Env_On = false,
-		Env_Ambient = Color3.fromRGB(120,120,140), Env_Outdoor = Color3.fromRGB(100,105,120),
-		Env_FogColor = Color3.fromRGB(170,180,200), Env_FogStart = 0, Env_FogEnd = 1000,
-		Env_AtmosDensity = 0.15, Env_AtmosColor = Color3.fromRGB(190,200,220),
-		Env_Brightness = 2, Env_ClockTime = 14,
+		Env_On=false, Env_Ambient=Color3.fromRGB(120,120,140), Env_Outdoor=Color3.fromRGB(100,105,120),
+		Env_FogColor=Color3.fromRGB(170,180,200), Env_FogStart=0, Env_FogEnd=1000,
+		Env_AtmosDensity=0.15, Env_AtmosColor=Color3.fromRGB(190,200,220), Env_Brightness=2, Env_ClockTime=14,
+		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(255,90,90),
 
         -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
         -- runs on Heartbeat, which fires at the monitor's refresh rate — so on a 144/240Hz screen
@@ -183,40 +182,22 @@ return function(Lib, Core)
 		VisualCtl.applyName()
 	end
 
-	local EnvCtl = { original=nil, atmosphere=nil, conns={}, applying=false }
+	local EnvCtl={original=nil,atmosphere=nil,conns={},applying=false}
 	local ENV_PROPS={"Ambient","OutdoorAmbient","FogColor","FogStart","FogEnd","Brightness","ClockTime"}
 	function EnvCtl.apply()
-		if not Config.Env_On or EnvCtl.applying then return end
-		EnvCtl.applying=true
-		Lighting.Ambient=Config.Env_Ambient; Lighting.OutdoorAmbient=Config.Env_Outdoor
-		Lighting.FogColor=Config.Env_FogColor; Lighting.FogStart=Config.Env_FogStart; Lighting.FogEnd=Config.Env_FogEnd
-		Lighting.Brightness=Config.Env_Brightness; Lighting.ClockTime=Config.Env_ClockTime
-		local a=Lighting:FindFirstChildOfClass("Atmosphere")
-		if a then a.Density=Config.Env_AtmosDensity; a.Color=Config.Env_AtmosColor end
+		if not Config.Env_On or EnvCtl.applying then return end; EnvCtl.applying=true
+		Lighting.Ambient=Config.Env_Ambient; Lighting.OutdoorAmbient=Config.Env_Outdoor; Lighting.FogColor=Config.Env_FogColor
+		Lighting.FogStart=Config.Env_FogStart; Lighting.FogEnd=Config.Env_FogEnd; Lighting.Brightness=Config.Env_Brightness; Lighting.ClockTime=Config.Env_ClockTime
+		local a=Lighting:FindFirstChildOfClass("Atmosphere"); if a then a.Density=Config.Env_AtmosDensity; a.Color=Config.Env_AtmosColor end
 		EnvCtl.applying=false
 	end
 	function EnvCtl.set(on)
 		for _,c in ipairs(EnvCtl.conns) do c:Disconnect() end; table.clear(EnvCtl.conns)
-		if on and not EnvCtl.original then
-			EnvCtl.original={}; for _,p in ipairs(ENV_PROPS) do EnvCtl.original[p]=Lighting[p] end
-			local a=Lighting:FindFirstChildOfClass("Atmosphere")
-			if a then EnvCtl.atmosphere=a; EnvCtl.original.ad=a.Density; EnvCtl.original.ac=a.Color end
-		end
+		if on and not EnvCtl.original then EnvCtl.original={}; for _,p in ipairs(ENV_PROPS) do EnvCtl.original[p]=Lighting[p] end; local a=Lighting:FindFirstChildOfClass("Atmosphere"); if a then EnvCtl.atmosphere=a; EnvCtl.original.ad=a.Density; EnvCtl.original.ac=a.Color end end
 		Config.Env_On=on and true or false
-		if Config.Env_On then
-			EnvCtl.apply()
-			for _,p in ipairs(ENV_PROPS) do EnvCtl.conns[#EnvCtl.conns+1]=Lighting:GetPropertyChangedSignal(p):Connect(EnvCtl.apply) end
-			local a=Lighting:FindFirstChildOfClass("Atmosphere")
-			if a then
-				EnvCtl.conns[#EnvCtl.conns+1]=a:GetPropertyChangedSignal("Density"):Connect(EnvCtl.apply)
-				EnvCtl.conns[#EnvCtl.conns+1]=a:GetPropertyChangedSignal("Color"):Connect(EnvCtl.apply)
-			end
-		elseif EnvCtl.original then
-			EnvCtl.applying=true
-			for _,p in ipairs(ENV_PROPS) do Lighting[p]=EnvCtl.original[p] end
-			if EnvCtl.atmosphere and EnvCtl.atmosphere.Parent then EnvCtl.atmosphere.Density=EnvCtl.original.ad; EnvCtl.atmosphere.Color=EnvCtl.original.ac end
-			EnvCtl.applying=false; EnvCtl.original=nil; EnvCtl.atmosphere=nil
-		end
+		if Config.Env_On then EnvCtl.apply(); for _,p in ipairs(ENV_PROPS) do EnvCtl.conns[#EnvCtl.conns+1]=Lighting:GetPropertyChangedSignal(p):Connect(EnvCtl.apply) end
+			local a=Lighting:FindFirstChildOfClass("Atmosphere"); if a then EnvCtl.conns[#EnvCtl.conns+1]=a:GetPropertyChangedSignal("Density"):Connect(EnvCtl.apply); EnvCtl.conns[#EnvCtl.conns+1]=a:GetPropertyChangedSignal("Color"):Connect(EnvCtl.apply) end
+		elseif EnvCtl.original then EnvCtl.applying=true; for _,p in ipairs(ENV_PROPS) do Lighting[p]=EnvCtl.original[p] end; if EnvCtl.atmosphere and EnvCtl.atmosphere.Parent then EnvCtl.atmosphere.Density=EnvCtl.original.ad; EnvCtl.atmosphere.Color=EnvCtl.original.ac end; EnvCtl.applying=false; EnvCtl.original=nil; EnvCtl.atmosphere=nil end
 	end
 
     -- ── Watermark palette (shared by every indicator style) ──────────────────
@@ -703,20 +684,20 @@ return function(Lib, Core)
     end
 
     local screenGui, indHolder, indUIScale
-    local panelBody, panelBack -- compact unified Neverlose panel
+    local panelBody       -- Panel chip container
     local dragHandle      -- invisible grab surface for the draggable "Free" text stack
     local rows = {}       -- [key] = Panel row object
     local beginDrag       -- forward decl (shared by every draggable surface)
     local rowOrder = { "Health", "Stamina", "IFrame", "M2", "Dodge", "Block" }
 
-    local ROW_H, ROW_GAP = 22, 1
+    local ROW_H, ROW_GAP = 26, 6
     local TW_IN  = TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
     local TW_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
 
     -- ── Drag + persistence state (position saved via MacLib FAL Data API) ────
     local MacLibRef                       -- captured from ctx.MacLib in buildUI
     local POS_FLAG                        -- FAL key for the saved HUD position
-    local IND_W = 190                     -- compact unified Neverlose-style panel
+    local IND_W = 214                     -- HUD width (px)
     local drag = {
         target  = Vector2.new(0, 0),      -- desired top-left offset (px)
         disp    = Vector2.new(0, 0),      -- smoothed actual offset (px)
@@ -731,7 +712,7 @@ return function(Lib, Core)
     local function mkRow(key, label)
         local frame = Instance.new("Frame")
         frame.Name = key
-        frame.BackgroundColor3 = WM.bgDark
+        frame.BackgroundColor3 = Color3.fromRGB(13, 13, 17)
         frame.BackgroundTransparency = 1
         frame.BorderSizePixel = 0
         frame.Size = UDim2.new(1, 0, 0, ROW_H)
@@ -741,11 +722,11 @@ return function(Lib, Core)
         frame.Visible = false
 
         frame.BackgroundColor3 = WM.bgDark
-        local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 2); corner.Parent = frame
+        local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = frame
 
         -- watermark-style border
         local stroke = Instance.new("UIStroke")
-        stroke.Thickness = 0
+        stroke.Thickness = 1
         stroke.Color = WM.stroke
         stroke.Transparency = 1
         stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
@@ -756,13 +737,13 @@ return function(Lib, Core)
         local fill = Instance.new("Frame")
         fill.Name = "Fill"
         fill.BackgroundColor3 = Config.Ind_Accent
-        fill.BackgroundTransparency = 0.88
+        fill.BackgroundTransparency = 0.8
         fill.BorderSizePixel = 0
         fill.ZIndex = 2
-        fill.Position = UDim2.new(0, 0, 1, -2)
-        fill.Size = UDim2.new(0, 0, 0, 2)
+        fill.Position = UDim2.new(0, 0, 0, 0)
+        fill.Size = UDim2.new(0, 0, 1, 0)
         fill.Parent = frame
-        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
+        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(0, 6); fc.Parent = fill
 
         -- left accent bar: clean vertical strip flush to the left edge, perfectly
         -- centered vertically. Rounded pill, sits above the fill.
@@ -772,8 +753,8 @@ return function(Lib, Core)
         accent.BorderSizePixel = 0
         accent.ZIndex = 4
         accent.AnchorPoint = Vector2.new(0, 0.5)
-        accent.Position = UDim2.new(0, 5, 0.5, 0)
-        accent.Size = UDim2.new(0, 2, 1, -8)
+        accent.Position = UDim2.new(0, 4, 0.5, 0)
+        accent.Size = UDim2.new(0, 3, 1, -10)
         accent.Parent = frame
         local ac = Instance.new("UICorner"); ac.CornerRadius = UDim.new(1, 0); ac.Parent = accent
 
@@ -782,12 +763,12 @@ return function(Lib, Core)
         lab.Name = "Label"
         lab.BackgroundTransparency = 1
         lab.ZIndex = 4
-        lab.Font = Enum.Font.GothamSemibold
-        lab.TextSize = 11
+        lab.Font = Enum.Font.GothamMedium
+        lab.TextSize = 12
         lab.TextColor3 = WM.txtMute
         lab.TextXAlignment = Enum.TextXAlignment.Left
         lab.TextTransparency = 1
-        lab.Position = UDim2.new(0, 12, 0, 0)
+        lab.Position = UDim2.new(0, 14, 0, 0)
         lab.Size = UDim2.new(1, -84, 1, 0)
         lab.Text = label
         lab.Parent = frame
@@ -798,7 +779,7 @@ return function(Lib, Core)
         val.BackgroundTransparency = 1
         val.ZIndex = 4
         val.Font = Enum.Font.GothamBold
-        val.TextSize = 11
+        val.TextSize = 12
         val.TextColor3 = WM.txtMain
         val.TextXAlignment = Enum.TextXAlignment.Right
         val.TextTransparency = 1
@@ -931,12 +912,6 @@ return function(Lib, Core)
         panelBody.Size = UDim2.new(1, 0, 0, 0)
         panelBody.AutomaticSize = Enum.AutomaticSize.Y
         panelBody.Parent = indHolder
-		panelBack = Instance.new("Frame")
-		panelBack.Name="NeverloseBack"; panelBack.BackgroundColor3=Color3.fromRGB(11,12,17); panelBack.BackgroundTransparency=0.12
-		panelBack.BorderSizePixel=0; panelBack.Position=UDim2.fromOffset(-5,-5); panelBack.Size=UDim2.fromOffset(IND_W+10,ROW_H+10); panelBack.ZIndex=0; panelBack.Parent=indHolder
-		local pbc=Instance.new("UICorner"); pbc.CornerRadius=UDim.new(0,4); pbc.Parent=panelBack
-		local pbs=Instance.new("UIStroke"); pbs.Color=Color3.fromRGB(48,53,72); pbs.Thickness=1; pbs.Transparency=0.15; pbs.Parent=panelBack
-		local top=Instance.new("Frame"); top.BackgroundColor3=Config.Ind_Accent; top.BorderSizePixel=0; top.Size=UDim2.new(1,0,0,2); top.ZIndex=5; top.Parent=panelBack
 
         local list = Instance.new("UIListLayout")
         list.FillDirection = Enum.FillDirection.Vertical
@@ -1006,7 +981,7 @@ return function(Lib, Core)
         if shown then
             r.frame.Visible = true
             TweenService:Create(r.frame, TW_IN, { BackgroundTransparency = WM.bgTransp, Size = UDim2.new(1, 0, 0, ROW_H) }):Play()
-			TweenService:Create(r.stroke, TW_IN, { Transparency = 1 }):Play()
+            TweenService:Create(r.stroke, TW_IN, { Transparency = 0 }):Play()
             TweenService:Create(r.label, TW_IN, { TextTransparency = 0 }):Play()
             TweenService:Create(r.value, TW_IN, { TextTransparency = 0 }):Play()
         else
@@ -1163,9 +1138,9 @@ return function(Lib, Core)
     --   Simple – a centred stack near the middle-bottom of the screen
     --   Player – a stack pinned to the side of the local player (left/right/bottom)
     local STYLE_DEFS = {
-        Simple = { width = 190, row = 27, txt = 15 },
-        Player = { width = 150, row = 22, txt = 13 },
-        Free   = { width = 168, row = 24, txt = 14 },
+		Simple = { width = 205, row = 29, txt = 14 },
+		Player = { width = 170, row = 25, txt = 13 },
+		Free   = { width = 185, row = 27, txt = 14 },
     }
     local DRAW_STYLES = { Simple = true, Player = true, Free = true }
 
@@ -1180,6 +1155,7 @@ return function(Lib, Core)
         local c = drawCells[key]
         if c then return c end
         c = {
+			bg = newDrawing("Square", { Filled=true, Visible=false, Color=Color3.fromRGB(11,12,17), Transparency=0.72, ZIndex=5 }),
             label = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMute, ZIndex = 7 }),
             value = newDrawing("Text", { Size = 13, Font = 2, Center = false, Outline = true, OutlineColor = Color3.new(0,0,0), Visible = false, Color = WM.txtMain, ZIndex = 7 }),
             track = newDrawing("Line", { Thickness = 2, Visible = false, Color = WM.stroke, ZIndex = 6, Transparency = 0 }),
@@ -1190,7 +1166,7 @@ return function(Lib, Core)
         return c
     end
     local function hideDrawCell(c)
-        c.label.Visible = false; c.value.Visible = false; c.track.Visible = false; c.fill.Visible = false
+		c.bg.Visible = false; c.label.Visible = false; c.value.Visible = false; c.track.Visible = false; c.fill.Visible = false
     end
     local function hideAllDrawCells()
         for _, c in pairs(drawCells) do c.alpha = 0; c.hasY = false; hideDrawCell(c) end
@@ -1231,6 +1207,7 @@ return function(Lib, Core)
                 local ratio = am and am.ratio or c.dispRatio
                 c.dispRatio = lerp(c.dispRatio, ratio, aA)
                 local col   = am and am.color or Config.Ind_Accent
+                c.bg.Position=Vector2.new(left-7*sc,rowY-4*sc); c.bg.Size=Vector2.new(width+14*sc,step-3*sc); c.bg.Color=Color3.fromRGB(11,12,17); c.bg.Transparency=c.alpha*0.78; c.bg.Visible=true
 
                 c.label.Size = txtSize
                 c.label.Text = STAT_LABELS[key] or key
@@ -1246,7 +1223,9 @@ return function(Lib, Core)
                 c.value.Transparency = c.alpha
                 c.value.Visible = true
 
-                local lineY = rowY + txtSize + 4 * sc
+                -- Reworked non-Panel styles: compact glass row with short colored progress,
+                -- stronger hierarchy and less bare floating text. Panel remains untouched.
+                local lineY = rowY + txtSize + 5 * sc
                 c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
                 c.track.Thickness = math.max(1, 2 * sc)
                 c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.5; c.track.Visible = true
@@ -1275,8 +1254,6 @@ return function(Lib, Core)
         -- toggle which draggable surface is live (only one container is ever shown)
         if indHolder then
             if panelBody then panelBody.Visible = (style == "Panel") and char ~= nil end
-			if panelBack then panelBack.Visible = (style == "Panel") and char ~= nil end
-			if panelBack and panelBody and panelBody.AbsoluteSize.Y > 0 then panelBack.Size=UDim2.fromOffset(IND_W+10,panelBody.AbsoluteSize.Y+10) end
             if dragHandle then dragHandle.Visible = (style == "Free") and char ~= nil end
         end
 
@@ -1289,7 +1266,7 @@ return function(Lib, Core)
                 setRowShown(r, show and true or false)
                 if show then
                     r.dispRatio = lerp(r.dispRatio, ratio, a)
-				r.fill.Size = UDim2.new(math.clamp(r.dispRatio, 0, 1), 0, 0, 2)
+                    r.fill.Size = UDim2.new(math.clamp(r.dispRatio, 0, 1), 0, 1, 0)
                     r.fill.BackgroundColor3 = color
                     r.accent.BackgroundColor3 = color
                     r.value.Text = text
@@ -1480,6 +1457,26 @@ return function(Lib, Core)
         lastHealth = h
     end
 
+	-- Server-authored successful hit broadcast. Subscribe to the URE directly so we do not
+	-- overwrite CombatBroadcast.On's single callback used by the game's Evasive module.
+	local HitFX={particles={}}
+	local function victimRoot(name)
+		local p=Players:FindFirstChild(name); local c=p and p.Character or Workspace:FindFirstChild(name)
+		return c and c:FindFirstChild("HumanoidRootPart")
+	end
+	local function confirmedHit(victim)
+		if not Config.HitFX_On then return end
+		if Config.HitSound_On then local s=Instance.new("Sound"); s.SoundId="rbxassetid://115982072912004"; s.Volume=0.75; s.Parent=SoundService; Debris:AddItem(s,4); s:Play() end
+		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if not root then return end; local sp,on=Camera:WorldToViewportPoint(root.Position); if not on then return end
+			for i=1,8 do local a=i/8*math.pi*2; local l=newDrawing("Line",{Visible=true,Thickness=2,Color=Config.HitFX_Color,ZIndex=80}); HitFX.particles[#HitFX.particles+1]={line=l,born=os.clock(),x=sp.X,y=sp.Y,dx=math.cos(a),dy=math.sin(a)} end
+		end
+	end
+	local renderHitFX=LPH_NO_VIRTUALIZE(function(now)
+		for i=#HitFX.particles,1,-1 do local p=HitFX.particles[i]; local age=now-p.born
+			if age>0.45 then p.line:Remove(); table.remove(HitFX.particles,i) else local r=8+age*70; p.line.From=Vector2.new(p.x+p.dx*r,p.y+p.dy*r); p.line.To=Vector2.new(p.x+p.dx*(r+10),p.y+p.dy*(r+10)); p.line.Transparency=1-age/0.45 end
+		end
+	end)
+
     -- ═══════════════════════════════════════════════════════════════════════
     -- Lifecycle wiring
     -- ═══════════════════════════��═══════════════════════════════════════════
@@ -1509,6 +1506,11 @@ return function(Lib, Core)
         track(Players.PlayerRemoving, function(plr) destroyEsp(plr); rebuildEspPlayers() end)
         VisualCtl.bindFOV()
         VisualCtl.bindName(LocalPlayer.Character)
+		local net=ReplicatedStorage:FindFirstChild("Shared") and ReplicatedStorage.Shared:FindFirstChild("Network")
+		local ure=net and net:FindFirstChild("CombatBroadcastURE")
+		if ure then track(ure.OnClientEvent,function(ev,attacker,victim)
+			if (ev=="M1Hit" or ev=="M2Hit") and LocalPlayer.Character and attacker==LocalPlayer.Character.Name and victim~=attacker then confirmedHit(victim) end
+		end) end
 
         -- master render loop — bound to Heartbeat, NOT RenderStepped.
         -- RenderStepped fires BEFORE Roblox's camera BindToRenderStep step, so under
@@ -1557,6 +1559,7 @@ return function(Lib, Core)
 			indicatorsWereOn = Config.Ind_On
 			pollLocalDamage()
 			if Config.HitDir_On or #hitArrows > 0 then updateHitDir() end
+			if #HitFX.particles>0 then renderHitFX(os.clock()) end
             end))
     end
 
@@ -1699,8 +1702,7 @@ return function(Lib, Core)
         boolToggle(sEsp, "Combat Style", "ESP Style", function() return Config.ESP_Style end,    function(v) Config.ESP_Style = v end)
         boolToggle(sEsp, "Skeleton", "ESP Skeleton", function() return Config.ESP_Skeleton end, function(v) Config.ESP_Skeleton = v end)
         boolToggle(sEsp, "Tracer",   "ESP Tracer",   function() return Config.ESP_Tracer end,   function(v) Config.ESP_Tracer = v end)
-		slider(sEsp, { Name = "Range", Flag = "VIS_ESP_Range", Default = Config.ESP_Range,
-			Min = 50, Max = 3000, Suffix = " st", Callback = function(v) Config.ESP_Range = v end })
+		slider(sEsp,{Name="Range",Flag="VIS_ESP_Range",Default=Config.ESP_Range,Min=50,Max=3000,Suffix=" st",Callback=function(v) Config.ESP_Range=v end})
         colorpick(sEsp, "Box Color", "VIS_ESP_BoxCol", Config.ESP_Box_Color, function(c) Config.ESP_Box_Color = c end)
         colorpick(sEsp, "Text Color", "VIS_ESP_TxtCol", Config.ESP_Text_Color, function(c) Config.ESP_Text_Color = c end)
         colorpick(sEsp, "Heavy (M2) Bar Color", "VIS_ESP_M2Col", Config.ESP_M2_Color, function(c) Config.ESP_M2_Color = c end)
@@ -1710,18 +1712,14 @@ return function(Lib, Core)
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
+        local sEnv=V:Section({Side="Left"}); sEnv:Header({Name="Environment"}); sEnv:Toggle({Name="Enabled",Default=Config.Env_On,Callback=function(v) EnvCtl.set(v) end},ctx.flag("VIS_ENV_On"))
+        colorpick(sEnv,"Ambient","VIS_ENV_Amb",Config.Env_Ambient,function(c) Config.Env_Ambient=c; EnvCtl.apply() end); colorpick(sEnv,"Outdoor Ambient","VIS_ENV_Out",Config.Env_Outdoor,function(c) Config.Env_Outdoor=c; EnvCtl.apply() end)
+        colorpick(sEnv,"Fog Color","VIS_ENV_Fog",Config.Env_FogColor,function(c) Config.Env_FogColor=c; EnvCtl.apply() end); colorpick(sEnv,"Atmosphere Color","VIS_ENV_Atm",Config.Env_AtmosColor,function(c) Config.Env_AtmosColor=c; EnvCtl.apply() end)
+        slider(sEnv,{Name="Fog Start",Flag="VIS_ENV_FS",Default=Config.Env_FogStart,Min=0,Max=5000,Suffix=" st",Callback=function(v) Config.Env_FogStart=v; EnvCtl.apply() end}); slider(sEnv,{Name="Fog End",Flag="VIS_ENV_FE",Default=Config.Env_FogEnd,Min=10,Max=10000,Suffix=" st",Callback=function(v) Config.Env_FogEnd=v; EnvCtl.apply() end})
+        slider(sEnv,{Name="Atmosphere Density",Flag="VIS_ENV_AD",Default=Config.Env_AtmosDensity,Min=0,Max=1,Precision=2,Callback=function(v) Config.Env_AtmosDensity=v; EnvCtl.apply() end}); slider(sEnv,{Name="Brightness",Flag="VIS_ENV_B",Default=Config.Env_Brightness,Min=0,Max=10,Precision=2,Callback=function(v) Config.Env_Brightness=v; EnvCtl.apply() end}); slider(sEnv,{Name="Clock Time",Flag="VIS_ENV_T",Default=Config.Env_ClockTime,Min=0,Max=24,Precision=1,Callback=function(v) Config.Env_ClockTime=v; EnvCtl.apply() end})
 
-        local sEnv=V:Section({Side="Left"}); sEnv:Header({Name="Environment"})
-        sEnv:Toggle({Name="Enabled",Default=Config.Env_On,Callback=function(v) EnvCtl.set(v) end},ctx.flag("VIS_ENV_On"))
-        colorpick(sEnv,"Ambient","VIS_ENV_Amb",Config.Env_Ambient,function(c) Config.Env_Ambient=c; EnvCtl.apply() end)
-        colorpick(sEnv,"Outdoor Ambient","VIS_ENV_Out",Config.Env_Outdoor,function(c) Config.Env_Outdoor=c; EnvCtl.apply() end)
-        colorpick(sEnv,"Fog Color","VIS_ENV_FogCol",Config.Env_FogColor,function(c) Config.Env_FogColor=c; EnvCtl.apply() end)
-        colorpick(sEnv,"Atmosphere Color","VIS_ENV_AtmCol",Config.Env_AtmosColor,function(c) Config.Env_AtmosColor=c; EnvCtl.apply() end)
-        slider(sEnv,{Name="Fog Start",Flag="VIS_ENV_FogStart",Default=Config.Env_FogStart,Min=0,Max=5000,Suffix=" st",Callback=function(v) Config.Env_FogStart=v; EnvCtl.apply() end})
-        slider(sEnv,{Name="Fog End",Flag="VIS_ENV_FogEnd",Default=Config.Env_FogEnd,Min=10,Max=10000,Suffix=" st",Callback=function(v) Config.Env_FogEnd=v; EnvCtl.apply() end})
-        slider(sEnv,{Name="Atmosphere Density",Flag="VIS_ENV_AtmDensity",Default=Config.Env_AtmosDensity,Min=0,Max=1,Precision=2,Callback=function(v) Config.Env_AtmosDensity=v; EnvCtl.apply() end})
-        slider(sEnv,{Name="Brightness",Flag="VIS_ENV_Bright",Default=Config.Env_Brightness,Min=0,Max=10,Precision=2,Callback=function(v) Config.Env_Brightness=v; EnvCtl.apply() end})
-        slider(sEnv,{Name="Clock Time",Flag="VIS_ENV_Time",Default=Config.Env_ClockTime,Min=0,Max=24,Precision=1,Suffix="h",Callback=function(v) Config.Env_ClockTime=v; EnvCtl.apply() end})
+        local sFX=V:Section({Side="Left"}); sFX:Header({Name="Hit Effects"})
+        boolToggle(sFX,"Enabled","Hit Effects",function() return Config.HitFX_On end,function(v) Config.HitFX_On=v end); boolToggle(sFX,"Hit Sound","Hit Sound",function() return Config.HitSound_On end,function(v) Config.HitSound_On=v end); boolToggle(sFX,"Hit Particles","Hit Particles",function() return Config.HitParticles_On end,function(v) Config.HitParticles_On=v end); colorpick(sFX,"Color","VIS_HITFX_C",Config.HitFX_Color,function(c) Config.HitFX_Color=c end)
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
         local sInd = V:Section({ Side = "Right" })
@@ -1840,8 +1838,10 @@ return function(Lib, Core)
         for plr in pairs(espPool) do destroyEsp(plr) end
         for _, h in ipairs(hitArrows) do removeArrow(h) end
         hitArrows = {}
+		for _,p in ipairs(HitFX.particles) do pcall(function() p.line:Remove() end) end
+		HitFX.particles={}
         for _, c in pairs(drawCells) do
-            for _, key in ipairs({ "label", "value", "track", "fill" }) do
+            for _, key in ipairs({ "bg", "label", "value", "track", "fill" }) do
                 if c[key] then pcall(function() c[key]:Remove() end) end
             end
         end
