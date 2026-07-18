@@ -38,7 +38,6 @@ local Config = {
 	-- Low = current oriented box; High = the same box projected to server contact time.
 	-- Both use exact overlap once workspace.Hitboxes has an active matching part.
 	AccuracyMode  = "High",
-	Key_Accuracy  = Enum.KeyCode.B,
 
 	-- Prediction caps used only to project an oriented box; they never make a threat true.
 	WillHitVelCap   = 2.0,
@@ -268,10 +267,7 @@ local Config = {
 	SA_DirtyGrab      = true,   -- enemy Dirty grab/M2 (GrappleDirtyHit, ImmuneToRagdollM2) → force dodge
 	SA_HakariRead     = true,   -- widen window for Hakari momentum M2 (HakariMomentumM2HitboxDelay 0.62)
 	SA_HakariWiden    = 0.05,   -- extra front/hold seconds applied to a Hakari M2
-	-- [V131] GRAPPLE WIN. Настоящее состояние борьбы = атрибут Grappling==true.
-	-- Пока мы в грэппле, spam штатного M1 lifecycle поддерживает clash input.
-	SA_GrappleWin     = false,  -- while Grappling==true, spam legitimate M1 inputs to win the clash
-	-- [V91] BLATANT force-dodge. Игра НЕ даёт додж, когда мы застряли в собственной атаке
+	-- [V91] BLATANT force-dodge.
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��етит, а мы залочены
 	-- софт-��остоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
@@ -580,12 +576,8 @@ local State = {
 	faceGoalUntil = 0,
 	faceHum       = nil,
 	faceGoalPos   = nil,   -- [V73] midpoint facing goal
-	-- Подтверждённое CombatClientRemoteEvent состояние grapple. Атрибут Grappling остаётся
-	-- fallback, но remote даёт точного второго участника и тип клэша.
-	grapple       = { active=false, dirty=false, foeName=nil, clashType=nil, winnerName=nil, startedAt=0 },
 	noParryActive = false,
 	noParryNow    = false,
-	grappleChar   = nil,
 }
 
 local Threats = {}
@@ -2039,7 +2031,7 @@ end
 -- Атрибуты, при которых наш перс физически НЕ может запустить M2 (тогда counter невозможен).
 local BOXING_BLOCK_ATTRS = {
 	"CombatAttacking", "Stunned", "Ragdoll",
-	"ParryAttackLockout", "BlockAttackLockout", "GrappleWinnerStun",
+	"ParryAttackLockout", "BlockAttackLockout",
 }
 
 -- Готов ли НАШ перс сейчас пустить boxing-M2 (стиль + все гейты состояния + M2 не на кулдауне).
@@ -2118,123 +2110,6 @@ local function tryBoxingCounter(now)
 	fireBoxingCounter(best)
 	diagPush(("COUNTER t=%.2f  %s  %s  dist=%.1f  (instant M2)")
 		:format(now, best.name or "?", best.kind or "?", bestDist))
-	return true
-end
-
--- ── GRAPPLE WIN ─────────────────────────────────────────────────────────────────────────────
--- [V131] ИСПРАВЛЕНО: раньше фича фаерила M2 на ЛЮБОЙ входящий тяжёлый в радиусе — то есть в
--- обычном бою, а не в борьбе. Настоящее состояние борьбы — атрибут Grappling==true на персонаже
--- (M2.lua:566/684, MovementServiceClient:1105, SmoothShiftLock:811). Теперь фича РАБОТАЕТ ТОЛЬКО
--- пока Grappling==true у НАС: grapple-clash выигрывается M1 input, поэтому используем быстрый
--- штатный M1 builder с подтверждённым сетевым minimum interval.
-local function grappleM1Ready()
-	if not Config.SkillAddon or not Config.SA_GrappleWin then return false end
-	local c = localChar()
-	if not c then return false end
-	-- ГЛАВНЫЙ гейт: мы должны реально быть В БОРЬБЕ. Вне грэппла фича молчит.
-	if c:GetAttribute("Grappling") ~= true then return false end
-	-- M1.ServerCheck has a confirmed 80ms minimum interval; custom builder handles the same cap.
-	if (os.clock() - (State.ap and State.ap.m1SendLast or 0)) < (Config.AP_MinSendGap or 0.08) then return false end
-	-- Grappling itself sets combat-busy/CantAnything. Do not treat those self-locks as a
-	-- prohibition or spam collapses to one M1. Keep only physical hard-locks.
-	if c:GetAttribute("Stunned") == true or c:GetAttribute("Ragdoll") == true
-	   or c:GetAttribute("Downed") == true then return false end
-	if c:GetAttribute("Equip") == false then return false end
-	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
-	if c:GetAttribute("GrappleWinnerStun") == true then return false end   -- уже проиграли клэш
-	local hum = c:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then return false end
-	return true
-end
-
--- Найти оппонента по борьбе. Remote-state авторитетнее: CombatGrappleStart payload содержит
--- CharAName/CharBName. Поиск ближайшего Grappling-игрока — только fallback при пропущенном событии.
-local function findGrappleFoe(myHRP)
-	local gs = State.grapple
-	if gs and gs.active and type(gs.foeName) == "string" then
-		local fp = Players:FindFirstChild(gs.foeName)
-		local fc = fp and fp.Character
-		local fh = fc and fc:FindFirstChild("HumanoidRootPart")
-		if fh then return fh end
-		local fm = Workspace:FindFirstChild(gs.foeName)
-		local mh = fm and fm:IsA("Model") and fm:FindFirstChild("HumanoidRootPart")
-		if mh then return mh end
-	end
-	local myPos = myHRP.Position
-	local best, bestDist
-	for _, pl in ipairs(Players:GetPlayers()) do
-		if pl ~= LocalPlayer then
-			local oc = pl.Character
-			local ohrp = oc and oc:FindFirstChild("HumanoidRootPart")
-			if ohrp and oc:GetAttribute("Grappling") == true then
-				local d = (ohrp.Position - myPos).Magnitude
-				if not bestDist or d < bestDist then best, bestDist = ohrp, d end
-			end
-		end
-	end
-	return best
-end
-
-State.grappleStart = function(payload, dirty)
-	if type(payload) ~= "table" then return end
-	local a, b = payload.CharAName, payload.CharBName
-	local me = LocalPlayer.Name
-	if a ~= me and b ~= me then return end
-	local gs = State.grapple
-	gs.active = true
-	gs.dirty = dirty == true
-	gs.foeName = (a == me) and b or a
-	gs.clashType = payload.ClashType
-	gs.winnerName = payload.WinnerName
-	gs.startedAt = os.clock()
-	diagPush(("GRAPPLE-START t=%.2f type=%s foe=%s clash=%s winner=%s")
-		:format(gs.startedAt, gs.dirty and "DIRTY" or "NORMAL", tostring(gs.foeName),
-			tostring(gs.clashType), tostring(gs.winnerName)))
-end
-
-State.grappleEnd = function(payload)
-	local gs = State.grapple
-	if not gs.active then return end
-	if type(payload) == "table" then
-		local a, b = payload.CharAName, payload.CharBName
-		if a and b and a ~= LocalPlayer.Name and b ~= LocalPlayer.Name then return end
-		gs.winnerName = payload.WinnerName or gs.winnerName
-	end
-	diagPush(("GRAPPLE-END t=%.2f foe=%s winner=%s")
-		:format(os.clock(), tostring(gs.foeName), tostring(gs.winnerName)))
-	gs.active, gs.dirty, gs.foeName, gs.clashType, gs.winnerName, gs.startedAt = false, false, nil, nil, nil, 0
-end
-
--- Пока мы в борьбе (Grappling==true), непрерывно жмём штатный M1 lifecycle.
-local function tryGrappleWin(now)
-	-- Remote-state мог потерять End; атрибут — авторитетный fallback после короткого grace.
-	local gs = State.grapple
-	local gc = localChar()
-	if gs.active and gc and gc:GetAttribute("Grappling") ~= true and now - gs.startedAt > 0.35 then
-		State.grappleEnd(nil)
-	end
-	if not grappleM1Ready() then return false end
-	local myHRP = localHRP()
-	if not myHRP then return false end
-	local foe = findGrappleFoe(myHRP)
-	local model = foe and foe.Parent
-	if not model then return false end
-	if not State.ap.getM1() then return false end
-	-- Do NOT snapTo/teleport during grapple: Grapple.lua owns character positions via
-	-- alignVictimToAttacker / applyAuthoritativeSnap. Only send a legitimate M1 server
-	-- check through tryM1Fn (the same path as a real player pressing M1 during grapple).
-	-- Animation is driven by Grapple.lua itself; custom-fire animations conflict with it.
-	local fired = false
-	if State.ap.tryM1Fn then
-		local ok, res = pcall(State.ap.tryM1Fn)
-		fired = ok and res == true
-	else
-		pcall(function() State.ap.getM1().OnM1Activated() end)
-		fired = true
-	end
-	if not fired then return false end
-	State.status = "GRAPPLE-WIN"
-	diagPush(("GRAPPLE-WIN t=%.2f  (M1 spam in grapple)"):format(now))
 	return true
 end
 
@@ -2343,7 +2218,7 @@ State.ap = {
 	punishFresh= false,  -- первый post-parry свинг обходит sustained cadence, но не server min-gap
 	busyAttrs = {
 		"Stunned", "Ragdoll", "Downed", "GuardBroken", "CantAnything",
-		"M1Cooldown", "ParryAttackLockout", "BlockAttackLockout", "GrappleWinnerStun",
+		"M1Cooldown", "ParryAttackLockout", "BlockAttackLockout",
 	},
 }
 
@@ -2632,7 +2507,23 @@ end
 function State.ap.tryInterrupt(now, th, threatCount)
 	local ap = State.ap
 	if not Config.AutoPlay or Config.AP_Interrupt == false then return false end
-	if threatCount ~= 1 or not th or th.pressed or th.dodged or th.interruptAttempted then return false end
+	if not th or th.pressed or th.dodged or th.interruptAttempted then return false end
+	-- [V138] Если параллельно есть второй враг чья атака приходит РАНЬШЕ DodgeHorizon,
+	-- не прерываем: нам нужны i-frames/block для той второй атаки.
+	-- Но если второй враг далеко (> DodgeHorizon от now) — это будущая угроза, прерываем смело.
+	if threatCount >= 2 then
+		local secondClose = false
+		for _, other in ipairs(Threats) do
+			if other ~= th and not other.feinted and not other.dodged and not other.pressed then
+				local otherDt = other.contactAbs - now
+				if otherDt >= 0 and otherDt <= (Config.DodgeHorizon or 0.6) then
+					secondClose = true
+					break
+				end
+			end
+		end
+		if secondClose then return false end
+	end
 	-- M1 тоже можно сбить, если наш style/height-scaled M1 действительно быстрее.
 	-- SKILL не включаем: часть спец-атак всё ещё имеет только fallback timing 0.35 без marker/config.
 	if th.kind ~= "M1" and th.kind ~= "M2" then return false end
@@ -2643,16 +2534,23 @@ function State.ap.tryInterrupt(now, th, threatCount)
 	local ownDelay, combo = ap.ownM1Delay()
 	if not ownDelay then return false end
 	local enemyLeft = (th.contactAbs or now) - now
-	local ownHit = ownDelay + getPingRaw() * (Config.AP_InterruptNetK or 0.5)
-	local margin = Config.AP_InterruptMargin or 0.055
-	if ownHit + margin >= enemyLeft then return false end
+	-- [V138] Разные margin для M1 и M2: M2 медленнее (hitboxDelay ~0.59с), у нас больше
+	-- времени чтобы опередить. M1 быстрее — нужен строгий margin чтобы не промахнуться.
+	local baseMargin = th.kind == "M2" and (Config.AP_InterruptMargin or 0.055) * 0.6
+	                                    or  (Config.AP_InterruptMargin or 0.055)
+	local netLag = getPingRaw() * (Config.AP_InterruptNetK or 0.5)
+	local ownHit = ownDelay + netLag
+	-- [V138] Дополнительная проверка: убедиться что enemyLeft ещё достаточно велик
+	-- (не пытаться сбивать атаку у которой осталось < 50ms — уже поздно).
+	if enemyLeft < 0.05 then return false end
+	if ownHit + baseMargin >= enemyLeft then return false end
 	if not ap.fireM1(th.attackerModel, "interrupt", true, true) then return false end
 	th.interruptAttempted = true
 	State.interruptFiredFrame = FrameId
 	State.status = "INTERRUPT"
 	diagPush(("INTERRUPT t=%.2f %s %s(%s) combo=%d ours=%.0fms enemy=%.0fms margin=%.0fms guard=fallback")
 		:format(now, th.name or "?", th.kind or "?", th.style or "?", combo or 0,
-			ownHit * 1000, enemyLeft * 1000, margin * 1000))
+			ownHit * 1000, enemyLeft * 1000, baseMargin * 1000))
 	-- Контрудар больше не владеет scheduler до ETA: обычный parry остаётся страховкой,
 	-- если сервер не подтвердит interruption. M1 уже ушёл с теми же animation+rotation.
 	return false
@@ -2727,6 +2625,10 @@ function State.ap.onPerfectParry(attackerName, kind)
 	local plr   = attackerName and Players:FindFirstChild(attackerName)
 	local model = plr and plr.Character
 	if not model then return end
+	-- [V138] Если Boxing Counter только что сработал (≤0.35с назад), M2 уже ушёл —
+	-- M1 dobivanie бесполезно (враг ещё не застанен нашим контером) и только палит кулдаун.
+	-- Используем стан от нашего M2 (BoxingCounterStun ~ 0.6с) как окно для AutoPlay позже.
+	if Config.BoxingCounter and (os.clock() - (State.lastCounter or 0)) < 0.40 then return end
 	-- окно стана: M2-парри = ParryStun.M2 (1с, надёжно); M1-парри короче (RecoveryLockout врага)
 	local stun = (kind == "M2") and (Config.AP_M2Stun or 1.0) or (Config.AP_M1Stun or 0.5)
 	State.ap.punishTgt   = model
@@ -3295,19 +3197,6 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	State.interruptThreatCount = 0
 	for k in pairs(V93.interruptSeen) do V93.interruptSeen[k] = nil end
 
-	-- Grapple — отдельное подтверждённое состояние боя. Пока наш персонаж реально Grappling,
-	-- старые animation-threats не должны запускать обычные block/dodge/counter ветки.
-	State.grappleChar = localChar()
-	if State.grapple.active and State.grappleChar
-	   and State.grappleChar:GetAttribute("Grappling") ~= true
-	   and now - State.grapple.startedAt > 0.35 then
-		State.grappleEnd(nil)
-	end
-	if State.grappleChar and State.grappleChar:GetAttribute("Grappling") == true then
-		tryGrappleWin(now)
-		return
-	end
-
 		for i = #Threats, 1, -1 do
 			local th = Threats[i]
 			local trackGone = th.track and th.track.Parent == nil
@@ -3832,15 +3721,11 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	end
 
 	-- Legacy Boxing counter оставлен только как отдельный SkillAddon fallback. Когда новый
-	-- AutoPlay interrupt включён, он единолично решает M1/M2 по точным deadline и сохраняет parry.
-	-- [V122] BOXING COUNTER (instant). Вместо парирования МОМЕНТАЛЬНО бьём M2 по ближайшему
-	-- атакующему в радиусе, если наш стиль Boxing и M2 не на кулдауне. Стоит ПОСЛЕ must-dodge
-	-- (грэбы всё равно доджим) и обычных додж��й, но ДО блока — counter ЗАМЕНЯЕТ парри. НЕ зависит
-	-- от wantBlock/willHitMe (тот баговал на delayed-hitbox M2) — скан идёт по сырым Threats, так
-	-- что counter срабатывает даже когда предиктор-геометрия отка��ала. Выстрелил → скип блока.
-	-- Grapple обрабатывается отдельным ранним state-path в начале schedulerStep.
-	if (not Config.AutoPlay or Config.AP_Interrupt == false)
-	   and State.interruptFiredFrame ~= FrameId and tryBoxingCounter(now) then return end
+	-- [V138] Boxing Counter always fires first when boxing style + M2 ready, regardless of
+	-- AutoPlay settings. AutoPlay interrupt runs independently via tryInterrupt above.
+	-- Counter REPLACES parry (returns to skip the block section below); it is NOT gated on
+	-- AutoPlay being off — boxing M2 punish is always better than parry when available.
+	if State.interruptFiredFrame ~= FrameId and tryBoxingCounter(now) then return end
 
 	if wantBlock then
 		-- ParryWindowDisabled запрещает perfect-window, но не обычный guard. Если guard уже
@@ -4256,28 +4141,6 @@ task.spawn(function()
 		onOutcome(attacker, result, kind, os.clock())
 	end)
 	dbg("calibration active — listening CombatBroadcastURE")
-end)
-
--- Точный grapple lifecycle. Этот RemoteEvent передаёт подтверждённые дампом имена обоих
--- участников, тип клэша и победителя; атрибут Grappling остаётся аварийным fallback.
-task.spawn(function()
-	local Shared = ReplicatedStorage:WaitForChild("Shared", 30)
-	local Network = Shared and Shared:WaitForChild("Network", 30)
-	local remote = Network and Network:WaitForChild("CombatClientRemoteEvent", 30)
-	if not remote or not remote:IsA("RemoteEvent") then
-		dbg("grapple-state: CombatClientRemoteEvent not found; attribute fallback only")
-		return
-	end
-	remote.OnClientEvent:Connect(function(eventName, payload)
-		if eventName == "CombatGrappleStart" then
-			State.grappleStart(payload, false)
-		elseif eventName == "CombatGrappleStartDirty" then
-			State.grappleStart(payload, true)
-		elseif eventName == "CombatGrappleEnd" then
-			State.grappleEnd(payload)
-		end
-	end)
-	dbg("grapple-state active — listening CombatClientRemoteEvent")
 end)
 
 -- [V90.4] Серверный hitbox-reactor удалён: он срабатывал только по уже-приземлившемуся удару,
@@ -6164,12 +6027,6 @@ return function(_Lib, _Core)
 			Min = 3, Max = 12, Precision = 1, Suffix = " studs",
 			Callback = function(v) Config.BoxingCounterReach = v end })
 		apBox:SubLabel({ Text = "max distance to the attacker to fire the instant counter M2" })
-
-		apBox:Divider()
-		apBox:Header({ Name = "Grapple" })
-		boolToggle(apBox, "Grapple Win", "Grapple Win",
-			function() return Config.SA_GrappleWin end, function(v) Config.SA_GrappleWin = v end)
-		apBox:SubLabel({ Text = "any style, makes u win grapple" })
 
 		apBox:Divider()
 		apBox:Header({ Name = "Anti-Grab" })
