@@ -38,6 +38,9 @@ return function(Lib, Core)
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local TweenService      = game:GetService("TweenService")
     local UserInputService  = game:GetService("UserInputService")
+	local Lighting           = game:GetService("Lighting")
+	local SoundService       = game:GetService("SoundService")
+	local Debris             = game:GetService("Debris")
 
     local LocalPlayer = Players.LocalPlayer
 	local VisualCtl
@@ -66,6 +69,7 @@ return function(Lib, Core)
         ESP_Skeleton = false,
         ESP_Tracer   = false,
         ESP_MaxDist  = 1200,
+		ESP_Range    = 1200,
         ESP_Box_Color  = Color3.fromRGB(90, 150, 255),
         ESP_Text_Color = Color3.fromRGB(235, 235, 240),
         ESP_M2_Color   = Color3.fromRGB(170, 110, 255),
@@ -98,6 +102,28 @@ return function(Lib, Core)
 		Name_Custom = false,
 		Name_First  = "Syllinse",
 		Name_Last   = "Project",
+
+		-- Environment
+		Env_On       = false,
+		Env_Ambient  = Color3.fromRGB(120, 120, 140),
+		Env_Outdoor  = Color3.fromRGB(100, 105, 120),
+		Env_FogColor = Color3.fromRGB(170, 180, 200),
+		Env_FogStart = 0,
+		Env_FogEnd   = 1000,
+		Env_AtmosDensity = 0.15,
+		Env_AtmosColor = Color3.fromRGB(190, 200, 220),
+		Env_Brightness = 2,
+		Env_ClockTime  = 14,
+
+		-- Combat visuals
+		HitFX_On       = false,
+		HitSound_On    = true,
+		HitParticles_On= true,
+		HitFX_Color    = Color3.fromRGB(255, 90, 90),
+		HitboxVis_On   = false,
+		HitboxVis_Color= Color3.fromRGB(255, 80, 80),
+		Timeline_On    = false,
+		Timeline_Color = Color3.fromRGB(120, 190, 255),
 
         -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
         -- runs on Heartbeat, which fires at the monitor's refresh rate — so on a 144/240Hz screen
@@ -172,6 +198,50 @@ return function(Lib, Core)
 		VisualCtl.restoreFOV()
 		Config.Name_On = false
 		VisualCtl.applyName()
+	end
+
+	-- EnvironmentService writes these properties continuously, so enabled overrides use
+	-- property-change listeners (not a render loop). Originals are restored on disable/unload.
+	local EnvCtl = { original = nil, atmosphere = nil, conns = {}, applying = false }
+	local ENV_PROPS = { "Ambient", "OutdoorAmbient", "FogColor", "FogStart", "FogEnd", "Brightness", "ClockTime" }
+	function EnvCtl.capture()
+		if EnvCtl.original then return end
+		EnvCtl.original = {}
+		for _, p in ipairs(ENV_PROPS) do EnvCtl.original[p] = Lighting[p] end
+		local a=Lighting:FindFirstChildOfClass("Atmosphere")
+		if a then EnvCtl.atmosphere=a; EnvCtl.original.AtmosDensity=a.Density; EnvCtl.original.AtmosColor=a.Color end
+	end
+	function EnvCtl.apply()
+		if not Config.Env_On or EnvCtl.applying then return end
+		EnvCtl.capture(); EnvCtl.applying = true
+		Lighting.Ambient, Lighting.OutdoorAmbient = Config.Env_Ambient, Config.Env_Outdoor
+		Lighting.FogColor, Lighting.FogStart, Lighting.FogEnd = Config.Env_FogColor, Config.Env_FogStart, Config.Env_FogEnd
+		Lighting.Brightness, Lighting.ClockTime = Config.Env_Brightness, Config.Env_ClockTime
+		local a=Lighting:FindFirstChildOfClass("Atmosphere")
+		if a then a.Density=Config.Env_AtmosDensity; a.Color=Config.Env_AtmosColor end
+		EnvCtl.applying = false
+	end
+	function EnvCtl.set(on)
+		Config.Env_On = on and true or false
+		for _, c in ipairs(EnvCtl.conns) do c:Disconnect() end; table.clear(EnvCtl.conns)
+		if Config.Env_On then
+			EnvCtl.capture(); EnvCtl.apply()
+			for _, p in ipairs(ENV_PROPS) do
+				EnvCtl.conns[#EnvCtl.conns + 1] = Lighting:GetPropertyChangedSignal(p):Connect(EnvCtl.apply)
+			end
+			local a=Lighting:FindFirstChildOfClass("Atmosphere")
+			if a then
+				EnvCtl.conns[#EnvCtl.conns+1]=a:GetPropertyChangedSignal("Density"):Connect(EnvCtl.apply)
+				EnvCtl.conns[#EnvCtl.conns+1]=a:GetPropertyChangedSignal("Color"):Connect(EnvCtl.apply)
+			end
+		elseif EnvCtl.original then
+			EnvCtl.applying = true
+			for _, p in ipairs(ENV_PROPS) do Lighting[p] = EnvCtl.original[p] end
+			if EnvCtl.atmosphere and EnvCtl.atmosphere.Parent then
+				EnvCtl.atmosphere.Density=EnvCtl.original.AtmosDensity; EnvCtl.atmosphere.Color=EnvCtl.original.AtmosColor
+			end
+			EnvCtl.applying = false; EnvCtl.original = nil; EnvCtl.atmosphere=nil
+		end
 	end
 
     -- ── Watermark palette (shared by every indicator style) ──────────────────
@@ -476,7 +546,7 @@ return function(Lib, Core)
 
         local lpRoot = _frLpRoot
         local dist = lpRoot and (root.Position - lpRoot.Position).Magnitude or 0
-        if Config.ESP_MaxDist > 0 and dist > Config.ESP_MaxDist then hideEsp(o); return end
+        if (Config.ESP_Range or 0) > 0 and dist > Config.ESP_Range then hideEsp(o); return end
 
         -- STATIC 2D box, anchored to the ROOT PART world position (exactly like the
         -- "Player" indicator style, which the user confirmed does NOT drift under
@@ -1427,6 +1497,158 @@ return function(Lib, Core)
         lastHealth = h
     end
 
+	-- ═════════════════════════ COMBAT VISUALS ═════════════════════════
+	local CombatViz = {
+		hbLines = {}, timeline = {}, particles = {}, candidates = setmetatable({}, { __mode = "k" }),
+		humConns = setmetatable({}, { __mode = "k" }), seenSwings = {}, hitboxFolder = nil,
+		corners = {}, overlap = setmetatable({}, { __mode = "k" }), timelineThreats = {}, feed = {}, feedDraw = {},
+		timelineSort = function(a,b) return (a.contactAbs or 0)<(b.contactAbs or 0) end,
+	}
+	local BOX_EDGES = { 1,2, 2,3, 3,4, 4,1, 5,6, 6,7, 7,8, 8,5, 1,5, 2,6, 3,7, 4,8 }
+	local function ensureHitboxLines()
+		if #CombatViz.hbLines > 0 then return end
+		for i = 1, 12 * 8 do CombatViz.hbLines[i] = newDrawing("Line", { Visible=false, Thickness=1, Color=Config.HitboxVis_Color, ZIndex=20 }) end
+	end
+	local function boxCorners(part)
+		local cf, h = part.CFrame, part.Size * 0.5
+		local c=CombatViz.corners
+		c[1]=cf*Vector3.new(-h.X,-h.Y,-h.Z); c[2]=cf*Vector3.new(h.X,-h.Y,-h.Z)
+		c[3]=cf*Vector3.new(h.X,h.Y,-h.Z); c[4]=cf*Vector3.new(-h.X,h.Y,-h.Z)
+		c[5]=cf*Vector3.new(-h.X,-h.Y,h.Z); c[6]=cf*Vector3.new(h.X,-h.Y,h.Z)
+		c[7]=cf*Vector3.new(h.X,h.Y,h.Z); c[8]=cf*Vector3.new(-h.X,h.Y,h.Z)
+		return c
+	end
+	local renderRealHitboxes = LPH_NO_VIRTUALIZE(function()
+		if not Config.HitboxVis_On or not hasDrawing then
+			for _, l in ipairs(CombatViz.hbLines) do l.Visible = false end
+			return
+		end
+		ensureHitboxLines()
+		local folder = CombatViz.hitboxFolder
+		if not (folder and folder.Parent) then folder = Workspace:FindFirstChild("Hitboxes"); CombatViz.hitboxFolder = folder end
+		local used, boxes = 0, 0
+		if folder then
+			for _, part in ipairs(folder:GetChildren()) do
+				if boxes >= 8 then break end
+				if part:IsA("BasePart") and part:GetAttribute("VictimSwingId") then
+					boxes = boxes + 1
+					local pts, col = boxCorners(part), Config.HitboxVis_Color
+					local owner = part:FindFirstChild("Owner")
+					if owner and LocalPlayer.Character and owner.Value == LocalPlayer.Character.Name then col = Color3.fromRGB(80,255,130) end
+					for e = 1, #BOX_EDGES, 2 do
+						used = used + 1; local l = CombatViz.hbLines[used]
+						local a, ona = Camera:WorldToViewportPoint(pts[BOX_EDGES[e]])
+						local b, onb = Camera:WorldToViewportPoint(pts[BOX_EDGES[e+1]])
+						if ona or onb then l.From=Vector2.new(a.X,a.Y); l.To=Vector2.new(b.X,b.Y); l.Color=col; l.Visible=true else l.Visible=false end
+					end
+				end
+			end
+		end
+		for i = used + 1, #CombatViz.hbLines do CombatViz.hbLines[i].Visible = false end
+	end)
+
+	local function ensureTimeline()
+		if #CombatViz.timeline > 0 then return end
+		for i = 1, 4 do CombatViz.timeline[i] = newText(14, Config.Timeline_Color); CombatViz.timeline[i].Center = false; CombatViz.timeline[i].ZIndex = 30 end
+	end
+	local renderTimeline = LPH_NO_VIRTUALIZE(function(now)
+		if not Config.Timeline_On or not hasDrawing then
+			for _, d in ipairs(CombatViz.timeline) do d.Visible=false end
+			return
+		end
+		ensureTimeline()
+		local G = type(getgenv)=="function" and getgenv() or _G
+		local bridge = G and G.SYLLINSE_AP_BRIDGE
+		local threats = bridge and bridge.getThreats and bridge.getThreats() or nil
+		local shown, vp, tmp = 0, Camera.ViewportSize, CombatViz.timelineThreats
+		table.clear(tmp)
+		if threats then
+			for _, th in ipairs(threats) do
+				local left = (th.contactAbs or now) - now
+				if left >= -0.08 and not th.resolved and not (th.group and th.group.cancelled) then tmp[#tmp+1]=th end
+			end
+		end
+		table.sort(tmp,CombatViz.timelineSort)
+		for i=1,math.min(4,#tmp) do
+			local th=tmp[i]; local left=(th.contactAbs or now)-now; shown=i; local d=CombatViz.timeline[i]
+			d.Text=("%s  %s %s  s%d  %.0fms"):format(th.name or "?",th.kind or "?",th.style or "?",th.strike or 1,math.max(0,left)*1000)
+			d.Position=Vector2.new(vp.X*0.5+90,vp.Y*0.53+(i-1)*17); d.Color=Config.Timeline_Color; d.Visible=true
+		end
+		for i=shown+1,#CombatViz.timeline do CombatViz.timeline[i].Visible=false end
+	end)
+
+	local function playConfirmedHit(pos, damage, target)
+		if Config.HitSound_On then
+			local s=Instance.new("Sound"); s.SoundId="rbxassetid://115982072912004"; s.Volume=0.75; s.Parent=SoundService
+			Debris:AddItem(s,4); s:Play()
+		end
+		CombatViz.feed[#CombatViz.feed+1]={born=os.clock(),text=("HIT  %s  -%.0f"):format(target or "?",damage or 0)}
+		if Config.HitParticles_On and hasDrawing then
+			local sp,on=Camera:WorldToViewportPoint(pos); if not on then return end
+			for i=1,8 do
+				local a=(i/8)*math.pi*2; local l=newDrawing("Line",{Visible=true,Thickness=2,Color=Config.HitFX_Color,ZIndex=80})
+				CombatViz.particles[#CombatViz.particles+1]={line=l,born=os.clock(),x=sp.X,y=sp.Y,dx=math.cos(a),dy=math.sin(a)}
+			end
+		end
+	end
+	local function hookHitHumanoid(hum)
+		if CombatViz.humConns[hum] then return end
+		local last=hum.Health
+		CombatViz.humConns[hum]=hum.HealthChanged:Connect(function(h)
+			local c=CombatViz.candidates[hum]
+			if Config.HitFX_On and c and os.clock()<=c.expires and h<last-0.1 then
+				playConfirmedHit(c.pos,last-h,hum.Parent and hum.Parent.Name); CombatViz.candidates[hum]=nil
+			end
+			last=h
+		end)
+	end
+	local scanOwnHitboxes = LPH_NO_VIRTUALIZE(function(now)
+		if not Config.HitFX_On then return end
+		local char=LocalPlayer.Character; if not char then return end
+		local folder=CombatViz.hitboxFolder
+		if not (folder and folder.Parent) then folder=Workspace:FindFirstChild("Hitboxes"); CombatViz.hitboxFolder=folder end
+		if not folder then return end
+		for _, part in ipairs(folder:GetChildren()) do
+			local owner=part:IsA("BasePart") and part:FindFirstChild("Owner")
+			local sid=part:IsA("BasePart") and part:GetAttribute("VictimSwingId")
+			if owner and owner.Value==char.Name and sid and not CombatViz.seenSwings[sid] then
+				for i=1,_espCount do
+					local ec=getChar(_espPlayers[i]); local hum=getHum(ec)
+					if ec and hum and hum.Health>0 then
+						local op=CombatViz.overlap[ec]
+						if not op then op=OverlapParams.new(); op.FilterType=Enum.RaycastFilterType.Include; op.FilterDescendantsInstances={ec}; op.MaxParts=1; CombatViz.overlap[ec]=op end
+						if #Workspace:GetPartBoundsInBox(part.CFrame,part.Size,op)>0 then
+							hookHitHumanoid(hum); CombatViz.candidates[hum]={expires=now+0.25,pos=part.Position}; CombatViz.seenSwings[sid]=now; break
+						end
+					end
+				end
+			end
+		end
+		for sid,t in pairs(CombatViz.seenSwings) do if now-t>3 then CombatViz.seenSwings[sid]=nil end end
+	end)
+	local renderHitParticles = LPH_NO_VIRTUALIZE(function(now)
+		for i=#CombatViz.particles,1,-1 do local p=CombatViz.particles[i]; local age=now-p.born
+			if age>0.45 then p.line:Remove(); table.remove(CombatViz.particles,i) else
+				local r=8+age*70; p.line.From=Vector2.new(p.x+p.dx*r,p.y+p.dy*r); p.line.To=Vector2.new(p.x+p.dx*(r+10),p.y+p.dy*(r+10)); p.line.Transparency=1-age/0.45; p.line.Visible=true
+			end
+		end
+	end)
+	local function ensureFeed()
+		if #CombatViz.feedDraw>0 then return end
+		for i=1,5 do CombatViz.feedDraw[i]=newText(15,Config.HitFX_Color); CombatViz.feedDraw[i].Center=false; CombatViz.feedDraw[i].ZIndex=90 end
+	end
+	local renderDamageFeed = LPH_NO_VIRTUALIZE(function(now)
+		if not Config.HitFX_On and #CombatViz.feed==0 then for _,d in ipairs(CombatViz.feedDraw) do d.Visible=false end; return end
+		ensureFeed()
+		for i=#CombatViz.feed,1,-1 do if now-CombatViz.feed[i].born>1.8 then table.remove(CombatViz.feed,i) end end
+		local vp=Camera.ViewportSize; local n=math.min(5,#CombatViz.feed)
+		for i=1,n do local item=CombatViz.feed[#CombatViz.feed-i+1]; local d=CombatViz.feedDraw[i]
+			d.Text=item.text; d.Position=Vector2.new(vp.X*0.62,vp.Y*0.42+(i-1)*18); d.Color=Config.HitFX_Color
+			d.Transparency=math.clamp(1-(now-item.born)/1.8,0,1); d.Visible=true
+		end
+		for i=n+1,#CombatViz.feedDraw do CombatViz.feedDraw[i].Visible=false end
+	end)
+
     -- ═══════════════════════════════════════════════════════════════════════
     -- Lifecycle wiring
     -- ═══════════════════════════��═══════════════════════════════════════════
@@ -1504,6 +1726,12 @@ return function(Lib, Core)
 			indicatorsWereOn = Config.Ind_On
 			pollLocalDamage()
 			if Config.HitDir_On or #hitArrows > 0 then updateHitDir() end
+			local now=os.clock()
+			if Config.HitboxVis_On or #CombatViz.hbLines>0 then renderRealHitboxes() end
+			if Config.Timeline_On or #CombatViz.timeline>0 then renderTimeline(now) end
+			if Config.HitFX_On then scanOwnHitboxes(now) end
+			if #CombatViz.particles>0 then renderHitParticles(now) end
+			if Config.HitFX_On or #CombatViz.feed>0 then renderDamageFeed(now) end
             end))
     end
 
@@ -1646,8 +1874,8 @@ return function(Lib, Core)
         boolToggle(sEsp, "Combat Style", "ESP Style", function() return Config.ESP_Style end,    function(v) Config.ESP_Style = v end)
         boolToggle(sEsp, "Skeleton", "ESP Skeleton", function() return Config.ESP_Skeleton end, function(v) Config.ESP_Skeleton = v end)
         boolToggle(sEsp, "Tracer",   "ESP Tracer",   function() return Config.ESP_Tracer end,   function(v) Config.ESP_Tracer = v end)
-        slider(sEsp, { Name = "Max Distance", Flag = "VIS_ESP_Dist", Default = Config.ESP_MaxDist,
-            Min = 100, Max = 3000, Suffix = "m", Callback = function(v) Config.ESP_MaxDist = v end })
+		slider(sEsp, { Name = "Range", Flag = "VIS_ESP_Range", Default = Config.ESP_Range,
+			Min = 50, Max = 3000, Suffix = " st", Callback = function(v) Config.ESP_Range = v end })
         colorpick(sEsp, "Box Color", "VIS_ESP_BoxCol", Config.ESP_Box_Color, function(c) Config.ESP_Box_Color = c end)
         colorpick(sEsp, "Text Color", "VIS_ESP_TxtCol", Config.ESP_Text_Color, function(c) Config.ESP_Text_Color = c end)
         colorpick(sEsp, "Heavy (M2) Bar Color", "VIS_ESP_M2Col", Config.ESP_M2_Color, function(c) Config.ESP_M2_Color = c end)
@@ -1657,6 +1885,33 @@ return function(Lib, Core)
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
+
+        -- ─────────────── Environment ───────────────
+        local sEnv = V:Section({ Side = "Left" })
+        sEnv:Header({ Name = "Environment" })
+        sEnv:Toggle({ Name="Enabled", Default=Config.Env_On, Callback=function(v) EnvCtl.set(v) end }, ctx.flag("VIS_ENV_On"))
+        colorpick(sEnv,"Ambient","VIS_ENV_Amb",Config.Env_Ambient,function(c) Config.Env_Ambient=c; EnvCtl.apply() end)
+        colorpick(sEnv,"Outdoor Ambient","VIS_ENV_Out",Config.Env_Outdoor,function(c) Config.Env_Outdoor=c; EnvCtl.apply() end)
+        colorpick(sEnv,"Fog Color","VIS_ENV_FogCol",Config.Env_FogColor,function(c) Config.Env_FogColor=c; EnvCtl.apply() end)
+		colorpick(sEnv,"Atmosphere Color","VIS_ENV_AtmCol",Config.Env_AtmosColor,function(c) Config.Env_AtmosColor=c; EnvCtl.apply() end)
+        slider(sEnv,{Name="Fog Start",Flag="VIS_ENV_FogStart",Default=Config.Env_FogStart,Min=0,Max=5000,Suffix=" st",Callback=function(v) Config.Env_FogStart=v; EnvCtl.apply() end})
+        slider(sEnv,{Name="Fog End",Flag="VIS_ENV_FogEnd",Default=Config.Env_FogEnd,Min=10,Max=10000,Suffix=" st",Callback=function(v) Config.Env_FogEnd=v; EnvCtl.apply() end})
+		slider(sEnv,{Name="Atmosphere Density",Flag="VIS_ENV_AtmDensity",Default=Config.Env_AtmosDensity,Min=0,Max=1,Precision=2,Callback=function(v) Config.Env_AtmosDensity=v; EnvCtl.apply() end})
+        slider(sEnv,{Name="Brightness",Flag="VIS_ENV_Bright",Default=Config.Env_Brightness,Min=0,Max=10,Precision=2,Callback=function(v) Config.Env_Brightness=v; EnvCtl.apply() end})
+        slider(sEnv,{Name="Clock Time",Flag="VIS_ENV_Time",Default=Config.Env_ClockTime,Min=0,Max=24,Precision=1,Suffix="h",Callback=function(v) Config.Env_ClockTime=v; EnvCtl.apply() end})
+
+        -- ─────────────── Combat Visuals ───────────────
+        local sCombat = V:Section({ Side = "Left" })
+        sCombat:Header({ Name = "Combat Visuals" })
+        boolToggle(sCombat,"Damage Feed","Damage Feed",function() return Config.HitFX_On end,function(v) Config.HitFX_On=v end)
+        boolToggle(sCombat,"Hit Sound","Hit Sound",function() return Config.HitSound_On end,function(v) Config.HitSound_On=v end)
+        boolToggle(sCombat,"Hit Particles","Hit Particles",function() return Config.HitParticles_On end,function(v) Config.HitParticles_On=v end)
+        colorpick(sCombat,"Hit FX Color","VIS_HITFX_Col",Config.HitFX_Color,function(c) Config.HitFX_Color=c end)
+        boolToggle(sCombat,"Real Hitboxes","Real Hitboxes",function() return Config.HitboxVis_On end,function(v) Config.HitboxVis_On=v end)
+        colorpick(sCombat,"Enemy Hitbox Color","VIS_HB_Col",Config.HitboxVis_Color,function(c) Config.HitboxVis_Color=c end)
+        boolToggle(sCombat,"Threat Timeline","Threat Timeline",function() return Config.Timeline_On end,function(v) Config.Timeline_On=v end)
+        colorpick(sCombat,"Timeline Color","VIS_TL_Col",Config.Timeline_Color,function(c) Config.Timeline_Color=c end)
+        sCombat:SubLabel({Text="Damage Feed confirms: own hitbox overlap + same target HP loss. Timeline uses AutoParry's live EDF threats."})
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
         local sInd = V:Section({ Side = "Right" })
@@ -1763,6 +2018,7 @@ return function(Lib, Core)
     end
 
     function M.stop()
+		EnvCtl.set(false)
         VisualCtl.restoreAll()
         VisualCtl.clearNameConns()
         if VisualCtl.fovConn then VisualCtl.fovConn:Disconnect(); VisualCtl.fovConn = nil end
@@ -1774,6 +2030,12 @@ return function(Lib, Core)
         for plr in pairs(espPool) do destroyEsp(plr) end
         for _, h in ipairs(hitArrows) do removeArrow(h) end
         hitArrows = {}
+		for _, l in ipairs(CombatViz.hbLines) do pcall(function() l:Remove() end) end
+		for _, d in ipairs(CombatViz.timeline) do pcall(function() d:Remove() end) end
+		for _, p in ipairs(CombatViz.particles) do pcall(function() p.line:Remove() end) end
+		for _, d in ipairs(CombatViz.feedDraw) do pcall(function() d:Remove() end) end
+		for _, c in pairs(CombatViz.humConns) do pcall(function() c:Disconnect() end) end
+		CombatViz.hbLines, CombatViz.timeline, CombatViz.particles, CombatViz.feedDraw, CombatViz.feed = {}, {}, {}, {}, {}
         for _, c in pairs(drawCells) do
             for _, key in ipairs({ "label", "value", "track", "fill" }) do
                 if c[key] then pcall(function() c[key]:Remove() end) end
