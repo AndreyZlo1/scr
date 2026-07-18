@@ -637,6 +637,19 @@ end
 -- недокомпенсации для парри). Если оба недоступны — отдаём последнее валидное значение, а НЕ
 -- хардкод 60. Итог: и hot-path, и header видят один настоящий RTT.
 local _lastGoodPing = 0.08
+-- Diagnostic-only source snapshot. Never consumed by scheduler/predictor.
+local function pingDiagSnapshot()
+	local oneWay, statsRtt
+	pcall(function()
+		local v = LocalPlayer:GetNetworkPing()
+		if type(v) == "number" and v > 0 then oneWay = v end
+	end)
+	pcall(function()
+		local v = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+		if type(v) == "number" and v > 1 then statsRtt = v / 1000 end
+	end)
+	return oneWay, statsRtt
+end
 local function getPingRaw()
 	local best
 
@@ -1055,7 +1068,17 @@ local function associatedHitbox(th)
 		local sid = best:GetAttribute("VictimSwingId")
 		V93.hbClaimBySid[sid] = th.group or th
 		th.serverHitbox, th.serverSwingId = best, sid
-		if th.group then th.group.serverHitbox, th.group.serverSwingId = best, sid end
+		th.hbFirstClock = V93.hbFirstSeen[best] or os.clock()
+		th.hbFirstServer = Workspace:GetServerTimeNow()
+		th.hbFirstPos, th.hbFirstSize = best.Position, best.Size
+		if th.group then
+			th.group.serverHitbox, th.group.serverSwingId = best, sid
+			th.group.hbFirstClock = th.hbFirstClock
+		end
+		diagPush(("TRACE-HB t=%.3f %s %s s%d sid=%s first=%+.0fms toPred=%+.0fms pos=(%.1f,%.1f,%.1f) size=(%.1f,%.1f,%.1f)")
+			:format(os.clock(), th.name or "?", th.kind or "?", th.strike or 1, tostring(sid),
+				(th.hbFirstClock - th.detectClock)*1000, ((th.contactAbs or th.hbFirstClock)-th.hbFirstClock)*1000,
+				best.Position.X, best.Position.Y, best.Position.Z, best.Size.X, best.Size.Y, best.Size.Z))
 	end
 	return best
 end
@@ -1078,6 +1101,18 @@ local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
 	end
 	if V93.hbChar ~= char then params.FilterDescendantsInstances = { char }; V93.hbChar = char end
 	local hit = #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0
+	if hit and not th.hbOverlapClock then
+		th.hbOverlapClock, th.hbOverlapServer = os.clock(), Workspace:GetServerTimeNow()
+		local my = localHRP()
+		local av = th.attackerHRP and th.attackerHRP.AssemblyLinearVelocity or Vector3.zero
+		local mv = my and my.AssemblyLinearVelocity or Vector3.zero
+		diagPush(("TRACE-OV t=%.3f %s %s s%d sid=%s detect=%+.0fms predErr=%+.0fms av=(%.1f,%.1f) mv=(%.1f,%.1f)")
+			:format(th.hbOverlapClock, th.name or "?", th.kind or "?", th.strike or 1,
+				tostring(th.serverSwingId or (th.group and th.group.serverSwingId) or "none"),
+				(th.hbOverlapClock-th.detectClock)*1000,
+				(th.hbOverlapClock-(th.contactAbs or th.hbOverlapClock))*1000,
+				av.X, av.Z, mv.X, mv.Z))
+	end
 	th.gtQueryFrame, th.gtQueryResult = FrameId, hit
 	return hit
 end)
@@ -1269,6 +1304,9 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local depth = ox * look.X + oz * look.Z
 	local side = math.abs(ox * (-look.Z) + oz * look.X)
 	local hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
+	th.geomDepth, th.geomSide = depth, side
+	th.geomForward, th.geomHalfD, th.geomHalfW = forward, halfD, halfW
+	th.geomTHit, th.geomOrigin, th.geomVictim, th.geomLook = tHit, origin, myAt, look
 	th.trustedHit = hit
 	if gt == false and not hit then
 		th.recognitionSource = "server-pending+predicted-miss"
@@ -2786,6 +2824,17 @@ local refreshContact = LPH_NO_VIRTUALIZE(function(th)
 
 		if playing and tp > (th.maxTP or th.initTP) + 0.0005 then
 			th.maxTP = tp; th.trackSeen = true; th.lastAdvanceClock = now
+			if not th.firstProgressClock then
+				th.firstProgressClock = now
+				diagPush(("TRACE-ANIM t=%.3f %s %s s%d firstProgress=%+.0fms tp=%.3f init=%.3f live=%.2f")
+					:format(now, th.name or "?", th.kind or "?", th.strike or 1,
+						(now-th.detectClock)*1000, tp, th.initTP or 0, th.liveSpeed or 0))
+			end
+		elseif not playing and not th.trackStopClock then
+			th.trackStopClock = now
+			diagPush(("TRACE-ANIM t=%.3f %s %s s%d stopped=%+.0fms tp=%.3f maxTP=%.3f hitTL=%.3f")
+				:format(now, th.name or "?", th.kind or "?", th.strike or 1,
+					(now-th.detectClock)*1000, tp, th.maxTP or th.initTP or 0, th.hitTL or 0))
 		end
 
 		-- [V96] Live-TP коррекция теперь И для M1 (раньше только M2/SKILL). M1 предсказывался
@@ -2935,6 +2984,13 @@ local function onAttack(attackerHRP, info, model, id, track)
 	local vlead = velLead(attackerHRP)
 	local nowClock  = os.clock()
 	local nowServer = Workspace:GetServerTimeNow()
+	local netOneWay, statsRtt = pingDiagSnapshot()
+	local pingRawDetect, pingMedDetect, uplinkDetect = getPingRaw(), getPing(), uplink()
+	local trackLength, trackPlaying = 0, false
+	if track then
+		pcall(function() trackLength = track.Length end)
+		pcall(function() trackPlaying = track.IsPlaying end)
+	end
 	local th = {
 		name = name, kind = info.t, style = info.s, mom = info.mom, id = id,
 		track = track, hitTL = hitTL, initTP = already, initSpeed = speed,
@@ -2943,6 +2999,11 @@ local function onAttack(attackerHRP, info, model, id, track)
 		attackerHRP = attackerHRP, attackerModel = model,
 		heightAttr = heightAttr, bodyHeightScale = bodyHeightScale, modelHeight = modelHeight,
 		attackMult = aMult,
+		pingOneWayDetect = netOneWay, pingStatsDetect = statsRtt,
+		pingRawDetect = pingRawDetect, pingMedDetect = pingMedDetect, uplinkDetect = uplinkDetect,
+		trackLengthDetect = trackLength, trackPlayingDetect = trackPlaying,
+		attackerPosDetect = attackerHRP.Position, victimPosDetect = myHRP.Position,
+		attackerVelDetect = attackerHRP.AssemblyLinearVelocity, victimVelDetect = myHRP.AssemblyLinearVelocity,
 		pressed = false, dodged = false,
 		pressDt = nil,
 		faceDot = nil,
@@ -2966,7 +3027,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	end
 
 	local rec = { clock = nowClock, detectServer = nowServer, type = info.t, style = info.s,
-	              id = id, contact = remaining0, pingRaw = getPingRaw(), combo = combo,
+	              id = id, contact = remaining0, pingRaw = pingRawDetect, combo = combo,
 	              speed = speed, matched = false, th = th, strike = 1 }
 	th.rec = rec
 	local q = Pending[name]; if not q then q = {}; Pending[name] = q end
@@ -3000,7 +3061,13 @@ local function onAttack(attackerHRP, info, model, id, track)
 	if State.status ~= "PARRY" then State.status = "THREAT" end
 	State.parryCount = State.parryCount + 1
 
-	local pRaw  = getPingRaw()
+	diagPush(("TRACE-DETECT t=%.3f srv=%.3f %s %s id=%s tp=%.3f/%.3f spd=%.2f playing=%s | net1w=%sms statsRTT=%sms rawRTT=%.0fms medRTT=%.0fms uplink=%.0fms | av=(%.1f,%.1f) mv=(%.1f,%.1f)")
+		:format(nowClock, nowServer, name, info.t, tostring(id), already, trackLength or 0, speed,
+			tostring(trackPlaying), netOneWay and ("%.0f"):format(netOneWay*1000) or "?",
+			statsRtt and ("%.0f"):format(statsRtt*1000) or "?", pingRawDetect*1000,
+			pingMedDetect*1000, uplinkDetect*1000,
+			th.attackerVelDetect.X, th.attackerVelDetect.Z, th.victimVelDetect.X, th.victimVelDetect.Z))
+	local pRaw  = pingRawDetect
 	local pMult = hitTL / (hitTL + math.clamp(pRaw * 0.5, 0, 0.35))
 	diagPush(("SWING  t=%.2f  %s  %s(%s)  combo=%d  dist=%.0f  contact=%.0fms  spd=%.2f  aMult=%.2f  height=%s  bodyScale=%s  modelY=%s  pingMult=%.2f  hitTL=%.0fms  vlead=%.0fms  ping=%.0f")
 		:format(os.clock(), name, info.t, info.s, combo, dist, remaining0*1000, speed, aMult,
@@ -3281,6 +3348,19 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		elseif not th.dodged then
 			local threatens = willHitMe(th)
 			th.threatens = threatens
+			if threatens and not th.firstThreatClock then
+				th.firstThreatClock = now
+				local ga, gm, gl = th.geomOrigin, th.geomVictim, th.geomLook
+				diagPush(("TRACE-GEOM t=%.3f %s %s s%d src=%s first=%+.0fms dt=%+.0fms tHit=%.0fms depth=%.2f range=[%.2f,%.2f] side=%.2f/%.2f A=(%s) M=(%s) look=(%s)")
+					:format(now, th.name or "?", th.kind or "?", th.strike or 1,
+						tostring(th.recognitionSource or "?"), (now-th.detectClock)*1000,
+						(th.contactAbs-now)*1000, (th.geomTHit or 0)*1000,
+						th.geomDepth or 0, (th.geomForward or 0)-(th.geomHalfD or 0),
+						(th.geomForward or 0)+(th.geomHalfD or 0), th.geomSide or 0, th.geomHalfW or 0,
+						ga and ("%.1f,%.1f"):format(ga.X,ga.Z) or "?",
+						gm and ("%.1f,%.1f"):format(gm.X,gm.Z) or "?",
+						gl and ("%.2f,%.2f"):format(gl.X,gl.Z) or "?"))
+			end
 			if threatens then th.everThreatened = true end
 			if threatens then
 				-- После normal block первого Boxing strike свежий perfect на втором физически
@@ -3758,7 +3838,21 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				if wantBlock.rec then
 					wantBlock.rec.pressDt = wantBlock.pressDt
 					wantBlock.rec.pressServer = serverNow
+					wantBlock.rec.pressClock = now
+					wantBlock.rec.pressAt = wantBlock.contactAbs - (Config.PerfectLead or 0) - up - (wantBlock.velLead or 0)
+					wantBlock.rec.pressLateBy = now - wantBlock.rec.pressAt
 					wantBlock.rec.faceDot = wantBlock.faceDot
+					local p1, ps = pingDiagSnapshot()
+					local tpNow = wantBlock.track and safeGet(wantBlock.track, "TimePosition", -1) or -1
+					diagPush(("TRACE-PRESS t=%.3f srv=%.3f %s %s s%d dt=%+.0fms lateBy=%+.0fms tp=%.3f | detect net1w=%sms stats=%sms raw=%.0f med=%.0f up=%.0f | press net1w=%sms stats=%sms raw=%.0f med=%.0f up=%.0f")
+						:format(now, serverNow, wantBlock.name or "?", wantBlock.kind or "?", wantBlock.strike or 1,
+							wantBlock.pressDt*1000, wantBlock.rec.pressLateBy*1000, tpNow,
+							wantBlock.pingOneWayDetect and ("%.0f"):format(wantBlock.pingOneWayDetect*1000) or "?",
+							wantBlock.pingStatsDetect and ("%.0f"):format(wantBlock.pingStatsDetect*1000) or "?",
+							(wantBlock.pingRawDetect or 0)*1000, (wantBlock.pingMedDetect or 0)*1000,
+							(wantBlock.uplinkDetect or 0)*1000,
+							p1 and ("%.0f"):format(p1*1000) or "?", ps and ("%.0f"):format(ps*1000) or "?",
+							getPingRaw()*1000, getPing()*1000, up*1000))
 				end
 			elseif State.blockedReason then
 				if wantBlock.rec then wantBlock.rec.blockedReason = State.blockedReason end
@@ -3979,6 +4073,22 @@ local function onOutcome(attacker, result, kind, eventClock)
 		State.comboStat = State.comboStat or { opener = {}, tail = {} }
 		local bucket = ((rec.combo or 0) >= 3) and State.comboStat.tail or State.comboStat.opener
 		bucket[result] = (bucket[result] or 0) + 1
+	end
+
+	do
+		local th = rec.th
+		local p1, ps = pingDiagSnapshot()
+		local tpOut = th and th.track and safeGet(th.track, "TimePosition", -1) or -1
+		diagPush(("TRACE-OUT t=%.3f %s %s s%d result=%s age=%.0fms tp=%.3f | firstThreat=%sms hbFirst=%sms hbOverlap=%sms sid=%s src=%s | pressLate=%sms | net1w=%sms stats=%sms raw=%.0f med=%.0f up=%.0f")
+			:format(eventClock, attacker, kind, rec.strike or 1, result, measured*1000, tpOut,
+				th and th.firstThreatClock and ("%.0f"):format((th.firstThreatClock-rec.clock)*1000) or "?",
+				th and th.hbFirstClock and ("%.0f"):format((th.hbFirstClock-rec.clock)*1000) or "?",
+				th and th.hbOverlapClock and ("%.0f"):format((th.hbOverlapClock-rec.clock)*1000) or "?",
+				tostring(th and (th.serverSwingId or (th.group and th.group.serverSwingId)) or "none"),
+				tostring(th and th.recognitionSource or "none"),
+				rec.pressLateBy and ("%+.0f"):format(rec.pressLateBy*1000) or "?",
+				p1 and ("%.0f"):format(p1*1000) or "?", ps and ("%.0f"):format(ps*1000) or "?",
+				getPingRaw()*1000, getPing()*1000, uplink()*1000))
 	end
 
 	diagPush(("OUT    t=%.2f  %s  %s(c%d,s%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms resAvg=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
