@@ -109,7 +109,7 @@ return function(Lib, Core)
 		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(88,165,255),
 		HitParticleColorB=Color3.fromRGB(165,95,255), HitParticleCount=20, HitParticleDuration=1.1,
 		HitParticleWireframe=true, HitParticleWireScale=0.4, HitParticleSpeedMin=2, HitParticleSpeedMax=32,
-		HitParticleGravity=-32, HitParticleMaxSystems=5,
+		HitParticleGravity=-32, HitParticleMaxSystems=5, HitSound_Volume=0.75,
 
         -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
         -- runs on Heartbeat, which fires at the monitor's refresh rate — so on a 144/240Hz screen
@@ -1485,29 +1485,37 @@ return function(Lib, Core)
 	end
 	local function particleColor(t) return Config.HitFX_Color:Lerp(Config.HitParticleColorB,t) end
 	local function destroySystem(sys)
-		for _,p in ipairs(sys.pts) do for _,l in ipairs(p.lines) do pcall(function() l:Remove() end) end end
+		for _,p in ipairs(sys.pts) do
+			if p.lines then for _,l in ipairs(p.lines) do pcall(function() l:Remove() end) end end
+			if p.dot then pcall(function() p.dot:Remove() end) end
+		end
 	end
 	local function spawnParticles(pos)
 		while #HitFX.systems >= (Config.HitParticleMaxSystems or 5) do destroySystem(table.remove(HitFX.systems,1)) end
 		local pts={}; local count=math.clamp(Config.HitParticleCount or 20,6,32)
-		for i=1,count do local dir=Vector3.new(math.random()-.5,math.random()*.9+.15,math.random()-.5).Unit; local z=math.random(); local lines={}
-			for e=1,6 do lines[e]=newDrawing("Line",{Visible=false,Thickness=.8,Color=Config.HitFX_Color,ZIndex=80}) end
-			pts[i]={pos=pos+dir*.08,vel=dir*((Config.HitParticleSpeedMin or 2)+z*((Config.HitParticleSpeedMax or 32)-(Config.HitParticleSpeedMin or 2))),ang=Vector3.new(math.random()*6.28,math.random()*6.28,math.random()*6.28),av=Vector3.new((math.random()-.5)*14,(math.random()-.5)*14,(math.random()-.5)*14),scale=(Config.HitParticleWireScale or .4)*(.65+z*.55),z=z,lines=lines}
+		local wire=Config.HitParticleWireframe~=false
+		for i=1,count do local dir=Vector3.new(math.random()-.5,math.random()*.9+.15,math.random()-.5).Unit; local z=math.random()
+			local pt={pos=pos+dir*.08,vel=dir*((Config.HitParticleSpeedMin or 2)+z*((Config.HitParticleSpeedMax or 32)-(Config.HitParticleSpeedMin or 2))),ang=Vector3.new(math.random()*6.28,math.random()*6.28,math.random()*6.28),av=Vector3.new((math.random()-.5)*14,(math.random()-.5)*14,(math.random()-.5)*14),scale=(Config.HitParticleWireScale or .4)*(.65+z*.55),z=z}
+			if wire then local lines={}; for e=1,6 do lines[e]=newDrawing("Line",{Visible=false,Thickness=.8,Color=Config.HitFX_Color,ZIndex=80}) end; pt.lines=lines
+			else pt.dot=newDrawing("Circle",{Filled=true,NumSides=10,Visible=false,Radius=2,Color=Config.HitFX_Color,ZIndex=80}) end
+			pts[i]=pt
 		end
-		HitFX.systems[#HitFX.systems+1]={pts=pts,age=0,duration=Config.HitParticleDuration or 1.1}
+		HitFX.systems[#HitFX.systems+1]={pts=pts,age=0,duration=Config.HitParticleDuration or 1.1,wire=wire}
 	end
 	local function confirmedHit(victim)
 		if not Config.HitFX_On then return end
-		if Config.HitSound_On then local s=Instance.new("Sound"); s.SoundId="rbxassetid://115982072912004"; s.Volume=0.75; s.Parent=SoundService; Debris:AddItem(s,4); s:Play() end
+		if Config.HitSound_On then local s=Instance.new("Sound"); s.SoundId="rbxassetid://115982072912004"; s.Volume=math.clamp(Config.HitSound_Volume or 0.75,0,1); s.Parent=SoundService; Debris:AddItem(s,4); s:Play() end
 		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if root then spawnParticles(root.Position) end end
 	end
 	local renderHitFX=LPH_NO_VIRTUALIZE(function(dt)
 		local cam=Camera
 		for si=#HitFX.systems,1,-1 do local sys=HitFX.systems[si]; sys.age=sys.age+dt; local age=sys.age
 			if age>=sys.duration then destroySystem(sys); table.remove(HitFX.systems,si) else local alpha=age<sys.duration*.15 and age/(sys.duration*.15) or math.clamp((sys.duration-age)/(sys.duration*.25),0,1); local step=math.clamp(dt,.001,.05)
-				for _,p in ipairs(sys.pts) do p.vel=p.vel+Vector3.new(0,Config.HitParticleGravity or -32,0)*step; p.vel=p.vel*(1-step*.35); p.pos=p.pos+p.vel*step; p.ang=p.ang+p.av*step; local rot=CFrame.Angles(p.ang.X,p.ang.Y,p.ang.Z); local verts={}
-					for vi,o in ipairs(TETRA) do local sp,on=cam:WorldToViewportPoint(p.pos+rot:VectorToWorldSpace(o*p.scale)); verts[vi]={sp,on and sp.Z>.05} end
-					for ei,edge in ipairs(TEDGES) do local a,b=verts[edge[1]],verts[edge[2]]; local l=p.lines[ei]; if a[2] and b[2] then l.From=Vector2.new(a[1].X,a[1].Y); l.To=Vector2.new(b[1].X,b[1].Y); l.Color=particleColor((p.z+age*.7+ei*.06)%1); l.Transparency=alpha*(.35+.55*p.z); l.Visible=true else l.Visible=false end end
+				for _,p in ipairs(sys.pts) do p.vel=p.vel+Vector3.new(0,Config.HitParticleGravity or -32,0)*step; p.vel=p.vel*(1-step*.35); p.pos=p.pos+p.vel*step
+					if sys.wire then p.ang=p.ang+p.av*step; local rot=CFrame.Angles(p.ang.X,p.ang.Y,p.ang.Z); local verts={}
+						for vi,o in ipairs(TETRA) do local sp,on=cam:WorldToViewportPoint(p.pos+rot:VectorToWorldSpace(o*p.scale)); verts[vi]={sp,on and sp.Z>.05} end
+						for ei,edge in ipairs(TEDGES) do local a,b=verts[edge[1]],verts[edge[2]]; local l=p.lines[ei]; if a[2] and b[2] then l.From=Vector2.new(a[1].X,a[1].Y); l.To=Vector2.new(b[1].X,b[1].Y); l.Color=particleColor((p.z+age*.7+ei*.06)%1); l.Transparency=alpha*(.35+.55*p.z); l.Visible=true else l.Visible=false end end
+					else local sp,on=cam:WorldToViewportPoint(p.pos); if on and sp.Z>.05 then p.dot.Position=Vector2.new(sp.X,sp.Y); p.dot.Radius=math.max(1,(1.5+p.z*2.5)*17/sp.Z); p.dot.Color=particleColor((p.z+age*.5)%1); p.dot.Transparency=alpha*(.4+.55*p.z); p.dot.Visible=true else p.dot.Visible=false end end
 				end
 			end
 		end
@@ -1670,7 +1678,7 @@ return function(Lib, Core)
 
         -- ─────────────── Camera + local nametag ───────────────
         local sLocal = V:Section({ Side = "Right" })
-        sLocal:Header({ Name = "Local Visuals" })
+        sLocal:Header({ Name = "Camera" })
         sLocal:Toggle({
             Name = "FOV Changer", Default = Config.FOV_On,
             Callback = function(v)
@@ -1684,7 +1692,10 @@ return function(Lib, Core)
             Minimum = 30, Maximum = 120, Precision = 0, Suffix = "°",
             Callback = function(v) Config.FOV_Value = v; VisualCtl.applyFOV() end,
         }, ctx.flag("VIS_FOV_Value"))
+        sLocal:SubLabel({ Text = "Undetected local camera FOV. Held against the game's own writes only while enabled." })
 
+        sLocal:Divider()
+        sLocal:Header({ Name = "Name Changer" })
         sLocal:Toggle({
             Name = "Name Changer", Default = Config.Name_On,
             Callback = function(v)
@@ -1729,6 +1740,8 @@ return function(Lib, Core)
             set = function(v) Config.ESP_On = v end,
             Desc = "If u fr dont know wtf is that - kys",
         })
+        sEsp:Divider()
+        sEsp:Header({ Name = "Elements" })
         boolToggle(sEsp, "Box",      "ESP Box",      function() return Config.ESP_Box end,      function(v) Config.ESP_Box = v end)
         boolToggle(sEsp, "Name",     "ESP Name",     function() return Config.ESP_Name end,     function(v) Config.ESP_Name = v end)
         boolToggle(sEsp, "Distance", "ESP Distance", function() return Config.ESP_Distance end, function(v) Config.ESP_Distance = v end)
@@ -1738,27 +1751,72 @@ return function(Lib, Core)
         boolToggle(sEsp, "Combat Style", "ESP Style", function() return Config.ESP_Style end,    function(v) Config.ESP_Style = v end)
         boolToggle(sEsp, "Skeleton", "ESP Skeleton", function() return Config.ESP_Skeleton end, function(v) Config.ESP_Skeleton = v end)
         boolToggle(sEsp, "Tracer",   "ESP Tracer",   function() return Config.ESP_Tracer end,   function(v) Config.ESP_Tracer = v end)
-		slider(sEsp,{Name="Range",Flag="VIS_ESP_Range",Default=Config.ESP_Range,Min=50,Max=3000,Suffix=" st",Callback=function(v) Config.ESP_Range=v end})
+
+        sEsp:Divider()
+        sEsp:Header({ Name = "Colors" })
         colorpick(sEsp, "Box Color", "VIS_ESP_BoxCol", Config.ESP_Box_Color, function(c) Config.ESP_Box_Color = c end)
         colorpick(sEsp, "Text Color", "VIS_ESP_TxtCol", Config.ESP_Text_Color, function(c) Config.ESP_Text_Color = c end)
         colorpick(sEsp, "Heavy (M2) Bar Color", "VIS_ESP_M2Col", Config.ESP_M2_Color, function(c) Config.ESP_M2_Color = c end)
+
+        sEsp:Divider()
+        sEsp:Header({ Name = "Performance" })
+		slider(sEsp,{Name="Range",Flag="VIS_ESP_Range",Default=Config.ESP_Range,Min=50,Max=3000,Suffix=" st",Callback=function(v) Config.ESP_Range=v end})
+        sEsp:SubLabel({ Text = "Max render distance. Players farther than this are skipped entirely." })
         slider(sEsp, { Name = "Render FPS Cap", Flag = "VIS_MaxFPS", Default = Config.MaxFPS,
             Min = 30, Max = 240, Suffix = " fps", Callback = function(v) Config.MaxFPS = v end })
         sEsp:SubLabel({ Text = "Caps how often visuals redraw. Lower = less CPU/GPU (60 is smooth). Raise only if you have a high-refresh monitor and spare frames." })
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
-        local sEnv=V:Section({Side="Left"}); sEnv:Header({Name="Environment"}); sEnv:Toggle({Name="Enabled",Default=Config.Env_On,Callback=function(v) EnvCtl.set(v) end},ctx.flag("VIS_ENV_On"))
-        colorpick(sEnv,"Ambient","VIS_ENV_Amb",Config.Env_Ambient,function(c) Config.Env_Ambient=c; EnvCtl.apply() end); colorpick(sEnv,"Outdoor Ambient","VIS_ENV_Out",Config.Env_Outdoor,function(c) Config.Env_Outdoor=c; EnvCtl.apply() end)
-        colorpick(sEnv,"Fog Color","VIS_ENV_Fog",Config.Env_FogColor,function(c) Config.Env_FogColor=c; EnvCtl.apply() end); colorpick(sEnv,"Atmosphere Color","VIS_ENV_Atm",Config.Env_AtmosColor,function(c) Config.Env_AtmosColor=c; EnvCtl.apply() end)
-        slider(sEnv,{Name="Fog Start",Flag="VIS_ENV_FS",Default=Config.Env_FogStart,Min=0,Max=5000,Suffix=" st",Callback=function(v) Config.Env_FogStart=v; EnvCtl.apply() end}); slider(sEnv,{Name="Fog End",Flag="VIS_ENV_FE",Default=Config.Env_FogEnd,Min=10,Max=10000,Suffix=" st",Callback=function(v) Config.Env_FogEnd=v; EnvCtl.apply() end})
-        slider(sEnv,{Name="Atmosphere Density",Flag="VIS_ENV_AD",Default=Config.Env_AtmosDensity,Min=0,Max=1,Precision=2,Callback=function(v) Config.Env_AtmosDensity=v; EnvCtl.apply() end}); slider(sEnv,{Name="Brightness",Flag="VIS_ENV_B",Default=Config.Env_Brightness,Min=0,Max=10,Precision=2,Callback=function(v) Config.Env_Brightness=v; EnvCtl.apply() end}); slider(sEnv,{Name="Clock Time",Flag="VIS_ENV_T",Default=Config.Env_ClockTime,Min=0,Max=24,Precision=1,Callback=function(v) Config.Env_ClockTime=v; EnvCtl.apply() end})
+        -- ─────────────── Environment (Left) ───────────────
+        local sEnv = V:Section({ Side = "Left" })
+        sEnv:Header({ Name = "Environment" })
+        sEnv:Toggle({ Name = "Enabled", Default = Config.Env_On,
+            Callback = function(v) EnvCtl.set(v) end }, ctx.flag("VIS_ENV_On"))
+        sEnv:SubLabel({ Text = "Local lighting override. Restores the game's original values when disabled." })
 
-        local sFX=V:Section({Side="Left"}); sFX:Header({Name="Hit Effects"})
-        boolToggle(sFX,"Enabled","Hit Effects",function() return Config.HitFX_On end,function(v) Config.HitFX_On=v end); boolToggle(sFX,"Hit Sound","Hit Sound",function() return Config.HitSound_On end,function(v) Config.HitSound_On=v end); boolToggle(sFX,"Hit Particles","Hit Particles",function() return Config.HitParticles_On end,function(v) Config.HitParticles_On=v end)
-        colorpick(sFX,"Primary Color","VIS_HITFX_C",Config.HitFX_Color,function(c) Config.HitFX_Color=c end); colorpick(sFX,"Secondary Color","VIS_HITFX_C2",Config.HitParticleColorB,function(c) Config.HitParticleColorB=c end)
-        slider(sFX,{Name="Particle Count",Flag="VIS_HITFX_N",Default=Config.HitParticleCount,Min=6,Max=32,Callback=function(v) Config.HitParticleCount=v end}); slider(sFX,{Name="Duration",Flag="VIS_HITFX_D",Default=Config.HitParticleDuration,Min=.3,Max=2.5,Precision=1,Suffix=" s",Callback=function(v) Config.HitParticleDuration=v end})
-        slider(sFX,{Name="Wire Scale",Flag="VIS_HITFX_S",Default=Config.HitParticleWireScale,Min=.15,Max=1,Precision=2,Callback=function(v) Config.HitParticleWireScale=v end}); slider(sFX,{Name="Speed",Flag="VIS_HITFX_V",Default=Config.HitParticleSpeedMax,Min=5,Max=50,Callback=function(v) Config.HitParticleSpeedMax=v end}); slider(sFX,{Name="Gravity",Flag="VIS_HITFX_G",Default=Config.HitParticleGravity,Min=-80,Max=10,Callback=function(v) Config.HitParticleGravity=v end})
+        sEnv:Divider()
+        sEnv:Header({ Name = "Colors" })
+        colorpick(sEnv, "Ambient", "VIS_ENV_Amb", Config.Env_Ambient, function(c) Config.Env_Ambient=c; EnvCtl.apply() end)
+        colorpick(sEnv, "Outdoor Ambient", "VIS_ENV_Out", Config.Env_Outdoor, function(c) Config.Env_Outdoor=c; EnvCtl.apply() end)
+        colorpick(sEnv, "Fog Color", "VIS_ENV_Fog", Config.Env_FogColor, function(c) Config.Env_FogColor=c; EnvCtl.apply() end)
+        colorpick(sEnv, "Atmosphere Color", "VIS_ENV_Atm", Config.Env_AtmosColor, function(c) Config.Env_AtmosColor=c; EnvCtl.apply() end)
+
+        sEnv:Divider()
+        sEnv:Header({ Name = "Fog & Atmosphere" })
+        slider(sEnv, { Name = "Fog Start", Flag = "VIS_ENV_FS", Default = Config.Env_FogStart, Min = 0, Max = 5000, Suffix = " st", Callback = function(v) Config.Env_FogStart=v; EnvCtl.apply() end })
+        slider(sEnv, { Name = "Fog End", Flag = "VIS_ENV_FE", Default = Config.Env_FogEnd, Min = 10, Max = 10000, Suffix = " st", Callback = function(v) Config.Env_FogEnd=v; EnvCtl.apply() end })
+        slider(sEnv, { Name = "Atmosphere Density", Flag = "VIS_ENV_AD", Default = Config.Env_AtmosDensity, Min = 0, Max = 1, Precision = 2, Callback = function(v) Config.Env_AtmosDensity=v; EnvCtl.apply() end })
+        sEnv:SubLabel({ Text = "Density also overrides the game's weather Atmosphere so fog changes actually show." })
+
+        sEnv:Divider()
+        sEnv:Header({ Name = "Lighting" })
+        slider(sEnv, { Name = "Brightness", Flag = "VIS_ENV_B", Default = Config.Env_Brightness, Min = 0, Max = 10, Precision = 2, Callback = function(v) Config.Env_Brightness=v; EnvCtl.apply() end })
+        slider(sEnv, { Name = "Clock Time", Flag = "VIS_ENV_T", Default = Config.Env_ClockTime, Min = 0, Max = 24, Precision = 1, Callback = function(v) Config.Env_ClockTime=v; EnvCtl.apply() end })
+
+        -- ─────────────── Hit Effects (Left) ───────────────
+        local sFX = V:Section({ Side = "Left" })
+        sFX:Header({ Name = "Hit Effects" })
+        boolToggle(sFX, "Enabled", "Hit Effects", function() return Config.HitFX_On end, function(v) Config.HitFX_On=v end)
+        sFX:SubLabel({ Text = "Plays on a server-confirmed hit YOU landed (M1Hit/M2Hit broadcast)." })
+
+        sFX:Divider()
+        sFX:Header({ Name = "Sound" })
+        boolToggle(sFX, "Hit Sound", "Hit Sound", function() return Config.HitSound_On end, function(v) Config.HitSound_On=v end)
+        slider(sFX, { Name = "Volume", Flag = "VIS_HITFX_VOL", Default = math.floor((Config.HitSound_Volume or 0.75)*100), Min = 0, Max = 100, Suffix = "%", Callback = function(v) Config.HitSound_Volume = v/100 end })
+
+        sFX:Divider()
+        sFX:Header({ Name = "Particles" })
+        boolToggle(sFX, "Hit Particles", "Hit Particles", function() return Config.HitParticles_On end, function(v) Config.HitParticles_On=v end)
+        boolToggle(sFX, "Wireframe", "Wireframe Particles", function() return Config.HitParticleWireframe end, function(v) Config.HitParticleWireframe=v end)
+        sFX:SubLabel({ Text = "Wireframe = rotating 3D tetra shards. Off = classic depth-scaled dots." })
+        colorpick(sFX, "Primary Color", "VIS_HITFX_C", Config.HitFX_Color, function(c) Config.HitFX_Color=c end)
+        colorpick(sFX, "Secondary Color", "VIS_HITFX_C2", Config.HitParticleColorB, function(c) Config.HitParticleColorB=c end)
+        slider(sFX, { Name = "Particle Count", Flag = "VIS_HITFX_N", Default = Config.HitParticleCount, Min = 6, Max = 32, Callback = function(v) Config.HitParticleCount=v end })
+        slider(sFX, { Name = "Duration", Flag = "VIS_HITFX_D", Default = Config.HitParticleDuration, Min = .3, Max = 2.5, Precision = 1, Suffix = " s", Callback = function(v) Config.HitParticleDuration=v end })
+        slider(sFX, { Name = "Wire Scale", Flag = "VIS_HITFX_S", Default = Config.HitParticleWireScale, Min = .15, Max = 1, Precision = 2, Callback = function(v) Config.HitParticleWireScale=v end })
+        slider(sFX, { Name = "Speed", Flag = "VIS_HITFX_V", Default = Config.HitParticleSpeedMax, Min = 5, Max = 50, Callback = function(v) Config.HitParticleSpeedMax=v end })
+        slider(sFX, { Name = "Gravity", Flag = "VIS_HITFX_G", Default = Config.HitParticleGravity, Min = -80, Max = 10, Callback = function(v) Config.HitParticleGravity=v end })
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
         local sInd = V:Section({ Side = "Right" })
@@ -1793,12 +1851,17 @@ return function(Lib, Core)
         end)
         sInd:SubLabel({ Text = "Panel = HUD | Free = draggable text stack | Player = on your character | Simple = centered stack." })
 
+        sInd:Divider()
+        sInd:Header({ Name = "Cooldowns" })
         boolToggle(sInd, "Health",       "Ind Health",  function() return Config.Ind_Health end,  function(v) Config.Ind_Health = v end)
         boolToggle(sInd, "Stamina",      "Ind Stamina", function() return Config.Ind_Stamina end, function(v) Config.Ind_Stamina = v end)
         boolToggle(sInd, "IFrame",       "Ind IFrame",  function() return Config.Ind_IFrame end,  function(v) Config.Ind_IFrame = v end)
         boolToggle(sInd, "Heavy (M2) CD", "Ind Heavy",  function() return Config.Ind_M2 end,      function(v) Config.Ind_M2 = v end)
         boolToggle(sInd, "Dodge CD",     "Ind Dodge",   function() return Config.Ind_Dodge end,   function(v) Config.Ind_Dodge = v end)
         boolToggle(sInd, "Block CD",     "Ind Block",   function() return Config.Ind_Block end,   function(v) Config.Ind_Block = v end)
+
+        sInd:Divider()
+        sInd:Header({ Name = "Appearance" })
         colorpick(sInd, "Accent Color", "VIS_IND_Accent", Config.Ind_Accent, function(c) Config.Ind_Accent = c end)
 
         -- ── Per-style settings (shown only for the relevant style) ──
@@ -1832,6 +1895,8 @@ return function(Lib, Core)
             }, ctx.flag("VIS_IND_PlayerDesign"))
             styleEls[designDd] = { "Player" }
         end)
+        local designHint = sInd:SubLabel({ Text = "Player only: Glass box / Ribbon fill / corner Brackets / dot Nodes." })
+        styleEls[designHint] = { "Player" }
 
         -- Player: vertical text nudge relative to the character.
         local playerTextY = slider(sInd, {
@@ -1855,17 +1920,18 @@ return function(Lib, Core)
         styleEls[scaleSlider] = { "Panel", "Free", "Player", "Simple" }
 
         applyStyleVis()
-        sInd:SubLabel({ Text = "Cooldowns" })
 
-        -- ─────────────── Section 3: Hit Direction (Right) ────���──────────
+        -- ─────────────── Hit Direction (Right) ───────────────
         local sHit = V:Section({ Side = "Right" })
         sHit:Header({ Name = "Hit Direction" })
         feature(sHit, {
             Title = "Hit Direction", Flag = "VIS_HITDIR",
             get = function() return Config.HitDir_On end,
             set = function(v) Config.HitDir_On = v end,
-            Desc = "Fading arrows around the crosshair",
+            Desc = "Fading arrows around the crosshair when you take a hit",
         })
+        sHit:Divider()
+        sHit:Header({ Name = "Appearance" })
         colorpick(sHit, "Arrow Color", "VIS_HIT_Col", Config.HitDir_Color, function(c) Config.HitDir_Color = c end)
         slider(sHit, {
             Name = "Transparency", Flag = "VIS_HIT_Transp", Default = math.floor((Config.HitDir_Transparency or 0) * 100),
