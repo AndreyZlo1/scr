@@ -573,7 +573,6 @@ local Config = {
 	-- (не скрываются), ESP визуально гладкий, а нагрузк�� на высоком fps падает вдвое+.
 	VizMaxFPS     = 60,
 	Debug         = true,
-	PerfStats     = false,
 
 	Key_Toggle    = Enum.KeyCode.K,
 	Key_Mode      = Enum.KeyCode.N,
@@ -816,24 +815,9 @@ local V93 = {
 	-- [V132] reusable RaycastParams for dodge wall-check
 	dodgeParams = nil,
 	dodgeChar = nil,
-	perfEMA = 0,
-	perfMax = 0,
-	perfFrames = 0,
-	bridge = nil,
 }
 
--- Executor-side read-only bridge for Visuals. Consumers receive the exact live scheduler
--- threats/perf snapshot; no duplicate predictor or hot registry is introduced.
-if type(getgenv) == "function" then
-	V93.bridge = getgenv().SYLLINSE_AP_BRIDGE or {}
-	getgenv().SYLLINSE_AP_BRIDGE = V93.bridge
-	V93.bridge.getThreats = function() return Threats end
-	V93.bridge.getPerf = function()
-		return V93.perfEMA, V93.perfMax, V93.perfFrames, #Threats, FrameId
-	end
-end
-
--- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ.
+-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Прежний EMA+peak-hold ЛАТЧИЛ спай�� (в логе header ping=224
 -- при combat-ping=158) → uplink раздувался → жали СЛИШКОМ РАНО. Медиана окна последних сырых
 -- сэмплов игнорирует одиночные выбросы В ОБЕ СТОРОНЫ (Data Ping пилит вверх и вниз) и отслеживает
 -- устойчивый RTT: один спайк-кадр среди 24 сэмплов НЕ сдвигает медиану, а реально выросший пинг
@@ -5680,7 +5664,6 @@ RunService.Heartbeat:Connect(function()
 		return
 	end
 	local now = os.clock()
-	local perfStart = Config.PerfStats and now or nil
 	FrameId = FrameId + 1        -- [V68] invalidates per-frame HRP cache
 	pcall(schedulerStep, now)    -- [V68] one persistent-fn pcall guards the whole loop
 	                             -- (no per-read closures inside anymore → far less GC)
@@ -5711,12 +5694,6 @@ RunService.Heartbeat:Connect(function()
 
 	if not State.blocking and State.status ~= "THREAT" then
 		if now >= State.flashUntil then State.status = "ARMED" end
-	end
-	if perfStart then
-		local ms = (os.clock() - perfStart) * 1000
-		V93.perfEMA = V93.perfEMA == 0 and ms or (V93.perfEMA + (ms - V93.perfEMA) * 0.08)
-		V93.perfMax = math.max(V93.perfMax * 0.995, ms)
-		V93.perfFrames = V93.perfFrames + 1
 	end
 end)
 
@@ -6637,13 +6614,6 @@ return function(_Lib, _Core)
 		-- Section 2 — Diagnostics (Save AutoParry diag + Copy)
 		local dbDiag = DB:Section({ Side = "Right" })
 		dbDiag:Header({ Name = "Diagnostics" })
-		boolToggle(dbDiag, "Performance Stats", "Performance Stats",
-			function() return Config.PerfStats end,
-			function(v)
-				Config.PerfStats = v
-				if not v then V93.perfEMA, V93.perfMax, V93.perfFrames = 0, 0, 0 end
-			end)
-		local perfPara = dbDiag:Paragraph({ Header = "AutoParry performance", Body = "Disabled" })
 		local copyDiag = false
 		dbDiag:Button({
 			Name = "Save AutoParry diag",
@@ -6666,18 +6636,6 @@ return function(_Lib, _Core)
 		boolToggle(dbDiag, "Copy", "Diag Copy",
 			function() return copyDiag end,
 			function(v) copyDiag = v end)
-
-		task.spawn(function()
-			while perfPara do
-				task.wait(0.5)
-				if Config.PerfStats then
-					pcall(function() perfPara:UpdateBody(("scheduler %.3f ms avg / %.3f ms peak\nframes %d · threats %d")
-						:format(V93.perfEMA, V93.perfMax, V93.perfFrames, #Threats)) end)
-				else
-					pcall(function() perfPara:UpdateBody("Disabled") end)
-				end
-			end
-		end)
 
 		-- Everything built; allow notifies now (initial element Callbacks are done).
 		task.defer(function() uiReady = true end)
