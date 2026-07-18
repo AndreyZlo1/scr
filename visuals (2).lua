@@ -78,7 +78,7 @@ return function(Lib, Core)
         Ind_On      = false,
         Ind_Style   = "Panel",   -- "Panel" | "Free" | "Player" | "Simple"
         Ind_PlayerSide = "Left", -- "Left" | "Right" | "Bottom" (Player style only)
-		Ind_PlayerDesign = "Glass", -- Glass | Ribbon | Brackets | Nodes
+		Ind_PlayerDesign = "Neon", -- Neon | Cyber | Arc | Minimal
         Ind_PlayerTextY = 0,     -- vertical text offset (px) for the Player style
         Ind_Drag    = true,      -- allow dragging the HUD (Panel / Free)
         Ind_Health  = true,
@@ -108,7 +108,8 @@ return function(Lib, Core)
 		Env_AtmosDensity=0.15, Env_AtmosColor=Color3.fromRGB(190,200,220), Env_Brightness=2, Env_ClockTime=14,
 		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(88,165,255),
 		HitParticleColorB=Color3.fromRGB(165,95,255), HitParticleCount=20, HitParticleDuration=1.1,
-		HitParticleWireframe=true, HitParticleWireScale=0.4, HitParticleSpeedMin=2, HitParticleSpeedMax=32,
+		HitParticleType="Sparks",  -- "Sparks" | "Orbs" | "Stars" | "Wireframe"
+		HitParticleWireframe=false, HitParticleWireScale=0.4, HitParticleSpeedMin=2, HitParticleSpeedMax=32,
 		HitParticleGravity=-32, HitParticleMaxSystems=5, HitSound_Volume=0.75,
 
         -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
@@ -1216,16 +1217,74 @@ return function(Lib, Core)
                 local col   = am and am.color or Config.Ind_Accent
                 -- Design applies to every Drawing-based style (Player/Free/Simple), not just Player,
                 -- so the picker is meaningful whichever draw style is active.
-                local design=Config.Ind_PlayerDesign or "Glass"
+                local design = Config.Ind_PlayerDesign or "Neon"
                 c.edgeA.Visible=false; c.edgeB.Visible=false; c.node.Visible=false
-                if design=="Glass" then
-                    c.bg.Position=Vector2.new(left-7*sc,rowY-4*sc); c.bg.Size=Vector2.new(width+14*sc,step-3*sc); c.bg.Color=Color3.fromRGB(11,12,17); c.bg.Transparency=c.alpha*0.78; c.bg.Visible=true
-                elseif design=="Ribbon" then
-                    c.bg.Position=Vector2.new(left-5*sc,rowY-2*sc); c.bg.Size=Vector2.new(width+10*sc,txtSize+8*sc); c.bg.Color=col; c.bg.Transparency=c.alpha*.18; c.bg.Visible=true
-                elseif design=="Brackets" then
-                    c.bg.Visible=false; c.edgeA.From=Vector2.new(left-7*sc,rowY-3*sc); c.edgeA.To=Vector2.new(left-7*sc,rowY+txtSize+7*sc); c.edgeB.From=Vector2.new(right+7*sc,rowY-3*sc); c.edgeB.To=Vector2.new(right+7*sc,rowY+txtSize+7*sc); c.edgeA.Color=col; c.edgeB.Color=col; c.edgeA.Transparency=c.alpha; c.edgeB.Transparency=c.alpha; c.edgeA.Visible=true; c.edgeB.Visible=true
-                else
-                    c.bg.Visible=false; c.node.Position=Vector2.new(left-7*sc,rowY+txtSize*.5); c.node.Radius=math.max(2,3*sc); c.node.Color=col; c.node.Transparency=c.alpha; c.node.Visible=true
+
+                if design == "Neon" then
+                    -- Neon: dark translucent pill bg + glowing colored left border strip + subtle inner glow line
+                    c.bg.Position  = Vector2.new(left - 4*sc, rowY - 3*sc)
+                    c.bg.Size      = Vector2.new(width + 8*sc, txtSize + 12*sc)
+                    c.bg.Color     = Color3.fromRGB(6, 6, 14)
+                    c.bg.Transparency = c.alpha * 0.55
+                    c.bg.Visible   = true
+                    -- left neon strip
+                    c.edgeA.From  = Vector2.new(left - 4*sc, rowY - 3*sc)
+                    c.edgeA.To    = Vector2.new(left - 4*sc, rowY + txtSize + 9*sc)
+                    c.edgeA.Color = col; c.edgeA.Thickness = math.max(2, 3*sc)
+                    c.edgeA.Transparency = 1 - c.alpha; c.edgeA.Visible = true
+                    -- subtle right echo strip (dim)
+                    c.edgeB.From  = Vector2.new(right + 4*sc, rowY - 3*sc)
+                    c.edgeB.To    = Vector2.new(right + 4*sc, rowY + txtSize + 9*sc)
+                    c.edgeB.Color = col; c.edgeB.Thickness = 1
+                    c.edgeB.Transparency = 1 - c.alpha * 0.35; c.edgeB.Visible = true
+
+                elseif design == "Cyber" then
+                    -- Cyber: no bg, corner tick marks (top-left + bottom-right), scanline track
+                    c.bg.Visible = false
+                    local CW, CH = 7*sc, 4*sc
+                    -- top-left horizontal tick
+                    c.edgeA.From = Vector2.new(left - 2*sc, rowY - 2*sc)
+                    c.edgeA.To   = Vector2.new(left - 2*sc + CW, rowY - 2*sc)
+                    c.edgeA.Color = col; c.edgeA.Thickness = math.max(1, 1.5*sc)
+                    c.edgeA.Transparency = 1 - c.alpha; c.edgeA.Visible = true
+                    -- bottom-right horizontal tick
+                    c.edgeB.From = Vector2.new(right + 2*sc - CW, rowY + txtSize + 5*sc)
+                    c.edgeB.To   = Vector2.new(right + 2*sc, rowY + txtSize + 5*sc)
+                    c.edgeB.Color = col; c.edgeB.Thickness = math.max(1, 1.5*sc)
+                    c.edgeB.Transparency = 1 - c.alpha; c.edgeB.Visible = true
+                    -- dot accent at top-left corner
+                    c.node.Position = Vector2.new(left - 2*sc, rowY - 2*sc)
+                    c.node.Radius   = math.max(2, 2.5*sc)
+                    c.node.Color    = col; c.node.Transparency = 1 - c.alpha; c.node.Visible = true
+
+                elseif design == "Arc" then
+                    -- Arc: wide translucent bg, colored top edge bar that fills with progress
+                    c.bg.Position  = Vector2.new(left - 6*sc, rowY - 4*sc)
+                    c.bg.Size      = Vector2.new(width + 12*sc, txtSize + 14*sc)
+                    c.bg.Color     = lerpColor(Color3.fromRGB(8,8,20), col, 0.07)
+                    c.bg.Transparency = c.alpha * 0.70
+                    c.bg.Visible   = true
+                    -- top edge full-width ghost line
+                    c.edgeA.From  = Vector2.new(left - 6*sc, rowY - 4*sc)
+                    c.edgeA.To    = Vector2.new(right + 6*sc, rowY - 4*sc)
+                    c.edgeA.Color = Color3.fromRGB(60, 60, 90)
+                    c.edgeA.Thickness = math.max(1, 1.5*sc)
+                    c.edgeA.Transparency = 1 - c.alpha * 0.5; c.edgeA.Visible = true
+                    -- top edge colored progress line (driven by dispRatio)
+                    local fillEndX = (left - 6*sc) + (width + 12*sc) * math.clamp(c.dispRatio, 0, 1)
+                    c.edgeB.From  = Vector2.new(left - 6*sc, rowY - 4*sc)
+                    c.edgeB.To    = Vector2.new(fillEndX, rowY - 4*sc)
+                    c.edgeB.Color = col; c.edgeB.Thickness = math.max(2, 2.5*sc)
+                    c.edgeB.Transparency = 1 - c.alpha; c.edgeB.Visible = true
+
+                else -- "Minimal"
+                    -- Minimal: zero chrome, just a colored diamond bullet + right-aligned value.
+                    -- Ultra clean — no background, no box, no border. Pure text + accent dot.
+                    c.bg.Visible = false; c.edgeA.Visible = false; c.edgeB.Visible = false
+                    c.node.Position = Vector2.new(left - 8*sc, rowY + txtSize * 0.45)
+                    c.node.Radius   = math.max(2, 3*sc)
+                    c.node.Color    = col
+                    c.node.Transparency = 1 - c.alpha; c.node.Visible = true
                 end
 
                 c.label.Size = txtSize
@@ -1489,20 +1548,50 @@ return function(Lib, Core)
 	local function destroySystem(sys)
 		for _,p in ipairs(sys.pts) do
 			if p.lines then for _,l in ipairs(p.lines) do pcall(function() l:Remove() end) end end
-			if p.dot then pcall(function() p.dot:Remove() end) end
+			if p.dot  then pcall(function() p.dot:Remove()  end) end
+			if p.ring then pcall(function() p.ring:Remove() end) end
 		end
 	end
 	local function spawnParticles(pos)
 		while #HitFX.systems >= (Config.HitParticleMaxSystems or 5) do destroySystem(table.remove(HitFX.systems,1)) end
-		local pts={}; local count=math.clamp(Config.HitParticleCount or 20,6,32)
-		local wire=Config.HitParticleWireframe~=false
-		for i=1,count do local dir=Vector3.new(math.random()-.5,math.random()*.9+.15,math.random()-.5).Unit; local z=math.random()
-			local pt={pos=pos+dir*.08,vel=dir*((Config.HitParticleSpeedMin or 2)+z*((Config.HitParticleSpeedMax or 32)-(Config.HitParticleSpeedMin or 2))),ang=Vector3.new(math.random()*6.28,math.random()*6.28,math.random()*6.28),av=Vector3.new((math.random()-.5)*14,(math.random()-.5)*14,(math.random()-.5)*14),scale=(Config.HitParticleWireScale or .4)*(.65+z*.55),z=z}
-			if wire then local lines={}; for e=1,6 do lines[e]=newDrawing("Line",{Visible=false,Thickness=.8,Color=Config.HitFX_Color,ZIndex=80}) end; pt.lines=lines
-			else pt.dot=newDrawing("Circle",{Filled=true,NumSides=10,Visible=false,Radius=2,Color=Config.HitFX_Color,ZIndex=80}) end
+		local pts={}; local count=math.clamp(Config.HitParticleCount or 20,6,40)
+		local ptype = Config.HitParticleType or "Sparks"
+
+		for i=1,count do
+			local z=math.random()
+			local dir=Vector3.new(math.random()-.5,math.random()*.9+.15,math.random()-.5).Unit
+			local spd=(Config.HitParticleSpeedMin or 2)+z*((Config.HitParticleSpeedMax or 32)-(Config.HitParticleSpeedMin or 2))
+			local pt={
+				pos=pos+dir*.08, vel=dir*spd,
+				ang=Vector3.new(math.random()*6.28,math.random()*6.28,math.random()*6.28),
+				av=Vector3.new((math.random()-.5)*14,(math.random()-.5)*14,(math.random()-.5)*14),
+				scale=(Config.HitParticleWireScale or .4)*(.65+z*.55), z=z,
+				-- per-particle random for star/orb variation
+				phase=math.random()*6.28, size=.7+z*1.3,
+			}
+			if ptype == "Wireframe" then
+				local lines={}
+				for e=1,6 do lines[e]=newDrawing("Line",{Visible=false,Thickness=.8,Color=Config.HitFX_Color,ZIndex=80}) end
+				pt.lines=lines
+			elseif ptype == "Orbs" then
+				-- Orb: large glowing filled circle that fades slowly, depth-scaled
+				pt.dot=newDrawing("Circle",{Filled=true,NumSides=20,Visible=false,Radius=5,Color=Config.HitFX_Color,ZIndex=80})
+				-- inner glow ring (slightly different color/size)
+				pt.ring=newDrawing("Circle",{Filled=false,NumSides=20,Visible=false,Radius=7,Thickness=1.5,Color=Config.HitParticleColorB,ZIndex=79})
+			elseif ptype == "Stars" then
+				-- Star: 4 crossing thin lines at a fixed 2D angle, rotates over time
+				local lines={}
+				for e=1,4 do lines[e]=newDrawing("Line",{Visible=false,Thickness=1.2,Color=Config.HitFX_Color,ZIndex=80}) end
+				pt.lines=lines
+			else -- "Sparks" (default)
+				-- Spark: 2 lines forming a thin elongated flash that shrinks to a dot
+				local lines={}
+				for e=1,2 do lines[e]=newDrawing("Line",{Visible=false,Thickness=1.5,Color=Config.HitFX_Color,ZIndex=80}) end
+				pt.lines=lines
+			end
 			pts[i]=pt
 		end
-		HitFX.systems[#HitFX.systems+1]={pts=pts,age=0,duration=Config.HitParticleDuration or 1.1,wire=wire}
+		HitFX.systems[#HitFX.systems+1]={pts=pts,age=0,duration=Config.HitParticleDuration or 1.1,ptype=ptype}
 	end
 	local function confirmedHit(victim)
 		if not Config.HitFX_On then return end
@@ -1511,13 +1600,102 @@ return function(Lib, Core)
 	end
 	local renderHitFX=LPH_NO_VIRTUALIZE(function(dt)
 		local cam=Camera
-		for si=#HitFX.systems,1,-1 do local sys=HitFX.systems[si]; sys.age=sys.age+dt; local age=sys.age
-			if age>=sys.duration then destroySystem(sys); table.remove(HitFX.systems,si) else local alpha=age<sys.duration*.15 and age/(sys.duration*.15) or math.clamp((sys.duration-age)/(sys.duration*.25),0,1); local step=math.clamp(dt,.001,.05)
-				for _,p in ipairs(sys.pts) do p.vel=p.vel+Vector3.new(0,Config.HitParticleGravity or -32,0)*step; p.vel=p.vel*(1-step*.35); p.pos=p.pos+p.vel*step
-					if sys.wire then p.ang=p.ang+p.av*step; local rot=CFrame.Angles(p.ang.X,p.ang.Y,p.ang.Z); local verts={}
-						for vi,o in ipairs(TETRA) do local sp,on=cam:WorldToViewportPoint(p.pos+rot:VectorToWorldSpace(o*p.scale)); verts[vi]={sp,on and sp.Z>.05} end
-						for ei,edge in ipairs(TEDGES) do local a,b=verts[edge[1]],verts[edge[2]]; local l=p.lines[ei]; if a[2] and b[2] then l.From=Vector2.new(a[1].X,a[1].Y); l.To=Vector2.new(b[1].X,b[1].Y); l.Color=particleColor((p.z+age*.7+ei*.06)%1); l.Transparency=alpha*(.35+.55*p.z); l.Visible=true else l.Visible=false end end
-					else local sp,on=cam:WorldToViewportPoint(p.pos); if on and sp.Z>.05 then p.dot.Position=Vector2.new(sp.X,sp.Y); p.dot.Radius=math.max(1,(1.5+p.z*2.5)*17/sp.Z); p.dot.Color=particleColor((p.z+age*.5)%1); p.dot.Transparency=alpha*(.4+.55*p.z); p.dot.Visible=true else p.dot.Visible=false end end
+		for si=#HitFX.systems,1,-1 do
+			local sys=HitFX.systems[si]; sys.age=sys.age+dt; local age=sys.age
+			if age>=sys.duration then
+				destroySystem(sys); table.remove(HitFX.systems,si)
+			else
+				local alpha = age<sys.duration*.15 and age/(sys.duration*.15)
+				              or math.clamp((sys.duration-age)/(sys.duration*.25),0,1)
+				local step  = math.clamp(dt,.001,.05)
+				local ptype = sys.ptype or "Sparks"
+
+				for _,p in ipairs(sys.pts) do
+					p.vel = p.vel + Vector3.new(0,Config.HitParticleGravity or -32,0)*step
+					p.vel = p.vel * (1-step*.35)
+					p.pos = p.pos + p.vel*step
+					local sp,on = cam:WorldToViewportPoint(p.pos)
+					local visible = on and sp.Z>.05
+
+					if ptype == "Wireframe" then
+						p.ang = p.ang + p.av*step
+						local rot = CFrame.Angles(p.ang.X,p.ang.Y,p.ang.Z)
+						local verts={}
+						for vi,o in ipairs(TETRA) do
+							local sv,ov=cam:WorldToViewportPoint(p.pos+rot:VectorToWorldSpace(o*p.scale))
+							verts[vi]={sv,ov and sv.Z>.05}
+						end
+						for ei,edge in ipairs(TEDGES) do
+							local a,b=verts[edge[1]],verts[edge[2]]; local l=p.lines[ei]
+							if a[2] and b[2] then
+								l.From=Vector2.new(a[1].X,a[1].Y); l.To=Vector2.new(b[1].X,b[1].Y)
+								l.Color=particleColor((p.z+age*.7+ei*.06)%1)
+								l.Transparency=alpha*(.35+.55*p.z); l.Visible=true
+							else l.Visible=false end
+						end
+
+					elseif ptype == "Orbs" then
+						if visible then
+							local radius = math.max(2,(2+p.size*3)*15/sp.Z)
+							p.dot.Position = Vector2.new(sp.X,sp.Y)
+							p.dot.Radius   = radius
+							p.dot.Color    = particleColor((p.z+age*.3)%1)
+							p.dot.Transparency = alpha*(.2+.35*p.z); p.dot.Visible=true
+							-- glow ring slightly larger, complementary color
+							p.ring.Position = Vector2.new(sp.X,sp.Y)
+							p.ring.Radius   = radius*1.55
+							p.ring.Color    = particleColor((p.z+age*.3+.5)%1)
+							p.ring.Transparency = alpha*(.55+.35*p.z); p.ring.Visible=true
+						else p.dot.Visible=false; p.ring.Visible=false end
+
+					elseif ptype == "Stars" then
+						if visible then
+							-- 4 arms of the star: each pair of lines forms one axis
+							local baseA = age*4 + p.phase   -- rotation angle advances over time
+							local armLen = math.max(2,(1.5+p.z*3)*14/sp.Z)
+							local cx,cy = sp.X,sp.Y
+							for arm=1,4 do
+								local a = baseA + (arm-1)*math.pi/4
+								local ex,ey = math.cos(a)*armLen, math.sin(a)*armLen
+								local l = p.lines[arm]
+								l.From = Vector2.new(cx-ex*0.3, cy-ey*0.3)
+								l.To   = Vector2.new(cx+ex,     cy+ey)
+								l.Color= particleColor((p.z+age*.5+arm*.12)%1)
+								l.Thickness = math.max(1, (2-age/sys.duration)*1.5)
+								l.Transparency = alpha*(.3+.45*p.z); l.Visible=true
+							end
+						else for _,l in ipairs(p.lines) do l.Visible=false end end
+
+					else -- "Sparks"
+						if visible then
+							-- spark tail: elongated in the direction of travel
+							local velScreen
+							local sp2,on2 = cam:WorldToViewportPoint(p.pos + p.vel*0.04)
+							local tailX = on2 and (sp2.X-sp.X) or 0
+							local tailY = on2 and (sp2.Y-sp.Y) or 0
+							local tailLen = math.sqrt(tailX*tailX+tailY*tailY)
+							if tailLen < 1 then tailX,tailY = 0,-3 end
+							local tscale = math.max(1, (2+p.size*2)*16/sp.Z)
+							-- main spark line
+							local l1 = p.lines[1]
+							l1.From = Vector2.new(sp.X, sp.Y)
+							l1.To   = Vector2.new(sp.X - tailX*tscale*0.5, sp.Y - tailY*tscale*0.5)
+							l1.Color= particleColor((p.z+age*.6)%1)
+							l1.Thickness= math.max(1, 1.8*tscale/16)
+							l1.Transparency= alpha*(.25+.5*p.z); l1.Visible=true
+							-- short crosshair flash near tip (makes it look like a real spark)
+							local l2 = p.lines[2]
+							local perpX,perpY = -tailY,tailX
+							local pMag = math.sqrt(perpX*perpX+perpY*perpY)+.001
+							perpX,perpY = perpX/pMag, perpY/pMag
+							local w = math.max(1, tscale*0.4)
+							l2.From = Vector2.new(sp.X - perpX*w, sp.Y - perpY*w)
+							l2.To   = Vector2.new(sp.X + perpX*w, sp.Y + perpY*w)
+							l2.Color= particleColor((p.z+age*.6+.25)%1)
+							l2.Thickness= math.max(1, 1.2*tscale/16)
+							l2.Transparency= alpha*(.4+.45*p.z); l2.Visible=true
+						else for _,l in ipairs(p.lines) do l.Visible=false end end
+					end
 				end
 			end
 		end
@@ -1810,15 +1988,48 @@ return function(Lib, Core)
         sFX:Divider()
         sFX:Header({ Name = "Particles" })
         boolToggle(sFX, "Hit Particles", "Hit Particles", function() return Config.HitParticles_On end, function(v) Config.HitParticles_On=v end)
-        boolToggle(sFX, "Wireframe", "Wireframe Particles", function() return Config.HitParticleWireframe end, function(v) Config.HitParticleWireframe=v end)
-        sFX:SubLabel({ Text = "Wireframe = rotating 3D tetra shards. Off = classic depth-scaled dots." })
-        colorpick(sFX, "Primary Color", "VIS_HITFX_C", Config.HitFX_Color, function(c) Config.HitFX_Color=c end)
-        colorpick(sFX, "Secondary Color", "VIS_HITFX_C2", Config.HitParticleColorB, function(c) Config.HitParticleColorB=c end)
-        slider(sFX, { Name = "Particle Count", Flag = "VIS_HITFX_N", Default = Config.HitParticleCount, Min = 6, Max = 32, Callback = function(v) Config.HitParticleCount=v end })
-        slider(sFX, { Name = "Duration", Flag = "VIS_HITFX_D", Default = Config.HitParticleDuration, Min = .3, Max = 2.5, Precision = 1, Suffix = " s", Callback = function(v) Config.HitParticleDuration=v end })
-        slider(sFX, { Name = "Wire Scale", Flag = "VIS_HITFX_S", Default = Config.HitParticleWireScale, Min = .15, Max = 1, Precision = 2, Callback = function(v) Config.HitParticleWireScale=v end })
-        slider(sFX, { Name = "Speed", Flag = "VIS_HITFX_V", Default = Config.HitParticleSpeedMax, Min = 5, Max = 50, Callback = function(v) Config.HitParticleSpeedMax=v end })
-        slider(sFX, { Name = "Gravity", Flag = "VIS_HITFX_G", Default = Config.HitParticleGravity, Min = -80, Max = 10, Callback = function(v) Config.HitParticleGravity=v end })
+
+        -- particle type dropdown + per-type unique settings
+        local particleTypeEls = {}
+        local function applyParticleTypeVis()
+            local cur = Config.HitParticleType or "Sparks"
+            for el, types in pairs(particleTypeEls) do
+                local vis = false
+                if types == "*" then vis = true
+                else for _, t in ipairs(types) do if t == cur then vis = true; break end end end
+                pcall(function() el:SetVisibility(vis) end)
+            end
+        end
+        pcall(function()
+            sFX:Dropdown({
+                Name = "Particle Type",
+                Options = { "Sparks", "Orbs", "Stars", "Wireframe" },
+                Default = Config.HitParticleType or "Sparks",
+                Callback = function(v)
+                    if type(v) == "string" and v ~= "" then
+                        Config.HitParticleType = v
+                        Config.HitParticleWireframe = (v == "Wireframe")
+                        applyParticleTypeVis()
+                    end
+                end,
+            }, ctx.flag("VIS_HITFX_PType"))
+        end)
+        sFX:SubLabel({ Text = "Sparks = chaotic elongated flashes | Orbs = glowing depth spheres | Stars = rotating 4-arm stars | Wireframe = spinning 3D tetra shards" })
+
+        colorpick(sFX, "Primary Color",   "VIS_HITFX_C",  Config.HitFX_Color,         function(c) Config.HitFX_Color=c end)
+        colorpick(sFX, "Secondary Color", "VIS_HITFX_C2", Config.HitParticleColorB,    function(c) Config.HitParticleColorB=c end)
+        slider(sFX, { Name = "Particle Count", Flag = "VIS_HITFX_N", Default = Config.HitParticleCount,   Min = 6,   Max = 40,  Callback = function(v) Config.HitParticleCount=v end })
+        slider(sFX, { Name = "Duration",       Flag = "VIS_HITFX_D", Default = Config.HitParticleDuration,Min = .3,  Max = 2.5, Precision = 1, Suffix = " s", Callback = function(v) Config.HitParticleDuration=v end })
+        slider(sFX, { Name = "Speed",          Flag = "VIS_HITFX_V", Default = Config.HitParticleSpeedMax,Min = 5,   Max = 50,  Callback = function(v) Config.HitParticleSpeedMax=v end })
+        slider(sFX, { Name = "Gravity",        Flag = "VIS_HITFX_G", Default = Config.HitParticleGravity, Min = -80, Max = 10,  Callback = function(v) Config.HitParticleGravity=v end })
+
+        -- Wireframe-only: wire scale
+        local wireScaleEl = slider(sFX, { Name = "Wire Scale", Flag = "VIS_HITFX_S",
+            Default = Config.HitParticleWireScale, Min = .15, Max = 1, Precision = 2,
+            Callback = function(v) Config.HitParticleWireScale=v end })
+        particleTypeEls[wireScaleEl] = { "Wireframe" }
+
+        applyParticleTypeVis()
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
         local sInd = V:Section({ Side = "Right" })
@@ -1887,18 +2098,17 @@ return function(Lib, Core)
             styleEls[sideDd] = { "Player" }
         end)
 
-        -- Design: one of four looks. Applies to every Drawing style (Player/Free/Simple),
-        -- so it's shown for all three (Panel has its own fixed HUD chrome).
+        -- Design: one of four looks. Applies to every Drawing style (Player/Free/Simple).
         pcall(function()
             local designDd = sInd:Dropdown({
                 Name = "Design",
-                Options = { "Glass", "Ribbon", "Brackets", "Nodes" },
+                Options = { "Neon", "Cyber", "Arc", "Minimal" },
                 Default = Config.Ind_PlayerDesign,
                 Callback = function(v) if type(v) == "string" and v ~= "" then Config.Ind_PlayerDesign = v end end,
             }, ctx.flag("VIS_IND_PlayerDesign"))
             styleEls[designDd] = { "Player", "Free", "Simple" }
         end)
-        local designHint = sInd:SubLabel({ Text = "Glass box / Ribbon fill / corner Brackets / dot Nodes (Player, Free, Simple)." })
+        local designHint = sInd:SubLabel({ Text = "Neon = dark pill + glowing border | Cyber = corner ticks + dot | Arc = progress top-edge bar | Minimal = clean bullet dot (Player, Free, Simple)." })
         styleEls[designHint] = { "Player", "Free", "Simple" }
 
         -- Player: vertical text nudge relative to the character.
