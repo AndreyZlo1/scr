@@ -1214,7 +1214,9 @@ return function(Lib, Core)
                 local ratio = am and am.ratio or c.dispRatio
                 c.dispRatio = lerp(c.dispRatio, ratio, aA)
                 local col   = am and am.color or Config.Ind_Accent
-                local design=(def==STYLE_DEFS.Player) and (Config.Ind_PlayerDesign or "Glass") or "Glass"
+                -- Design applies to every Drawing-based style (Player/Free/Simple), not just Player,
+                -- so the picker is meaningful whichever draw style is active.
+                local design=Config.Ind_PlayerDesign or "Glass"
                 c.edgeA.Visible=false; c.edgeB.Visible=false; c.node.Visible=false
                 if design=="Glass" then
                     c.bg.Position=Vector2.new(left-7*sc,rowY-4*sc); c.bg.Size=Vector2.new(width+14*sc,step-3*sc); c.bg.Color=Color3.fromRGB(11,12,17); c.bg.Transparency=c.alpha*0.78; c.bg.Visible=true
@@ -1885,18 +1887,19 @@ return function(Lib, Core)
             styleEls[sideDd] = { "Player" }
         end)
 
-        -- Player: pick one of the four designs (Glass frame / Ribbon / Brackets / Nodes).
+        -- Design: one of four looks. Applies to every Drawing style (Player/Free/Simple),
+        -- so it's shown for all three (Panel has its own fixed HUD chrome).
         pcall(function()
             local designDd = sInd:Dropdown({
-                Name = "Player Design",
+                Name = "Design",
                 Options = { "Glass", "Ribbon", "Brackets", "Nodes" },
                 Default = Config.Ind_PlayerDesign,
                 Callback = function(v) if type(v) == "string" and v ~= "" then Config.Ind_PlayerDesign = v end end,
             }, ctx.flag("VIS_IND_PlayerDesign"))
-            styleEls[designDd] = { "Player" }
+            styleEls[designDd] = { "Player", "Free", "Simple" }
         end)
-        local designHint = sInd:SubLabel({ Text = "Player only: Glass box / Ribbon fill / corner Brackets / dot Nodes." })
-        styleEls[designHint] = { "Player" }
+        local designHint = sInd:SubLabel({ Text = "Glass box / Ribbon fill / corner Brackets / dot Nodes (Player, Free, Simple)." })
+        styleEls[designHint] = { "Player", "Free", "Simple" }
 
         -- Player: vertical text nudge relative to the character.
         local playerTextY = slider(sInd, {
