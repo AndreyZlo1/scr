@@ -398,6 +398,9 @@ local Config = {
 	-- [V97] AutoPlay addon — автоатака. По умолчанию ВЫКЛ (агрессивное поведение).
 	AutoPlay          = false,  -- мастер-тумблер аддона
 	AP_PunishOnParry  = true,   -- добивать M1 застаненного врага после идеального парри
+	AP_Interrupt      = true,   -- вместо parry сбить одиночную атаку, только если наш M1 гарантированно раньше
+	AP_InterruptMargin= 0.055,  -- наш ожидаемый hit должен опередить вражеский минимум на 55мс
+	AP_InterruptNetK  = 0.50,   -- ServerCheck идёт к серверу примерно за половину RTT
 	AP_BaseReach      = 5.5,    -- базовый реч нашего M1 (ForwardOffset 4 + запас), студы
 	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по росту
 	-- [V107] РЕЙТ СВОЕГО M1. Раньше fireM1Custom слал через CombatRemoteClient.Fire, а тот держит
@@ -803,6 +806,9 @@ local V93 = {
 	clusterBuf  = {},
 	-- [V132] persistent cluster attacker-seen table (no per-frame allocation)
 	seenAttackers = {},
+	threatSeen = {},
+	ownM1Info = { t = "M1", s = "Basic" },
+	sortByContact = function(a, b) return a.contactAbs < b.contactAbs end,
 	-- [V132] reusable RaycastParams for dodge wall-check
 	dodgeParams = nil,
 	dodgeChar = nil,
@@ -1084,7 +1090,7 @@ end
 -- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один раз за FrameId,
 -- чтобы не обходить папку по разу на каждую угрозу в м��льтибое. Всё состояние — в V93 (см. выше
 -- ��ро лимит 200 локалов), новых local тут не заводим.
-local function hitboxIndex()
+local hitboxIndex = LPH_NO_VIRTUALIZE(function()
 	if V93.hbFrame == FrameId then return V93.byOwner end
 	V93.hbFrame = FrameId
 	local byOwner = V93.byOwner
@@ -1114,14 +1120,18 @@ local function hitboxIndex()
 		end
 	end
 	return byOwner
-end
+end)
 
 -- Точная (как в игре) проверка: пересекает ли РЕАЛЬНЫЙ парт атакующего ��аш персонаж.
 -- true — есть парт и он в нас; false — па��т(ы) есть, но мимо; nil — активного парта нет.
-local function realHitboxHitsMe(ownerName)
+local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
+	if th and th.gtQueryFrame == FrameId then return th.gtQueryResult end
 	if not ownerName then return nil end
 	local lst = hitboxIndex()[ownerName]
-	if not lst or #lst == 0 then return nil end
+	if not lst or #lst == 0 then
+		if th then th.gtQueryFrame, th.gtQueryResult = FrameId, nil end
+		return nil
+	end
 	local char = localChar()
 	if not char then return nil end
 	local params = V93.hbParams
@@ -1138,11 +1148,13 @@ local function realHitboxHitsMe(ownerName)
 	for i = 1, #lst do
 		local part = lst[i]
 		if part.Parent and #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0 then
+			if th then th.gtQueryFrame, th.gtQueryResult = FrameId, true end
 			return true
 		end
 	end
+	if th then th.gtQueryFrame, th.gtQueryResult = FrameId, false end
 	return false
-end
+end)
 
 -- [V74] Return the closest hitbox part for a given owner, plus its distance to us.
 -- Used to trigger dodge right when the server hitbox becomes dangerous.
@@ -1166,7 +1178,7 @@ end
 -- [V74] Update a threat's predicted contact based on the actual hitbox appearance.
 -- When the server hitbox appears near us, we know the real hit is now, so we pull
 -- contactAbs in to make the iframe window cover the actual registration window.
-local function syncContactWithHitbox(th, now)
+local syncContactWithHitbox = LPH_NO_VIRTUALIZE(function(th, now)
 	if not Config.HitboxDodge then return end
 	if th.dodged or th.hitboxSynced then return end
 	local part, dist = hitboxNearestPart(th.name)
@@ -1177,7 +1189,7 @@ local function syncContactWithHitbox(th, now)
 		th.hitboxPart = part
 	end
 	local near = dist <= Config.HitboxNearDist
-	local hitting = realHitboxHitsMe(th.name) == true
+	local hitting = realHitboxHitsMe(th.name, th) == true
 	if near or hitting then
 		-- Pull contact in so the existing dodge/block math fires right now.
 		local target = now + (hitting and 0 or Config.HitboxDodgeLead)
@@ -1186,9 +1198,9 @@ local function syncContactWithHitbox(th, now)
 			th.hitboxSynced = true
 		end
 	end
-end
+end)
 
-local function hitboxGeom(th)
+local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 	local aHRP = th.attackerHRP
 	if not aHRP or not aHRP.Parent then return nil end
 	local now  = os.clock()
@@ -1288,9 +1300,9 @@ local function hitboxGeom(th)
 
 	local center = predA + flatLook * forward
 	return center, forward, predA, flatLook
-end
+end)
 
-local function willHitMe(th)
+local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local myHRP = localHRP()
 	local aHRP  = th.attackerHRP
 	if not myHRP then return Config.FilterFailSafe end
@@ -1607,7 +1619,7 @@ local function willHitMe(th)
 			local gt = nil
 			local tHit = math.clamp((th.contactAbs or nowW) - nowW, 0, 0.6)
 			if tHit < 0.18 or (FrameId % 3 == 0) then
-				gt = realHitboxHitsMe(th.name)
+				gt = realHitboxHitsMe(th.name, th)
 			end
 			if gt == true then
 				th.gtConfirmed = true      -- латчим: удар реально в нас, держим блок до ко��ца свинга
@@ -1722,7 +1734,7 @@ local function willHitMe(th)
 	                and fwd <= (forward + Config.HitboxDepth + slack)
 	local inLateral = side <= (Config.HitHalfWidth + slack)
 	return inForward and inLateral
-end
+end)
 
 local function nextCombo(attacker)
 	local now = os.clock()
@@ -1746,7 +1758,6 @@ local function nextCombo(attacker)
 	return c.idx
 end
 
-local KSP = game:GetService("KeyframeSequenceProvider")
 local GameData = { cfg = nil, cau = nil, cu = nil, resolved = false }
 
 local function loadGameModules()
@@ -1853,56 +1864,6 @@ local function styleOf(model)
 	return "Basic"
 end
 
-local BONE_MARKERS = {
-	HumanoidRootPart=true, Torso=true, Head=true, ["Left Leg"]=true, ["Right Leg"]=true,
-	["Left Arm"]=true, ["Right Arm"]=true, UpperTorso=true, LowerTorso=true,
-}
-local function scanMarkers(seq)
-	local hit, any, count = nil, nil, 0
-	pcall(function()
-		for _, kf in ipairs(seq:GetKeyframes()) do
-			for _, m in ipairs(kf:GetMarkers()) do
-				if not BONE_MARKERS[m.Name] then
-					count += 1
-					if not any or kf.Time < any then any = kf.Time end
-					if m.Name == "Hit" and (not hit or kf.Time < hit) then hit = kf.Time end
-				end
-			end
-		end
-	end)
-	return hit, any, count
-end
-
-local AnimMeta = {}
-local function resolveAnimMeta(id)
-	local cached = AnimMeta[id]
-	if cached then return cached end
-	local meta = { kind = "M1", hit = nil, marks = 0 }
-	local ok, seq = pcall(function() return KSP:GetKeyframeSequenceAsync("rbxassetid://" .. id) end)
-	if ok and seq then
-		local hit, any, count = scanMarkers(seq)
-		meta.marks = count
-		if hit and hit > 0 then
-			meta.kind, meta.hit = "M2", hit
-		elseif count > 0 and any then
-			meta.kind, meta.hit = "SKILL", any
-		end
-		pcall(function() seq:Destroy() end)
-	else
-		local legacy = LEGACY_ATTACKS[id]
-		if legacy then meta.kind = legacy.t end
-	end
-	AnimMeta[id] = meta
-	-- [V73] FPS: cap metadata cache
-	if not AnimMetaCount then AnimMetaCount = 0 end
-	AnimMetaCount = AnimMetaCount + 1
-	if AnimMetaCount > 250 then
-		for k in pairs(AnimMeta) do AnimMeta[k] = nil end
-		AnimMetaCount = 0
-	end
-	return meta
-end
-
 local AttackIds = {}
 local function comboFromName(nm)
 	local n = nm:match("^(%d+)")
@@ -1925,9 +1886,8 @@ local function animIdOf(inst)
 	if a then return tonumber(tostring(a.AnimationId):match("(%d+)")) end
 	return nil
 end
-local BenignIds = {}
 -- [V85] id защитных анимаций (block/guard/parry/deflect/perfect). Некоторые стили имеют
--- на ��лок-анимации keyframe-маркеры → resolveAnimMeta оши����очно принимал их за атаку (SKILL/M2)
+-- защитные анимации не должны попадать в статический attack registry.
 -- и парри срабатывал на ЧУЖОЙ блок. Собираем их явно и жёстко исключаем из детекта угроз.
 local BlockIds = {}
 local function looksDefensive(nm)
@@ -1968,7 +1928,7 @@ local function indexAllAnims()
 							-- [V109] КОРЕНЬ «тяжёлой/скилла нет в логе, скрипт её не видит»: ЛЮБОЙ удар
 							-- внутри боевого стиля с НЕСТАНДАРТНЫМ именем (не M1/M2 — напр. Striker "Crit",
 							-- Kure "6to15_CritStartup" или будущая «крутилка ногами») раньше давал kind=nil →
-							-- анимка проваливалась в BenignIds (loop2) → детект ГЛУШИЛ её насовсем → нет
+							-- анимка раньше не попадала в attack registry → детект ГЛУШИЛ её насовсем → нет
 							-- угрозы → ни блока, ни доджа, ни interrupt (юзер: «скрипт даже не атакует»).
 							-- Теперь любая не-защитная / не-реакционная / не-idle анимка боевого стиля = SKILL.
 							-- Ловится по keyframe-таймлайну (hitTimelineBase). Ложняков нет: реакции/блок/
@@ -2007,8 +1967,6 @@ local function indexAllAnims()
 								and (lname:find("crit") or lname:find("momentum")
 									or lname:find("slam") or lname:find("special") or lname:find("finisher")) then
 								AttackIds[id] = { kind = "SKILL", combo = nil }
-							else
-								BenignIds[id] = true
 							end
 						end
 					end
@@ -2026,15 +1984,15 @@ end
 
 local function resolveInfo(id, model)
 	local entry  = AttackIds[id]
-	local meta   = resolveAnimMeta(id)
+	if not entry then return nil end
 	local legacy = LEGACY_ATTACKS[id]
-	local kind = (meta.hit and meta.kind == "M2") and "M2" or (entry and entry.kind) or meta.kind
+	local kind = entry.kind
 	local rk = registryKind and registryKind(model, id)
 	if rk == "M1" or rk == "M2" then kind = rk end
 	return {
 		t     = kind,
 		s     = styleOf(model) or (legacy and legacy.s) or "Basic",
-		hit   = meta.hit,
+		hit   = entry.hit,
 		combo = entry and entry.combo,
 		mom   = (entry and entry.mom) or (legacy and legacy.mom) or false,
 		name  = entry and entry.name or nil,
@@ -2764,6 +2722,8 @@ State.ap = {
 	nextM1At   = 0,      -- анти-спам ПОЛЛА (сам tryM1 гейтит настоящий рей�� по AttackDuration 0.45с)
 	punishTgt  = nil,    -- модель врага, которого добиваем после ��арри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
+	interruptThreat = nil,
+	interruptUntil  = 0,
 	busyAttrs = {
 		"Stunned", "Ragdoll", "Downed", "GuardBroken", "CantAnything",
 		"M1Cooldown", "ParryAttackLockout", "BlockAttackLockout", "GrappleWinnerStun",
@@ -2923,6 +2883,16 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 		end
 		local anims = ap.getAnims()
 		local v53   = anims and anims[combo] or nil
+		if not v53 then return end
+		local spd = 1
+		pcall(function() spd = ap.getSpeed(char, combo) or 1 end)
+		-- Родная игра сначала синхронно запускает M1 (она сама StopAnim'ит Evasive/
+		-- PerfectBlock/EHit/Combat и грузит M1 с Action4), и лишь затем шлёт ServerCheck.
+		-- Старый task.spawn инвертировал порядок: сеть уходила первой, а косметический свинг
+		-- стартовал позже и проигрывал race другой анимации. Под Luraph это окно ещё шире.
+		local played = false
+		pcall(function() played = ap.playSwing(char, combo, spd, false) == true end)
+		if not played then return end
 		local newId = (debug.getupvalue(ap.tryM1Fn, ap.u25idx) or 0) + 1
 		-- шлём НАПРЯМУЮ: сервер ст��оит M1-хитбокс по нашему LookVector в момент приёма ServerCheck
 		ServerRemote:FireServer({ Type = "Combat", Action = "M1", Func = "ServerCheck" }, newId)
@@ -2934,12 +2904,6 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate)
 		debug.setupvalue(ap.tryM1Fn, ap.u26idx, newId)
 		ap.u27tbl[newId] = combo
 		ap.u28tbl[newId] = v53
-		-- анимация свинга — В ФОНЕ (хит уже ушёл ServerCheck-ом; анимация косметическая и может йелдить)
-		task.spawn(function()
-			local spd = 1
-			pcall(function() spd = ap.getSpeed(char, combo) or 1 end)
-			pcall(ap.playSwing, char, combo, spd, false)
-		end)
 		ok = true
 	end)
 	return ok
@@ -2951,6 +2915,10 @@ function State.ap.canAttack()
 	if not c then return false end
 	if c:GetAttribute("Equip") ~= true then return false end   -- ��уки не одеты ��� бить нельзя
 	if c:GetAttribute("Blocking") == true then return false end -- держим guard → M1 не пройдёт
+	-- Те же конфликтующие combat-гейты, что стоят в родной tryM1. Custom builder их раньше
+	-- обходил и запускал M1 поверх другой своей атаки; игровой модуль затем StopAnim'ил трек.
+	if c:GetAttribute("CombatAttacking") == true or c:GetAttribute("M1") == true
+	   or c:GetAttribute("M2") == true or c:GetAttribute("PendingM2") == true then return false end
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
 	for _, a in ipairs(State.ap.busyAttrs) do
 		if c:GetAttribute(a) then return false end
@@ -2962,7 +2930,14 @@ end
 
 -- реальный радиус нашего M1 С УЧЁТОМ РОСТА (крупнее аватар → больше хитбокс/дос��аёт да��ьше)
 function State.ap.reach()
-	local base = Config.AP_BaseReach or 5.5     -- ForwardOffset(4) + половина коробки + запас
+	local base = Config.AP_BaseReach or 5.5
+	-- ForwardOffset тоже style-specific. Берём живой CombatConfig, а запас 1.5 stud оставляем
+	-- как половину стандартного M1 box; рост ниже масштабирует итог как HitboxSizeMultiplier.
+	loadGameModules()
+	if GameData.cfg and GameData.cfg.GetStyleHitboxForwardOffset then
+		local ok, fwd = pcall(GameData.cfg.GetStyleHitboxForwardOffset, styleOf(localChar()), "M1")
+		if ok and type(fwd) == "number" then base = fwd + 1.5 end
+	end
 	local _, _, myH = heightDiag(localChar())
 	if type(myH) == "number" and myH > 0 then
 		base = base * math.clamp(myH / (Config.AP_RefHeight or 5.5), 0.85, 1.45)
@@ -2996,7 +2971,72 @@ function State.ap.snapTo(hrp)
 	end
 end
 
--- послать ЛЕГИТНЫЙ M1 по цели: снап лицом + прямой вызов родной tryM1() (или OnM1Activated).
+-- Предсказать момент НАШЕГО следующего M1 тем же источником, что использует игра:
+-- style+combo CombatConfig, множитель роста и ping animation multiplier.
+function State.ap.ownM1Delay()
+	local ap = State.ap
+	local char = localChar()
+	if not char then return nil, nil end
+	local combo = 1
+	if Config.AP_ComboMode == "Fixed" then
+		combo = math.clamp(math.floor(Config.AP_FixedHit or 1), 1, 4)
+	elseif ap.fireOK and ap.tryM1Fn and ap.comboIdx then
+		combo = ((debug.getupvalue(ap.tryM1Fn, ap.comboIdx) or 0) % 4) + 1
+	end
+	V93.ownM1Info.s = styleOf(char)
+	return hitTimeline(V93.ownM1Info, combo, attackSpeedMult(char)), combo
+end
+
+-- Можно ли физически сбить эту атаку. IFrames/HyperArmor берём из живого CombatConfig,
+-- а не из списка стилей: обновления игры автоматически сохранят правильный гейт.
+function State.ap.interruptible(th)
+	if not th or not th.attackerModel or not th.attackerHRP then return false end
+	if th.attackerModel:GetAttribute("IFRAMES") == true
+	   or th.attackerModel:GetAttribute("HyperArmor") == true then return false end
+	if th.kind == "M2" then
+		loadGameModules()
+		if GameData.cfg and GameData.cfg.GetStyleConfig then
+			local ok, sc = pcall(GameData.cfg.GetStyleConfig, th.style or "basic")
+			if ok and type(sc) == "table"
+			   and (sc.M2GrantsIFrames == true or sc.M2GrantsHyperArmor == true) then return false end
+		end
+	end
+	return true
+end
+
+-- Контрудар является транзакцией: он заменяет parry только после реального успешного fireM1.
+-- Если к ожидаемому моменту нашего hit угроза ещё жива, suppression снимается и остаётся
+-- заранее зарезервированное время на обычный block fallback.
+function State.ap.tryInterrupt(now, th, threatCount)
+	local ap = State.ap
+	if not Config.AutoPlay or Config.AP_Interrupt == false then return false end
+	if ap.interruptThreat then
+		if ap.interruptThreat == th and now < (ap.interruptUntil or 0) then return true end
+		ap.interruptThreat, ap.interruptUntil = nil, 0
+	end
+	if threatCount ~= 1 or not th or th.pressed or th.dodged then return false end
+	-- Unblockable/grab policy всегда важнее агрессии: эти атаки уже имеют отдельный must-dodge путь.
+	if isMustDodge(th) then return false end
+	if not ap.interruptible(th) or not ap.canAttack() then return false end
+	if ap.flatDist(th.attackerModel) > ap.reach() then return false end
+	local ownDelay, combo = ap.ownM1Delay()
+	if not ownDelay then return false end
+	local enemyLeft = (th.contactAbs or now) - now
+	local ownHit = ownDelay + getPingRaw() * (Config.AP_InterruptNetK or 0.5)
+	local fallback = uplink() + (Config.PerfectLead or 0.0625) + (Config.AP_InterruptMargin or 0.055)
+	if ownHit + fallback >= enemyLeft then return false end
+	if not ap.fireM1(th.attackerModel, "interrupt") then return false end
+	ap.interruptThreat = th
+	ap.interruptUntil = now + ownHit
+	th.interruptAttempted = true
+	State.status = "INTERRUPT"
+	diagPush(("INTERRUPT t=%.2f %s %s(%s) combo=%d ours=%.0fms enemy=%.0fms reserve=%.0fms")
+		:format(now, th.name or "?", th.kind or "?", th.style or "?", combo or 0,
+			ownHit * 1000, enemyLeft * 1000, fallback * 1000))
+	return true
+end
+
+-- послать ЛЕГИТНЫЙ M1 по цели:
 -- БЕЗ собственных лок/задержек — и��ровая tryM1 сама разрешит удар как только это ��опустимо
 -- (AttackDuration/lockout/стан). Наш nextM1At — лишь троттл ПОЛЛА, чтобы не звать tryM1 сотни
 -- раз в кадр; настоящий рейт держит игра. Поэтому добивание/перебивание бьёт МГНОВЕННО, как
@@ -3164,7 +3204,7 @@ local function fireBlock(tsServer)
 	return tsServer
 end
 
-local function refreshContact(th)
+local refreshContact = LPH_NO_VIRTUALIZE(function(th)
 	local now = os.clock()
 	local remaining = th.contact0 - (now - th.detectClock)
 
@@ -3246,7 +3286,7 @@ local function refreshContact(th)
 	th.trackPlaying = playing
 	th.contactAbs = now + math.max(remaining, 0)
 	return remaining
-end
+end)
 
 local function insideAutoFOV(attackerHRP)
 	local fov = math.clamp(tonumber(Config.FOV) or 360, 1, 360)
@@ -3522,6 +3562,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	local faceTgt   = nil
 	local imminent  = V93.imminentBuf   -- [V123] персистентный буфер (без аллокации таблицы/кадр)
 	table.clear(imminent)
+	State.interruptCandidate = nil
+	State.interruptThreatCount = 0
 
 	-- Grapple — отдельное подтверждённое состояние боя. Пока наш персонаж реально Grappling,
 	-- старые animation-threats не должны запускать обычные block/dodge/counter ветки.
@@ -3610,6 +3652,13 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			th.threatens = threatens
 			if threatens then th.everThreatened = true end
 			if threatens then
+				-- AutoPlay interrupt использует уже готовую геометрию/таймлайн этого же scheduler.
+				-- Кандидат нужен ДО короткого defensive window; отдельного предиктора/обхода нет.
+				State.interruptThreatCount = State.interruptThreatCount + 1
+				if not State.interruptCandidate
+				   or th.contactAbs < State.interruptCandidate.contactAbs then
+					State.interruptCandidate = th
+				end
 				local lead = Config.PerfectLead
 				local hold = Config.HoldAfter
 		if Config.M2WidenWindow and th.kind == "M2" then
@@ -3683,7 +3732,11 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 	end
 
-	table.sort(imminent, function(a, b) return a.contactAbs < b.contactAbs end)
+	-- Успешный контрудар временно владеет кадром; неуспех ничего не меняет и ниже штатно
+	-- продолжатся dodge/parry ветки. На следующем кадре suppression живёт лишь до own-hit ETA.
+	if State.ap.tryInterrupt(now, State.interruptCandidate, State.interruptThreatCount) then return end
+
+	table.sort(imminent, V93.sortByContact)
 
 	-- Multi-attacker clustering is based on distinct attackers and absolute contacts.
 	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
@@ -3941,7 +3994,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- BlockCooldown 0.5с (dump: CombatConfig.Block.CooldownSeconds).
 	local threatN, farContact = 0, nil
 	do
-		local seen = {}
+		local seen = V93.threatSeen
+		for k in pairs(seen) do seen[k] = nil end
 		for _, th in ipairs(imminent) do
 			local key = th.attackerModel or th.attackerHRP or th.name
 			if key and not seen[key] then seen[key] = true; threatN = threatN + 1 end
@@ -4298,11 +4352,9 @@ local function hookAnimator(animator)
 		if not rec.enemy then return end
 		-- [V85] защитная анимация вра��а (блок/парри/perfect) — это НЕ входящая атака, не парир��ем.
 		if BlockIds[id] then return end
-		if not attackEntry(id) then
-			if BenignIds[id] then return end
-			local meta = resolveAnimMeta(id)
-			if not (meta and meta.marks and meta.marks > 0) then return end
-		end
+		-- Полное дерево Animations индексируется один раз при старте. Неизвестные ID не
+		-- парсим через KeyframeSequenceProvider в горячем AnimationPlayed callback.
+		if not attackEntry(id) then return end
 		local info = resolveInfo(id, rec.model)
 		if not info then return end
 		onAttack(rec.hrp, info, rec.model, id, track)
@@ -6300,6 +6352,9 @@ return function(_Lib, _Core)
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
 	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
+	boolToggle(apPlay, "Counter Interrupt", "Counter Interrupt",
+		function() return Config.AP_Interrupt ~= false end, function(v) Config.AP_Interrupt = v end)
+	apPlay:SubLabel({ Text = "if ur next M1 lands first and enemy is in reach → hit now instead of parrying\nfalls back to parry when timing, range, iframe or hyperarmor check fails" })
 	apPlay:SubLabel({ Text = "note: our M1 always uses the fast custom builder (bypasses the 450ms throttle)" })
 
 	apPlay:Divider()
