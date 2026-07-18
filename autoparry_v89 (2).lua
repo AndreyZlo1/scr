@@ -356,7 +356,11 @@ local Config = {
 	-- нев��змо��ен → доджим оба ���разу (iframes покрывают обоих). Порог = реальное
 	-- время разв��рота (по угловой скорости) + запас на перевзвод.
 	EmergencyDualDodge = true,
-	TurnRateDegPerSec  = 720,   -- насколько быстро HRP реально доворачивается снапом
+	-- [V134] Multi-cover dodge is a committed transaction: use it only when ONE confirmed
+	-- server iframe interval can cover two or more independent contact deadlines.
+	MultiDodgeCover = true,
+	MultiDodgeConfirmSlack = 0.03,
+	TurnRateDegPerSec  = 720,
 	RearmBudget        = 0.06,  -- запас на свежий Activated (сервер + throttle)
 	DualDodgeMaxGap     = 0.22, -- 2-й удар в пределах этого от 1-го = кандидат на dual
 
@@ -672,6 +676,9 @@ local State = {
 	fireCount    = 0,
 	lastDodge    = -99,
 	lastDodgeInfo   = nil,
+	-- [V134] authoritative dodge transaction. `pending` exists only after the request was
+	-- sent; `confirmed` flips only on the game's replicated IFRAMES attribute.
+	dodgeTxn = { pending=false, confirmed=false, fire=0, lo=0, hi=0, untilAt=0, reason=nil },
 	lastDodgeRefuse = nil,
 	lastAct      = -99,
 	lastDeact    = -99,
@@ -2424,8 +2431,11 @@ local function sendDeactivate(force)
 end
 
 local function sendDodge(dir)
-	if State.blocking then
+	-- Evasive.lua hard-rejects while Character.Blocking is true. `State.blocking=false`
+	-- alone is only local intent; send the real Deactivated before requesting Evasive.
+	if State.guardUp or State.blocking then
 		State.blocking, State.holdUntil = false, 0
+		sendDeactivate(true)
 		stopBlockAnim()
 	end
 	ServerRemote:FireServer({ Type = "Combat", Action = "Evasive", Func = "Evasive" })
@@ -3187,6 +3197,9 @@ local function canDodgeNow(force)
 	   and (c:GetAttribute("Stunned") == true or c:GetAttribute("CantAnything") == true) then
 		return false, "Stunned"
 	end
+	-- Dump Evasive.lua also refuses while Blocking/CombatAttacking. performDodge clears
+	-- Blocking via Deactivated before FireServer; self-attack remains a hard refusal.
+	if c:GetAttribute("CombatAttacking") == true then return false, "CombatAttacking" end
 	local hum = c:FindFirstChildOfClass("Humanoid")
 	if hum and (hum.Health <= 0
 	   or hum:GetState() == Enum.HumanoidStateType.Dead
@@ -3559,6 +3572,8 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff)
 		end
 		return false
 	end
+	local tx0 = State.dodgeTxn
+	if tx0 and tx0.pending then return false end
 	local can, why = canDodgeNow(force)
 	if not can then
 		if State.lastDodgeRefuse ~= why then
@@ -3576,33 +3591,66 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff)
 	end
 	local dir = bestDodgeDir(now, preferBack)
 	sendDodge(dir)
-	local coverEnd = now + Config.DodgeConfirm + Config.IFrameDur
-	local soonest, covered = nil, 0
+	local tx = State.dodgeTxn
+	local iframeLo = now + Config.DodgeConfirm
+	local iframeHi = iframeLo + Config.IFrameDur
+	tx.pending, tx.confirmed = true, false
+	tx.fire, tx.lo, tx.hi = now, iframeLo, iframeHi
+	tx.untilAt, tx.reason = iframeHi + 0.08, reason
+	local planned, soonest = 0, nil
 	for _, th in ipairs(Threats) do
-		if not th.dodged and th.contactAbs <= coverEnd + 0.03 then
-			th.dodged = true; covered = covered + 1
-			if not soonest or th.contactAbs < soonest then soonest = th.contactAbs end
+		local c = th.contactAbs
+		if c >= iframeLo - 0.03 and c <= iframeHi + 0.03 then
+			planned = planned + 1
+			if not soonest or c < soonest then soonest = c end
 		end
 	end
 	State.lastDodgeInfo = {
-		fire       = now,
-		reason     = reason,
-		contactAbs = soonest,
-		iframeLo   = now + Config.DodgeConfirm,
-		iframeHi   = now + Config.DodgeConfirm + Config.IFrameDur,
-		dir        = dir and "smart" or "input",
+		fire=now, reason=reason, contactAbs=soonest, iframeLo=iframeLo, iframeHi=iframeHi,
+		dir=dir and "smart" or "input", planned=planned,
 	}
-	diagPush(("DODGE  t=%.2f  %s%s  covers=%d  dir=%s  fire→contact=%s  iframe=[+%.0f,+%.0f]ms")
-		:format(now, reason, granted and " [GRANT]" or "", covered, State.lastDodgeInfo.dir,
+	diagPush(("DODGE  t=%.2f  %s%s  planned=%d  dir=%s  fire→contact=%s  iframe=[+%.0f,+%.0f]ms")
+		:format(now, reason, granted and " [GRANT]" or "", planned, State.lastDodgeInfo.dir,
 			soonest and ("%.0fms"):format((soonest-now)*1000) or "n/a",
 			Config.DodgeConfirm*1000, (Config.DodgeConfirm+Config.IFrameDur)*1000))
 	return true
 end
 
--- [LURAPH] The per-Heartbeat threat scheduler — the reactive parry path. Kept
+-- Authoritative coverage is only granted after the game's replicated IFRAMES flag.
+-- Before confirmation, a dodge request remains a request: no threat is removed from EDF.
+local function updateDodgeTxn(now)
+	local tx = State.dodgeTxn
+	if not tx or not tx.pending then return end
+	local c = localChar()
+	if not tx.confirmed and c and c:GetAttribute("IFRAMES") == true then
+		tx.confirmed = true
+		local covered = 0
+		for _, th in ipairs(Threats) do
+			local contact = th.contactAbs
+			if not th.dodged and contact >= tx.lo - (Config.MultiDodgeConfirmSlack or 0.03)
+				and contact <= tx.hi + (Config.MultiDodgeConfirmSlack or 0.03) then
+				th.dodged, th.coveredByDodge = true, true
+				covered = covered + 1
+			end
+		end
+		diagPush(("DODGE-CONFIRM t=%.2f  %s  covered=%d  window=[+%.0f,+%.0f]ms")
+			:format(now, tostring(tx.reason or "?"), covered,
+				(tx.lo-tx.fire)*1000, (tx.hi-tx.fire)*1000))
+	end
+	if now >= tx.untilAt then
+		if not tx.confirmed then
+			diagPush(("DODGE-REJECT t=%.2f  %s  IFRAMES not confirmed; EDF retained")
+				:format(now, tostring(tx.reason or "?")))
+		end
+		tx.pending, tx.confirmed, tx.reason = false, false, nil
+	end
+end
+
+-- [LURAPH] The per-Heartbeat threat scheduler
 -- native (not virtualized) so timing math stays fast; Luraph still obfuscates
 -- its constants/strings. Not the secret, so nothing is lost by not virtualizing.
 local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
+	updateDodgeTxn(now)
 	local serverNow = Workspace:GetServerTimeNow()
 	local up        = uplink()
 	local wantBlock = nil
@@ -3804,28 +3852,34 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
 	local cluster = V93.clusterBuf   -- [V123] персистентный буфер (без аллокации таблицы/кадр)
 	table.clear(cluster)
-	local seenAttackers = V93.seenAttackers
-	for k in pairs(seenAttackers) do seenAttackers[k] = nil end
-	local clusterHeavy = false
+	-- A cluster is a set of CONTACT DEADLINES, not attackers. Two Boxing M2 strikes are
+	-- two deadlines (s1/s2); collapsing by attacker loses the second deadline and makes a
+	-- one-dodge feasibility test lie. Each threat record is already one animation strike.
 	for _, th in ipairs(imminent) do
-		local key = th.attackerModel or th.attackerHRP or th.name
-		if key and not seenAttackers[key] then
-			seenAttackers[key] = true
-			cluster[#cluster + 1] = th
-			if th.kind == "M2" then clusterHeavy = true end
-		end
+		cluster[#cluster + 1] = th
+		if th.kind == "M2" then clusterHeavy = true end
 	end
 	local clusterN = #cluster
 	local clusterFirst = cluster[1]
 	local clusterLast = cluster[#cluster]
 	local clusterSpread = (clusterFirst and clusterLast) and (clusterLast.contactAbs - clusterFirst.contactAbs) or 0
 	local clusterStrategy = nil
-	if Config.MultiThreatGuard and clusterN >= (Config.MultiThreatMinN or 2) then
+	-- A confirmed/pending dodge owns this burst until its server iframe transaction closes.
+	-- Do not recompute it into HELD_GUARD halfway through as deadlines drain from imminent.
+	local activeTxn = State.dodgeTxn
+	if activeTxn and activeTxn.pending then
+		clusterStrategy = "DODGE_TXN"
+	end
+	if not clusterStrategy and Config.MultiThreatGuard and clusterN >= (Config.MultiThreatMinN or 2) then
 		local iframeSpan = math.max(0, (Config.IFrameDur or 0.30) - 0.07)
 		local blockCd = Config.BlockCooldown or 0.5
 		local seqSpread = Config.SequentialSpread or 0.78
 		-- [V73] SEQUENTIAL: separate presses if spread is enough and second press clears cooldown
-		if clusterN == 2 and clusterSpread >= seqSpread and not clusterHeavy then
+		-- Transaction strategies are evaluated on CONTACT deadlines. Sequential only applies
+	-- to two distinct attacks; two strikes from one Boxing M2 are not sequential because
+	-- their guard lifecycle is governed by the group-held path.
+	if clusterN == 2 and clusterSpread >= seqSpread and not clusterHeavy
+		and cluster[1].attackerModel ~= cluster[2].attackerModel then
 			local a, b = cluster[1], cluster[2]
 			local spreadOk = (b.contactAbs - a.contactAbs) >= blockCd + Config.PerfectLead + Config.MinActGap + 0.05
 			if not isMustDodge(a) and not isMustDodge(b) and spreadOk then
@@ -3848,25 +3902,33 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					(clusterFirst.contactAbs - now) * 1000, (clusterLast.contactAbs - now) * 1000))
 		end
 
-		-- [V96] Pre-emptive кластер-додж под первый контакт, пока все контакты в одном iframe-окне.
-		-- ТЕПЕРЬ только если parry невозможен (not canBlockNow): по требованию юзера при доступном
-		-- блоке кластер держим guard'ом + мультип��екс-фейсингом (V95), а НЕ жжём додж. Раньше коммент
-		-- прямо гласил «allowed even when block is available» — это и был лишний додж не по делу.
+		-- [V134] One dodge is preferred ONLY when its exact planned server iframe interval
+		-- covers at least two live CONTACT deadlines. Unlike the old attacker-deduped/drifting
+		-- heuristic, this includes Boxing M2 s1+s2 and requires BOTH lower+upper bounds.
+		-- It intentionally runs while blocking is available: one confirmed iframe protects a
+		-- genuinely simultaneous burst better than spending BlockCooldown on its first hit.
 		if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
-			and Config.DodgeOnParryCooldown ~= false
-			and not canBlockNow() and dodgeReady() and canDodgeNow() then
+			and Config.MultiDodgeCover ~= false and dodgeReady() and canDodgeNow() then
 			local firstDt = clusterFirst.contactAbs - now
-			local iframeLo = Config.DodgeConfirm - 0.03
-			local iframeHi = Config.DodgeConfirm + Config.IFrameDur - 0.04
-			local lastDt = clusterLast.contactAbs - now
-			if firstDt >= iframeLo and firstDt <= iframeHi and lastDt <= iframeHi then
-				if performDodge(now, ("iframe-cluster(n=%d spread=%.0fms)"):format(clusterN, clusterSpread * 1000)) then
-					for _, th in ipairs(cluster) do th.coveredByDodge = true end
+			local iframeLo = Config.DodgeConfirm - (Config.MultiDodgeConfirmSlack or 0.03)
+			local iframeHi = Config.DodgeConfirm + Config.IFrameDur + (Config.MultiDodgeConfirmSlack or 0.03)
+			local covered = 0
+			for _, th in ipairs(cluster) do
+				local dtc = th.contactAbs - now
+				if dtc >= iframeLo and dtc <= iframeHi then covered = covered + 1 end
+			end
+			if firstDt >= iframeLo and covered >= 2 then
+				if performDodge(now, ("multi-cover(n=%d span=%.0fms)"):format(covered, clusterSpread * 1000)) then
 					return
 				end
 			end
 		end
 	end
+
+	-- Do not send Block/Activated while an Evasive request is awaiting the game's IFRAMES
+	-- acknowledgement: Evasive.lua itself rejects requests while Blocking, and a new block
+	-- remote can cancel the just-requested dodge. Coverage is resolved by updateDodgeTxn.
+	if State.dodgeTxn and State.dodgeTxn.pending then return end
 
 	-- MustDodge is its own protection path, independent of DodgeHeavy and cluster policy.
 	-- Scan all live imminent threats before any legacy heavy/escape decision.
