@@ -380,12 +380,9 @@ local Config = {
 	SA_DirtyGrab      = true,   -- enemy Dirty grab/M2 (GrappleDirtyHit, ImmuneToRagdollM2) → force dodge
 	SA_HakariRead     = true,   -- widen window for Hakari momentum M2 (HakariMomentumM2HitboxDelay 0.62)
 	SA_HakariWiden    = 0.05,   -- extra front/hold seconds applied to a Hakari M2
-	-- [V131] GRAPPLE WIN. Настоящее состояние борьбы = атрибут Grappling==true на персонаже.
-	-- В окне клэша (Grapple.Duration=2.29) сервер отдаёт победу тому, кто в борьбе жмёт M2
-	-- непрерывно/последним (проигравшему летит GrappleWinnerStun). Поэтому, ПОКА мы в грэппле,
-	-- спамим M2 — так остаёмся «последним атакующим». Вне грэппла (Grappling≠true) фича молчит,
-	-- поэтому в обычном бою M2 больше НЕ фаерится (это была причина ложных срабатываний).
-	SA_GrappleWin     = false,  -- while Grappling==true, spam M2 to stay the last attacker & win the clash
+	-- [V131] GRAPPLE WIN. Настоящее состояние борьбы = атрибут Grappling==true.
+	-- Пока мы в грэппле, spam штатного M1 lifecycle поддерживает clash input.
+	SA_GrappleWin     = false,  -- while Grappling==true, spam legitimate M1 inputs to win the clash
 	-- [V91] BLATANT force-dodge. Игра НЕ даёт додж, когда мы застряли в собственной атаке
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��етит, а мы залочены
@@ -2532,24 +2529,22 @@ end
 -- [V131] ИСПРАВЛЕНО: раньше фича фаерила M2 на ЛЮБОЙ входящий тяжёлый в радиусе — то есть в
 -- обычном бою, а не в борьбе. Настоящее состояние борьбы — атрибут Grappling==true на персонаже
 -- (M2.lua:566/684, MovementServiceClient:1105, SmoothShiftLock:811). Теперь фича РАБОТАЕТ ТОЛЬКО
--- пока Grappling==true у НАС: в окне клэша (Grapple.Duration=2.29) сервер отдаёт победу тому, кто
--- в борьбе жмёт M2 непрерывно/последним (проигравшему летит GrappleWinnerStun). Поэтому мы просто
--- спамим M2 весь grapple — так гарантированно остаёмся «последним атакующим».
-local function grappleM2Ready()
+-- пока Grappling==true у НАС: grapple-clash выигрывается M1 input, поэтому используем быстрый
+-- штатный M1 builder с подтверждённым сетевым minimum interval.
+local function grappleM1Ready()
 	if not Config.SkillAddon or not Config.SA_GrappleWin then return false end
 	local c = localChar()
 	if not c then return false end
 	-- ГЛАВНЫЙ гейт: мы должны реально быть В БОРЬБЕ. Вне грэппла фича молчит.
 	if c:GetAttribute("Grappling") ~= true then return false end
-	-- анти-даблфайр: не спамим M2 быстрее BoxingCounterGap (реальный кулдаун держит игра).
-	if (os.clock() - (State.lastCounter or 0)) < (Config.BoxingCounterGap or 0.30) then return false end
-	for _, attr in ipairs(BOXING_BLOCK_ATTRS) do
-		if c:GetAttribute(attr) then return false end
-	end
-	if c:GetAttribute("CantAnything") and not c:GetAttribute("CombatRecovery") then return false end
+	-- M1.ServerCheck has a confirmed 80ms minimum interval; custom builder handles the same cap.
+	if (os.clock() - (State.ap and State.ap.m1SendLast or 0)) < (Config.AP_MinSendGap or 0.08) then return false end
+	-- Grappling itself sets combat-busy/CantAnything. Do not treat those self-locks as a
+	-- prohibition or spam collapses to one M1. Keep only physical hard-locks.
+	if c:GetAttribute("Stunned") == true or c:GetAttribute("Ragdoll") == true
+	   or c:GetAttribute("Downed") == true then return false end
 	if c:GetAttribute("Equip") == false then return false end
 	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
-	if c:GetAttribute("M2Cooldown") == true or c:GetAttribute("M2CD") == true then return false end
 	if c:GetAttribute("GrappleWinnerStun") == true then return false end   -- уже проиграли клэш
 	local hum = c:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 then return false end
@@ -2614,9 +2609,7 @@ State.grappleEnd = function(payload)
 	gs.active, gs.dirty, gs.foeName, gs.clashType, gs.winnerName, gs.startedAt = false, false, nil, nil, nil, 0
 end
 
--- Пока мы в борьбе (Grappling==true), непрерывно жмём M2, чтобы выиграть клэш.
--- Переиспользуем fireBoxingCounter (снап лицом при наличии цели, сброс guard,
--- FireServer M2). Срабатывает ТОЛЬКО в грэппле, поэтому в обычном бою больше не мешает.
+-- Пока мы в борьбе (Grappling==true), непрерывно жмём штатный M1 lifecycle.
 local function tryGrappleWin(now)
 	-- Remote-state мог потерять End; атрибут — авторитетный fallback после короткого grace.
 	local gs = State.grapple
@@ -2624,13 +2617,18 @@ local function tryGrappleWin(now)
 	if gs.active and gc and gc:GetAttribute("Grappling") ~= true and now - gs.startedAt > 0.35 then
 		State.grappleEnd(nil)
 	end
-	if not grappleM2Ready() then return false end
+	if not grappleM1Ready() then return false end
 	local myHRP = localHRP()
 	if not myHRP then return false end
 	local foe = findGrappleFoe(myHRP)
-	fireBoxingCounter({ attackerHRP = foe, name = "grapple-foe", kind = "GRAPPLE" })
+	local model = foe and foe.Parent
+	if not model then return false end
+	if not State.ap.getM1() then return false end
+	State.ap.snapTo(foe)
+	local fired = State.ap.fireM1Custom(localChar(), model, nil, false, true, false)
+	if not fired then return false end
 	State.status = "GRAPPLE-WIN"
-	diagPush(("GRAPPLE-WIN t=%.2f  (M2 spam in grapple)"):format(now))
+	diagPush(("GRAPPLE-WIN t=%.2f  (M1 spam in grapple)"):format(now))
 	return true
 end
 
