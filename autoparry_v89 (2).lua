@@ -2068,12 +2068,9 @@ local function hitTimeline(info, combo, mult, contactBase)
 	-- [V124] Сервер делит ВСЕ hitbox-задержки на mult роста атакующего (GetScaledHitboxDelay:
 	-- delay/mult) — и M1, и M2, и скиллы. Диаг подтвердил: Basic M2 0.525/1.09=482мс = measured
 	-- 485мс. Прошлый V123-демпфер (m→1 для M2) был ОШИБКОЙ — он и ломал M2 (pred 617 vs 485).
-	-- [V132] Учитываем PingAnimSpeedMultiplier: игра проигрывает анимацию МЕДЛЕННЕЕ на пинге,
-	-- поэтому реальный контакт = base / (aMult * pingMult). Без этого M2/M1 приходят раньше
-	-- предсказания, особенно на высоком пинге, и парри оказывается поздним (LATE / HIT).
-	local scaled = base / m
-	local pingMult = getPingAnimMult(scaled)
-	m = m * math.max(pingMult, 0.05)
+	-- Incoming server hitbox deadline is CombatConfig delay / attacker height-speed multiplier.
+	-- PingAnimSpeedMultiplier belongs to local animation presentation, not the foreign server
+	-- hitbox. Dividing by it (<1 at high ping) made every threat 50-110ms late (diag 365774).
 	return base / m
 end
 
@@ -4312,7 +4309,18 @@ local function onOutcome(attacker, result, kind, eventClock)
 	elseif result == "EARLY" and rec.th and rec.th.group then
 		rec.th.group.held = true -- ordinary block: держим guard до второго marker
 	end
-	-- Только подтверждённый matched PERFECT открывает punish. Threat уже resolved, поэтому
+	-- A perfect resolves the current held-guard transaction. Other attackers in the
+	-- latched cluster must be re-armed; keeping pressed=true caused later M2/M1 NO-PRESS.
+	if result == "PERFECT" and rec.th and rec.th.clusterStrategy == "HELD_GUARD" then
+		for _, other in ipairs(Threats) do
+			if other ~= rec.th and not other.resolved and other.contactAbs > eventClock then
+				other.pressed, other.coveredByHeldGuard = false, false
+				if other.rec then other.rec.pressDt, other.rec.pressServer = nil, nil end
+			end
+		end
+		State.blocking, State.holdUntil, State.multiHoldUntil = false, 0, 0
+	end
+	-- Только подтверждённый matched PERFECT открывает punish.
 	-- следующий Heartbeat не ждёт старый hold/deadline и сразу запускает priority M1.
 	if result == "PERFECT" then State.ap.onPerfectParry(attacker, kind) end
 
