@@ -1212,23 +1212,18 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > (Config.MaxHeightDiff or 12) then return false end
 
 	local mode = Config.AccuracyMode or "Low"
-	-- A matching active part is the authority. `false` means the real game geometry is live
-	-- and misses us, so no animation/range heuristic may override it.
+	-- A matching live part is authoritative only on positive overlap. A negative sample is
+	-- pending because VictimHitboxService repeats the same overlap query every Heartbeat.
 	local gt = realHitboxHitsMe(th.name, th)
-	if gt ~= nil then
-		th.gtConfirmed, th.trustedHit = gt == true, gt == true
-		th.recognitionSource = gt and "server-overlap" or "server-miss"
-		-- An active server part is authoritative: even a previously predicted candidate
-		-- is cancelled when the game's actual box misses us.
-		if not gt then th.predictLatched = false end
-		return gt
-	end
-	-- Before the server part exists, preserve a positive High projection until ground-truth
-	-- arrives. This prevents interpolation/yaw jitter from deleting a long-windup M2 between
-	-- its valid early projection and the server's delayed Hitbox part.
-	if mode == "High" and th.predictLatched then
-		th.recognitionSource = "predicted-latch"
+	if gt == true then
+		th.gtConfirmed, th.trustedHit = true, true
+		th.recognitionSource = "server-overlap"
 		return true
+	elseif gt == false then
+		-- VictimHitboxService retries this same live part every Heartbeat. `false` only
+		-- means "not overlapping on this frame"; it is not a final miss. Continue with
+		-- pre-contact geometry while the associated SID remains live.
+		th.recognitionSource = "server-pending"
 	end
 
 	local _, forward, predA, rawLook = hitboxGeom(th)
@@ -1238,20 +1233,19 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local look, origin = rawLook, aHRP.Position
 	if mode == "High" then
 		origin = Vector3.new(predA.X, aHRP.Position.Y, predA.Z)
-		-- Turn only by observed angular motion; no arbitrary cone/radius trust.
-		local rate = math.max(math.abs(safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0), math.rad(th.yawRate or 0))
-		if rate > 0 and tHit > 0 then
-			local myFlat = Vector3.new(myHRP.Position.X - origin.X, 0, myHRP.Position.Z - origin.Z)
-			if myFlat.Magnitude > 0.05 then
-				local toMe = myFlat.Unit
-				local dot = rawLook:Dot(toMe)
-				local cross = rawLook.X * toMe.Z - rawLook.Z * toMe.X
-				local want = math.atan2(cross, dot)
-				local turn = math.clamp(want, -rate * tHit, rate * tHit)
-				local c, s = math.cos(turn), math.sin(turn)
-				look = Vector3.new(rawLook.X * c - rawLook.Z * s, 0, rawLook.X * s + rawLook.Z * c)
-				look = look.Magnitude > 0.05 and look.Unit or rawLook
-			end
+		-- Preserve the observed yaw SIGN. The old abs(rate)+turn-toward-us model invented
+		-- turns toward us for every rotating/back-facing enemy, then latched the false threat.
+		local angY = safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0
+		local signedRate = angY
+		if th.prevLook and (th.yawRate or 0) > math.abs(math.deg(angY)) then
+			local crossObserved = th.prevLook.X * rawLook.Z - th.prevLook.Z * rawLook.X
+			signedRate = math.rad(th.yawRate or 0) * (crossObserved >= 0 and 1 or -1)
+		end
+		if math.abs(signedRate) > 0.01 and tHit > 0 then
+			local turn = math.clamp(signedRate * tHit, -math.pi, math.pi)
+			local c, s = math.cos(turn), math.sin(turn)
+			look = Vector3.new(rawLook.X * c - rawLook.Z * s, 0, rawLook.X * s + rawLook.Z * c)
+			look = look.Magnitude > 0.05 and look.Unit or rawLook
 		end
 	end
 
@@ -1276,9 +1270,12 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local side = math.abs(ox * (-look.Z) + oz * look.X)
 	local hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
 	th.trustedHit = hit
-	th.recognitionSource = hit and (mode == "High" and "predicted-overlap" or "current-overlap")
-		or (mode == "High" and "predicted-miss" or "current-miss")
-	if mode == "High" and hit then th.predictLatched = true end
+	if gt == false and not hit then
+		th.recognitionSource = "server-pending+predicted-miss"
+	else
+		th.recognitionSource = hit and (mode == "High" and "predicted-overlap" or "current-overlap")
+			or (mode == "High" and "predicted-miss" or "current-miss")
+	end
 	if not hit then th.offTarget = true end
 	return hit
 end)
