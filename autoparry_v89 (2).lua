@@ -100,7 +100,10 @@ local Config = {
 	-- расширенно�� радиусе, если смотрит ~н�� нас ��ЛИ реально сближается, считаем угрозой сразу.
 		HeavyTrust       = true,
 		HeavyTrustRange  = 14,     -- радиус (студы), в котором тяжёлым/скиллам даём безусловное доверие
-		HeavyFaceMin     = -0.30,  -- бракуем тяжёлый, только если predFacing·toMe < этого И он не сближается
+		HeavyFaceMin     = 0.0,    -- [V133] stationary heavy must be PREDICTED to face at least toward us
+		                           -- (server builds the hitbox from attacker facing; >90° away can't connect).
+		                           -- Real lunges are still trusted via closingOk regardless of facing, so this
+		                           -- only culls the "reacts to every heavy in radius" false blocks. Was -0.30 (~107°).
 		HeavyClosingMin  = 6,      -- скорость сближения (студ/с) выше этой = выпад на нас, доверяем даже спиной
 		-- [V101] ДЛИННЫЙ ВЫПАД (ло��: digmyswaga M2(MuayThai) dist=26 → never-in-hitbox MISS). Стили
 		-- вроде MuayThai/Karate имеют M2 с длинным дэшем (M2HitboxDelay 0.6с), закрывающим 20+ студов
@@ -3369,8 +3372,6 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- track.Speed для чужих игро��ов ��еплицируется как 1.0, по��тому берём из роста.
 	local aMult    = attackSpeedMult(model)
 	local heightAttr, bodyHeightScale, modelHeight = heightDiag(model)
-	local hitTL    = info.contacts and (info.contacts[1] / math.max(aMult, 0.05))
-		or hitTimeline(info, combo, aMult)
 	local speed    = 1
 	local already  = 0
 	if track then
@@ -3379,6 +3380,15 @@ local function onAttack(attackerHRP, info, model, id, track)
 		local okT, tp = pcall(function() return track.TimePosition end)
 		if okT and type(tp) == "number" and tp > 0 then already = tp end
 	end
+	-- [V133] info.contacts = static .anim Hit KEYFRAME times (already in animation-time
+	-- seconds). The correct anim-time→wall-clock divisor is the animation PLAYBACK SPEED
+	-- (track.Speed, ~1.0 for replicated enemies), NOT aMult. aMult is the server's
+	-- GetScaledHitboxDelay divisor for the CONFIG M2HitboxDelay only. Dividing a raw
+	-- keyframe by aMult made Boxing M2 predict ~45-118ms EARLY (diag 368813: marker 600ms
+	-- /1.08 = 555 pred vs 602 measured) → parry fired too soon → LATE/miss. Config path
+	-- (hitTimeline) still uses aMult; marker path uses live speed.
+	local hitTL    = info.contacts and (info.contacts[1] / math.max(speed, 0.05))
+		or hitTimeline(info, combo, aMult)
 	local remaining0 = math.max(0, hitTL - already)
 	if remaining0 > Config.MaxWait then return end
 
@@ -3426,7 +3436,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 	if info.contacts and info.contacts[2] then
 		local group = { cancelled = false, held = false }
 		th.group, th.strike = group, 1
-		local hit2 = info.contacts[2] / math.max(aMult, 0.05)
+		local hit2 = info.contacts[2] / math.max(speed, 0.05)   -- [V133] anim-keyframe → /speed, not /aMult
 		local rem2 = math.max(0, hit2 - already)
 		local th2 = table.clone(th)
 		th2.hitTL, th2.contact0, th2.contactAbs = hit2, rem2, nowClock + rem2
@@ -3440,8 +3450,9 @@ local function onAttack(attackerHRP, info, model, id, track)
 			speed = speed, matched = false, th = th2, strike = 2 }
 		th2.rec = rec2
 		q[#q+1] = rec2
-		diagPush(("MULTI  t=%.2f  %s M2(Boxing) contacts=[%.0f,%.0f]ms markers=[600,1050]ms")
-			:format(nowClock, name, remaining0*1000, rem2*1000))
+		diagPush(("MULTI  t=%.2f  %s M2(Boxing) contacts=[%.0f,%.0f]ms markers=[%.0f,%.0f]ms speed=%.2f")
+			:format(nowClock, name, remaining0*1000, rem2*1000,
+				info.contacts[1]*1000, info.contacts[2]*1000, speed))
 	end
 	while #q > 10 do table.remove(q, 1) end
 
