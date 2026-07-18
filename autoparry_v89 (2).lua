@@ -210,9 +210,7 @@ local Config = {
 	-- instead of relying only on the predicted animation timeline. This fixes M2/Boxing
 	-- and other delayed hitboxes where predicted contact is far from real hit.
 	HitboxDodge     = true,
-	HitboxNearDist  = 6.0,   -- studs: if a hitbox part is this close, treat it as imminent
-	HitboxDodgeLead = 0.05,   -- small safety margin before the hitbox contacts
-	-- [V116] Никакой контакт-коррекции нет: и flat M2ContactBias (V113), и адаптивный калибратор
+
 	-- (V115) удалены — калибрация отравляла между врагами (обучалась на одном, ломала второго).
 	-- Предикт чисто математический: таймлайн анимации + живой TimePosition.
 	ChargeStallMs = 45,
@@ -1161,7 +1159,12 @@ local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
 	end
 	for i = 1, #lst do
 		local part = lst[i]
-		if part.Parent and #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0 then
+		local atk = part and part:FindFirstChild("AttackName")
+		-- VictimHitboxService keys a real report by Owner + AttackName + VictimSwingId.
+		-- We do not have the server-created swing id in AnimationPlayed, but must at least
+		-- never correlate an M1 part to an M2 threat (or vice versa).
+		if part.Parent and atk and atk:IsA("StringValue") and (not th or atk.Value == th.kind)
+			and #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0 then
 			if th then th.gtQueryFrame, th.gtQueryResult = FrameId, true end
 			return true
 		end
@@ -1172,7 +1175,7 @@ end)
 
 -- [V74] Return the closest hitbox part for a given owner, plus its distance to us.
 -- Used to trigger dodge right when the server hitbox becomes dangerous.
-local function hitboxNearestPart(ownerName)
+local function hitboxNearestPart(ownerName, kind)
 	if not ownerName then return nil, nil end
 	local lst = hitboxIndex()[ownerName]
 	if not lst or #lst == 0 then return nil, nil end
@@ -1181,7 +1184,8 @@ local function hitboxNearestPart(ownerName)
 	local best, bestD = nil, math.huge
 	for i = 1, #lst do
 		local part = lst[i]
-		if part.Parent then
+		local atk = part and part:FindFirstChild("AttackName")
+		if part.Parent and atk and atk:IsA("StringValue") and (not kind or atk.Value == kind) then
 			local d = (part.Position - me.Position).Magnitude
 			if d < bestD then bestD = d; best = part end
 		end
@@ -1189,31 +1193,24 @@ local function hitboxNearestPart(ownerName)
 	return best, bestD
 end
 
--- [V74] Update a threat's predicted contact based on the actual hitbox appearance.
--- When the server hitbox appears near us, we know the real hit is now, so we pull
--- contactAbs in to make the iframe window cover the actual registration window.
+-- [V135] Ground-truth alignment. The game only sends VictimHitConfirm after exact overlap;
+-- merely being NEAR a part is not a hit. Pulling a contact from `near` created false early
+-- M2/dodge reactions. Match Owner + AttackName and snap only on the same overlap predicate.
 local syncContactWithHitbox = LPH_NO_VIRTUALIZE(function(th, now)
 	if not Config.HitboxDodge then return end
-	-- Один Boxing hitbox живёт через оба страйка. Его первое появление нельзя использовать
-	-- для snap второго deadline, иначе Hit#2 схлопнется в Hit#1.
+	-- One Boxing hitbox can serve both strikes; never snap s2 to the first part.
 	if (th.strike or 1) > 1 then return end
 	if th.dodged or th.hitboxSynced then return end
-	local part, dist = hitboxNearestPart(th.name)
+	local part = hitboxNearestPart(th.name, th.kind)
 	if not part then return end
-	-- First time we see the hitbox, remember it and snap contactAbs to just before it.
 	if not th.hitboxSeen then
-		th.hitboxSeen = now
-		th.hitboxPart = part
+		th.hitboxSeen, th.hitboxPart = now, part
 	end
-	local near = dist <= Config.HitboxNearDist
-	local hitting = realHitboxHitsMe(th.name, th) == true
-	if near or hitting then
-		-- Pull contact in so the existing dodge/block math fires right now.
-		local target = now + (hitting and 0 or Config.HitboxDodgeLead)
-		if th.contactAbs > target then
-			th.contactAbs = target
-			th.hitboxSynced = true
-		end
+	if realHitboxHitsMe(th.name, th) == true then
+		-- Exact overlap is the game's VictimHitConfirm moment: it is evidence, not a
+		-- predictor. Moving the deadline to "now" here was already too late to create a
+		-- reliable parry and corrupted outcome matching. Preserve the anim/config deadline.
+		th.gtConfirmed, th.hitboxSynced = true, true
 	end
 end)
 
@@ -3627,8 +3624,8 @@ local function updateDodgeTxn(now)
 		local covered = 0
 		for _, th in ipairs(Threats) do
 			local contact = th.contactAbs
-			if not th.dodged and contact >= tx.lo - (Config.MultiDodgeConfirmSlack or 0.03)
-				and contact <= tx.hi + (Config.MultiDodgeConfirmSlack or 0.03) then
+			if not th.dodged and contact >= tx.lo
+				and contact <= tx.hi then
 				th.dodged, th.coveredByDodge = true, true
 				covered = covered + 1
 			end
@@ -3910,8 +3907,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
 			and Config.MultiDodgeCover ~= false and dodgeReady() and canDodgeNow() then
 			local firstDt = clusterFirst.contactAbs - now
-			local iframeLo = Config.DodgeConfirm - (Config.MultiDodgeConfirmSlack or 0.03)
-			local iframeHi = Config.DodgeConfirm + Config.IFrameDur + (Config.MultiDodgeConfirmSlack or 0.03)
+			local iframeLo = Config.DodgeConfirm
+			local iframeHi = Config.DodgeConfirm + Config.IFrameDur
 			local covered = 0
 			for _, th in ipairs(cluster) do
 				local dtc = th.contactAbs - now
@@ -4303,7 +4300,10 @@ local function onOutcome(attacker, result, kind, eventClock)
 	if q then
 		for i = #q, 1, -1 do
 			local r = q[i]
-			if (eventClock - r.clock) <= Config.MatchWindow and outcomeTypeMatches(r.type, kind) then
+			local age = eventClock - r.clock
+			-- Broadcast may arrive after a newer AnimationPlayed. Never allow a negative-age
+			-- outcome to steal that future record; it caused meas=1260ms / 111ms pairings.
+			if age >= 0 and age <= Config.MatchWindow and outcomeTypeMatches(r.type, kind) then
 				if not r.matched then
 					-- Multi-hit одной анимации создаёт несколько одинаковых M2 records. Матчим
 					-- исход к БЛИЖАЙШЕМУ ожидаемому strike deadline, а не к последней записи queue.
@@ -4332,6 +4332,11 @@ local function onOutcome(attacker, result, kind, eventClock)
 		return
 	end
 
+	if not rec then
+		diagPush(("OUT    t=%.2f  %s  %s  %s  (no fresh swing)"):format(eventClock, attacker, kind, result))
+		return
+	end
+
 	State.tally[result] = (State.tally[result] or 0) + 1
 	State.lastResult    = result
 	State.flashUntil    = os.clock() + 0.25
@@ -4355,28 +4360,17 @@ local function onOutcome(attacker, result, kind, eventClock)
 		end
 	end
 
-	-- [V62] GUARDBREAK = guard физически сломан сервером → всегда сб��асываем.
-	-- LATE = один удар прошёл, но при активном held-guard в мультибое НЕ роняе��
-	-- Blocking: guard всё ещё поднят и нужен остальным атакующим. Прежнее
-	-- безусловное обнуление прово��ировало re-press → BlockCooldown → каскад HIT.
-	if result == "GUARDBREAK" then
-		State.blocking  = false
-		State.holdUntil = 0
-	elseif result == "LATE" then
-		local holding = State.blocking and (os.clock() < (State.holdUntil or 0))
-		if not (State.multiThreat and holding) then
-			State.blocking  = false
-			State.holdUntil = 0
-		end
-	end
-
-	-- rec/followUp уже вычислены в начале функции (до мутаций state).
-	if not rec then
-		diagPush(("OUT    t=%.2f  %s  %s  %s  (no fresh swing)"):format(eventClock, attacker, kind, result))
-		return
-	end
+	-- State mutation is now safe: the record was validated before telemetry above.
 	rec.matched = true
 	if rec.th then rec.th.resolved = true end
+
+	-- GUARDBREAK = guard physically broken. LATE only releases a non-held guard.
+	if result == "GUARDBREAK" then
+		State.blocking, State.holdUntil = false, 0
+	elseif result == "LATE" then
+		local holding = State.blocking and (os.clock() < (State.holdUntil or 0))
+		if not (State.multiThreat and holding) then State.blocking, State.holdUntil = false, 0 end
+	end
 	if result == "PERFECT" and rec.th and rec.th.group then
 		rec.th.group.cancelled = true -- perfect первого strike останавливает оставшуюся атаку
 	elseif result == "EARLY" and rec.th and rec.th.group then
