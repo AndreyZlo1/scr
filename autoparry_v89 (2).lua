@@ -31,6 +31,8 @@ local Config = {
 	HitHalfWidth  = 3.0,
 	HitboxSlack   = 0.5,   -- Low: small current-position tolerance
 	HighSlack     = 0.35,  -- High: small predicted-position tolerance
+	HighReachPad  = 2.0,   -- [V137] High wide-recognition reach padding beyond forward+halfD
+	HighFaceFloor = -0.15, -- [V137] High facing gate: attacker look·toMe must be >= this (excludes back-facing)
 	FilterFailSafe= true,
 
 	-- Low = current oriented box; High = the same box projected to server contact time.
@@ -1299,10 +1301,33 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local ox, oz = myAt.X - origin.X, myAt.Z - origin.Z
 	local depth = ox * look.X + oz * look.Z
 	local side = math.abs(ox * (-look.Z) + oz * look.X)
-	local hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
 	th.geomDepth, th.geomSide = depth, side
 	th.geomForward, th.geomHalfD, th.geomHalfW = forward, halfD, halfW
 	th.geomTHit, th.geomOrigin, th.geomVictim, th.geomLook = tHit, origin, myAt, look
+
+	local hit
+	if mode == "High" then
+		-- [V137] WIDE recognition. DIAG 386874 proved the strict oriented box (depth band +
+		-- narrow side) rejected real angled/rotating hits: 65% of misses were predicted-miss /
+		-- server-pending, and success only happened when recognition fired early (~55ms) vs late
+		-- (~134ms). The server hitbox overlap above already gives the authoritative TRUE; this
+		-- pre-contact predicate only needs to be EARLY and INCLUSIVE, not geometrically exact.
+		-- Model: attacker is within reach of us AND is roughly facing us. This mirrors the old
+		-- working "distance + animation + rough facing" recognition, without radius/heavy trust.
+		local dist2d = math.sqrt(ox * ox + oz * oz)
+		local reach = forward + halfD + (Config.HighReachPad or 2.0)
+		-- (ox,oz) = victim - attackerOrigin, i.e. the attacker->victim direction. A real swing
+		-- that connects has the attacker's look pointing toward us, so look·(attacker->victim)
+		-- is near +1. Loose gate: accept unless clearly back-facing.
+		local toMeX, toMeZ = ox, oz
+		if dist2d > 0.05 then toMeX, toMeZ = ox / dist2d, oz / dist2d else toMeX, toMeZ = look.X, look.Z end
+		local faceToMe = look.X * toMeX + look.Z * toMeZ
+		local faceFloor = Config.HighFaceFloor or -0.15
+		hit = (dist2d <= reach) and (faceToMe >= faceFloor)
+	else
+		hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
+	end
+
 	th.trustedHit = hit
 	if gt == false and not hit then
 		th.recognitionSource = "server-pending+predicted-miss"
