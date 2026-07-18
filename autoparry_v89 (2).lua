@@ -22,145 +22,25 @@ local Config = {
 	IncludeNPCs   = true,
 	HeavyEnabled  = true,
 
+	-- Recognition geometry. The game creates a forward-oriented M1/M2 BasePart; cached
+	-- live dimensions replace these fallbacks after the first observed real part.
 	M1Forward     = 4,
 	M2Forward     = 3,
 	HitboxDepth   = 4.0,
-	HitboxDepthBack = 1.0,
 	HitHalfWidth  = 3.0,
-	HitboxSlack   = 0.5,
+	HitboxSlack   = 0.5,   -- Low: small current-position tolerance
+	HighSlack     = 0.35,  -- High: small predicted-position tolerance
 	FilterFailSafe= true,
 
-	-- [V67] БЛИЖНИЙ-БОЙ ДОВЕРИЕ. Первопричина регресса 1v1 (58% против 87% у V64):
-	-- willHitMe — жёсткий гейт для нажатия. В упор (dist 2-6) враг стрейфит во
-	-- время комбо → predA улетает вбок, flatLook не на нас, конус не дотягивает →
-	-- willHitMe=false → NO-PRESS, хотя удар прилетает (LATE). В логе 651000 ровно
-	-- это: c1 PERFECT, c2/c3/c4 LATE NO-PRESS + "MISS! never-in-hitbox". Плюс когда
-	-- willHitMe=false, faceTgt НЕ обновляется → перестаём поворачиваться → спираль.
-	-- Фикс: в пределах HitTrustRange активный свинг ДОВЕРЯЕМ (хитбокс игры щедрый,
-	-- сервер доворачивает атакующего сам). Строгий прямоугольник остаётся для
-	-- дальней дистанции (различать удар по нам vs по союзнику в мультибое).
-	HitTrustRange = 7.0,
-	-- [V67] кап на velocity-экстраполяцию predA: у стрейфящего врага aV*tHit за
-	-- ~0.35с даёт 5+ студов смещения и уводит центр хитбокса. Ограничиваем.
-	WillHitVelCap = 2.0,
-	-- [V91] РАЗДЕЛЬНЫЙ кап предикта predA. Раньше единый WillHitVelCap душил и сближение,
-	-- и strafe → лунж/наскок с dist=10+ отсекался как «far» (High-миссы never-in-hitbox).
-	-- Теперь: сближение (toward us) ведём щедрее (реальный наскок закрывает дистанцию),
-	-- боковую (strafe) компоненту жёстко капим (иначе центр бокса уезжает вбок).
-	WillHitCloseCap = 12,   -- [V109] студы: макс. предикт в сторону сближения (6.5→12: ловим ВБЕГАЮЩИХ
-	                        -- врагов, чей наскок за время замаха закрывает 8-12 студов; доп. clamp по
-	                        -- фактической дистанции в hitboxGeom не даёт predA проскочить за нас)
-	WillHitLatCap   = 1.5,  -- студы: макс. предикт боковой (strafe) составляющей
-
-	-- [V68] ДВА РЕЖИМА ТОЧНОСТИ (переключение клавишей B).
-	-- Low  = как в V67: щедрое доверие ближнему бою, НО с отбраковкой ударов,
-	--        которые явно направлены НЕ в нас (враг лицом в другую сторону на
-	--        предсказанной ротации) — чтобы не агриться на чужие атаки в мясорубке.
-	-- High = точная модель: строим хитбокс по ПРЕДСКАЗАННОЙ ротации атакующего на
-	--        момент контакта (атака привязана к HRP-yaw) и проверяем, попадаем ли мы
-	--        в него. Ловит байты/финты: враг доворачивается к нам в последний момент
-	--        = угроза; отворачивается = не угроза. Без слепого close-range доверия.
-	AccuracyMode  = "Low",
-	PointBlank    = 3.0,    -- Low: ≤ этой дист. всегда считаем удар нашим (в упор не отвертеться)
-	LowFaceMin    = -0.55,  -- Low: бракуем удар, только если predFacing·toMe < этого (шире конус ~123°: реагируем на большее, отсекаем только явно спиной)
-	RotPredMaxDeg = 200,    -- [V88] кап предсказанного доворота за свинг (Low: широкий, ловит 180° финты)
-	-- [V92] В HIGH кап доворота ЖЁСТКИЙ. При 200° предсказанный facing разворачивался на
-	-- ПОЛ-ОБОРОТА → враг, стоящий СПИНОЙ, «предсказанно смотрел на нас» → High парировал
-	-- атаки, которые физически не в нас (жалоба игрока). 55° = реальный доворот за свинг,
-	-- спиной-стоящий (rawDot<0) уже не долетает предиктом до нас.
-	RotPredMaxDegHigh = 55,
-	HighSlack     = 0.35,   -- [V90.5] High: базовый слак бокса, студы (статичный бой — узко, мало ложняков)
-	-- [V105] ДВИЖ-СЛАК: юзер — «стоя пиздимся идеально, а когда враг двигается/крутится, скрипт
-	-- иногда опаздывает; когда выходит за радиус и заходит — миссаем». На нашем экране движущийся
-	-- враг отрисован в прошлом (интерп-лаг + пинг), а сервер держит его позицию ВПЕРЕДИ → предсказанный
-	-- бокс уезжает мимо. Добавляем к слаку High-бокса вклад ОТНОСИТЕЛЬНОЙ планарной скорости
-	-- (враг + мы), пропорционально, с капом. Стоим оба (speed≈0) → слак = базовый → строгий кейс не
-	-- трогаем и ложняков не добавляем; кто-то движется → бокс шире ровно настолько, насколько велик
-	-- рассинхрон позиции.
-	HighMoveSlackK   = 0.045,  -- студ слака на 1 студ/с относительной скорости
-	HighMoveSlackCap = 2.2,    -- макс. добавка слака от движения (студы)
-	HeavyHighFaceMin = 0.5, -- [V90.5] High: тяжёлый лунж доверяем, только если нацелен в нас (~60° конус)
-	-- [V92] High back-facing гейт: враг сейчас смотрит от нас сильнее HighBackDot И предсказанный
-	-- facing не наводится сильнее HighFaceMin → физически не может ударить → сразу reject.
-	HighBackDot   = -0.15,  -- rawDot ниже этого = смотрит от нас
-	HighFaceMin   = 0.25,   -- предсказанный facing·toMe должен превысить это, иначе не угроза
-	-- [V90.4] High = чисто геометрический dual-box (predLook + rawL), без radius/facing-доверия
-	-- (см. willHitMe). Никаких HighFaceMin/HighReachPad больше нет — они и делали High как Low.
-	-- [V90] DRAG/SNAP-TURN детект (закрученные атаки: враг смотрит мимо, бьёт, резко
-	-- доворачивается к нам). Ловим по ЗНА��У довор����та (facing приближается к нам между
-	-- кадрами), а не по мгновенной angY (шумной). Работает и в High, и в Low.
-	DragDetect    = true,
-	DragTurnMinDeg= 35,     -- град/с: доворот в������ше этого + приближение facing к нам = drag-угроза
-	DragTrustRange= 13,     -- радиус (студы), где drag-довороту даём доверие
+	-- Low = current oriented box; High = the same box projected to server contact time.
+	-- Both use exact overlap once workspace.Hitboxes has an active matching part.
+	AccuracyMode  = "High",
 	Key_Accuracy  = Enum.KeyCode.B,
 
-	-- [V89] HEAVY-ПРИОРИТЕТ. Тяжёлые (M2) и скиллы — выпады, атакующий закрывает дистанцию в
-	-- замахе, а velCap=2.0 обрезал predA → geom-бокс отбраковывал их как "never-in-hitbox"
-	-- (в диаг ровно так пропала Capoeira M2 → Ragdoll-каскад → провал мультибоя). Тяжёлы�� в
-	-- расширенно�� радиусе, если смотрит ~н�� нас ��ЛИ реально сближается, считаем угрозой сразу.
-		HeavyTrust       = true,
-		HeavyTrustRange  = 14,     -- радиус (студы), в котором тяжёлым/скиллам даём безусловное доверие
-		HeavyFaceMin     = 0.0,    -- [V133] stationary heavy must be PREDICTED to face at least toward us
-		                           -- (server builds the hitbox from attacker facing; >90° away can't connect).
-		                           -- Real lunges are still trusted via closingOk regardless of facing, so this
-		                           -- only culls the "reacts to every heavy in radius" false blocks. Was -0.30 (~107°).
-		HeavyClosingMin  = 6,      -- скорость сближения (студ/с) выше этой = выпад на нас, доверяем даже спиной
-		-- [V101] ДЛИННЫЙ ВЫПАД (ло��: digmyswaga M2(MuayThai) dist=26 → never-in-hitbox MISS). Стили
-		-- вроде MuayThai/Karate имеют M2 с длинным дэшем (M2HitboxDelay 0.6с), закрывающим 20+ студов
-		-- в замахе. Обычный HeavyTrustRange(14) отсекал их по дистанции → скрипт не ре����������гировал.
-		-- Ловим ДВУМЯ путя��и: (1) реальный дэш на нас (сильное сближение по velocity ИЛИ по дельте
-		-- позиции — второе ловит CFrame-твин-дэши, где velocity=0), доверяем до HeavyLungeRange
-		-- независимо от текущей дистанции; (2) на средней дистанции (heavyRange..HeavyFaceRange) —
-		-- если тяжёлый РЕАЛЬНО нацелен в нас узким ��онусом (HeavyFarFaceMin). Далёкий стоячий M2,
-		-- смотрящий мимо и не идущий на нас, по-прежнему НЕ парируется (нет ложняка).
-		HeavyLungeRange   = 36,     -- макс. дистанция, с которой доверяем реально дэшущему выпаду
-		HeavyLungeClosing = 14,     -- скорость сближения (студ/с), выше которой это точно дэш на нас
-		HeavyFaceRange    = 30,     -- расширенный радиус facing-доверия для тяжёлых
-		HeavyFarFaceMin   = 0.85,   -- на средней дистанции доверяем, только если нацелен ТОЧНО в нас (~32° конус)
-		-- [V101] BROADPHASE для High: дешёвый ранний отказ явно недосягаемым/неприближающимся
-		-- угрозам ДО дорогого предикта ротации/GetPartBoundsInBox. В разы разгружает scheduler в
-		-- мультибое (парри перестают опаздывать из-за CPU), при этом реально долетающие
-		-- (сближающиеся/лунж) проходят дальше — точность High не страдает.
-		HighBroadRange    = 28,     -- [V105] за этим радиусом + враг НЕ приближается → мгновенный reject
-		                            -- (24→28: враг, вышедший за радиус и снова зашедший, больше не режется рано)
-		-- [V114] M1 APPROACH-TRUST. КОРЕНЬ жалобы «враг в ~10 studs подходит во время замаха → скрипт
-		-- не успевает; когда всегда в радиусе — парри норм». В High лёгкий M1 доверялся ТОЛЬКО когда
-		-- предсказательный бокс (predA+forward) уже накрывал нас. У ВБЕГАЮЩЕГО врага closing≈0 в начале
-		-- замаха (сперва замах, step-in в середине) → бокс накрывает поздно → willHitMe=false почти до
-		-- контакта → press в упор (в логе pressDt=0ms LATE). HeavyTrust решает это для M2/SKILL, но для
-		-- M1 такого пути НЕ было. Фикс: committed M1, НАЦЕЛЕННЫЙ в нас (faceDotPred) и который НА МОМЕНТ
-		-- контакта окажется в пределах досягаемости (radial predict по closing) → доверяем СРАЗУ, не
-		-- дожидаясь бокса → press планируется заранее → PERFECT. Ложняков нет: стоячий whiff (closing≈0,
-		-- dist-at-contact = dist > reach) НЕ триггерит; смотрящий мимо отсекается faceDotPred.
-		M1ApproachTrust    = true,
-		M1ApproachRange    = 14,    -- макс. текущая дистанция, на которой рассматриваем approach-trust для M1
-		M1ApproachFaceMin  = 0.30,  -- предсказанный facing·toMe (нацелен в нас) — иначе чужой/мимо-удар
-		M1ApproachReachPad = 3.0,   -- запас к forward: dist-на-контакте ≤ forward+pad ⇒ долетит
-
-		-- [V126] M1 BAIT-GATE. Жалоба: «скрипт легко разбайтить — ударить относительно рядом,
-		-- если враг смотрит на меня удар регается, если нет — нет». Сервер строит M1-хитбокс
-		-- по facing атакующего в момент контакта (мгновенно, без задержки — victim НЕ проверяет
-		-- угол). Значит свинг, в котором враг НИ РАЗУ фактически не наводится на нас и НЕ
-		-- доворачивается к нам — физически не попадёт → это байт. Предиктный конус (faceDotPred)
-		-- легко обмануть кратким дёрганьем прицела: angY скачет → predLook переворачивает на нас
-		-- → trust → жжём блок/сбиваем тайминг. Гейт: для M1 доверять, только если враг РЕАЛЬНО
-		-- смотрит в нашу сторону (rawDot) ЛИБО измеримо доворачивается к нам. ТОЛЬКО M1 — у
-		-- M2/скиллов уникальные/широкие хитбоксы и лунжи (просил пользователь), их не трогаем.
-		M1BaitGate     = true,
-		M1CommitFaceMin = 0.10,  -- rawDot(текущий facing·toMe) ≥ этого = реально смотрит в нашу
-		                         --   полусферу (~84° конус). Ниже И без доворота к нам → байт.
-		M1BaitTurnMinDeg = 25,   -- град/с фактического доворота К НАМ, снимающего байт-гейт
-		                         --   (реальный снап-финт со спины проходит; статичный байт — нет)
-
-	-- [V116] Адаптивная калибрация УДАЛЕНА (отравляла между врагами — см. коммент у press-схемы).
-	-- Пр������д����кт чисто математический; resAvg в логе — только диагностика точности, в press НЕ подаётся.
-	TurnWindow    = true,
-	TurnBaseDeg   = 42,
-	TurnCloseDeg  = 90,
-	CloseRangePad = 5,
-	TurnWindowMax = 150,
-	TurnFloor     = 0.05,
-	TurnAngVelK   = 1.0,
+	-- Prediction caps used only to project an oriented box; they never make a threat true.
+	WillHitVelCap   = 2.0,
+	WillHitCloseCap = 12,
+	WillHitLatCap   = 1.5,
 
 	FeintFrac     = 0.80,
 	FeintGraceMs  = 90,
@@ -1288,466 +1168,65 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 	th.prevPos  = prevPos   -- [V101] для measured-closing (лунж-детект тяжёлых)
 	th.prevPosT = prevT
 
-	if Config.TurnWindow then
-		local me = localHRP()
-		if me then
-			local toMe = Vector3.new(me.Position.X - predA.X, 0, me.Position.Z - predA.Z)
-			local dist = toMe.Magnitude
-			if dist > 0.05 then
-				toMe = toMe.Unit
-				local angNow = math.deg(math.acos(math.clamp(flatLook:Dot(toMe), -1, 1)))
-				local physYaw = math.abs(math.deg(safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y))
-				local turnRate = math.max(trackedRate, physYaw)
-				local measuredTurn = turnRate * tHit * (Config.TurnAngVelK or 1)
-				local baseCone = Config.TurnBaseDeg
-				if dist <= (forward + (Config.CloseRangePad or 5)) then
-					baseCone = Config.TurnCloseDeg
-				end
-				local allow = math.clamp(baseCone + measuredTurn, 0, Config.TurnWindowMax)
-				if tHit < Config.TurnFloor then allow = math.min(allow, baseCone) end
-				if angNow <= allow then
-					flatLook = toMe
-				end
-			end
-		end
-	end
 
-	local center = predA + flatLook * forward
-	return center, forward, predA, flatLook
+	return predA + flatLook * forward, forward, predA, flatLook
 end)
 
+-- [V136] Recognition is one model, not a collection of trust/radius overrides.
+-- The real game recognises a hit only from Owner + AttackName + VictimSwingId + exact overlap.
+-- Before its part exists, Low uses the current oriented hitbox; High projects that same box to
+-- the canonical server contact. Neither mode ever returns true merely because an M2 is nearby.
 local willHitMe = LPH_NO_VIRTUALIZE(function(th)
-	local myHRP = localHRP()
-	local aHRP  = th.attackerHRP
+	local myHRP, aHRP = localHRP(), th.attackerHRP
 	if not myHRP then return Config.FilterFailSafe end
 	if not aHRP or not aHRP.Parent then return false end
+	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > (Config.MaxHeightDiff or 12) then return false end
 
-	-- [module] VERTICAL GATE: the hitbox math below is flat (X/Z only), so an attacker
-	-- standing on another floor directly above/below used to register as point-blank.
-	-- Reject anyone whose vertical offset exceeds MaxHeightDiff before any 2D test.
-	local maxDY = Config.MaxHeightDiff or 12
-	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > maxDY then return false end
-
-	-- [V88] LATCH: как то��ько закоммиченный свинг хоть раз признан у��розой (в упор, лицом
-	-- или че��ез доворот-на-нас), держим true до конца жиз��и угрозы. Это чинит финты с
-	-- разворотом: враг бьёт спиной и доворачивается — раньше поздний кадр с "смотрит мимо"
-	-- сбрасывал willHitMe и парри отменялся. Настоящий финт-кэнсел сюда не попадает: его
-	-- раньше удаляет ветка th.feinted в scheduler.
 	local mode = Config.AccuracyMode or "Low"
+	-- A matching active part is the authority. `false` means the real game geometry is live
+	-- and misses us, so no animation/range heuristic may override it.
+	local gt = realHitboxHitsMe(th.name, th)
+	if gt ~= nil then
+		th.gtConfirmed, th.trustedHit = gt == true, gt == true
+		return gt
+	end
 
-	-- [V93] В High доверяемся ТОЛЬКО ground-truth (реальный па��т) и ч��стой геометр��и; latch из
-	-- Low-эвристик (point-blank/drag/heavy) здесь отключён — иначе High «залипал» бы на угрозах,
-	-- которые в нас не попадают. Свой latch в High ставит лишь подтверждённое пересечение
-	-- реального игрового хитбокса (th.gtConfirmed) в ветке ниже.
+	local _, forward, predA, rawLook = hitboxGeom(th)
+	if not predA or not rawLook then return Config.FilterFailSafe end
+	local now = os.clock()
+	local tHit = math.clamp((th.contactAbs or now) - now, 0, 0.6)
+	local look, origin = rawLook, aHRP.Position
 	if mode == "High" then
-		if th.gtConfirmed then return true end
-	elseif th.trustLatch then
-		return true
-	end
-
-	-- [V102] BROADPHASE (High): ДЕШЁВЫЙ ранний отказ ДО дорогого hitboxGeom. Только для ��ЁГКИХ
-	-- M1 — ��яжёлые (M2/SKILL) НИКОГДА не режем здесь (у них своя расширенная логика доверия
-	-- HeavyTrust/lunge/mid-face ниже; V101-broadphase ошибочно резал стоячий нацеленный хэви на
-	-- dist 24-30 → willHitMe=false → ни блока, ни interrupt → «стоим как вкопанный». Теперь хэви
-	-- всегда проходит дальше). Для M1: отказ только если враг за HighBroadRange И НЕ приближается
-	-- ни по velocity, ни по измеренной дельте поз��ции (ловит бег «туда-обратно с у��аром на входе»).
-	if mode == "High" and not th.gtConfirmed and th.kind ~= "M2" and th.kind ~= "SKILL" then
-		local bdx = myHRP.Position.X - aHRP.Position.X
-		local bdz = myHRP.Position.Z - aHRP.Position.Z
-		local d2  = bdx * bdx + bdz * bdz
-		local br  = Config.HighBroadRange or 24
-		if d2 > (br * br) then
-			local bv = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-			local approaching = (bv.X * bdx + bv.Z * bdz) > 0   -- velocity в нашу сторону
-			if not approaching and th.prevPos and th.prevPosT then
-				local dtp = os.clock() - th.prevPosT
-				if dtp > 1e-3 and dtp < 0.5 then
-					local pdx  = th.prevPos.X - myHRP.Position.X
-					local pdz  = th.prevPos.Z - myHRP.Position.Z
-					-- прошлая дистанция больше текущей → идёт на нас (измеренное сближение)
-					approaching = (pdx * pdx + pdz * pdz) > d2 + 1
-				end
-			end
-			if not approaching then
-				th.trustedHit = false
-				return false
+		origin = Vector3.new(predA.X, aHRP.Position.Y, predA.Z)
+		-- Turn only by observed angular motion; no arbitrary cone/radius trust.
+		local rate = math.max(math.abs(safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0), math.rad(th.yawRate or 0))
+		if rate > 0 and tHit > 0 then
+			local myFlat = Vector3.new(myHRP.Position.X - origin.X, 0, myHRP.Position.Z - origin.Z)
+			if myFlat.Magnitude > 0.05 then
+				local toMe = myFlat.Unit
+				local dot = rawLook:Dot(toMe)
+				local cross = rawLook.X * toMe.Z - rawLook.Z * toMe.X
+				local want = math.atan2(cross, dot)
+				local turn = math.clamp(want, -rate * tHit, rate * tHit)
+				local c, s = math.cos(turn), math.sin(turn)
+				look = Vector3.new(rawLook.X * c - rawLook.Z * s, 0, rawLook.X * s + rawLook.Z * c)
+				look = look.Magnitude > 0.05 and look.Unit or rawLook
 			end
 		end
 	end
 
-	local _, forward, predA, flatLook = hitboxGeom(th)
-	if not predA then return Config.FilterFailSafe end
-
-	-- дешёвые величины сперва — по ним закрываем самый частый кейс (point-blank)
-	-- БЕЗ дорогого пред��кта ротации.
-	local toMeV = Vector3.new(myHRP.Position.X - aHRP.Position.X, 0, myHRP.Position.Z - aHRP.Position.Z)
-	local dist  = toMeV.Magnitude
-
-	-- Point-blank floor applies in BOTH modes. A hit landed in point-blank range is
-	-- physically unavoidable regardless of predicted rotation, so the strict High box
-	-- must never reject it — that was the root of High-mode misses on close M1s while
-	-- an enemy strafed (predA/box swung off us → false → NO-PRESS → LATE).
-	-- [V93] Point-blank floor — ТОЛЬКО не в High. «В упор» ещё не значит «попадёт»: атакующий
-	-- может махать мимо/спиной. В High это решает реальный парт либо геометрия ниже, а не радиус.
-	if mode ~= "High" then
-		local trust = Config.HitTrustRange or 0
-		if trust > 0 and dist <= (Config.PointBlank or 3.0) then
-			th.trustedHit = true; return true
-		end
-	end
-
-	-- [V68] предсказанная Р����ТАЦИЯ атакующего на момент контакта. Хитбокс атаки
-	-- стр��ит���я игрой по yaw HRP атакующего (см. VictimHitboxService: деталь в
-	-- workspace.Hitboxes ориентирована по атакующему). Значит важно не где он
-	-- смотрит СЕЙЧАС, а куда бу��ет смотреть в момент ��дара — это и ловит финты.
-	local nowW  = os.clock()
-	local tHit  = math.clamp((th.contactAbs or nowW) - nowW, 0, 0.6)
-	local toMe  = (dist > 0.05) and toMeV.Unit or flatLook
-	local rawL  = aHRP.CFrame.LookVector
-	rawL = Vector3.new(rawL.X, 0, rawL.Z)
-	rawL = (rawL.Magnitude > 0.05) and rawL.Unit or flatLook
-	local angY  = safeGet(aHRP, "AssemblyAngularVelocity", Vector3.zero).Y or 0
-	-- [V92] в High жёсткий кап доворота (спиной-стоящий не «долетает» предиктом до нас)
-	local capR  = math.rad((mode == "High" and (Config.RotPredMaxDegHigh or 55)) or (Config.RotPredMaxDeg or 120))
-	-- [V91] РОБАСТНЫЙ предикт ротации. Физический angY шумит и часто =0 меж��у physics-степами
-	-- → predLook НЕ доворачивался на доворачивающегося врага → High-бокс уходил мимо (миссы
-	-- never-in-hitbox). Берём МАКС из физической и ИЗМЕРЕННОЙ (кадр-к-кадру) скорости доворота;
-	-- знак измеренной — из наблюдённого поворота prevLook→rawL (θ = -(px·rz − pz·rx)).
-	-- Это точнее наводит бокс по facing В МОМЕНТ удара — как строит серверный хитбокс.
-	local rotRate = math.abs(angY)
-	local rotSign = (angY >= 0) and 1 or -1
-	if th.prevLook then
-		local measR = math.rad(th.yawRate or 0)
-		if measR > rotRate then
-			rotRate = measR
-			local cz = th.prevLook.X * rawL.Z - th.prevLook.Z * rawL.X
-			rotSign = (cz <= 0) and 1 or -1
-		end
-	end
-	local dyaw  = math.clamp(rotSign * rotRate * tHit, -capR, capR)
-	-- [V89] поворот rawL вокруг Y БЕЗ аллокации CFrame. CFrame.Angles(0,dyaw,0)*rawL
-	-- соз��авал временный CFrame НА КАЖДУЮ угрозу КАЖДЫЙ кадр — в мясорубке (2+ атакующих
-	-- по нескольку треков) это давило GC и роняло FPS scheduler'а → он «переставал
-	-- успевать». Ручная матрица Y-вращения даёт тот же вектор без мусора.
-	local cy, sy   = math.cos(dyaw), math.sin(dyaw)
-	local predLook = Vector3.new(rawL.X * cy + rawL.Z * sy, 0, -rawL.X * sy + rawL.Z * cy)
-	predLook = (predLook.Magnitude > 0.05) and predLook.Unit or rawL
-	local faceDotPred = predLook:Dot(toMe)
-
-	-- [V88] SNAP-TURN FEINT: враг закоммитил свинг и АКТИВНО доворачивается на нас. Серверный
-	-- хитбокс строится по его facing В МОМЕНТ удара, поэтому разворот из «спин��й» = р��альная
-	-- угроза, хотя сейч��с смотрит мимо. Детект по знаку: предсказанный facing ближе к нам, чем
-	-- текущий (rawDot) → он поворачивается в нашу сторо��у. Работает и в High, и в Low.
-	local rawDot = rawL:Dot(toMe)
-	-- [V90] DRAG/SNAP-TURN — ловим по ЗНАКУ д��вор��та (facing приближается к нам между кадрами),
-	-- а не по мгновенной angY (она шумная и ч����сто 0 между physics-степами → старый детект
-	-- пропускал «закрученные» атаки). Два независимых источника доворота, любого достаточно:
-	--   • physics-предикт: predLook уже развёрнут к нам сильнее те��ущего (faceDotPred > rawDot)
-	--   • измере��ный ��оворот за п��ошлый кадр: facing реально стал ближе к нам (prevLook→rawL)
-	-- Порог скорости — DragTurnMinDeg (ниже прежних ~69°/с, ловим снап раньше). Дальность —
-	-- DragTrustRange (шире обычного trust: drag часто начинают с�� средней дистанции).
-	local turningToward = false
-	if Config.DragDetect then
-		local dragDeg   = Config.DragTurnMinDeg or 35
-		local predTurns = (faceDotPred > rawDot + 0.03)
-		local measTurns = false
-		if th.prevLook then
-			local prevDot = th.prevLook:Dot(toMe)
-			measTurns = (rawDot > prevDot + 0.02) and ((th.yawRate or 0) >= dragDeg)
-		end
-		local physTurns = (math.abs(angY) > 1.2) and predTurns
-		turningToward = physTurns or measTurns or (predTurns and (th.yawRate or 0) >= dragDeg)
-	end
-
-	-- [V126] M1 BAIT-GATE сигнал: РЕАЛЬНАЯ нацеленность/доворот К НАМ (не предиктный конус,
-	-- который легко обмануть дёрганьем прицела). Сервер строит M1-хитбокс по facing атакующего
-	-- в момент контакта, поэтому свинг, где враг ни разу не смотрит на нас И не доворачивается —
-	-- физически не попадёт = байт. Считаем ТОЛЬКО для M1 (у M2/скиллов свои широкие хитбоксы).
-	-- gtConfirmed (реальный парт уже пересёк нас) — не переопределяем ground-truth.
-	local m1FacingCommitted = true
-	if Config.M1BaitGate and th.kind == "M1" and not th.gtConfirmed then
-		local facesUs = (rawDot >= (Config.M1CommitFaceMin or 0.10))
-		local turnsToUs = false
-		if th.prevLook then
-			local prevDot = th.prevLook:Dot(toMe)
-			-- facing реально приближается к нам между ��адрами И скорость доворота зн��чима
-			turnsToUs = (rawDot > prevDot + 0.01) and ((th.yawRate or 0) >= (Config.M1BaitTurnMinDeg or 25))
-		end
-		m1FacingCommitted = facesUs or turnsToUs
-	end
-		-- [V90.4] drag/snap-turn доверие — ТОЛЬКО в Low. В High доворот, который реально
-		-- дойдёт до нас, и так ловит предсказанный бокс (predLook по yaw в момент удара);
-		-- radius-доверие в High агрилось бы на довороты, чей замах в нас не попадает.
-		local dragRange = math.max(Config.HitTrustRange or 0, Config.DragTrustRange or 0)
-		if mode ~= "High" and dragRange > 0 and dist <= dragRange and turningToward then
-			th.trustedHit = true; th.trustLatch = true; th.feintTurn = true
-			return true
-		end
-
-	-- [V89] HEAVY-ПРИОРИТЕТ (главная причина пропусков в диаг). Тяжёлые (M2) и скиллы —
-	-- это ВЫПАДЫ: атакующий закрывает дистанцию прямо в замахе. Capoeira M2 детектился на
-	-- dist=10, а WillHitVelCap=2.0 обрезал экстраполяцию predA до 2 студов → geom-бокс
-	-- давал false ВЕСЬ пу���� → "never-in-hitbox" NO-PRESS, следом Ragdoll и каскад на
-	-- остальных ��такующих (отсюда и «не справляется с мульти��таками»). Тяжёлые пропускать
-	-- нельзя (их не перевзвести повторным блоком): если враг в расширенном радиусе И либо
-	-- смотрит приме������ на нас (predFacing), либо реально СБЛИЖАЕТСЯ — считаем угрозой сразу,
-	-- в обход geom-фильтра. Работает и в Low, и в High. Лишний блок безвреден (OmniBlock
-	-- ненаправленный), а пропущенный хэви = проигр��нный разме��.
-		-- [V93] HeavyTrust (радиусное доверие тяжёлым) — ТОЛЬКО не в High. В High тяжёлый лунж,
-		-- который реально дойдёт, и так ловит предсказанный бокс (predA экстраполируется по
-		-- velocity к нам); летящий мимо — не должен парироваться. Радиус тут = ложняки.
-		if (th.kind == "M2" or th.kind == "SKILL") and Config.HeavyTrust then
-			local aV       = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-			local toMeUnit = (dist > 0.05) and toMe or flatLook
-			-- сближение по velocity (обычные дэши/выпады с LinearVelocity)
-			local velClose = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit)
-			-- [V101] measured-closing: дельта дистанции по кадрам. Л��вит CFrame-твин-дэши
-			-- (MuayThai/Karate flying-knee), где AssemblyLinearVelocity остаётся ≈0.
-			local measClose = 0
-			if th.prevPos and th.prevPosT then
-				local dtp = os.clock() - th.prevPosT
-				if dtp > 1e-3 and dtp < 0.5 then
-					local pdx  = th.prevPos.X - myHRP.Position.X
-					local pdz  = th.prevPos.Z - myHRP.Position.Z
-					local prevD = math.sqrt(pdx * pdx + pdz * pdz)
-					measClose = (prevD - dist) / dtp
-				end
-			end
-			local closing   = math.max(velClose, measClose)  -- >0 = реально идёт на нас
-			local closingOk = closing > (Config.HeavyClosingMin or 6)
-			-- (1) ДЛИННЫЙ ВЫПАД: враг реально дэшит на нас (сильное сближение) → доверяем до
-			-- HeavyLungeRange НЕЗАВИСИМО от текущей дистанции. Это чинит MuayThai M2 dist=26.
-			if closing > (Config.HeavyLungeClosing or 14) and dist <= (Config.HeavyLungeRange or 36) then
-				th.trustedHit = true; th.trustLatch = true
-				return true
-			end
-			-- (2) БЛИЖНИЙ РАДИУС (HeavyTrustRange): Low — сближение ИЛИ грубый facing; High —
-			-- сближение ИЛИ нацелен в нас (конус HeavyHighFaceMin). Стоячий, но нацеленный
-			-- тяжёлый (лог: spousespartner M2 dist=13) теперь доверяется.
-			local heavyRange = Config.HeavyTrustRange or 14
-			if dist <= heavyRange then
-				local trustHeavy
-				if mode == "High" then
-					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyHighFaceMin or 0.5))
-				else
-					trustHeavy = closingOk or (faceDotPred >= (Config.HeavyFaceMin or -0.30))
-				end
-				if trustHeavy then
-					th.trustedHit = true; th.trustLatch = true
-					return true
-				end
-			-- (3) СРЕДНЯЯ ДИСТАНЦИЯ (heavyRange..HeavyFaceRange): дове��яем ТОЛЬКО е����ли тяжёлый
-			-- нацелен ТОЧНО в нас узким конусом (HeavyFarFaceMin) — на такой дистанции это почти
-			-- наверняка готовящийся выпад. Смотрит мимо / не идёт на нас → не парируем (нет ложняка).
-			elseif dist <= (Config.HeavyFaceRange or 30) then
-				if faceDotPred >= (Config.HeavyFarFaceMin or 0.85) then
-					th.trustedHit = true; th.trustLatch = true
-					return true
-				end
-			end
-		end
-
-		-- [V132] M2 HIGH-MODE FALLBACK. Long-windup M2s (Capoeira, MuayThai, Karate, Hakari,
-		-- Boxing, Wrestling) часто двигаются боком/под углом, но их hitbox большой и delayed.
-		-- Строгий предикт-бокс отбраковывал реальные M2 → "never-in-hitbox" MISS. Если враг в
-		-- радиусе досягаемости lunge и не явно разворачивается от нас, лучше лишний блок, чем
-		-- пропустить тяжёлый. Срабатывает ТОЛЬКО в High (в Low уже покрывает HeavyTrust).
-		if mode == "High" and th.kind == "M2" and not th.trustLatch then
-			local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-			local toMeUnit = (dist > 0.05) and toMe or flatLook
-			local velClose = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit)
-			local measClose = 0
-			if th.prevPos and th.prevPosT then
-				local dtp = nowW - th.prevPosT
-				if dtp > 1e-3 and dtp < 0.5 then
-					local pdx  = th.prevPos.X - myHRP.Position.X
-					local pdz  = th.prevPos.Z - myHRP.Position.Z
-					local prevD = math.sqrt(pdx * pdx + pdz * pdz)
-					measClose = (prevD - dist) / dtp
-				end
-			end
-			local closing = math.max(velClose, measClose)
-			-- long-windup M2 = стиль с M2HitboxDelay > 0.45; это практически всегда выпад/схватка
-			loadGameModules()
-			local m2Delay = 0.45
-			pcall(function()
-				if GameData.cfg and GameData.cfg.GetStyleM2HitboxDelay then
-					m2Delay = GameData.cfg.GetStyleM2HitboxDelay(th.style or "basic", th.mom or false)
-				end
-			end)
-			local longM2 = (type(m2Delay) == "number" and m2Delay > 0.45)
-			local inLunge = dist <= (Config.HeavyLungeRange or 36)
-			local facesUs = faceDotPred >= (Config.HighFaceMin or 0.25)
-			local closingOk = closing > 4
-			local alreadyClose = dist <= (Config.HeavyTrustRange or 14)
-			if inLunge and (longM2 or alreadyClose) and (facesUs or closingOk) then
-				th.trustedHit = true; th.trustLatch = true
-				return true
-			end
-		end
-
-		-- [V114] M1 APPROACH-TRUST: аналог HeavyTrust, но для ЛЁГКОГО M1 и с более узкими рамками.
-		-- Ловит «враг в ~10 studs, во время замаха подходит и бьёт�� — раньше High-бокс накрывал нас
-		-- поздно (closing≈0 в начале замаха) → willHitMe=false почти до контакта → LATE (pressDt=0).
-		-- Доверяем, как только committed-M1 НАЦЕЛЕН в нас И по прогнозу окажется в досягаемости на
-		-- момент контакта. НЕ латчим (в High каждый кадр перерешаем — финт/отмена мгновенно сбросят).
-		if th.kind == "M1" and Config.M1ApproachTrust ~= false
-		   and dist <= (Config.M1ApproachRange or 14) then
-			local aV = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-			local toMeUnit = (dist > 0.05) and toMe or flatLook
-			local velClose = Vector3.new(aV.X, 0, aV.Z):Dot(toMeUnit)   -- сближение по velocity
-			local measClose = 0                                          -- измеренное кадр-к-кадру
-			if th.prevPos and th.prevPosT then
-				local dtp = os.clock() - th.prevPosT
-				if dtp > 1e-3 and dtp < 0.5 then
-					local pdx   = th.prevPos.X - myHRP.Position.X
-					local pdz   = th.prevPos.Z - myHRP.Position.Z
-					local prevD = math.sqrt(pdx * pdx + pdz * pdz)
-					measClose = (prevD - dist) / dtp
-				end
-			end
-			local closing       = math.max(velClose, measClose, 0)
-			local distAtContact = dist - closing * tHit          -- где он будет к контакту
-			local reach         = forward + (Config.M1ApproachReachPad or 3.0)
-			local faceMin       = (mode == "High")
-				and (Config.M1ApproachFaceMin or Config.HighFaceMin or 0.30)
-				or (Config.HeavyFaceMin or -0.30)
-			-- нацелен в нас И (уже в досягаемости ИЛИ по прогнозу долетит к контакту)
-			-- [V126] + bait-gate: не доверяем approach'у, где враг фактически не наводится и не
-			-- доворачивается к нам (иначе он подходит боком/спиной и свингом не достаёт = ��айт).
-			if faceDotPred >= faceMin and distAtContact <= reach and m1FacingCommitted then
-				th.trustedHit = true
-				return true
-			end
-		end
-
-		if mode == "High" then
-			-- [V93] HIGH = GROUND-TRUTH. Решает не «рядом и п��имерно смотрит», а реальная игровая
-			-- геометрия удара.
-			-- ── Шаг 1: реальный парт. Если игра УЖЕ породила хитбокс-парт этого атакующего в
-			-- workspace.Hitboxes — проверяем пересечение с нами тем же методом, что и
-			-- VictimHitboxService (GetPartBoundsInBox по нашему персонажу). Это авторитетно и
-			-- пинг-независимо по геометрии; вертикаль/ориентация учтены самим партом.
-			-- [V132] ground-truth hitbox check is expensive (GetPartBoundsInBox per part). Only
-			-- run it close to contact or on every 3rd frame; otherwise rely on geometry.
-			local gt = nil
-			local tHit = math.clamp((th.contactAbs or nowW) - nowW, 0, 0.6)
-			if tHit < 0.18 or (FrameId % 3 == 0) then
-				gt = realHitboxHitsMe(th.name, th)
-			end
-			if gt == true then
-				th.gtConfirmed = true      -- латчим: удар реально в нас, держим блок до ко��ца свинга
-				th.trustedHit  = true
-				return true
-			elseif gt == false then
-				-- Парт(ы) активен, но в нас не попадает → чужой/мимо-удар. Точно не блокируем.
-				th.trustedHit = false
-				return false
-			end
-
-			-- ── Шаг 2: парта ещё нет (мы во взводе ДО контакта) → предсказательная геометрия,
-			-- но РЕАЛЬНЫМ размером бокса (кэш RealHitboxSize по типу атаки, обучается с живых
-			-- партов; фолбэк — Config для самого первого свинга). Два origin'а (predA/predLook и
-			-- aPos/rawL), их объединение. Никаких trust-ра��иусов — только «мы внутри замаха».
-			-- [V105] движ-слак: расширяем бокс на вклад относительной планарной скорости (враг + мы),
-			-- компенсируя рассинхрон отрисованной (прошлой) и серверной (будущей) позиции у движущихся.
-			local slack   = Config.HighSlack or 0.6
-			do
-				local aVel = safeGet(aHRP, "AssemblyLinearVelocity", Vector3.zero)
-				local mVel = myHRP and safeGet(myHRP, "AssemblyLinearVelocity", Vector3.zero) or Vector3.zero
-				local relX, relZ = aVel.X - mVel.X, aVel.Z - mVel.Z
-				local relSpeed = math.sqrt(relX * relX + relZ * relZ)
-				local add = math.min(relSpeed * (Config.HighMoveSlackK or 0.045), Config.HighMoveSlackCap or 2.2)
-				slack = slack + add
-			end
-			local realSz  = V93.sizes[th.kind]
-			-- вертикальный гейт по реальной высоте парта (плюс запас): удар выше/ниже — мимо
-			if realSz then
-				local halfH = realSz.Y * 0.5 + 3
-				if math.abs(myHRP.Position.Y - aHRP.Position.Y) > halfH then
-					th.trustedHit = false
-					return false
-				end
-			end
-			-- дальность/глубина от origin а��акующего вдоль его facing: центр пар��а ≈ forward,
-			-- полуглубина = realSz.Z/2 (фолбэк — старые Config-границы), полуширина = realSz.X/2.
-			local halfW   = (realSz and realSz.X * 0.5 or (Config.HitHalfWidth or 4)) + slack
-			local depthF  = (realSz and (forward + realSz.Z * 0.5) or (forward + (Config.HitboxDepth or 0))) + slack
-			local depthB  = (realSz and (forward - realSz.Z * 0.5) or -(Config.HitboxDepthBack or 0)) - slack
-			local function inBox(originX, originZ, look)
-				local ox, oz = myHRP.Position.X - originX, myHRP.Position.Z - originZ
-				local fdepth = ox * look.X + oz * look.Z
-				local fside  = math.abs(ox * (-look.Z) + oz * look.X)
-				return fdepth >= depthB and fdepth <= depthF and fside <= halfW
-			end
-			-- [V94] AIM-AWARE пр��дикт facing к МОМЕ��ТУ contact. Серверный хитбокс строится по yaw
-			-- атакующего в момент удара (дамп VictimHitboxService). Прежний predLook капался жёстко
-			-- на RotPredMaxDegHigh=55° → враг, доворачивающийся к нам со спины/сбоку, «не долетал»
-			-- предиктом → back-facing gate его резал → MISS/поздний отве�� (жалоба «бьёт и
-			-- поворачивается — скрипт не вовремя»). Считаем знаковый угол rawL→toMe и сколько враг
-			-- РЕАЛЬНО успеет повернуть за tHit (rotRate = макс физической и измеренной кадр-к-кадру
-			-- угловой скорости). Поворачиваем rawL к нам не больше, чем позволяет скорость:
-			--   • доворачивается быстро → aimLook смотрит на нас → парируем ВОВРЕМЯ (взвод заранее);
-			--   • стоит спиной б��з вращения → maxTurn≈0 → aimLook≈спина → aimDot низкий → мимо.
-			local dotRT   = rawL.X * toMe.X + rawL.Z * toMe.Z
-			local crossRT = rawL.X * toMe.Z - rawL.Z * toMe.X
-			local angToUs = math.atan2(crossRT, dotRT)          -- знаковый угол rawL→toMe
-			local maxTurn = math.max(rotRate, 0) * tHit          -- сколько успеет повернуть (рад)
-			local phi     = math.clamp(angToUs, -maxTurn, maxTurn)
-			local cphi, sphi = math.cos(phi), math.sin(phi)
-			local aimLook = Vector3.new(rawL.X * cphi - rawL.Z * sphi, 0, rawL.X * sphi + rawL.Z * cphi)
-			aimLook = (aimLook.Magnitude > 0.05) and aimLook.Unit or rawL
-			-- [V96] POINT-BLANK дове��ие (как в LOW-ветке): в упор враг физически достаёт хитбоксом
-			-- НЕЗАВИСИМО от facing, а серверный do��орот довершится к контакту. Прежде High жёстко
-			-- резал ближние удары facing-гейтом → в логе валидные комбо-M1 (dist 3–6) п��дали в
-			-- `MISS never-in-hitbox` → NO-PRESS/поздний блок. Ниже PointBlank сразу доверяем.
-			-- [V126] point-blank авто-доверие: для M2/с��иллов безусловно (широкие хитбоксы,
-			-- в упор не отвертеться), а для M1 — только если враг фактически наводится/
-			-- доворачивается к нам (иначе в упор спиной = байт, M1-боксом не достанет).
-			if dist <= (Config.PointBlank or 3.0) and (th.kind ~= "M1" or m1FacingCommitted) then
-				th.trustedHit = true
-				return true
-			end
-			-- [V126] M1 BAIT-GATE (глобально для M1 в High): свинг, где враг не смотрит на нас и
-			-- не доворачивается — сервер построит хитбокс мимо → не попадёт. Отсекаем как чужой/
-			-- байтовый ДО предиктного бокса (иначе краткий дёрг прицела раскручивал aimLook на нас).
-			if not m1FacingCommitted then
-				th.trustedHit = false
-				th.offTarget  = true
-				return false
-			end
-			-- BACK-FACING gate по facing С УЧЁТОМ доворота: даже повернувшись на максимум своей
-			-- угловой скорости, враг не наводится на нас → этим свингом не достанет → мимо.
-			if aimLook:Dot(toMe) < (Config.HighFaceMin or 0.25) then
-				th.trustedHit = false
-				return false
-			end
-			-- бокс строим с facing К МОМЕНТУ contact (aimLook) от предсказанной И текущей позиции
-			local hit = inBox(predA.X, predA.Z, aimLook)
-			         or inBox(aHRP.Position.X, aHRP.Position.Z, aimLook)
-			th.trustedHit = false
-			return hit
-		end
-
-	-- LOW: щедрое доверие ближнему бою (как V67), НО отбрако��ываем удары, явно
-	-- направленные не в на�� (predFacing смотрит от нас �� мы не в упор) — чтоб�� не
-	-- ��гри��ься на чужие атаки в замесе.
-	local trust = Config.HitTrustRange or 0
-	if trust > 0 and dist <= trust then
-		if dist <= (Config.PointBlank or 3.0) then th.trustedHit = true; th.trustLatch = true; return true end
-		if faceDotPred >= (Config.LowFaceMin or -0.40) then th.trustedHit = true; th.trustLatch = true; return true end
-		th.offTarget = true
-		return false
-	end
-
-	local off  = Vector3.new(myHRP.Position.X - predA.X, 0, myHRP.Position.Z - predA.Z)
-	local fwd  = off:Dot(flatLook)
-	local side = math.abs(off:Dot(Vector3.new(-flatLook.Z, 0, flatLook.X)))
-	local slack = Config.HitboxSlack or 0
-	local inForward = fwd >= (forward - Config.HitboxDepthBack - slack)
-	                and fwd <= (forward + Config.HitboxDepth + slack)
-	local inLateral = side <= (Config.HitHalfWidth + slack)
-	return inForward and inLateral
+	local sz = V93.sizes[th.kind]
+	local halfW = (sz and sz.X * 0.5 or Config.HitHalfWidth or 3) + (mode == "High" and (Config.HighSlack or 0.35) or (Config.HitboxSlack or 0))
+	local halfH = (sz and sz.Y * 0.5 or 3) + 1.5
+	local halfD = sz and sz.Z * 0.5 or (Config.HitboxDepth or 4)
+	if math.abs(myHRP.Position.Y - origin.Y) > halfH then return false end
+	local ox, oz = myHRP.Position.X - origin.X, myHRP.Position.Z - origin.Z
+	local depth = ox * look.X + oz * look.Z
+	local side = math.abs(ox * (-look.Z) + oz * look.X)
+	local hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
+	th.trustedHit = hit
+	if not hit then th.offTarget = true end
+	return hit
 end)
 
 local function nextCombo(attacker)
@@ -6313,7 +5792,7 @@ return function(_Lib, _Core)
 				notify("Accuracy Mode", "Selected: " .. tostring(v))
 			end,
 		}, ctx.flag("AP_AccuracyMode"))
-		apMain:SubLabel({ Text = "Low = simple hit check (fast).  High = angle/geometry check (fewer false blocks)" })
+		apMain:SubLabel({ Text = "Low = current real-box geometry (fast).  High = projects the same box to the server contact time.\nBoth use exact live hitbox overlap when it exists." })
 		slider(apMain, { Name = "FOV", Flag = "AP_FOV", Default = Config.FOV or 360,
 			Min = 1, Max = 360, Suffix = "°", Callback = function(v) Config.FOV = v end })
 		apMain:SubLabel({ Text = "only reacts to enemies in this cone\n360 = all around u" })
@@ -6335,9 +5814,6 @@ return function(_Lib, _Core)
 		slider(apMain, { Name = "Rotation Speed", Flag = "AP_FaceLerp",
 			Default = Config.FaceLerp or 0.80, Min = 0.10, Max = 1.00, Precision = 2,
 			Callback = function(v) Config.FaceLerp = v end })
-		slider(apMain, { Name = "Rotation Predict Cap", Flag = "AP_RotPred",
-			Default = Config.RotPredMaxDeg or 200, Min = 60, Max = 300, Suffix = "°",
-			Callback = function(v) Config.RotPredMaxDeg = v end })
 
 		-- ── Section 2 — Dodge (Right box): behaviour + tuning + must-dodge ──
 		local apDodge = AP:Section({ Side = "Right" })
@@ -6375,9 +5851,6 @@ return function(_Lib, _Core)
 		slider(apDodge, { Name = "i-Frame Window", Flag = "AP_IFrame",
 			Default = math.floor((Config.IFrameDur or 0.30) * 1000), Min = 120, Max = 500,
 			Suffix = " ms", Callback = function(v) Config.IFrameDur = v / 1000 end })
-		slider(apDodge, { Name = "Heavy Trust Range", Flag = "AP_HeavyRange", Default = Config.HeavyTrustRange or 14,
-			Min = 6, Max = 24, Suffix = " st", Callback = function(v) Config.HeavyTrustRange = v end })
-		apDodge:SubLabel({ Text = "how close a heavy must be before we fully trust it (lunges are caught farther out automatically)" })
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Must-Dodge List" })
