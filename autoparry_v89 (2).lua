@@ -503,8 +503,7 @@ local Config = {
 	ACScriptName    = "so you're challenging me",
 	NeutralizeAC    = true,
 
-	ServerSwingHook   = true,
-	ServerSwingDedup  = 0.35,
+
 
 	-- [V90.2] Мульт��таргет: мгновенный (hard) снап лицом к следующему атакующему, когда в
 	-- замесе 2+ угрозы — без п��авного лерпа, чтобы не терять ка��ры на перекладку между целями.
@@ -689,6 +688,12 @@ local State = {
 	faceGoalUntil = 0,
 	faceHum       = nil,
 	faceGoalPos   = nil,   -- [V73] midpoint facing goal
+	-- Подтверждённое CombatClientRemoteEvent состояние grapple. Атрибут Grappling остаётся
+	-- fallback, но remote даёт точного второго участника и тип клэша.
+	grapple       = { active=false, dirty=false, foeName=nil, clashType=nil, winnerName=nil, startedAt=0 },
+	noParryActive = false,
+	noParryNow    = false,
+	grappleChar   = nil,
 }
 
 local Threats = {}
@@ -902,7 +907,8 @@ local function canBlockNow()
 	local stunned = c:GetAttribute("Stunned") == true
 	local cantAny = c:GetAttribute("CantAnything") == true
 	if stunned or cantAny then
-		if Config.ComboEscape and c:GetAttribute("ParryBuffered") == true
+		if Config.ComboEscape and c:GetAttribute("ParryWindowDisabled") ~= true
+		   and c:GetAttribute("ParryBuffered") == true
 		   and c:GetAttribute("PerfectBlocking") ~= true then
 			return true, nil
 		end
@@ -1973,7 +1979,14 @@ local function indexAllAnims()
 						local id = animIdOf(child)
 						if id and defensive then BlockIds[id] = true end
 						if kind and id then
-							AttackIds[id] = { kind = kind, combo = (kind == "M1") and comboFromName(child.Name) or nil }
+							AttackIds[id] = {
+								kind = kind,
+								combo = (kind == "M1") and comboFromName(child.Name) or nil,
+								name = child.Name,
+								-- CombatConfig.GetStyleM2HitboxDelay(style, true) выбирает
+								-- HakariMomentumM2HitboxDelay=0.62 вместо обычных 0.59.
+								mom = lname:find("momentum") ~= nil,
+							}
 						end
 					end
 				end
@@ -2023,7 +2036,8 @@ local function resolveInfo(id, model)
 		s     = styleOf(model) or (legacy and legacy.s) or "Basic",
 		hit   = meta.hit,
 		combo = entry and entry.combo,
-		mom   = legacy and legacy.mom or false,
+		mom   = (entry and entry.mom) or (legacy and legacy.mom) or false,
+		name  = entry and entry.name or nil,
 	}
 end
 
@@ -2572,9 +2586,19 @@ local function grappleM2Ready()
 	return true
 end
 
--- Найти оппонента по борьбе: ближайший игрок, у которого тоже Grappling==true (для снапа лицом).
--- Может вернуть nil — тогда просто фаерим M2 без снапа (в грэппле вы и так залочены друг на друга).
+-- Найти оппонента по борьбе. Remote-state авторитетнее: CombatGrappleStart payload содержит
+-- CharAName/CharBName. Поиск ближайшего Grappling-игрока — только fallback при пропущенном событии.
 local function findGrappleFoe(myHRP)
+	local gs = State.grapple
+	if gs and gs.active and type(gs.foeName) == "string" then
+		local fp = Players:FindFirstChild(gs.foeName)
+		local fc = fp and fp.Character
+		local fh = fc and fc:FindFirstChild("HumanoidRootPart")
+		if fh then return fh end
+		local fm = Workspace:FindFirstChild(gs.foeName)
+		local mh = fm and fm:IsA("Model") and fm:FindFirstChild("HumanoidRootPart")
+		if mh then return mh end
+	end
 	local myPos = myHRP.Position
 	local best, bestDist
 	for _, pl in ipairs(Players:GetPlayers()) do
@@ -2590,10 +2614,46 @@ local function findGrappleFoe(myHRP)
 	return best
 end
 
--- Пока мы в борьбе (Grappling==true) — непрерывно бьём M2, чтобы быть последним атакующим и
--- выиграть клэш. Переиспользуем fireBoxingCounter (снап лицом при наличии цели, сброс guard,
+State.grappleStart = function(payload, dirty)
+	if type(payload) ~= "table" then return end
+	local a, b = payload.CharAName, payload.CharBName
+	local me = LocalPlayer.Name
+	if a ~= me and b ~= me then return end
+	local gs = State.grapple
+	gs.active = true
+	gs.dirty = dirty == true
+	gs.foeName = (a == me) and b or a
+	gs.clashType = payload.ClashType
+	gs.winnerName = payload.WinnerName
+	gs.startedAt = os.clock()
+	diagPush(("GRAPPLE-START t=%.2f type=%s foe=%s clash=%s winner=%s")
+		:format(gs.startedAt, gs.dirty and "DIRTY" or "NORMAL", tostring(gs.foeName),
+			tostring(gs.clashType), tostring(gs.winnerName)))
+end
+
+State.grappleEnd = function(payload)
+	local gs = State.grapple
+	if not gs.active then return end
+	if type(payload) == "table" then
+		local a, b = payload.CharAName, payload.CharBName
+		if a and b and a ~= LocalPlayer.Name and b ~= LocalPlayer.Name then return end
+		gs.winnerName = payload.WinnerName or gs.winnerName
+	end
+	diagPush(("GRAPPLE-END t=%.2f foe=%s winner=%s")
+		:format(os.clock(), tostring(gs.foeName), tostring(gs.winnerName)))
+	gs.active, gs.dirty, gs.foeName, gs.clashType, gs.winnerName, gs.startedAt = false, false, nil, nil, nil, 0
+end
+
+-- Пока мы в борьбе (Grappling==true), непрерывно жмём M2, чтобы выиграть клэш.
+-- Переиспользуем fireBoxingCounter (снап лицом при наличии цели, сброс guard,
 -- FireServer M2). Срабатывает ТОЛЬКО в грэппле, поэтому в обычном бою больше не мешает.
 local function tryGrappleWin(now)
+	-- Remote-state мог потерять End; атрибут — авторитетный fallback после короткого grace.
+	local gs = State.grapple
+	local gc = localChar()
+	if gs.active and gc and gc:GetAttribute("Grappling") ~= true and now - gs.startedAt > 0.35 then
+		State.grappleEnd(nil)
+	end
 	if not grappleM2Ready() then return false end
 	local myHRP = localHRP()
 	if not myHRP then return false end
@@ -3323,48 +3383,6 @@ local function onAttack(attackerHRP, info, model, id, track)
 			pMult, hitTL*1000, vlead*1000, pRaw*1000))
 end
 
-local function resolveSwingAttacker(arg)
-	if typeof(arg) == "Instance" then
-		if arg:IsA("Player") then return arg.Character end
-		if arg:IsA("Model") then return arg end
-		local plr = Players:GetPlayerFromCharacter(arg)
-		if plr then return plr.Character end
-		return arg.Parent and arg.Parent:IsA("Model") and arg.Parent or nil
-	elseif type(arg) == "string" then
-		local plr = Players:FindFirstChild(arg)
-		if plr and plr.Character then return plr.Character end
-		return Workspace:FindFirstChild(arg)
-	elseif type(arg) == "table" then
-		for _, k in ipairs({ "Character", "Attacker", "Player", "Char", "Model" }) do
-			local v = arg[k]
-			if v then local m = resolveSwingAttacker(v); if m then return m end end
-		end
-		local nm = arg.Name or arg.CharacterName or arg.AttackerName
-		if type(nm) == "string" then return resolveSwingAttacker(nm) end
-	end
-	return nil
-end
-
-local function registerServerSwing(kind, arg)
-	if not (Config.Enabled and Config.ServerSwingHook) then return end
-	local model = resolveSwingAttacker(arg)
-	if not model then return end
-	local ok, hrp = isEnemyModel(model)
-	if not ok or not hrp then return end
-	local plr  = Players:GetPlayerFromCharacter(model)
-	local name = plr and plr.Name or model.Name
-	local q = Pending[name]
-	if q then
-		local nowC = os.clock()
-		for i = #q, 1, -1 do
-			local r = q[i]
-			if r.type == kind and (nowC - r.clock) <= Config.ServerSwingDedup then return end
-		end
-	end
-	local info = { t = kind, s = styleOf(model) or "Basic", hit = nil, combo = nil, mom = false }
-	onAttack(hrp, info, model, 0, nil)
-end
-
 local function dirIsClear(origin, dir)
 	if not Config.DodgeWallCheck then return true end
 	local char = localChar()
@@ -3504,6 +3522,19 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	local faceTgt   = nil
 	local imminent  = V93.imminentBuf   -- [V123] персистентный буфер (без аллокации таблицы/кадр)
 	table.clear(imminent)
+
+	-- Grapple — отдельное подтверждённое состояние боя. Пока наш персонаж реально Grappling,
+	-- старые animation-threats не должны запускать обычные block/dodge/counter ветки.
+	State.grappleChar = localChar()
+	if State.grapple.active and State.grappleChar
+	   and State.grappleChar:GetAttribute("Grappling") ~= true
+	   and now - State.grapple.startedAt > 0.35 then
+		State.grappleEnd(nil)
+	end
+	if State.grappleChar and State.grappleChar:GetAttribute("Grappling") == true then
+		tryGrappleWin(now)
+		return
+	end
 
 		for i = #Threats, 1, -1 do
 			local th = Threats[i]
@@ -3944,12 +3975,24 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- (грэбы всё равно доджим) и обычных додж��й, но ДО блока — counter ЗАМЕНЯЕТ парри. НЕ зависит
 	-- от wantBlock/willHitMe (тот баговал на delayed-hitbox M2) — скан идёт по сырым Threats, так
 	-- что counter срабатывает даже когда предиктор-геометрия отка��ала. Выстрелил → скип блока.
-	-- [V129] GRAPPLE WIN — оспорить вражеский тяжёлый нашим M2 (последний коммит в клэш). Стоит
-	-- ПОСЛЕ must-dodge (грэбы всё равно доджим первым приоритетом) и ДО boxing-counter/блока.
-	if tryGrappleWin(now) then return end
+	-- Grapple обрабатывается отдельным ранним state-path в начале schedulerStep.
 	if tryBoxingCounter(now) then return end
 
 	if wantBlock then
+		-- ParryWindowDisabled запрещает perfect-window, но не обычный guard. Если guard уже
+		-- поднят, не re-arm'им его на каждый удар: помечаем угрозу покрытой и продолжаем hold.
+		State.noParryNow = localChar() and localChar():GetAttribute("ParryWindowDisabled") == true
+		if State.noParryNow ~= State.noParryActive then
+			State.noParryActive = State.noParryNow
+			diagPush(("PARRY-WINDOW t=%.2f %s → %s")
+				:format(now, State.noParryNow and "DISABLED" or "RESTORED",
+					State.noParryNow and "normal guard / must-dodge" or "perfect parry"))
+		end
+		if State.noParryNow and State.blocking then
+			wantBlock.pressed = true
+			wantBlock.coveredByHeldGuard = true
+			if wantBlock.rec then wantBlock.rec.blockedReason = "ParryWindowDisabled: normal guard" end
+		end
 		-- Multi-attacker held-guard mode uses exactly one Activated for the whole burst.
 		-- Re-arming each threat hits the game's block rate-limit/cooldown and cascades HITs.
 		if clusterStrategy == "HELD_GUARD" and State.blocking then
@@ -4301,35 +4344,31 @@ task.spawn(function()
 	dbg("calibration active — listening CombatBroadcastURE")
 end)
 
+-- Точный grapple lifecycle. Этот RemoteEvent передаёт подтверждённые дампом имена обоих
+-- участников, тип клэша и победителя; атрибут Grappling остаётся аварийным fallback.
 task.spawn(function()
-	if not Config.ServerSwingHook then return end
-	local Shared  = ReplicatedStorage:WaitForChild("Shared", 30)
+	local Shared = ReplicatedStorage:WaitForChild("Shared", 30)
 	local Network = Shared and Shared:WaitForChild("Network", 30)
-	if not Network then dbg("server-swing hook: Network not found"); return end
-	local remote
-	for _, ch in ipairs(Network:GetChildren()) do
-		if (ch:IsA("RemoteEvent") or ch:IsA("UnreliableRemoteEvent"))
-		   and ch.Name:find("CombatClientRemote") then
-			remote = ch; break
-		end
+	local remote = Network and Network:WaitForChild("CombatClientRemoteEvent", 30)
+	if not remote or not remote:IsA("RemoteEvent") then
+		dbg("grapple-state: CombatClientRemoteEvent not found; attribute fallback only")
+		return
 	end
-	remote = remote or Network:FindFirstChild("CombatClientRemoteURE")
-	if not remote then dbg("server-swing hook: CombatClientRemote remote not found"); return end
-	remote.OnClientEvent:Connect(function(eventName, a1, ...)
-		if type(eventName) ~= "string" then return end
-		local kind
-		if eventName == "CombatM2Swing" then kind = "M2"
-		elseif eventName == "CombatM1HoldSwing" then kind = "M1" end
-		if not kind then return end
-		local ok = pcall(registerServerSwing, kind, a1)
-		if not ok then end
+	remote.OnClientEvent:Connect(function(eventName, payload)
+		if eventName == "CombatGrappleStart" then
+			State.grappleStart(payload, false)
+		elseif eventName == "CombatGrappleStartDirty" then
+			State.grappleStart(payload, true)
+		elseif eventName == "CombatGrappleEnd" then
+			State.grappleEnd(payload)
+		end
 	end)
-	dbg("server-swing hook active — listening " .. remote.Name)
+	dbg("grapple-state active — listening CombatClientRemoteEvent")
 end)
 
--- [V90.4] СЕРВЕРНЫЙ ХИТБОКС-ДЕТЕКТ / HOLD BLOCK уда��ены по запросу: детект срабатывал по
--- уже-приземлившемуся удару (реактивно), из-за чего мог держать guard и мешать. Парри теперь
--- п��лностью предиктивный (willHitMe по анимации/сервер-свингам), как �� раньше.
+-- [V90.4] Серверный hitbox-reactor удалён: он срабатывал только по уже-приземлившемуся удару,
+-- из-за чего мог держать guard и мешать. Парри теперь
+-- полностью предиктивный (willHitMe по анимации), как и раньше.
 
 local function acAvailable(name)
 	local ok, v = pcall(function()
