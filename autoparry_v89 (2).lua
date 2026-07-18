@@ -27,6 +27,7 @@ local Config = {
 	M1Forward     = 4,
 	M2Forward     = 3,
 	HitboxDepth   = 4.0,
+	HitboxDepthBack = 1.0, -- geometric rear half-extent for fallback / target-hitbox visual
 	HitHalfWidth  = 3.0,
 	HitboxSlack   = 0.5,   -- Low: small current-position tolerance
 	HighSlack     = 0.35,  -- High: small predicted-position tolerance
@@ -1188,8 +1189,15 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local gt = realHitboxHitsMe(th.name, th)
 	if gt ~= nil then
 		th.gtConfirmed, th.trustedHit = gt == true, gt == true
+		-- An active server part is authoritative: even a previously predicted candidate
+		-- is cancelled when the game's actual box misses us.
+		if not gt then th.predictLatched = false end
 		return gt
 	end
+	-- Before the server part exists, preserve a positive High projection until ground-truth
+	-- arrives. This prevents interpolation/yaw jitter from deleting a long-windup M2 between
+	-- its valid early projection and the server's delayed Hitbox part.
+	if mode == "High" and th.predictLatched then return true end
 
 	local _, forward, predA, rawLook = hitboxGeom(th)
 	if not predA or not rawLook then return Config.FilterFailSafe end
@@ -1225,6 +1233,7 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local side = math.abs(ox * (-look.Z) + oz * look.X)
 	local hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
 	th.trustedHit = hit
+	if mode == "High" and hit then th.predictLatched = true end
 	if not hit then th.offTarget = true end
 	return hit
 end)
@@ -3202,8 +3211,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				local reason
 				if th.everThreatened == nil or th.everThreatened == false then
 					reason = th.offTarget
-						and "off-target (Low facing-gate: враг предсказанно смотрит от нас → чужая атака)"
-						or "never-in-hitbox (willHitMe=false весь путь — фильтр углом/дистанцией отсёк)"
+						and "geometry-rejected (active real part missed us or predicted oriented box did not overlap)"
+						or "never-in-hitbox (no real overlap and predicted oriented box never overlapped)"
 					if th.offTarget then State.offTargetRej = (State.offTargetRej or 0) + 1 end
 				elseif th.enteredWindow then
 					reason = "in-window но не выбран EDF (перебит другой целью в т��т же кадр)"
