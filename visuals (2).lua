@@ -20,6 +20,18 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 return function(Lib, Core)
+    -- Luraph macro raw shim. Hot per-frame paths are wrapped in
+    -- LPH_NO_VIRTUALIZE(function() ... end) so Luraph keeps them native-fast. You
+    -- CANNOT declare a local/variable named LPH_* — Luraph reserves the prefix and
+    -- errors ("cannot be used as a variable name"). So when run raw we install an
+    -- identity fallback under that name via a STRING key (concat so the reserved
+    -- token never appears as an identifier). After Luraph this line is dead.
+    do
+        local k = "LPH" .. "_NO_VIRTUALIZE"
+        local G = (type(getgenv) == "function") and getgenv() or _G
+        if not G[k] then G[k] = function(f) return f end end
+    end
+
     local Players           = game:GetService("Players")
     local RunService        = game:GetService("RunService")
     local Workspace         = game:GetService("Workspace")
@@ -28,12 +40,16 @@ return function(Lib, Core)
     local UserInputService  = game:GetService("UserInputService")
 
     local LocalPlayer = Players.LocalPlayer
+	local VisualCtl
 
     -- cloneref hides our references to Camera/CoreGui from naive scans (harmless if absent)
     local cref = (type(cloneref) == "function") and cloneref or function(x) return x end
     local Camera = cref(Workspace.CurrentCamera)
-    Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-        if Workspace.CurrentCamera then Camera = cref(Workspace.CurrentCamera) end
+	local cameraConn = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		if Workspace.CurrentCamera then
+			Camera = cref(Workspace.CurrentCamera)
+			if VisualCtl then VisualCtl.bindFOV() end
+		end
     end)
 
     -- ── Config (all OFF at start; M.start enforces it) ───────────────────────
@@ -74,7 +90,89 @@ return function(Lib, Core)
         HitDir_On    = false,
         HitDir_Color = Color3.fromRGB(255, 74, 74),
         HitDir_Transparency = 0,   -- 0 = opaque, 1 = invisible
+
+		-- Camera / local identity
+		FOV_On      = false,
+		FOV_Value   = 70,
+		Name_On     = false,
+		Name_Custom = false,
+		Name_First  = "Syllinse",
+		Name_Last   = "Project",
+
+        -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
+        -- runs on Heartbeat, which fires at the monitor's refresh rate — so on a 144/240Hz screen
+        -- we were doing 2.4–4x more WorldToViewportPoint + attribute reads than the eye can see.
+        -- Capping the heavy redraw at MaxFPS (default 60) cuts that cost proportionally while
+        -- animations stay smooth (we pass the REAL accumulated dt, so lerps are framerate-correct).
+        MaxFPS = 60,
     }
+
+	-- Event-driven camera/name controls: no per-frame enforcement. Both are client-only.
+	VisualCtl = {
+		originals = setmetatable({}, { __mode = "k" }),
+		fovOriginals = setmetatable({}, { __mode = "k" }),
+		nameConns = {}, fovConn = nil,
+	}
+	function VisualCtl.applyFOV()
+		if not Camera then return end
+		if VisualCtl.fovOriginals[Camera] == nil then VisualCtl.fovOriginals[Camera] = Camera.FieldOfView end
+		if not Config.FOV_On then return end
+		local wanted = math.clamp(tonumber(Config.FOV_Value) or 70, 1, 120)
+		if math.abs(Camera.FieldOfView - wanted) > 0.01 then Camera.FieldOfView = wanted end
+	end
+	function VisualCtl.restoreFOV()
+		if not Camera then return end
+		local original = VisualCtl.fovOriginals[Camera]
+		if original and math.abs(Camera.FieldOfView - original) > 0.01 then Camera.FieldOfView = original end
+	end
+	function VisualCtl.bindFOV()
+		if VisualCtl.fovConn then VisualCtl.fovConn:Disconnect(); VisualCtl.fovConn = nil end
+		if Camera then
+			VisualCtl.fovConn = Camera:GetPropertyChangedSignal("FieldOfView"):Connect(function()
+				VisualCtl.applyFOV()
+			end)
+		end
+		VisualCtl.applyFOV()
+	end
+	function VisualCtl.clearNameConns()
+		for _, c in ipairs(VisualCtl.nameConns) do pcall(function() c:Disconnect() end) end
+		table.clear(VisualCtl.nameConns)
+	end
+	function VisualCtl.applyName(char)
+		char = char or LocalPlayer.Character
+		local pd = char and char:FindFirstChild("PlayerData")
+		if not pd then return false end
+		if not VisualCtl.originals[pd] then
+			VisualCtl.originals[pd] = { first = pd:GetAttribute("FirstName"), last = pd:GetAttribute("LastName") }
+		end
+		local src = VisualCtl.originals[pd]
+		local first = Config.Name_Custom and Config.Name_First or "Syllinse"
+		local last  = Config.Name_Custom and Config.Name_Last  or "Project"
+		if not Config.Name_On then first, last = src.first, src.last end
+		if pd:GetAttribute("FirstName") ~= first then pd:SetAttribute("FirstName", first) end
+		if pd:GetAttribute("LastName") ~= last then pd:SetAttribute("LastName", last) end
+		return true
+	end
+	function VisualCtl.bindName(char)
+		VisualCtl.clearNameConns()
+		char = char or LocalPlayer.Character
+		local pd = char and (char:FindFirstChild("PlayerData") or char:WaitForChild("PlayerData", 5))
+		if not pd then return end
+		VisualCtl.applyName(char)
+		local guard = false
+		local function enforce()
+			if guard or not Config.Name_On then return end
+			guard = true; VisualCtl.applyName(char); guard = false
+		end
+		VisualCtl.nameConns[1] = pd:GetAttributeChangedSignal("FirstName"):Connect(enforce)
+		VisualCtl.nameConns[2] = pd:GetAttributeChangedSignal("LastName"):Connect(enforce)
+	end
+	function VisualCtl.restoreAll()
+		Config.FOV_On = false
+		VisualCtl.restoreFOV()
+		Config.Name_On = false
+		VisualCtl.applyName()
+	end
 
     -- ── Watermark palette (shared by every indicator style) ──────────────────
     local WM = {
@@ -98,19 +196,35 @@ return function(Lib, Core)
         local s = pd and pd:GetAttribute("CombatStyle")
         return (type(s) == "string" and s ~= "") and s or "default"
     end
+    -- [PERF] Cooldown durations are per-STYLE constants, but these were re-fetched (with a pcall
+    -- into the game module) on EVERY frame the bar was visible. Cache the result per style key so
+    -- each style incurs exactly one pcall for its lifetime.
+    local _m2CdCache, _evCdCache = {}, {}
     local function cfgM2Cooldown(char)
-        if CombatConfig and CombatConfig.GetStyleM2Cooldown then
-            local ok, v = pcall(CombatConfig.GetStyleM2Cooldown, styleKeyOf(char))
-            if ok and type(v) == "number" then return v end
+        local k = styleKeyOf(char)
+        local v = _m2CdCache[k]
+        if v == nil then
+            v = 7
+            if CombatConfig and CombatConfig.GetStyleM2Cooldown then
+                local ok, r = pcall(CombatConfig.GetStyleM2Cooldown, k)
+                if ok and type(r) == "number" then v = r end
+            end
+            _m2CdCache[k] = v
         end
-        return 7
+        return v
     end
     local function cfgEvasiveCooldown(char)
-        if CombatConfig and CombatConfig.GetStyleEvasiveCooldown then
-            local ok, v = pcall(CombatConfig.GetStyleEvasiveCooldown, styleKeyOf(char))
-            if ok and type(v) == "number" then return v end
+        local k = styleKeyOf(char)
+        local v = _evCdCache[k]
+        if v == nil then
+            v = 1.5
+            if CombatConfig and CombatConfig.GetStyleEvasiveCooldown then
+                local ok, r = pcall(CombatConfig.GetStyleEvasiveCooldown, k)
+                if ok and type(r) == "number" then v = r end
+            end
+            _evCdCache[k] = v
         end
-        return 1.5
+        return v
     end
     -- M2Cooldown is a boolean attribute → mirror it into a timed ratio per target,
     -- using the exact duration from CombatConfig. `trk` is the per-esp o.m2t table.
@@ -191,11 +305,10 @@ return function(Lib, Core)
     }
 
     -- Resolve world-space joint points for the character. Returns (points, bones, headPart).
-    local function skeletonPoints(char)
+    local skeletonPoints = LPH_NO_VIRTUALIZE(function(char, pts)
         local head = char:FindFirstChild("Head")
         local uT   = char:FindFirstChild("UpperTorso")
-        local pts  = {}
-        local function pp(n) local p = char:FindFirstChild(n); return p and p.Position or nil end
+		pts = pts or {}
         if uT then
             -- R15
             local cf = uT.CFrame
@@ -223,7 +336,7 @@ return function(Lib, Core)
             pts.HipL      = pelvis - lrt * (lhx * 0.5)
             pts.HipR      = pelvis + lrt * (lhx * 0.5)
             for _, n in ipairs({ "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }) do
-                pts[n] = pp(n)
+				local p = char:FindFirstChild(n); pts[n] = p and p.Position or nil
             end
             return pts, BONES_R15, head
         end
@@ -243,12 +356,12 @@ return function(Lib, Core)
             pts.HipL      = hip - rt * (hx * 0.6)
             pts.HipR      = hip + rt * (hx * 0.6)
             for _, n in ipairs({ "Left Arm", "Right Arm", "Left Leg", "Right Leg" }) do
-                pts[n] = pp(n)
+				local p = char:FindFirstChild(n); pts[n] = p and p.Position or nil
             end
             return pts, BONES_R6, head
         end
         return pts, BONES_R15, head
-    end
+    end)
 
     local espPool = {}   -- [player] = { objects... }
 
@@ -293,14 +406,27 @@ return function(Lib, Core)
         o.m2   = newDrawing("Square", { Thickness = 1, Filled = true, Visible = false, Color = Config.ESP_M2_Color, ZIndex = 2 })
         o.tracer = newDrawing("Line", { Thickness = 1, Visible = false, Color = Config.ESP_Box_Color })
         o.m2t = { active = false, t0 = 0, dur = 7 }   -- per-player M2 timer (boolean attr → timed)
-        -- skeleton head circle
-        o.headCircle = newDrawing("Circle", { Thickness = 1, Filled = false, NumSides = 24, Radius = 6, Visible = false, Color = Color3.fromRGB(255, 255, 255), ZIndex = 2 })
+        -- [PERF] Skeleton is OFF by default, yet the old code eagerly built a Circle + 24 Line
+        -- Drawing objects for EVERY player up front (~25 objects/player wasted). These are now
+        -- created lazily by ensureSkeleton(o) the first time skeleton is actually drawn.
+        o.headCircle = nil
         o.bones = {}
-        for i = 1, SKELETON_MAX do
-            o.bones[i] = newDrawing("Line", { Thickness = 1, Visible = false, Color = Color3.fromRGB(255, 255, 255) })
-        end
+		o.skelPts = {}
         espPool[plr] = o
         return o
+    end
+
+    -- Lazily build the skeleton Drawings for an esp entry (head circle + bone lines). Called only
+    -- while ESP_Skeleton is on, so executors never pay for skeleton objects unless the user uses it.
+    local function ensureSkeleton(o)
+        if not o.headCircle then
+            o.headCircle = newDrawing("Circle", { Thickness = 1, Filled = false, NumSides = 24, Radius = 6, Visible = false, Color = Color3.fromRGB(255, 255, 255), ZIndex = 2 })
+        end
+        if #o.bones == 0 then
+            for i = 1, SKELETON_MAX do
+                o.bones[i] = newDrawing("Line", { Thickness = 1, Visible = false, Color = Color3.fromRGB(255, 255, 255) })
+            end
+        end
     end
 
     local function hideEsp(o)
@@ -321,7 +447,25 @@ return function(Lib, Core)
         espPool[plr] = nil
     end
 
-    local function updateEspFor(plr)
+    -- Frame-scoped caches: the local player's root and the viewport are identical
+    -- for EVERY tracked player within a single frame, so we resolve them ONCE per
+    -- Heartbeat tick (see the render loop) instead of re-doing getChar/getRoot and
+    -- a ViewportSize read for all N players every frame.
+    local _frLpRoot, _frVP
+	local _espPlayers = {}
+	local _espCount = 0
+	local function rebuildEspPlayers()
+		table.clear(_espPlayers)
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer then _espPlayers[#_espPlayers + 1] = plr end
+		end
+		_espCount = #_espPlayers
+	end
+	rebuildEspPlayers()
+
+    -- [LURAPH] Per-player ESP update — the hottest per-frame path (runs for every
+    -- tracked player each tick). LPH_NO_VIRTUALIZE keeps it native under Luraph.
+    local updateEspFor = LPH_NO_VIRTUALIZE(function(plr)
         local o = espPool[plr] or createEsp(plr)
         local char = getChar(plr)
         if not (Config.ESP_On and char and isAlive(char)) then hideEsp(o); return end
@@ -330,8 +474,7 @@ return function(Lib, Core)
         local root = getRoot(char)
         if not (hum and root) then hideEsp(o); return end
 
-        local lpChar = getChar(LocalPlayer)
-        local lpRoot = lpChar and getRoot(lpChar)
+        local lpRoot = _frLpRoot
         local dist = lpRoot and (root.Position - lpRoot.Position).Magnitude or 0
         if Config.ESP_MaxDist > 0 and dist > Config.ESP_MaxDist then hideEsp(o); return end
 
@@ -341,9 +484,15 @@ return function(Lib, Core)
         -- WORLD-up from the root; width is a fixed portrait ratio of that height. Because
         -- nothing here reads the model's orientation/CFrame, shiftlock (which yaws the
         -- character toward the camera) can no longer shift or breathe the box.
-        local _, size = char:GetBoundingBox()
+		-- BoundingBox is expensive and body dimensions almost never change. Cache per character;
+		-- invalidate only on respawn/model replacement instead of recomputing N×60 times/sec.
+		if o.boundChar ~= char then
+			o.boundChar = char
+			local ok, _, size = pcall(char.GetBoundingBox, char)
+			o.boundY = ok and size and size.Y or 6
+		end
         local anchor = root.Position
-        local halfH  = size.Y * 0.5
+		local halfH  = o.boundY * 0.5
         local topSp, onT = Camera:WorldToViewportPoint(anchor + Vector3.new(0, halfH, 0))
         local botSp, onB = Camera:WorldToViewportPoint(anchor - Vector3.new(0, halfH, 0))
         if not (onT or onB) then hideEsp(o); return end
@@ -440,7 +589,7 @@ return function(Lib, Core)
 
         -- Tracer (from bottom-center of screen to box bottom)
         if Config.ESP_Tracer then
-            local vp = Camera.ViewportSize
+            local vp = _frVP or Camera.ViewportSize   -- [PERF] frame-cached viewport
             o.tracer.Color = Config.ESP_Box_Color
             o.tracer.From = Vector2.new(vp.X / 2, vp.Y)
             o.tracer.To = Vector2.new(bx + bw / 2, by + bh)
@@ -451,7 +600,8 @@ return function(Lib, Core)
 
         -- Skeleton (computed joints + head circle)
         if Config.ESP_Skeleton then
-            local pts, bones, headPart = skeletonPoints(char)
+            ensureSkeleton(o)
+            local pts, bones, headPart = skeletonPoints(char, o.skelPts)
             local col = Config.ESP_Box_Color
             local used = 0
             for _, pair in ipairs(bones) do
@@ -494,9 +644,9 @@ return function(Lib, Core)
             end
         else
             for _, b in ipairs(o.bones) do b.Visible = false end
-            o.headCircle.Visible = false
+            if o.headCircle then o.headCircle.Visible = false end
         end
-    end
+    end)
 
     -- ═══════════════════════════════════════════════════════════════��═══════
     -- INDICATORS  (Neverlose-style animated GUI)
@@ -813,7 +963,12 @@ return function(Lib, Core)
             TweenService:Create(r.stroke, TW_OUT, { Transparency = 1 }):Play()
             TweenService:Create(r.label, TW_OUT, { TextTransparency = 1 }):Play()
             local t = TweenService:Create(r.value, TW_OUT, { TextTransparency = 1 })
-            t.Completed:Connect(function() if not r.shown then r.frame.Visible = false end end)
+            -- [PERF] disconnect after it fires — the old code leaked one Completed connection per
+            -- hide (they piled up every time a row toggled off).
+            local cn; cn = t.Completed:Connect(function()
+                if cn then cn:Disconnect(); cn = nil end
+                if not r.shown then r.frame.Visible = false end
+            end)
             t:Play()
         end
     end
@@ -877,7 +1032,7 @@ return function(Lib, Core)
     local staminaMax = 100
 
     -- read every LOCAL indicator's { show, ratio, text, color }
-    local function readIndicator(key, char, hum)
+    local readIndicator = LPH_NO_VIRTUALIZE(function(key, char, hum)
         local A = function(n) return char:GetAttribute(n) end
 
         if key == "Health" then
@@ -930,21 +1085,26 @@ return function(Lib, Core)
             return false
         end
         return false
-    end
+    end)
 
     -- short labels used by the minimalist Drawing styles
     local STAT_LABELS = { Health = "HP", Stamina = "Stamina", IFrame = "I-Frame", M2 = "Heavy", Dodge = "Dodge", Block = "Block" }
 
     -- ordered list of currently-active local stats { key, ratio, text, color }
+	local statsBuf, statsN = {}, 0
     local function collectStats(char, hum)
-        local list = {}
-        for _, key in ipairs(rowOrder) do
-            local show, ratio, text, color = readIndicator(key, char, hum)
-            if show then
-                list[#list + 1] = { key = key, ratio = ratio or 0, text = text or "", color = color or Config.Ind_Accent }
-            end
-        end
-        return list
+		statsN = 0
+		for _, key in ipairs(rowOrder) do
+			local show, ratio, text, color = readIndicator(key, char, hum)
+			if show then
+				statsN = statsN + 1
+				local s = statsBuf[statsN]
+				if not s then s = {}; statsBuf[statsN] = s end
+				s.key, s.ratio, s.text, s.color = key, ratio or 0, text or "", color or Config.Ind_Accent
+			end
+		end
+		for i = statsN + 1, #statsBuf do statsBuf[i] = nil end
+		return statsBuf
     end
 
     -- Drawing indicator STYLE definitions (clean, NO background panel — just text +
@@ -996,16 +1156,17 @@ return function(Lib, Core)
     -- Animated vertical stack drawn as clean text rows with a thin accent progress bar
     -- underneath each. No background box. Rows ease into their slot and fade in/out.
     -- (centerX, topY) is the top-centre of the block.
-    local function renderDrawStack(stats, dt, def, centerX, topY, sc)
+	local activeStats = {}
+    local renderDrawStack = LPH_NO_VIRTUALIZE(function(stats, dt, def, centerX, topY, sc)
         local width, step, txtSize = def.width * sc, def.row * sc, def.txt * sc
         local left, right = centerX - width / 2, centerX + width / 2
         local aA = math.clamp(dt * 12, 0, 1)
 
-        local activeMap = {}
-        for i, s in ipairs(stats) do activeMap[s.key] = { idx = i, stat = s } end
+        for k in pairs(activeStats) do activeStats[k] = nil end
+        for i, s in ipairs(stats) do s.idx = i; activeStats[s.key] = s end
         for _, key in ipairs(rowOrder) do
             local c  = getDrawCell(key)
-            local am = activeMap[key]
+            local am = activeStats[key]
             c.alpha = lerp(c.alpha, am and 1 or 0, aA)
             if am then
                 local slotY = topY + (am.idx - 1) * step
@@ -1016,9 +1177,9 @@ return function(Lib, Core)
                 hideDrawCell(c); if not am then c.hasY = false end
             else
                 local rowY  = c.y
-                local ratio = am and am.stat.ratio or c.dispRatio
+                local ratio = am and am.ratio or c.dispRatio
                 c.dispRatio = lerp(c.dispRatio, ratio, aA)
-                local col   = am and am.stat.color or Config.Ind_Accent
+                local col   = am and am.color or Config.Ind_Accent
 
                 c.label.Size = txtSize
                 c.label.Text = STAT_LABELS[key] or key
@@ -1027,7 +1188,7 @@ return function(Lib, Core)
                 c.label.Transparency = c.alpha
                 c.label.Visible = true
 
-                if am then c.value.Text = am.stat.text end
+                if am then c.value.Text = am.text end
                 c.value.Size = txtSize
                 c.value.Position = Vector2.new(right - textWidth(c.value), rowY)
                 c.value.Color = WM.txtMain
@@ -1045,9 +1206,9 @@ return function(Lib, Core)
                 c.fill.Color = col; c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
             end
         end
-    end
+    end)
 
-    local function updateIndicators(dt)
+    local updateIndicators = LPH_NO_VIRTUALIZE(function(dt)
         -- smooth drag follow (runs whenever the HUD exists so it eases into place)
         if indHolder then
             drag.disp = drag.disp:Lerp(drag.target, math.clamp(dt * 16, 0, 1))
@@ -1085,7 +1246,7 @@ return function(Lib, Core)
             for _, r in pairs(rows) do setRowShown(r, false) end
         end
 
-        -- ── Drawing styles (Simple / Player / Free) ─────────────────────────
+        -- ── Drawing styles (Simple / Player / Free) ───────────────��─────────
         local def = DRAW_STYLES[style] and STYLE_DEFS[style] or nil
         if char and hasDrawing and def then
             local stats = collectStats(char, hum)
@@ -1155,7 +1316,7 @@ return function(Lib, Core)
         else
             hideAllDrawCells()
         end
-    end
+    end)
 
     -- ═════════════════════════════════════════════════════════════════���═════
     -- HIT DIRECTION  (fading arrows around the crosshair)
@@ -1208,7 +1369,7 @@ return function(Lib, Core)
         return math.atan2(flatRel:Dot(rightF), flatRel:Dot(lookF))
     end
 
-    local function updateHitDir()
+    local updateHitDir = LPH_NO_VIRTUALIZE(function()
         if not hasDrawing then return end
         local vp = Camera.ViewportSize
         local cx, cy = vp.X / 2, vp.Y / 2
@@ -1248,7 +1409,7 @@ return function(Lib, Core)
                 h.tri.Visible = trans > 0.02
             end
         end
-    end
+    end)
 
     local function onLocalDamage()
         local ang = nearestAttackerAngle()
@@ -1268,7 +1429,7 @@ return function(Lib, Core)
 
     -- ═══════════════════════════════════════════════════════════════════════
     -- Lifecycle wiring
-    -- ═══════════════════════════════════════════════════════════════════════
+    -- ═══════════════════════════��═══════════════════════════════════════════
     local conns = {}
     local function track(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
 
@@ -1289,8 +1450,12 @@ return function(Lib, Core)
             task.wait(0.4)
             for _, t in pairs(cdTracks) do t.active = false end   -- reset cooldown timers on respawn
             hookLocalHumanoid()
+            VisualCtl.bindName(LocalPlayer.Character)
         end)
-        track(Players.PlayerRemoving, function(plr) destroyEsp(plr) end)
+        track(Players.PlayerAdded, rebuildEspPlayers)
+        track(Players.PlayerRemoving, function(plr) destroyEsp(plr); rebuildEspPlayers() end)
+        VisualCtl.bindFOV()
+        VisualCtl.bindName(LocalPlayer.Character)
 
         -- master render loop — bound to Heartbeat, NOT RenderStepped.
         -- RenderStepped fires BEFORE Roblox's camera BindToRenderStep step, so under
@@ -1300,16 +1465,46 @@ return function(Lib, Core)
         -- Camera.CFrame is fully current and the shiftlock offset is baked in. This is
         -- exactly how the working BRM5 ESP avoids the shift. The one-frame draw latency
         -- is imperceptible and is the correct trade-off here.
-        track(RunService.Heartbeat, function(dt)
+        local _acc, _espWasOn, indicatorsWereOn = 0, false, false
+        track(RunService.Heartbeat, LPH_NO_VIRTUALIZE(function(dt)
+            -- [PERF] Throttle the heavy redraw to MaxFPS. We accumulate real time and only run the
+            -- pipeline once per frame-budget, passing the ACCUMULATED dt so every lerp/animation
+            -- advances by true elapsed time (smooth even though we tick fewer times/sec).
+            _acc = _acc + dt
+            local budget = (Config.MaxFPS and Config.MaxFPS > 0) and (1 / Config.MaxFPS) or 0
+            if _acc < budget then return end
+            local fdt = _acc
+            _acc = 0
+
             if hasDrawing then
-                for _, plr in ipairs(Players:GetPlayers()) do
-                    if plr ~= LocalPlayer then updateEspFor(plr) end
+                if Config.ESP_On then
+                    -- [PERF] Resolve the local player's root + viewport ONCE per tick.
+                    -- These are identical for all N tracked players, so doing them
+                    -- here (instead of inside updateEspFor per player) removes N-1
+                    -- redundant getChar/getRoot/ViewportSize reads every frame.
+                    local lpChar = getChar(LocalPlayer)
+                    _frLpRoot = lpChar and getRoot(lpChar) or nil
+                    _frVP = Camera and Camera.ViewportSize or nil
+                    -- Only touch players (and lazily create their pools) while ESP is actually on.
+                    for i = 1, _espCount do updateEspFor(_espPlayers[i]) end
+                    _espWasOn = true
+                elseif _espWasOn then
+                    -- ESP just turned off → hide existing pools ONCE, then stop iterating entirely.
+                    for _, o in pairs(espPool) do hideEsp(o) end
+                    _espWasOn = false
                 end
             end
-            updateIndicators(dt)
-            pollLocalDamage()
-            updateHitDir()
-        end)
+			-- Avoid all indicator attribute reads/property writes while disabled. One transition
+			-- tick hides any live rows/cells; subsequent frames skip the subsystem entirely.
+			if Config.Ind_On then
+				updateIndicators(fdt)
+			elseif indicatorsWereOn then
+				updateIndicators(fdt)
+			end
+			indicatorsWereOn = Config.Ind_On
+			pollLocalDamage()
+			if Config.HitDir_On or #hitArrows > 0 then updateHitDir() end
+            end))
     end
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -1381,6 +1576,58 @@ return function(Lib, Core)
 
         local V = ctx.tabs.Visuals
 
+        -- ─────────────── Camera + local nametag ───────────────
+        local sLocal = V:Section({ Side = "Right" })
+        sLocal:Header({ Name = "Local Visuals" })
+        sLocal:Toggle({
+            Name = "FOV Changer", Default = Config.FOV_On,
+            Callback = function(v)
+                Config.FOV_On = v and true or false
+                if Config.FOV_On then VisualCtl.applyFOV() else VisualCtl.restoreFOV() end
+                notify("FOV Changer", Config.FOV_On and "Enabled" or "Disabled")
+            end,
+        }, ctx.flag("VIS_FOV_On"))
+        sLocal:Slider({
+            Name = "Field of View", Default = Config.FOV_Value,
+            Minimum = 30, Maximum = 120, Precision = 0, Suffix = "°",
+            Callback = function(v) Config.FOV_Value = v; VisualCtl.applyFOV() end,
+        }, ctx.flag("VIS_FOV_Value"))
+
+        sLocal:Toggle({
+            Name = "Name Changer", Default = Config.Name_On,
+            Callback = function(v)
+                Config.Name_On = v and true or false
+                VisualCtl.applyName()
+                notify("Name Changer", Config.Name_On and "Enabled" or "Disabled")
+            end,
+        }, ctx.flag("VIS_Name_On"))
+        sLocal:SubLabel({ Text = "Default: Syllinse Project. Local-only; updates the game's own billboard/nameplate." })
+		local customInputs = {}
+		local function setCustomInputVisibility(v)
+			for _, el in ipairs(customInputs) do pcall(function() el:SetVisibility(v) end) end
+		end
+		sLocal:Toggle({
+            Name = "Custom", Default = Config.Name_Custom,
+			Callback = function(v)
+				Config.Name_Custom = v and true or false
+				setCustomInputVisibility(Config.Name_Custom)
+				VisualCtl.applyName()
+			end,
+        }, ctx.flag("VIS_Name_Custom"))
+		customInputs[1] = sLocal:Input({
+            Name = "First Name", Default = Config.Name_First, Placeholder = "Syllinse",
+            AcceptedCharacters = "All", CharacterLimit = 24,
+            Callback = function(v) Config.Name_First = tostring(v or ""); VisualCtl.applyName() end,
+            onChanged = function(v) Config.Name_First = tostring(v or ""); VisualCtl.applyName() end,
+        }, ctx.flag("VIS_Name_First"))
+        customInputs[2] = sLocal:Input({
+            Name = "Last Name", Default = Config.Name_Last, Placeholder = "Project",
+            AcceptedCharacters = "All", CharacterLimit = 24,
+            Callback = function(v) Config.Name_Last = tostring(v or ""); VisualCtl.applyName() end,
+            onChanged = function(v) Config.Name_Last = tostring(v or ""); VisualCtl.applyName() end,
+        }, ctx.flag("VIS_Name_Last"))
+		setCustomInputVisibility(Config.Name_Custom)
+
         -- ─────────────── Section 1: ESP (Left) ───────────────
         local sEsp = V:Section({ Side = "Left" })
         sEsp:Header({ Name = "ESP" })
@@ -1404,6 +1651,9 @@ return function(Lib, Core)
         colorpick(sEsp, "Box Color", "VIS_ESP_BoxCol", Config.ESP_Box_Color, function(c) Config.ESP_Box_Color = c end)
         colorpick(sEsp, "Text Color", "VIS_ESP_TxtCol", Config.ESP_Text_Color, function(c) Config.ESP_Text_Color = c end)
         colorpick(sEsp, "Heavy (M2) Bar Color", "VIS_ESP_M2Col", Config.ESP_M2_Color, function(c) Config.ESP_M2_Color = c end)
+        slider(sEsp, { Name = "Render FPS Cap", Flag = "VIS_MaxFPS", Default = Config.MaxFPS,
+            Min = 30, Max = 240, Suffix = " fps", Callback = function(v) Config.MaxFPS = v end })
+        sEsp:SubLabel({ Text = "Caps how often visuals redraw. Lower = less CPU/GPU (60 is smooth). Raise only if you have a high-refresh monitor and spare frames." })
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
@@ -1513,6 +1763,10 @@ return function(Lib, Core)
     end
 
     function M.stop()
+        VisualCtl.restoreAll()
+        VisualCtl.clearNameConns()
+        if VisualCtl.fovConn then VisualCtl.fovConn:Disconnect(); VisualCtl.fovConn = nil end
+		if cameraConn then cameraConn:Disconnect(); cameraConn = nil end
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
         conns = {}
         for _, c in ipairs(dragConns) do pcall(function() c:Disconnect() end) end
