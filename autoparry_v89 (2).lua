@@ -2220,8 +2220,18 @@ local function tryGrappleWin(now)
 	local model = foe and foe.Parent
 	if not model then return false end
 	if not State.ap.getM1() then return false end
-	State.ap.snapTo(foe)
-	local fired = State.ap.fireM1Custom(localChar(), model, nil, false, true, false)
+	-- Do NOT snapTo/teleport during grapple: Grapple.lua owns character positions via
+	-- alignVictimToAttacker / applyAuthoritativeSnap. Only send a legitimate M1 server
+	-- check through tryM1Fn (the same path as a real player pressing M1 during grapple).
+	-- Animation is driven by Grapple.lua itself; custom-fire animations conflict with it.
+	local fired = false
+	if State.ap.tryM1Fn then
+		local ok, res = pcall(State.ap.tryM1Fn)
+		fired = ok and res == true
+	else
+		pcall(function() State.ap.getM1().OnM1Activated() end)
+		fired = true
+	end
 	if not fired then return false end
 	State.status = "GRAPPLE-WIN"
 	diagPush(("GRAPPLE-WIN t=%.2f  (M1 spam in grapple)"):format(now))
@@ -2243,8 +2253,10 @@ local function isMustDodge(th)
 	-- Wrestling M2 is a guaranteed grab with HyperArmor; Dirty grab ignores ragdoll immunity —
 	-- both pass through the Blocking attribute, so only i-frames (a backdodge) save you.
 	if Config.SkillAddon then
-		if Config.SA_WrestlingGrab and st == "wrestling" and th.kind == "M2" then return true end
-		if Config.SA_DirtyGrab and st == "dirty" and (th.kind == "M2" or th.kind == "SKILL") then return true end
+		-- SA grabs are a subset of the Must-Dodge list: they respect the MustDodge master toggle.
+		-- If user empties MustDodgeStyles and turns off MustDodge, SA grabs also stop force-dodging.
+		if Config.MustDodge and Config.SA_WrestlingGrab and st == "wrestling" and th.kind == "M2" then return true end
+		if Config.MustDodge and Config.SA_DirtyGrab and st == "dirty" and (th.kind == "M2" or th.kind == "SKILL") then return true end
 	end
 	if not Config.MustDodge then return false end
 	local byStyle = Config.MustDodgeStyles and Config.MustDodgeStyles[st]
@@ -3520,6 +3532,31 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				clusterStrategy = "SEQUENTIAL"
 			end
 		end
+		-- [V138] DODGE_M1_PARRY_M2: two DIFFERENT attackers — player A throws a fast M1 while
+		-- player B already has a heavy M2 (e.g. Boxing M2) in the air. Best solution:
+		--   dodge the M1 in its iframe window → as soon as iframes drop, parry the M2.
+		-- Conditions:
+		--   1. First threat is M1, second is M2, from DIFFERENT attackers.
+		--   2. M1 contact fits exactly in the dodge iframe window.
+		--   3. M2 contact leaves enough time to press block after iframes end.
+		--   4. Neither is an unblockable must-dodge (those take their own path).
+		if not clusterStrategy and clusterN >= 2 then
+			local first, second = cluster[1], cluster[2]
+			if first and second
+				and first.kind == "M1" and second.kind == "M2"
+				and first.attackerModel ~= second.attackerModel
+				and not isMustDodge(first) and not isMustDodge(second) then
+				local m1Dt  = first.contactAbs - now
+				local m2Dt  = second.contactAbs - now
+				local dLo   = Config.DodgeConfirm - 0.03
+				local dHi   = Config.DodgeConfirm + Config.IFrameDur - 0.04
+				-- M2 must leave room for a full block press after the dodge lands
+				local m2Gap = m2Dt - (Config.DodgeConfirm + Config.IFrameDur)
+				if m1Dt >= dLo and m1Dt <= dHi and m2Gap >= (Config.PerfectLead or 0.0625) + (Config.UplinkMax or 0.25) then
+					clusterStrategy = "DODGE_M1_PARRY_M2"
+				end
+			end
+		end
 		if not clusterStrategy then
 			clusterStrategy = clusterSpread <= iframeSpan and "IFRAME_CLUSTER" or "HELD_GUARD"
 		end
@@ -3563,6 +3600,22 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- acknowledgement: Evasive.lua itself rejects requests while Blocking, and a new block
 	-- remote can cancel the just-requested dodge. Coverage is resolved by updateDodgeTxn.
 	if State.dodgeTxn and State.dodgeTxn.pending then return end
+
+	-- [V138] DODGE_M1_PARRY_M2 execution: fire a dodge to cover the incoming M1 with iframes.
+	-- The M2 is left in imminent and will be picked up as wantBlock in the normal parry path
+	-- once the dodge transaction resolves. Mark the M1 as covered so EDF skips it for parry.
+	if clusterStrategy == "DODGE_M1_PARRY_M2" and dodgeReady() and canDodgeNow() then
+		local m1th = cluster[1]
+		local m1Dt = m1th.contactAbs - now
+		local dLo  = Config.DodgeConfirm - 0.03
+		local dHi  = Config.DodgeConfirm + Config.IFrameDur - 0.04
+		if m1Dt >= dLo and m1Dt <= dHi then
+			if performDodge(now, "dodge-m1-parry-m2") then
+				m1th.coveredByDodge = true
+				return
+			end
+		end
+	end
 
 	-- MustDodge is its own protection path, independent of DodgeHeavy and cluster policy.
 	-- Scan all live imminent threats before any legacy heavy/escape decision.
@@ -6017,7 +6070,7 @@ return function(_Lib, _Core)
 		})
 		boolToggle(apDodge, "Dodge All Heavies", "Dodge All Heavies",
 			function() return Config.DodgeHeavy end, function(v) Config.DodgeHeavy = v end)
-		apDodge:SubLabel({ Text = "dodge EVERY heavy attack instead of blocking\nnot recommended — burns i-frames" })
+		apDodge:SubLabel({ Text = "when block is unavailable and a heavy (M2) is coming:\ndodge it instead of eating the hit\n(unblockable grabs always dodged via Must-Dodge)" })
 		boolToggle(apDodge, "Dodge If Cant Parry", "Dodge If Cant Parry",
 			function() return Config.DodgeOnParryCooldown ~= false end,
 			function(v) Config.DodgeOnParryCooldown = v end)
