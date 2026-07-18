@@ -809,6 +809,7 @@ local V93 = {
 	seenAttackers = {},
 	threatSeen = {},
 	interruptSeen = {},
+	boxingM2Contacts = { 0.6000000, 1.0500000 }, -- static .anim Hit markers; config confirms count=2
 	ownM1Info = { t = "M1", s = "Basic" },
 	sortByContact = function(a, b) return a.contactAbs < b.contactAbs end,
 	-- [V132] reusable RaycastParams for dodge wall-check
@@ -1186,6 +1187,9 @@ end
 -- contactAbs in to make the iframe window cover the actual registration window.
 local syncContactWithHitbox = LPH_NO_VIRTUALIZE(function(th, now)
 	if not Config.HitboxDodge then return end
+	-- Один Boxing hitbox живёт через оба страйка. Его первое появление нельзя использовать
+	-- для snap второго deadline, иначе Hit#2 схлопнется в Hit#1.
+	if (th.strike or 1) > 1 then return end
 	if th.dodged or th.hitboxSynced then return end
 	local part, dist = hitboxNearestPart(th.name)
 	if not part then return end
@@ -1995,10 +1999,12 @@ local function resolveInfo(id, model)
 	local kind = entry.kind
 	local rk = registryKind and registryKind(model, id)
 	if rk == "M1" or rk == "M2" then kind = rk end
+	local style = styleOf(model) or (legacy and legacy.s) or "Basic"
 	return {
 		t     = kind,
-		s     = styleOf(model) or (legacy and legacy.s) or "Basic",
+		s     = style,
 		hit   = entry.hit,
+		contacts = (kind == "M2" and string.lower(style) == "boxing") and V93.boxingM2Contacts or nil,
 		combo = entry and entry.combo,
 		mom   = (entry and entry.mom) or (legacy and legacy.mom) or false,
 		name  = entry and entry.name or nil,
@@ -2059,8 +2065,8 @@ end
 -- ��елает игра (GetScaledHitboxDelay: delay/mult). ��дин общий множитель покрывает M1,
 -- M2 и скиллы всех стилей БЕЗ ручных патчей — если игра добавит новый стиль/атаку,
 -- б��за подтянется из её же ��онфига, а скорость — из роста атакующего.
-local function hitTimeline(info, combo, mult)
-	local base = hitTimelineBase(info, combo)
+local function hitTimeline(info, combo, mult, contactBase)
+	local base = contactBase or hitTimelineBase(info, combo)
 	local m = (type(mult) == "number" and mult > 0.05) and mult or 1
 	-- [V124] Сервер делит ВСЕ hitbox-задержки на mult роста атакующего (GetScaledHitboxDelay:
 	-- delay/mult) — и M1, и M2, и скиллы. Диаг подтвердил: Basic M2 0.525/1.09=482мс = measured
@@ -3021,7 +3027,9 @@ function State.ap.tryInterrupt(now, th, threatCount)
 	local ap = State.ap
 	if not Config.AutoPlay or Config.AP_Interrupt == false then return false end
 	if threatCount ~= 1 or not th or th.pressed or th.dodged or th.interruptAttempted then return false end
-	if th.kind ~= "M2" then return false end
+	-- M1 тоже можно сбить, если наш style/height-scaled M1 действительно быстрее.
+	-- SKILL не включаем: часть спец-атак всё ещё имеет только fallback timing 0.35 без marker/config.
+	if th.kind ~= "M1" and th.kind ~= "M2" then return false end
 	-- Unblockable/grab policy всегда важнее агрессии: эти атаки уже имеют отдельный must-dodge путь.
 	if isMustDodge(th) then return false end
 	if not ap.interruptible(th) or not ap.canAttack(true) then return false end
@@ -3034,6 +3042,7 @@ function State.ap.tryInterrupt(now, th, threatCount)
 	if ownHit + margin >= enemyLeft then return false end
 	if not ap.fireM1(th.attackerModel, "interrupt", true, true) then return false end
 	th.interruptAttempted = true
+	State.interruptFiredFrame = FrameId
 	State.status = "INTERRUPT"
 	diagPush(("INTERRUPT t=%.2f %s %s(%s) combo=%d ours=%.0fms enemy=%.0fms margin=%.0fms guard=fallback")
 		:format(now, th.name or "?", th.kind or "?", th.style or "?", combo or 0,
@@ -3365,7 +3374,8 @@ local function onAttack(attackerHRP, info, model, id, track)
 	-- track.Speed для чужих игро��ов ��еплицируется как 1.0, по��тому берём из роста.
 	local aMult    = attackSpeedMult(model)
 	local heightAttr, bodyHeightScale, modelHeight = heightDiag(model)
-	local hitTL    = hitTimeline(info, combo, aMult)
+	local hitTL    = info.contacts and (info.contacts[1] / math.max(aMult, 0.05))
+		or hitTimeline(info, combo, aMult)
 	local speed    = 1
 	local already  = 0
 	if track then
@@ -3412,11 +3422,33 @@ local function onAttack(attackerHRP, info, model, id, track)
 
 	local rec = { clock = nowClock, detectServer = nowServer, type = info.t, style = info.s,
 	              id = id, contact = remaining0, pingRaw = getPingRaw(), combo = combo,
-	              speed = speed, matched = false, th = th }
+	              speed = speed, matched = false, th = th, strike = 1 }
 	th.rec = rec
 	local q = Pending[name]; if not q then q = {}; Pending[name] = q end
 	q[#q+1] = rec
-	if #q > 10 then table.remove(q, 1) end
+	-- Boxing M2: CombatConfig.M2MultiHitCount=2, .anim Hit markers=[0.60,1.05].
+	-- Второй marker — отдельный EDF deadline той же атаки, а не telemetry follow-up.
+	if info.contacts and info.contacts[2] then
+		local group = { cancelled = false, held = false }
+		th.group, th.strike = group, 1
+		local hit2 = info.contacts[2] / math.max(aMult, 0.05)
+		local rem2 = math.max(0, hit2 - already)
+		local th2 = table.clone(th)
+		th2.hitTL, th2.contact0, th2.contactAbs = hit2, rem2, nowClock + rem2
+		group.lastContact = th2.contactAbs
+		th2.strike, th2.pressed, th2.dodged = 2, false, false
+		th2.pressDt, th2.faceDot, th2.rec = nil, nil, nil
+		th2.hitboxSeen, th2.hitboxSynced, th2.hitboxPart = nil, nil, nil
+		Threats[#Threats+1] = th2
+		local rec2 = { clock = nowClock, detectServer = nowServer, type = info.t, style = info.s,
+			id = id, contact = rem2, pingRaw = rec.pingRaw, combo = combo,
+			speed = speed, matched = false, th = th2, strike = 2 }
+		th2.rec = rec2
+		q[#q+1] = rec2
+		diagPush(("MULTI  t=%.2f  %s M2(Boxing) contacts=[%.0f,%.0f]ms markers=[600,1050]ms")
+			:format(nowClock, name, remaining0*1000, rem2*1000))
+	end
+	while #q > 10 do table.remove(q, 1) end
 
 	State.lastThreat = { name = name, type = info.t, dist = dist, hitIn = remaining0 }
 	if State.status ~= "PARRY" then State.status = "THREAT" end
@@ -3603,7 +3635,9 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local noTrackExpired = (not th.track)
 				and (now - th.detectClock) > ((th.contact0 or 0) + 0.35)
 
-			if th.feinted then
+			if th.resolved or (th.group and th.group.cancelled) then
+				table.remove(Threats, i)
+			elseif th.feinted then
 				if not th.feintLogged then
 					th.feintLogged = true
 					diagPush(("FEINT  t=%.2f  %s  %s  reached=%.0f%% of hitTL → ignored")
@@ -3662,6 +3696,13 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			th.threatens = threatens
 			if threatens then th.everThreatened = true end
 			if threatens then
+				-- После normal block первого Boxing strike свежий perfect на втором физически
+				-- невозможен из-за BlockCooldown=0.5с > marker gap≈0.45с. Не роняем guard.
+				if th.group and th.group.held and State.blocking then
+					th.pressed, th.coveredByHeldGuard = true, true
+					State.holdUntil = math.max(State.holdUntil or 0,
+						(th.group.lastContact or th.contactAbs) + Config.HoldAfter + (Config.HoldLateGrace or 0))
+				end
 				-- AutoPlay interrupt использует уже готовую геометрию/таймлайн этого же scheduler.
 				-- Safety-count = разные атакующие, а не animation tracks одного комбо-врага.
 				local ik = th.attackerModel or th.attackerHRP or th.name
@@ -3669,9 +3710,9 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					V93.interruptSeen[ik] = true
 					State.interruptThreatCount = State.interruptThreatCount + 1
 				end
-				-- Кандидат = earliest HEAVY. Раньше более ранний M1 занимал слот, затем
-				-- tryInterrupt отклонял его по kind и до лежащей рядом M2 вообще не доходил.
-				if th.kind == "M2" and (not State.interruptCandidate
+				-- Кандидат = earliest точно рассчитанная M1/M2, которую наш M1 потенциально успеет сбить.
+				-- Enemy contact уже включает его style/combo/рост/live TimePosition.
+				if (th.kind == "M1" or th.kind == "M2") and (not State.interruptCandidate
 				   or th.contactAbs < State.interruptCandidate.contactAbs) then
 					State.interruptCandidate = th
 				end
@@ -4035,17 +4076,16 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 	end
 
-	-- [V110] Interrupt Heavies УДАЛЁН (юзер: не срабатывал на тяжёлые вовсе и ломал парри —
-	-- скрипт ждал «перехвата», которого не было, вместо чес��ного блока/доджа). Теперь тяжёлые
-	-- обрабатываются ТОЛЬКО обычным путём: must-dodge (грэбы) → block/perfect-parry. Надёжнее.
-
+	-- Legacy Boxing counter оставлен только как отдельный SkillAddon fallback. Когда новый
+	-- AutoPlay interrupt включён, он единолично решает M1/M2 по точным deadline и сохраняет parry.
 	-- [V122] BOXING COUNTER (instant). Вместо парирования МОМЕНТАЛЬНО бьём M2 по ближайшему
 	-- атакующему в радиусе, если наш стиль Boxing и M2 не на кулдауне. Стоит ПОСЛЕ must-dodge
 	-- (грэбы всё равно доджим) и обычных додж��й, но ДО блока — counter ЗАМЕНЯЕТ парри. НЕ зависит
 	-- от wantBlock/willHitMe (тот баговал на delayed-hitbox M2) — скан идёт по сырым Threats, так
 	-- что counter срабатывает даже когда предиктор-геометрия отка��ала. Выстрелил → скип блока.
 	-- Grapple обрабатывается отдельным ранним state-path в начале schedulerStep.
-	if tryBoxingCounter(now) then return end
+	if (not Config.AutoPlay or Config.AP_Interrupt == false)
+	   and State.interruptFiredFrame ~= FrameId and tryBoxingCounter(now) then return end
 
 	if wantBlock then
 		-- ParryWindowDisabled запрещает perfect-window, но не обычный guard. Если guard уже
@@ -4197,8 +4237,16 @@ local function onOutcome(attacker, result, kind, eventClock)
 			local r = q[i]
 			if (eventClock - r.clock) <= Config.MatchWindow and outcomeTypeMatches(r.type, kind) then
 				if not r.matched then
-					if r.type == kind then rec = r; break          -- точный тип — берём сразу
-					elseif not looseRec then looseRec = r end        -- SKILL↔M2 — запасной кандидат
+					-- Multi-hit одной анимации создаёт несколько одинаковых M2 records. Матчим
+					-- исход к БЛИЖАЙШЕМУ ожидаемому strike deadline, а не к последней записи queue.
+					local score = math.abs((eventClock - r.clock) - (r.contact or 0))
+					if r.type == kind then
+						if not rec or score < (rec.matchScore or math.huge) then
+							rec, r.matchScore = r, score
+						end
+					elseif not looseRec or score < (looseRec.matchScore or math.huge) then
+						looseRec, r.matchScore = r, score
+					end
 				elseif not followUp and (eventClock - r.clock) <= Config.MultiHitWindow then
 					followUp = r   -- уже засчитанный свинг → это ПОЗДНИЙ страйк той же атаки
 				end
@@ -4254,16 +4302,21 @@ local function onOutcome(attacker, result, kind, eventClock)
 		end
 	end
 
-	-- AutoPlay: идеальное парри → враг в стане. Первый безопасный scheduler-step попробует
-	-- priority M1 после server minimum gap, не ожидая обычного sustained cadence.
-	if result == "PERFECT" then State.ap.onPerfectParry(attacker, kind) end
-
 	-- rec/followUp уже вычислены в начале функции (до мутаций state).
 	if not rec then
 		diagPush(("OUT    t=%.2f  %s  %s  %s  (no fresh swing)"):format(eventClock, attacker, kind, result))
 		return
 	end
 	rec.matched = true
+	if rec.th then rec.th.resolved = true end
+	if result == "PERFECT" and rec.th and rec.th.group then
+		rec.th.group.cancelled = true -- perfect первого strike останавливает оставшуюся атаку
+	elseif result == "EARLY" and rec.th and rec.th.group then
+		rec.th.group.held = true -- ordinary block: держим guard до второго marker
+	end
+	-- Только подтверждённый matched PERFECT открывает punish. Threat уже resolved, поэтому
+	-- следующий Heartbeat не ждёт старый hold/deadline и сразу запускает priority M1.
+	if result == "PERFECT" then State.ap.onPerfectParry(attacker, kind) end
 
 	local measured = eventClock - rec.clock
 	local predErr  = (measured - rec.contact) * 1000
@@ -4319,8 +4372,8 @@ local function onOutcome(attacker, result, kind, eventClock)
 		bucket[result] = (bucket[result] or 0) + 1
 	end
 
-	diagPush(("OUT    t=%.2f  %s  %s(c%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms resAvg=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
-		:format(eventClock, attacker, kind, rec.combo or 0, result, measured*1000, rec.contact*1000,
+	diagPush(("OUT    t=%.2f  %s  %s(c%d,s%d)  %-10s  meas=%.0fms pred=%.0fms predErr=%+.0fms resAvg=%+.0fms(n=%d) | blockGap=%s pressDt=%s %s%s | face=%s%s spd=%.2f ping=%.0f")
+		:format(eventClock, attacker, kind, rec.combo or 0, rec.strike or 1, result, measured*1000, rec.contact*1000,
 		        predErr, resAvg, resNShown, gapStr, pressStr, hint, reasonStr, faceStr, faceFlag, rec.speed or 1, (rec.pingRaw or 0)*1000))
 end
 
