@@ -109,6 +109,7 @@ return function(Lib, Core)
 		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(88,165,255),
 		HitParticleColorB=Color3.fromRGB(165,95,255), HitParticleCount=20, HitParticleDuration=1.1,
 		HitParticleType="Sparks",  -- "Sparks" | "Orbs" | "Stars" | "Wireframe"
+		HitParticlePhysics=false,  -- bounce off geometry (Raycast per particle)
 		HitParticleWireframe=false, HitParticleWireScale=0.4, HitParticleSpeedMin=2, HitParticleSpeedMax=32,
 		HitParticleGravity=-32, HitParticleMaxSystems=5, HitSound_Volume=0.75,
 
@@ -1143,11 +1144,196 @@ return function(Lib, Core)
     --   Simple – a centred stack near the middle-bottom of the screen
     --   Player – a stack pinned to the side of the local player (left/right/bottom)
     local STYLE_DEFS = {
-		Simple = { width = 205, row = 29, txt = 14 },
-		Player = { width = 170, row = 25, txt = 13 },
-		Free   = { width = 185, row = 27, txt = 14 },
+		Simple  = { width = 205, row = 29, txt = 14 },
+		Player  = { width = 170, row = 25, txt = 13 },
+		Free    = { width = 185, row = 27, txt = 14 },
     }
     local DRAW_STYLES = { Simple = true, Player = true, Free = true }
+
+    -- ── PlayerV2: BillboardGui attached to character — floating colored bar-stack ──
+    -- Each stat is a vertical colored pill that grows from 0% to 100%. Floats above head.
+    -- ── PlayerV3: ScreenGui anchor — circular arc gauges pinned to character 3D point ──
+    -- Uses Drawing arcs (Line circles) for a radar-style circular mini-HUD.
+    local v2Bill    -- BillboardGui for PlayerV2
+    local v2Bars = {}  -- [key] = { frame, fill, label }
+    local v3Arcs = {}  -- [key] = { ring, arc, label, value } Drawing objects
+    local V2_BAR_W, V2_BAR_H, V2_GAP = 16, 70, 4
+    local V3_RADIUS = 46  -- base screen radius for arc gauges
+
+    local function buildV2(char)
+        if v2Bill then pcall(function() v2Bill:Destroy() end) end
+        v2Bill = nil; v2Bars = {}
+        if not char then return end
+        local hrp = getRoot(char)
+        if not hrp then return end
+        local bill = Instance.new("BillboardGui")
+        bill.Name = "\0SylV2"
+        bill.Adornee = hrp
+        bill.AlwaysOnTop = false
+        bill.Size = UDim2.fromOffset((V2_BAR_W + V2_GAP) * #rowOrder + V2_GAP, V2_BAR_H + 30)
+        bill.StudsOffset = Vector3.new(0, 3.8, 0)
+        bill.ResetOnSpawn = false
+        pcall(function() bill.Parent = guiParent() end)
+        if not bill.Parent then bill.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+        v2Bill = bill
+
+        -- background frame
+        local bg = Instance.new("Frame"); bg.Name = "BG"
+        bg.BackgroundColor3 = Color3.fromRGB(8,8,14); bg.BackgroundTransparency = 0.3
+        bg.BorderSizePixel = 0; bg.Size = UDim2.new(1,0,1,0); bg.Parent = bill
+        Instance.new("UICorner", bg).CornerRadius = UDim.new(0,8)
+        Instance.new("UIStroke", bg).Color = Color3.fromRGB(45,45,65); bg:FindFirstChildOfClass("UIStroke").Transparency = 0.5
+
+        for i, key in ipairs(rowOrder) do
+            local col = Instance.new("Frame"); col.Name = key
+            col.BackgroundTransparency = 1; col.BorderSizePixel = 0
+            col.Position = UDim2.fromOffset((i-1)*(V2_BAR_W+V2_GAP) + V2_GAP, 4)
+            col.Size = UDim2.fromOffset(V2_BAR_W, V2_BAR_H + 14)
+            col.Parent = bg
+
+            -- bar track (background)
+            local track = Instance.new("Frame"); track.Name = "Track"
+            track.BackgroundColor3 = Color3.fromRGB(20,20,32); track.BorderSizePixel = 0
+            track.Position = UDim2.new(0,0,0,0); track.Size = UDim2.fromOffset(V2_BAR_W, V2_BAR_H)
+            Instance.new("UICorner", track).CornerRadius = UDim.new(0,4); track.Parent = col
+
+            -- fill (anchored bottom, grows upward via Size)
+            local fill = Instance.new("Frame"); fill.Name = "Fill"
+            fill.BackgroundColor3 = Config.Ind_Accent; fill.BorderSizePixel = 0
+            fill.AnchorPoint = Vector2.new(0,1)
+            fill.Position = UDim2.new(0,0,1,0); fill.Size = UDim2.new(1,0,0,0)
+            Instance.new("UICorner", fill).CornerRadius = UDim.new(0,4); fill.Parent = track
+
+            -- short label at bottom
+            local lab = Instance.new("TextLabel"); lab.Name = "Label"
+            lab.BackgroundTransparency = 1; lab.Font = Enum.Font.GothamBold
+            lab.TextSize = 8; lab.TextColor3 = Color3.fromRGB(180,180,210)
+            lab.TextXAlignment = Enum.TextXAlignment.Center
+            lab.Position = UDim2.fromOffset(0, V2_BAR_H + 2); lab.Size = UDim2.fromOffset(V2_BAR_W, 12)
+            local ABBREV = {Health="HP",Stamina="ST",IFrame="IF",M2="M2",Dodge="DO",Block="BL"}
+            lab.Text = ABBREV[key] or key:sub(1,2):upper(); lab.Parent = col
+
+            v2Bars[key] = { fill = fill, track = track, col = col, label = lab, dispRatio = 0 }
+        end
+    end
+
+    local function destroyV2()
+        if v2Bill then pcall(function() v2Bill:Destroy() end); v2Bill = nil end
+        v2Bars = {}
+    end
+
+    local function buildV3()
+        -- Clean up old arcs
+        for _, a in pairs(v3Arcs) do
+            if a.ring  then pcall(function() a.ring:Remove()  end) end
+            if a.arc   then pcall(function() a.arc:Remove()   end) end
+            if a.label then pcall(function() a.label:Remove() end) end
+            if a.value then pcall(function() a.value:Remove() end) end
+        end
+        v3Arcs = {}
+        if not hasDrawing then return end
+        local ABBREV = {Health="HP",Stamina="ST",IFrame="IF",M2="M2",Dodge="DO",Block="BL"}
+        for _, key in ipairs(rowOrder) do
+            v3Arcs[key] = {
+                ring  = newDrawing("Circle",{Filled=false,NumSides=36,Thickness=2.5,Visible=false,Color=Color3.fromRGB(30,30,50),ZIndex=12}),
+                arc   = newDrawing("Circle",{Filled=false,NumSides=36,Thickness=3,Visible=false,Color=Config.Ind_Accent,ZIndex=13}),
+                label = newDrawing("Text",{Size=11,Font=2,Center=true,Outline=true,OutlineColor=Color3.new(0,0,0),Visible=false,Color=Color3.fromRGB(200,200,220),ZIndex=14}),
+                value = newDrawing("Text",{Size=10,Font=2,Center=true,Outline=true,OutlineColor=Color3.new(0,0,0),Visible=false,Color=Color3.fromRGB(255,255,255),ZIndex=14}),
+                dispRatio=0, alpha=0,
+                abbrev = ABBREV[key] or key:sub(1,2):upper(),
+            }
+        end
+    end
+
+    local function destroyV3()
+        for _, a in pairs(v3Arcs) do
+            for _, k2 in ipairs({"ring","arc","label","value"}) do
+                if a[k2] then pcall(function() a[k2]:Remove() end) end
+            end
+        end
+        v3Arcs = {}
+    end
+
+    local function updateV2(char, hum, dt)
+        if not v2Bill or not v2Bill.Parent then
+            buildV2(char); return
+        end
+        -- re-adorn if character changed (respawn)
+        local hrp = getRoot(char)
+        if hrp and v2Bill.Adornee ~= hrp then v2Bill.Adornee = hrp end
+        local a = math.clamp(dt * 14, 0, 1)
+        for _, key in ipairs(rowOrder) do
+            local b = v2Bars[key]
+            if not b then return end
+            local show, ratio, text, color = readIndicator(key, char, hum)
+            b.col.Visible = show and true or false
+            if show then
+                b.dispRatio = lerp(b.dispRatio, ratio or 0, a)
+                b.fill.BackgroundColor3 = color or Config.Ind_Accent
+                b.fill.Size = UDim2.new(1, 0, math.clamp(b.dispRatio, 0, 1), 0)
+            end
+        end
+    end
+
+    local function updateV3(char, hum, dt)
+        if not hasDrawing then return end
+        if next(v3Arcs) == nil then buildV3() end
+        local root = getRoot(char)
+        if not root then
+            for _, a in pairs(v3Arcs) do a.ring.Visible=false; a.arc.Visible=false; a.label.Visible=false; a.value.Visible=false end
+            return
+        end
+        -- project a point slightly above the character's head
+        local wp  = root.Position + Vector3.new(0, 4.2, 0)
+        local sp, on = Camera:WorldToViewportPoint(wp)
+        if not on or sp.Z < 0.1 then
+            for _, a in pairs(v3Arcs) do a.ring.Visible=false; a.arc.Visible=false; a.label.Visible=false; a.value.Visible=false end
+            return
+        end
+        local sc   = uiScale()
+        local fade = math.clamp(dt * 12, 0, 1)
+        local cx, cy = sp.X, sp.Y
+        -- arrange N arcs in a row, spaced by 2*r+gap
+        local n    = #rowOrder
+        local r    = math.clamp(V3_RADIUS * sc * 22 / math.max(sp.Z, 5), 14, 50)
+        local gap  = r * 0.35
+        local totalW = n * (2*r + gap) - gap
+        local startX = cx - totalW * 0.5 + r
+
+        for i, key in ipairs(rowOrder) do
+            local a = v3Arcs[key]
+            if not a then break end
+            local show, ratio, text, color = readIndicator(key, char, hum)
+            a.alpha = lerp(a.alpha, show and 1 or 0, fade)
+            a.dispRatio = lerp(a.dispRatio, ratio or 0, fade)
+            local ax = startX + (i-1) * (2*r + gap)
+            local ay = cy
+
+            if a.alpha < 0.02 then
+                a.ring.Visible=false; a.arc.Visible=false; a.label.Visible=false; a.value.Visible=false
+            else
+                local col = color or Config.Ind_Accent
+                local tr  = 1 - a.alpha
+                -- outer ghost ring
+                a.ring.Position = Vector2.new(ax, ay); a.ring.Radius = r
+                a.ring.Transparency = tr + (1 - tr) * 0.65; a.ring.Visible = true
+                -- filled arc simulated by adjusting NumSides proportional to ratio
+                -- (Drawing Circle doesn't support arc directly; we use a small circle that
+                --  visually overlaps — the ring does the outline, the arc dot shows progress)
+                local arcR = r * math.clamp(a.dispRatio, 0, 1)
+                a.arc.Position = Vector2.new(ax, ay); a.arc.Radius = math.max(2, arcR)
+                a.arc.Color = col; a.arc.Transparency = tr; a.arc.Visible = arcR > 1
+                -- center label
+                a.label.Text = a.abbrev
+                a.label.Position = Vector2.new(ax, ay - 6*sc)
+                a.label.Color = Color3.fromRGB(160,160,200); a.label.Transparency = tr; a.label.Visible = true
+                -- value below
+                a.value.Text = text or ""
+                a.value.Position = Vector2.new(ax, ay + 4*sc)
+                a.value.Color = Color3.fromRGB(255,255,255); a.value.Transparency = tr; a.value.Visible = show == true
+            end
+        end
+    end
 
     -- ── Drawing-based cell pool (text + thin bar per row, no chrome) ─────────
     local drawCells = {}
@@ -1287,31 +1473,31 @@ return function(Lib, Core)
                     c.node.Transparency = 1 - c.alpha; c.node.Visible = true
                 end
 
+                -- Drawing API: Transparency 0 = opaque, 1 = invisible. c.alpha goes 0→1 as
+                -- the row fades IN, so element transparency must be (1 - c.alpha).
                 c.label.Size = txtSize
                 c.label.Text = STAT_LABELS[key] or key
                 c.label.Position = Vector2.new(left, rowY)
                 c.label.Color = WM.txtMute
-                c.label.Transparency = c.alpha
+                c.label.Transparency = 1 - c.alpha
                 c.label.Visible = true
 
                 if am then c.value.Text = am.text end
                 c.value.Size = txtSize
                 c.value.Position = Vector2.new(right - textWidth(c.value), rowY)
                 c.value.Color = WM.txtMain
-                c.value.Transparency = c.alpha
+                c.value.Transparency = 1 - c.alpha
                 c.value.Visible = true
 
-                -- Reworked non-Panel styles: compact glass row with short colored progress,
-                -- stronger hierarchy and less bare floating text. Panel remains untouched.
                 local lineY = rowY + txtSize + 5 * sc
                 c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
-                c.track.Thickness = math.max(1, (design=="Ribbon" and 4 or 2) * sc)
-                c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.5; c.track.Visible = true
+                c.track.Thickness = math.max(1, 2 * sc)
+                c.track.Color = WM.stroke; c.track.Transparency = 1 - c.alpha * 0.5; c.track.Visible = true
 
                 local fillW = width * math.clamp(c.dispRatio, 0, 1)
                 c.fill.From = Vector2.new(left, lineY); c.fill.To = Vector2.new(left + fillW, lineY)
                 c.fill.Thickness = math.max(1, 2 * sc)
-                c.fill.Color = col; c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
+                c.fill.Color = col; c.fill.Transparency = 1 - c.alpha; c.fill.Visible = fillW > 0.5
             end
         end
     end)
@@ -1423,6 +1609,21 @@ return function(Lib, Core)
             if not drawn then hideAllDrawCells() end
         else
             hideAllDrawCells()
+        end
+
+        -- ── PlayerV2: vertical bar-stack BillboardGui attached to character ──────
+        if char and style == "PlayerV2" then
+            updateV2(char, hum, dt)
+        else
+            -- destroy V2 when switching away to prevent ghost GUI
+            if v2Bill then destroyV2() end
+        end
+
+        -- ── PlayerV3: circular arc gauges via Drawing, 3D-anchored ───────────────
+        if char and style == "PlayerV3" then
+            updateV3(char, hum, dt)
+        else
+            if next(v3Arcs) ~= nil then destroyV3() end
         end
     end)
 
@@ -1611,11 +1812,34 @@ return function(Lib, Core)
 				local ptype = sys.ptype or "Sparks"
 
 				for _,p in ipairs(sys.pts) do
-					p.vel = p.vel + Vector3.new(0,Config.HitParticleGravity or -32,0)*step
-					p.vel = p.vel * (1-step*.35)
-					p.pos = p.pos + p.vel*step
-					local sp,on = cam:WorldToViewportPoint(p.pos)
-					local visible = on and sp.Z>.05
+					p.vel = p.vel + Vector3.new(0, Config.HitParticleGravity or -32, 0) * step
+					p.vel = p.vel * (1 - step * 0.35)
+					local newPos = p.pos + p.vel * step
+					-- [Physics] bounce off geometry: raycast from old pos toward new pos
+					if Config.HitParticlePhysics then
+						local dir = newPos - p.pos
+						local dist = dir.Magnitude
+						if dist > 0.001 then
+							local rp = RaycastParams.new()
+							rp.FilterType = Enum.RaycastFilterType.Exclude
+							-- exclude characters so sparks bounce off world geometry only
+							local chars = {}
+							for _, pl in ipairs(Players:GetPlayers()) do
+								if pl.Character then chars[#chars+1] = pl.Character end
+							end
+							rp.FilterDescendantsInstances = chars
+							local hit = Workspace:Raycast(p.pos, dir.Unit * (dist + 0.05), rp)
+							if hit then
+								-- reflect velocity around surface normal, lose 35% energy
+								local n = hit.Normal
+								p.vel = (p.vel - 2 * p.vel:Dot(n) * n) * 0.65
+								newPos = hit.Position + n * 0.05
+							end
+						end
+					end
+					p.pos = newPos
+					local sp, on = cam:WorldToViewportPoint(p.pos)
+					local visible = on and sp.Z > 0.05
 
 					if ptype == "Wireframe" then
 						p.ang = p.ang + p.av*step
@@ -1650,51 +1874,58 @@ return function(Lib, Core)
 
 					elseif ptype == "Stars" then
 						if visible then
-							-- 4 arms of the star: each pair of lines forms one axis
-							local baseA = age*4 + p.phase   -- rotation angle advances over time
-							local armLen = math.max(2,(1.5+p.z*3)*14/sp.Z)
-							local cx,cy = sp.X,sp.Y
-							for arm=1,4 do
-								local a = baseA + (arm-1)*math.pi/4
-								local ex,ey = math.cos(a)*armLen, math.sin(a)*armLen
-								local l = p.lines[arm]
-								l.From = Vector2.new(cx-ex*0.3, cy-ey*0.3)
-								l.To   = Vector2.new(cx+ex,     cy+ey)
-								l.Color= particleColor((p.z+age*.5+arm*.12)%1)
-								l.Thickness = math.max(1, (2-age/sys.duration)*1.5)
-								l.Transparency = alpha*(.3+.45*p.z); l.Visible=true
+							-- Symmetric 4-arm star: each arm grows from center outward equally.
+							-- depth-clamp prevents blow-up at close range.
+							local baseA   = age * 3 + p.phase
+							local armLen  = math.clamp((1.2 + p.z * 2.5) * 14 / math.max(sp.Z, 4), 2, 28)
+							local fadeLen = armLen * (1 - age / sys.duration * 0.6) -- arms shrink as they age
+							local cx, cy  = sp.X, sp.Y
+							for arm = 1, 4 do
+								local a  = baseA + (arm - 1) * math.pi * 0.5  -- 90° apart = perfect cross
+								local ex, ey = math.cos(a) * fadeLen, math.sin(a) * fadeLen
+								local l  = p.lines[arm]
+								-- from center outward symmetrically: tip = center ± arm
+								l.From = Vector2.new(cx - ex, cy - ey)
+								l.To   = Vector2.new(cx + ex, cy + ey)
+								l.Color = particleColor((p.z + age * 0.5 + arm * 0.15) % 1)
+								l.Thickness = math.max(1, (1.8 - age / sys.duration) * 1.2)
+								l.Transparency = 1 - alpha * (0.55 + 0.4 * p.z)
+								l.Visible = true
 							end
-						else for _,l in ipairs(p.lines) do l.Visible=false end end
+						else for _, l in ipairs(p.lines) do l.Visible = false end end
 
 					else -- "Sparks"
 						if visible then
-							-- spark tail: elongated in the direction of travel
-							local velScreen
-							local sp2,on2 = cam:WorldToViewportPoint(p.pos + p.vel*0.04)
-							local tailX = on2 and (sp2.X-sp.X) or 0
-							local tailY = on2 and (sp2.Y-sp.Y) or 0
-							local tailLen = math.sqrt(tailX*tailX+tailY*tailY)
-							if tailLen < 1 then tailX,tailY = 0,-3 end
-							local tscale = math.max(1, (2+p.size*2)*16/sp.Z)
-							-- main spark line
+							-- Sparks: depth-clamped tail elongated in travel direction.
+							-- sp.Z clamped to ≥4 to prevent blow-up when camera is very close.
+							local sp2, on2 = cam:WorldToViewportPoint(p.pos + p.vel * 0.04)
+							local tailX = on2 and (sp2.X - sp.X) or 0
+							local tailY = on2 and (sp2.Y - sp.Y) or 0
+							local tailLen = math.sqrt(tailX * tailX + tailY * tailY)
+							if tailLen < 0.5 then tailX, tailY = 0, -2 end
+							-- clamp depth: sp.Z ≥ 4 prevents enormous sparks at close range
+							local depthSafe = math.max(sp.Z, 4)
+							local tscale = math.clamp((1.5 + p.size * 1.5) * 12 / depthSafe, 0.5, 18)
 							local l1 = p.lines[1]
 							l1.From = Vector2.new(sp.X, sp.Y)
-							l1.To   = Vector2.new(sp.X - tailX*tscale*0.5, sp.Y - tailY*tscale*0.5)
-							l1.Color= particleColor((p.z+age*.6)%1)
-							l1.Thickness= math.max(1, 1.8*tscale/16)
-							l1.Transparency= alpha*(.25+.5*p.z); l1.Visible=true
-							-- short crosshair flash near tip (makes it look like a real spark)
+							l1.To   = Vector2.new(sp.X - tailX * tscale * 0.45, sp.Y - tailY * tscale * 0.45)
+							l1.Color = particleColor((p.z + age * 0.6) % 1)
+							l1.Thickness = math.max(1, tscale * 0.12)
+							l1.Transparency = 1 - alpha * (0.75 + 0.2 * p.z)
+							l1.Visible = true
+							-- perpendicular cross-flash at tip
 							local l2 = p.lines[2]
-							local perpX,perpY = -tailY,tailX
-							local pMag = math.sqrt(perpX*perpX+perpY*perpY)+.001
-							perpX,perpY = perpX/pMag, perpY/pMag
-							local w = math.max(1, tscale*0.4)
-							l2.From = Vector2.new(sp.X - perpX*w, sp.Y - perpY*w)
-							l2.To   = Vector2.new(sp.X + perpX*w, sp.Y + perpY*w)
-							l2.Color= particleColor((p.z+age*.6+.25)%1)
-							l2.Thickness= math.max(1, 1.2*tscale/16)
-							l2.Transparency= alpha*(.4+.45*p.z); l2.Visible=true
-						else for _,l in ipairs(p.lines) do l.Visible=false end end
+							local perpX, perpY = -tailY, tailX
+							local pMag = math.sqrt(perpX * perpX + perpY * perpY) + 0.001
+							perpX, perpY = perpX / pMag, perpY / pMag
+							local w = math.clamp(tscale * 0.3, 0.5, 6)
+							l2.From = Vector2.new(sp.X - perpX * w, sp.Y - perpY * w)
+							l2.To   = Vector2.new(sp.X + perpX * w, sp.Y + perpY * w)
+							l2.Color = particleColor((p.z + age * 0.6 + 0.25) % 1)
+							l2.Thickness = math.max(1, tscale * 0.09)
+							l2.Transparency = 1 - alpha * (0.6 + 0.3 * p.z)
+							l2.Visible = true
+						else for _, l in ipairs(p.lines) do l.Visible = false end end
 					end
 				end
 			end
@@ -2029,6 +2260,11 @@ return function(Lib, Core)
             Callback = function(v) Config.HitParticleWireScale=v end })
         particleTypeEls[wireScaleEl] = { "Wireframe" }
 
+        boolToggle(sFX, "Physics Bounce", "Particle Physics",
+            function() return Config.HitParticlePhysics end,
+            function(v) Config.HitParticlePhysics = v and true or false end)
+        sFX:SubLabel({ Text = "Particles bounce off world geometry (Raycast). More realistic but heavier on CPU." })
+
         applyParticleTypeVis()
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
@@ -2055,14 +2291,14 @@ return function(Lib, Core)
         pcall(function()
             sInd:Dropdown({
                 Name = "Style",
-                Options = { "Panel", "Free", "Player", "Simple" },
+                Options = { "Panel", "Free", "Player", "Simple", "PlayerV2", "PlayerV3" },
                 Default = Config.Ind_Style,
                 Callback = function(v)
                     if type(v) == "string" and v ~= "" then Config.Ind_Style = v; applyStyleVis() end
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Panel = HUD | Free = draggable text stack | Player = on your character | Simple = centered stack." })
+        sInd:SubLabel({ Text = "Panel/Free/Player/Simple = Drawing-based | PlayerV2 = vertical bar pills above char | PlayerV3 = circular arc gauges above char." })
 
         sInd:Divider()
         sInd:Header({ Name = "Cooldowns" })
@@ -2176,6 +2412,8 @@ return function(Lib, Core)
         end
         drawCells = {}
         indUIScale = nil
+        destroyV2()
+        destroyV3()
         if screenGui then pcall(function() screenGui:Destroy() end); screenGui = nil end
     end
 
