@@ -108,11 +108,13 @@ return function(Lib, Core)
 		Env_AtmosDensity=0.15, Env_AtmosColor=Color3.fromRGB(190,200,220), Env_Brightness=2, Env_ClockTime=14,
 		HitFX_On=false, HitSound_On=true, HitParticles_On=true, HitFX_Color=Color3.fromRGB(88,165,255),
 		HitParticleColorB=Color3.fromRGB(165,95,255), HitParticleCount=20, HitParticleDuration=1.1,
+		HitSoundName="Fatality", HitSoundId=115982072912004,
 		HitParticleType="Sparks",  -- "Sparks" | "Orbs" | "Wireframe"
 		HitParticlePhysics=false,  -- bounce off geometry (Raycast per particle)
 		HitParticleWireframe=false, HitParticleWireScale=0.4, HitParticleSpeedMin=2, HitParticleSpeedMax=32,
 		HitParticleGravity=-32, HitParticleMaxSystems=5, HitSound_Volume=0.75,
 		HitParticleOrbSize=1.0,    -- orb base size multiplier (0.3..3.0)
+		HitParticleSparkSize=1.0, -- spark base size multiplier (0.3..3.0)
 
         -- [PERF] Render throttle. The whole visual pipeline (ESP loop + indicators + hit-dir)
         -- runs on Heartbeat, which fires at the monitor's refresh rate — so on a 144/240Hz screen
@@ -958,6 +960,14 @@ return function(Lib, Core)
         -- deep translucent base + a soft diagonal sheen gradient + a bright hairline
         -- top edge + a faint neutral outline (NOT the accent colour). Rounded, generous
         -- padding, a small header, and a per-row accent dot for extra detail.
+        --
+        -- IMPORTANT: UIPadding shifts the effective origin for EVERY direct child of
+        -- the Frame it's on (both Scale AND Offset), not just UIListLayout content.
+        -- Putting UIPadding directly on glassBody previously dragged the header
+        -- (accent tick + "STATUS" text) down by the padding amount, landing it well
+        -- below where it visually belonged. Fix: header lives directly on glassBody
+        -- (unpadded, fixed pixel offsets); the row list lives in a separate
+        -- `contentPad` child that owns its own UIPadding, offset below the header.
         glassBody = Instance.new("Frame")
         glassBody.Name = "GlassBody"
         glassBody.BackgroundColor3 = Color3.fromRGB(13, 14, 20)
@@ -985,19 +995,38 @@ return function(Lib, Core)
         gStroke.Thickness = 1
         gStroke.Transparency = 0.62
         gStroke.Parent = glassBody
-        -- inner padding (generous, minimalist)
-        local gPad = Instance.new("UIPadding")
-        gPad.PaddingTop = UDim.new(0, 26); gPad.PaddingBottom = UDim.new(0, 12)
-        gPad.PaddingLeft = UDim.new(0, 14); gPad.PaddingRight = UDim.new(0, 14)
-        gPad.Parent = glassBody
-        -- bright top hairline (glass edge highlight)
-        local gEdge = Instance.new("Frame")
-        gEdge.Name = "TopEdge"; gEdge.BorderSizePixel = 0
-        gEdge.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        gEdge.BackgroundTransparency = 0.7
-        gEdge.Position = UDim2.new(0, 14, 0, 4); gEdge.Size = UDim2.new(1, -28, 0, 1)
-        gEdge.Parent = glassBody
-        -- small header: accent tick + title text
+
+        local HEADER_H = 28  -- reserved pixel height for the unpadded header strip
+
+        -- bright top hairline (glass edge highlight) — spans the full width, minus
+        -- a small gap in the middle reserved for the icon.
+        local gEdgeL = Instance.new("Frame")
+        gEdgeL.Name = "TopEdgeL"; gEdgeL.BorderSizePixel = 0
+        gEdgeL.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        gEdgeL.BackgroundTransparency = 0.7
+        gEdgeL.AnchorPoint = Vector2.new(0, 0)
+        gEdgeL.Position = UDim2.new(0, 14, 0, 4)
+        gEdgeL.Size = UDim2.new(0.5, -24, 0, 1)
+        gEdgeL.Parent = glassBody
+        local gEdgeR = Instance.new("Frame")
+        gEdgeR.Name = "TopEdgeR"; gEdgeR.BorderSizePixel = 0
+        gEdgeR.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        gEdgeR.BackgroundTransparency = 0.7
+        gEdgeR.AnchorPoint = Vector2.new(1, 0)
+        gEdgeR.Position = UDim2.new(1, -14, 0, 4)
+        gEdgeR.Size = UDim2.new(0.5, -24, 0, 1)
+        gEdgeR.Parent = glassBody
+        -- centre icon sitting ON the hairline
+        local gIcon = Instance.new("ImageLabel")
+        gIcon.Name = "GlassIcon"; gIcon.BackgroundTransparency = 1
+        gIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+        gIcon.Position = UDim2.new(0.5, 0, 0, 4)
+        gIcon.Size = UDim2.new(0, 14, 0, 14)
+        gIcon.Image = "rbxassetid://76311199408449"
+        gIcon.ImageTransparency = 0.15
+        gIcon.Parent = glassBody
+
+        -- small header: accent tick + title text (fixed offsets, NOT padded)
         local gHeadDot = Instance.new("Frame")
         gHeadDot.Name = "HeadDot"; gHeadDot.BorderSizePixel = 0
         gHeadDot.BackgroundColor3 = Config.Ind_Accent
@@ -1011,12 +1040,26 @@ return function(Lib, Core)
         gTitle.Position = UDim2.new(0, 22, 0, 9); gTitle.Size = UDim2.new(1, -30, 0, 14)
         gTitle.Text = "STATUS"; gTitle.Parent = glassBody
 
+        -- ── content container: everything below the header, WITH padding ────────
+        local contentPad = Instance.new("Frame")
+        contentPad.Name = "ContentPad"
+        contentPad.BackgroundTransparency = 1
+        contentPad.Position = UDim2.new(0, 0, 0, HEADER_H)
+        contentPad.Size = UDim2.new(1, 0, 0, 0)
+        contentPad.AutomaticSize = Enum.AutomaticSize.Y
+        contentPad.Parent = glassBody
+
+        local gPad = Instance.new("UIPadding")
+        gPad.PaddingTop = UDim.new(0, 0); gPad.PaddingBottom = UDim.new(0, 12)
+        gPad.PaddingLeft = UDim.new(0, 14); gPad.PaddingRight = UDim.new(0, 14)
+        gPad.Parent = contentPad
+
         local gList = Instance.new("UIListLayout")
         gList.FillDirection = Enum.FillDirection.Vertical
         gList.HorizontalAlignment = Enum.HorizontalAlignment.Left
         gList.SortOrder = Enum.SortOrder.LayoutOrder
         gList.Padding = UDim.new(0, 8)
-        gList.Parent = glassBody
+        gList.Parent = contentPad
 
         local GLABEL = { Health="Health", Stamina="Stamina", IFrame="I-Frame", M2="Heavy", Dodge="Dodge", Block="Block" }
         for i, key in ipairs(rowOrder) do
@@ -1025,7 +1068,7 @@ return function(Lib, Core)
             row.Size = UDim2.new(1, 0, 0, 22); row.LayoutOrder = i; row.Visible = false
             row.ClipsDescendants = true
             row.Active = true
-            row.Parent = glassBody
+            row.Parent = contentPad
 
             -- accent dot (left)
             local dot = Instance.new("Frame"); dot.Name = "Dot"; dot.BorderSizePixel = 0
@@ -1723,9 +1766,28 @@ return function(Lib, Core)
 		end
 		HitFX.systems[#HitFX.systems+1]={pts=pts,age=0,duration=Config.HitParticleDuration or 1.1,ptype=ptype}
 	end
+	-- Catalog of selectable hit sounds. "Fatality" is the original built-in id.
+	local HIT_SOUNDS = {
+		Fatality        = 115982072912004,
+		["Minecraft XP"]  = 15181891182,
+		["Minecraft Hit"] = 73571339886360,
+		["Minecraft Egg"] = 134530432300459,
+		["Minecraft Bow"] = 111481862692779,
+		Click           = 95635059379804,
+		Bell            = 124010691633262,
+		Neverlose       = 139452805868562,
+		Primordial      = 97511223764004,
+	}
+	local HIT_SOUND_ORDER = { "Fatality", "Minecraft XP", "Minecraft Hit", "Minecraft Egg", "Minecraft Bow", "Click", "Bell", "Neverlose", "Primordial" }
+	local function playHitSound(id)
+		id = id or Config.HitSoundId or HIT_SOUNDS.Fatality
+		local s=Instance.new("Sound"); s.SoundId="rbxassetid://"..tostring(id)
+		s.Volume=math.clamp(Config.HitSound_Volume or 0.75,0,1); s.Parent=SoundService
+		Debris:AddItem(s,4); s:Play()
+	end
 	local function confirmedHit(victim)
 		if not Config.HitFX_On then return end
-		if Config.HitSound_On then local s=Instance.new("Sound"); s.SoundId="rbxassetid://115982072912004"; s.Volume=math.clamp(Config.HitSound_Volume or 0.75,0,1); s.Parent=SoundService; Debris:AddItem(s,4); s:Play() end
+		if Config.HitSound_On then playHitSound() end
 		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if root then spawnParticles(root.Position) end end
 	end
 	local renderHitFX=LPH_NO_VIRTUALIZE(function(dt)
@@ -1759,9 +1821,24 @@ return function(Lib, Core)
 							rp.FilterDescendantsInstances = chars
 							local hit = Workspace:Raycast(p.pos, dir.Unit * (dist + 0.05), rp)
 							if hit then
-								-- reflect velocity around surface normal, lose 35% energy
+								-- Ricochet: mirror-reflect around the surface normal, then fan the
+								-- result out with a random tangential scatter so a bounce doesn't
+								-- look like one clean pool-ball reflection — real ricochet sparks
+								-- kick off at a spread of angles. Energy loss is randomized too
+								-- (55%-80% kept) so successive bounces decay unevenly, like a
+								-- real ricochet losing more energy on shallower hits.
 								local n = hit.Normal
-								p.vel = (p.vel - 2 * p.vel:Dot(n) * n) * 0.65
+								local reflected = p.vel - 2 * p.vel:Dot(n) * n
+								-- build a tangent basis for the scatter jitter
+								local tangent = reflected:Cross(n)
+								if tangent.Magnitude < 0.001 then tangent = Vector3.new(1,0,0):Cross(n) end
+								tangent = tangent.Unit
+								local scatterAngle = (math.random() - 0.5) * math.rad(50) -- ±25°
+								local keep = 0.55 + math.random() * 0.25
+								local scattered = (reflected.Unit * math.cos(scatterAngle) + tangent * math.sin(scatterAngle)) * reflected.Magnitude
+								p.vel = scattered * keep
+								-- small extra pop of speed off the surface so it doesn't just slide
+								p.vel = p.vel + n * (reflected.Magnitude * 0.08)
 								newPos = hit.Position + n * 0.05
 							end
 						end
@@ -1827,10 +1904,12 @@ return function(Lib, Core)
 							if tailLen < 0.5 then tailX, tailY = 0, -2; tailLen = 2 end
 							local nX, nY = tailX / tailLen, tailY / tailLen
 							-- base pixel size from depth (bigger when closer), decent minimum so
-							-- sparks are actually visible, capped so they never fill the screen
-							local base = math.clamp((2 + p.size * 2.5) * 20 / depthSafe, 3, 22)
+							-- sparks are actually visible, capped so they never fill the screen.
+							-- HitParticleSparkSize is a user multiplier (0.3..3.0) on top of that.
+							local sizeMul = math.clamp(Config.HitParticleSparkSize or 1.0, 0.3, 3.0)
+							local base = math.clamp((2 + p.size * 2.5) * 20 / depthSafe, 3, 22) * sizeMul
 							-- streak length blends base size with a bit of the real screen motion
-							local sparkLen = math.clamp(base + math.min(tailLen * 0.5, 10), 4, 30)
+							local sparkLen = math.clamp(base + math.min(tailLen * 0.5, 10) * sizeMul, 4, 30 * sizeMul)
 							local l1 = p.lines[1]
 							l1.From = Vector2.new(sp.X + nX * sparkLen * 0.35, sp.Y + nY * sparkLen * 0.35)
 							l1.To   = Vector2.new(sp.X - nX * sparkLen * 0.65, sp.Y - nY * sparkLen * 0.65)
@@ -2137,6 +2216,20 @@ return function(Lib, Core)
         sFX:Divider()
         sFX:Header({ Name = "Sound" })
         boolToggle(sFX, "Hit Sound", "Hit Sound", function() return Config.HitSound_On end, function(v) Config.HitSound_On=v end)
+        pcall(function()
+            sFX:Dropdown({
+                Name = "Sound",
+                Options = HIT_SOUND_ORDER,
+                Default = Config.HitSoundName or "Fatality",
+                Callback = function(v)
+                    if type(v) == "string" and HIT_SOUNDS[v] then
+                        Config.HitSoundName = v
+                        Config.HitSoundId = HIT_SOUNDS[v]
+                    end
+                end,
+            }, ctx.flag("VIS_HITFX_SoundPick"))
+        end)
+        sFX:Button({ Name = "Preview", Callback = function() playHitSound(Config.HitSoundId) end })
         slider(sFX, { Name = "Volume", Flag = "VIS_HITFX_VOL", Default = math.floor((Config.HitSound_Volume or 0.75)*100), Min = 0, Max = 100, Suffix = "%", Callback = function(v) Config.HitSound_Volume = v/100 end })
 
         sFX:Divider()
@@ -2188,6 +2281,12 @@ return function(Lib, Core)
             Default = math.floor((Config.HitParticleOrbSize or 1.0) * 100), Min = 30, Max = 300, Suffix = "%",
             Callback = function(v) Config.HitParticleOrbSize = v / 100 end })
         particleTypeEls[orbSizeEl] = { "Orbs" }
+
+        -- Sparks-only: spark size multiplier
+        local sparkSizeEl = slider(sFX, { Name = "Spark Size", Flag = "VIS_HITFX_SPK",
+            Default = math.floor((Config.HitParticleSparkSize or 1.0) * 100), Min = 30, Max = 300, Suffix = "%",
+            Callback = function(v) Config.HitParticleSparkSize = v / 100 end })
+        particleTypeEls[sparkSizeEl] = { "Sparks" }
 
         boolToggle(sFX, "Physics Bounce", "Particle Physics",
             function() return Config.HitParticlePhysics end,
