@@ -1020,9 +1020,9 @@ return function(Lib, Core)
         local gIcon = Instance.new("ImageLabel")
         gIcon.Name = "GlassIcon"; gIcon.BackgroundTransparency = 1
         gIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-        gIcon.Position = UDim2.new(0.5, 0, 0, 4)
+        gIcon.Position = UDim2.new(0.5, 0, 0, 9)
         gIcon.Size = UDim2.new(0, 14, 0, 14)
-        gIcon.Image = "rbxassetid://76311199408449"
+        gIcon.Image = "rbxassetid://80766621913775"
         gIcon.ImageTransparency = 0.15
         gIcon.Parent = glassBody
 
@@ -1905,11 +1905,16 @@ return function(Lib, Core)
 							local nX, nY = tailX / tailLen, tailY / tailLen
 							-- base pixel size from depth (bigger when closer), decent minimum so
 							-- sparks are actually visible, capped so they never fill the screen.
-							-- HitParticleSparkSize is a user multiplier (0.3..3.0) on top of that.
-							local sizeMul = math.clamp(Config.HitParticleSparkSize or 1.0, 0.3, 3.0)
-							local base = math.clamp((2 + p.size * 2.5) * 20 / depthSafe, 3, 22) * sizeMul
-							-- streak length blends base size with a bit of the real screen motion
-							local sparkLen = math.clamp(base + math.min(tailLen * 0.5, 10) * sizeMul, 4, 30 * sizeMul)
+							-- This "base" drives THICKNESS only and is NOT touched by the user's
+							-- size setting — Spark Size should only stretch the streak LENGTH,
+							-- not fatten it (fattening made them look like blobs, not sparks).
+							local base = math.clamp((2 + p.size * 2.5) * 20 / depthSafe, 3, 22)
+							-- HitParticleSparkSize is a user multiplier (0.3..3.0) on LENGTH only.
+							local lenMul = math.clamp(Config.HitParticleSparkSize or 1.0, 0.3, 3.0)
+							-- streak length blends base size with a bit of the real screen motion,
+							-- then applies the length multiplier. Raised floor from 4->8 so small
+							-- sparks don't collapse to near-zero-length (was reported as "buggy").
+							local sparkLen = math.clamp((base + math.min(tailLen * 0.5, 10)) * lenMul, 8, 90)
 							local l1 = p.lines[1]
 							l1.From = Vector2.new(sp.X + nX * sparkLen * 0.35, sp.Y + nY * sparkLen * 0.35)
 							l1.To   = Vector2.new(sp.X - nX * sparkLen * 0.65, sp.Y - nY * sparkLen * 0.65)
