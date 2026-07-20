@@ -76,11 +76,11 @@ return function(Lib, Core)
 
         -- Indicators
         Ind_On      = false,
-        Ind_Style   = "Panel",   -- "Panel" | "Free" | "Player" | "Simple"
-        Ind_PlayerSide = "Left", -- "Left" | "Right" | "Bottom" (Player style only)
-		Ind_PlayerDesign = "Neon", -- Neon | Cyber | Arc | Minimal
-        Ind_PlayerTextY = 0,     -- vertical text offset (px) for the Player style
-        Ind_Drag    = true,      -- allow dragging the HUD (Panel / Free)
+        Ind_Style   = "Panel",   -- visual design: "Panel" | "Simple" | "Glass"
+        Ind_Anchor  = "Free",    -- placement: "Player" (on character) | "Free" (draggable)
+        Ind_PlayerSide = "Left", -- "Left" | "Right" | "Bottom" (Anchor=Player only)
+        Ind_PlayerTextY = 0,     -- vertical text offset (px) for the Player anchor
+        Ind_Drag    = true,      -- allow dragging the HUD (Anchor=Free only)
         Ind_Health  = true,
         Ind_Stamina = true,
         Ind_IFrame  = true,
@@ -955,82 +955,105 @@ return function(Lib, Core)
 
         -- ── Glass body: liquid-glass HUD (Nursultan / Neverlose style) ──────────
         -- Roblox GUI can't do real backdrop blur, so we fake frosted glass with a
-        -- dark translucent base + a soft diagonal gradient sheen + a bright hairline
-        -- top edge + subtle accent stroke. Rounded, generous padding, minimalist.
+        -- deep translucent base + a soft diagonal sheen gradient + a bright hairline
+        -- top edge + a faint neutral outline (NOT the accent colour). Rounded, generous
+        -- padding, a small header, and a per-row accent dot for extra detail.
         glassBody = Instance.new("Frame")
         glassBody.Name = "GlassBody"
-        glassBody.BackgroundColor3 = Color3.fromRGB(14, 15, 22)
-        glassBody.BackgroundTransparency = 0.12
+        glassBody.BackgroundColor3 = Color3.fromRGB(13, 14, 20)
+        glassBody.BackgroundTransparency = 0.08
         glassBody.BorderSizePixel = 0
         glassBody.Size = UDim2.new(0, IND_W, 0, 0)
         glassBody.AutomaticSize = Enum.AutomaticSize.Y
         glassBody.Visible = false
         glassBody.Active = true
         glassBody.Parent = indHolder
-        Instance.new("UICorner", glassBody).CornerRadius = UDim.new(0, 12)
+        Instance.new("UICorner", glassBody).CornerRadius = UDim.new(0, 14)
         -- frosted sheen: diagonal light-to-dark gradient overlay
         local gGrad = Instance.new("UIGradient")
         gGrad.Color = ColorSequence.new{
-            ColorSequenceKeypoint.new(0.0, Color3.fromRGB(60, 64, 82)),
-            ColorSequenceKeypoint.new(0.5, Color3.fromRGB(22, 24, 34)),
-            ColorSequenceKeypoint.new(1.0, Color3.fromRGB(12, 13, 19)),
+            ColorSequenceKeypoint.new(0.0, Color3.fromRGB(54, 58, 74)),
+            ColorSequenceKeypoint.new(0.45, Color3.fromRGB(20, 22, 31)),
+            ColorSequenceKeypoint.new(1.0, Color3.fromRGB(11, 12, 18)),
         }
-        gGrad.Transparency = NumberSequence.new(0.55)
-        gGrad.Rotation = 120
+        gGrad.Transparency = NumberSequence.new(0.5)
+        gGrad.Rotation = 115
         gGrad.Parent = glassBody
-        -- accent hairline stroke
+        -- faint NEUTRAL outline (soft white/grey, not blue)
         local gStroke = Instance.new("UIStroke")
-        gStroke.Color = Config.Ind_Accent
-        gStroke.Thickness = 1.2
-        gStroke.Transparency = 0.4
+        gStroke.Color = Color3.fromRGB(150, 155, 170)
+        gStroke.Thickness = 1
+        gStroke.Transparency = 0.62
         gStroke.Parent = glassBody
-        -- inner padding
+        -- inner padding (generous, minimalist)
         local gPad = Instance.new("UIPadding")
-        gPad.PaddingTop = UDim.new(0, 10); gPad.PaddingBottom = UDim.new(0, 10)
-        gPad.PaddingLeft = UDim.new(0, 12); gPad.PaddingRight = UDim.new(0, 12)
+        gPad.PaddingTop = UDim.new(0, 26); gPad.PaddingBottom = UDim.new(0, 12)
+        gPad.PaddingLeft = UDim.new(0, 14); gPad.PaddingRight = UDim.new(0, 14)
         gPad.Parent = glassBody
         -- bright top hairline (glass edge highlight)
         local gEdge = Instance.new("Frame")
         gEdge.Name = "TopEdge"; gEdge.BorderSizePixel = 0
         gEdge.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        gEdge.BackgroundTransparency = 0.65
-        gEdge.Position = UDim2.new(0, 10, 0, 3); gEdge.Size = UDim2.new(1, -20, 0, 1)
+        gEdge.BackgroundTransparency = 0.7
+        gEdge.Position = UDim2.new(0, 14, 0, 4); gEdge.Size = UDim2.new(1, -28, 0, 1)
         gEdge.Parent = glassBody
+        -- small header: accent tick + title text
+        local gHeadDot = Instance.new("Frame")
+        gHeadDot.Name = "HeadDot"; gHeadDot.BorderSizePixel = 0
+        gHeadDot.BackgroundColor3 = Config.Ind_Accent
+        gHeadDot.Position = UDim2.new(0, 14, 0, 11); gHeadDot.Size = UDim2.new(0, 3, 0, 11)
+        Instance.new("UICorner", gHeadDot).CornerRadius = UDim.new(1, 0); gHeadDot.Parent = glassBody
+        local gTitle = Instance.new("TextLabel")
+        gTitle.Name = "Title"; gTitle.BackgroundTransparency = 1
+        gTitle.Font = Enum.Font.GothamBold; gTitle.TextSize = 11
+        gTitle.TextColor3 = Color3.fromRGB(228, 230, 240)
+        gTitle.TextXAlignment = Enum.TextXAlignment.Left
+        gTitle.Position = UDim2.new(0, 22, 0, 9); gTitle.Size = UDim2.new(1, -30, 0, 14)
+        gTitle.Text = "STATUS"; gTitle.Parent = glassBody
+
         local gList = Instance.new("UIListLayout")
         gList.FillDirection = Enum.FillDirection.Vertical
         gList.HorizontalAlignment = Enum.HorizontalAlignment.Left
         gList.SortOrder = Enum.SortOrder.LayoutOrder
-        gList.Padding = UDim.new(0, 9)
+        gList.Padding = UDim.new(0, 8)
         gList.Parent = glassBody
 
         local GLABEL = { Health="Health", Stamina="Stamina", IFrame="I-Frame", M2="Heavy", Dodge="Dodge", Block="Block" }
         for i, key in ipairs(rowOrder) do
             local row = Instance.new("Frame")
             row.Name = key; row.BackgroundTransparency = 1; row.BorderSizePixel = 0
-            row.Size = UDim2.new(1, 0, 0, 20); row.LayoutOrder = i; row.Visible = false
+            row.Size = UDim2.new(1, 0, 0, 22); row.LayoutOrder = i; row.Visible = false
+            row.ClipsDescendants = true
             row.Active = true
             row.Parent = glassBody
 
-            -- label (left)
+            -- accent dot (left)
+            local dot = Instance.new("Frame"); dot.Name = "Dot"; dot.BorderSizePixel = 0
+            dot.BackgroundColor3 = Config.Ind_Accent
+            dot.AnchorPoint = Vector2.new(0, 0.5)
+            dot.Position = UDim2.new(0, 0, 0, 6); dot.Size = UDim2.new(0, 5, 0, 5)
+            Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0); dot.Parent = row
+
+            -- label (left, after dot)
             local lab = Instance.new("TextLabel"); lab.Name = "Label"
             lab.BackgroundTransparency = 1; lab.Font = Enum.Font.GothamMedium
-            lab.TextSize = 12; lab.TextColor3 = Color3.fromRGB(200, 202, 215)
+            lab.TextSize = 12; lab.TextColor3 = Color3.fromRGB(196, 199, 212)
             lab.TextXAlignment = Enum.TextXAlignment.Left; lab.TextYAlignment = Enum.TextYAlignment.Top
-            lab.Position = UDim2.new(0, 0, 0, 0); lab.Size = UDim2.new(0.5, 0, 0, 12)
+            lab.Position = UDim2.new(0, 11, 0, 0); lab.Size = UDim2.new(0.5, 0, 0, 13)
             lab.Text = GLABEL[key] or key; lab.Parent = row
 
-            -- value (right)
+            -- value (right, heavy)
             local val = Instance.new("TextLabel"); val.Name = "Value"
             val.BackgroundTransparency = 1; val.Font = Enum.Font.GothamBold
             val.TextSize = 12; val.TextColor3 = Color3.fromRGB(255, 255, 255)
             val.TextXAlignment = Enum.TextXAlignment.Right; val.TextYAlignment = Enum.TextYAlignment.Top
-            val.Position = UDim2.new(0.5, 0, 0, 0); val.Size = UDim2.new(0.5, 0, 0, 12)
+            val.Position = UDim2.new(0.5, 0, 0, 0); val.Size = UDim2.new(0.5, 0, 0, 13)
             val.Text = ""; val.Parent = row
 
-            -- thin progress bar under the row
+            -- thin rounded progress bar under the row
             local barBg = Instance.new("Frame"); barBg.Name = "BarBg"
-            barBg.BackgroundColor3 = Color3.fromRGB(34, 36, 48); barBg.BorderSizePixel = 0
-            barBg.Position = UDim2.new(0, 0, 0, 15); barBg.Size = UDim2.new(1, 0, 0, 3)
+            barBg.BackgroundColor3 = Color3.fromRGB(32, 34, 46); barBg.BorderSizePixel = 0
+            barBg.Position = UDim2.new(0, 0, 0, 16); barBg.Size = UDim2.new(1, 0, 0, 3)
             Instance.new("UICorner", barBg).CornerRadius = UDim.new(1, 0); barBg.Parent = row
 
             local bar = Instance.new("Frame"); bar.Name = "Bar"
@@ -1038,12 +1061,44 @@ return function(Lib, Core)
             bar.Position = UDim2.new(0, 0, 0, 0); bar.Size = UDim2.new(0, 0, 1, 0)
             Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0); bar.Parent = barBg
             local barGrad = Instance.new("UIGradient")
-            barGrad.Transparency = NumberSequence.new(0.3, 0); barGrad.Parent = bar
+            barGrad.Transparency = NumberSequence.new(0.35, 0); barGrad.Parent = bar
 
             row.InputBegan:Connect(function(input) beginDrag(input) end)
-            glassRows[key] = { row = row, label = lab, value = val, bar = bar, dispRatio = 0, shown = false }
+            glassRows[key] = {
+                row = row, label = lab, value = val, bar = bar, dot = dot,
+                barBg = barBg, dispRatio = 0, shown = nil,
+            }
         end
         glassBody.InputBegan:Connect(function(input) beginDrag(input) end)
+    end
+
+    -- Smooth appear/collapse animation for a Glass row (height + fade).
+    local GLASS_IN  = TweenInfo.new(0.26, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+    local GLASS_OUT = TweenInfo.new(0.20, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+    local function setGlassShown(g, shown)
+        if g.shown == shown then return end
+        g.shown = shown
+        if shown then
+            g.row.Visible = true
+            TweenService:Create(g.row, GLASS_IN, { Size = UDim2.new(1, 0, 0, 22) }):Play()
+            TweenService:Create(g.label, GLASS_IN, { TextTransparency = 0 }):Play()
+            TweenService:Create(g.value, GLASS_IN, { TextTransparency = 0 }):Play()
+            TweenService:Create(g.dot,   GLASS_IN, { BackgroundTransparency = 0 }):Play()
+            TweenService:Create(g.barBg, GLASS_IN, { BackgroundTransparency = 0 }):Play()
+            TweenService:Create(g.bar,   GLASS_IN, { BackgroundTransparency = 0 }):Play()
+        else
+            TweenService:Create(g.row, GLASS_OUT, { Size = UDim2.new(1, 0, 0, 0) }):Play()
+            TweenService:Create(g.label, GLASS_OUT, { TextTransparency = 1 }):Play()
+            TweenService:Create(g.value, GLASS_OUT, { TextTransparency = 1 }):Play()
+            TweenService:Create(g.dot,   GLASS_OUT, { BackgroundTransparency = 1 }):Play()
+            TweenService:Create(g.barBg, GLASS_OUT, { BackgroundTransparency = 1 }):Play()
+            local t = TweenService:Create(g.bar, GLASS_OUT, { BackgroundTransparency = 1 })
+            local cn; cn = t.Completed:Connect(function()
+                if cn then cn:Disconnect(); cn = nil end
+                if not g.shown then g.row.Visible = false end
+            end)
+            t:Play()
+        end
     end
 
     -- restore the saved HUD position (fraction-based, resolution-independent).
@@ -1234,245 +1289,11 @@ return function(Lib, Core)
 		return statsBuf
     end
 
-    -- Drawing indicator STYLE definitions (clean, NO background panel — just text +
-    -- a thin accent bar per row, white text). Only two Drawing styles exist:
-    --   Simple – a centred stack near the middle-bottom of the screen
-    --   Player – a stack pinned to the side of the local player (left/right/bottom)
-    local STYLE_DEFS = {
-		Simple  = { width = 205, row = 29, txt = 14 },
-		Player  = { width = 170, row = 25, txt = 13 },
-		Free    = { width = 185, row = 27, txt = 14 },
-    }
-    local DRAW_STYLES = { Simple = true, Player = true, Free = true }
+    -- Simple (Drawing) stack geometry. One def; placement is chosen by Ind_Anchor
+    -- (Player = pinned to character, Free = draggable screen position).
+    local SIMPLE_DEF = { width = 190, row = 27, txt = 14 }
 
-    local uiScale  -- forward declaration: defined after STYLE_DEFS, used by V2/V3 below
 
-    -- ── PlayerV2: BillboardGui attached to character — floating colored bar-stack ──
-    -- Each stat is a vertical colored pill that grows from 0% to 100%. Floats above head.
-    -- ── PlayerV3: ScreenGui anchor — circular arc gauges pinned to character 3D point ──
-    -- Uses Drawing arcs (Line circles) for a radar-style circular mini-HUD.
-    local v2Bill    -- BillboardGui for PlayerV2
-    local v2Bars = {}  -- [key] = { frame, fill, label }
-    local v3Arcs = {}  -- [key] = { ring, arc, label, value } Drawing objects
-    local V2_BAR_W, V2_BAR_H, V2_GAP = 20, 78, 7
-    local V3_RADIUS = 46  -- base screen radius for arc gauges
-    local V2_ABBREV = { Health="HP", Stamina="ST", IFrame="IF", M2="M2", Dodge="DG", Block="BK" }
-
-    local function buildV2(char)
-        if v2Bill then pcall(function() v2Bill:Destroy() end) end
-        v2Bill = nil; v2Bars = {}
-        if not char then return end
-        local hrp = getRoot(char)
-        if not hrp then return end
-        local bill = Instance.new("BillboardGui")
-        bill.Name = "\0SylV2"
-        bill.Adornee = hrp
-        bill.AlwaysOnTop = false
-        local padX = 10
-        bill.Size = UDim2.fromOffset((V2_BAR_W + V2_GAP) * #rowOrder + V2_GAP + padX, V2_BAR_H + 44)
-        bill.StudsOffset = Vector3.new(0, 4.0, 0)
-        bill.ResetOnSpawn = false
-        pcall(function() bill.Parent = guiParent() end)
-        if not bill.Parent then bill.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-        v2Bill = bill
-
-        -- glass-ish background frame (dark, translucent, rounded, gradient + glow stroke)
-        local bg = Instance.new("Frame"); bg.Name = "BG"
-        bg.BackgroundColor3 = Color3.fromRGB(10,10,16); bg.BackgroundTransparency = 0.15
-        bg.BorderSizePixel = 0; bg.Size = UDim2.new(1,0,1,0); bg.Parent = bill
-        Instance.new("UICorner", bg).CornerRadius = UDim.new(0,10)
-        local bgGrad = Instance.new("UIGradient")
-        bgGrad.Color = ColorSequence.new(Color3.fromRGB(20,20,32), Color3.fromRGB(8,8,13))
-        bgGrad.Rotation = 90; bgGrad.Parent = bg
-        local bgStroke = Instance.new("UIStroke")
-        bgStroke.Color = Config.Ind_Accent; bgStroke.Thickness = 1.4
-        bgStroke.Transparency = 0.35; bgStroke.Parent = bg
-
-        -- top accent header line
-        local header = Instance.new("Frame"); header.Name = "Header"
-        header.BackgroundColor3 = Config.Ind_Accent; header.BorderSizePixel = 0
-        header.Position = UDim2.new(0, 8, 0, 5); header.Size = UDim2.new(1, -16, 0, 2)
-        Instance.new("UICorner", header).CornerRadius = UDim.new(1,0); header.Parent = bg
-
-        for i, key in ipairs(rowOrder) do
-            local col = Instance.new("Frame"); col.Name = key
-            col.BackgroundTransparency = 1; col.BorderSizePixel = 0
-            col.Position = UDim2.fromOffset(padX*0.5 + (i-1)*(V2_BAR_W+V2_GAP) + V2_GAP, 14)
-            col.Size = UDim2.fromOffset(V2_BAR_W, V2_BAR_H + 26)
-            col.Parent = bg
-
-            -- value text above the bar
-            local valTxt = Instance.new("TextLabel"); valTxt.Name = "Val"
-            valTxt.BackgroundTransparency = 1; valTxt.Font = Enum.Font.GothamBold
-            valTxt.TextSize = 9; valTxt.TextColor3 = Color3.fromRGB(255,255,255)
-            valTxt.TextXAlignment = Enum.TextXAlignment.Center
-            valTxt.Position = UDim2.fromOffset(-4, 0); valTxt.Size = UDim2.fromOffset(V2_BAR_W+8, 11)
-            valTxt.Text = ""; valTxt.Parent = col
-
-            -- bar track (rounded, dark, inner shadow feel)
-            local track = Instance.new("Frame"); track.Name = "Track"
-            track.BackgroundColor3 = Color3.fromRGB(18,18,28); track.BorderSizePixel = 0
-            track.Position = UDim2.fromOffset(0, 13); track.Size = UDim2.fromOffset(V2_BAR_W, V2_BAR_H)
-            Instance.new("UICorner", track).CornerRadius = UDim.new(0,6); track.Parent = col
-            local trStroke = Instance.new("UIStroke")
-            trStroke.Color = Color3.fromRGB(40,40,58); trStroke.Thickness = 1
-            trStroke.Transparency = 0.4; trStroke.Parent = track
-
-            -- fill (anchored bottom, grows upward), with vertical gradient + glow
-            local fill = Instance.new("Frame"); fill.Name = "Fill"
-            fill.BackgroundColor3 = Config.Ind_Accent; fill.BorderSizePixel = 0
-            fill.AnchorPoint = Vector2.new(0,1)
-            fill.Position = UDim2.new(0,0,1,0); fill.Size = UDim2.new(1,0,0,0)
-            Instance.new("UICorner", fill).CornerRadius = UDim.new(0,6); fill.Parent = track
-            local fillGrad = Instance.new("UIGradient")
-            fillGrad.Transparency = NumberSequence.new(0.15, 0)
-            fillGrad.Rotation = 90; fillGrad.Parent = fill
-
-            -- top glow cap on the fill (bright line at the top of the filled area)
-            local cap = Instance.new("Frame"); cap.Name = "Cap"
-            cap.BackgroundColor3 = Color3.fromRGB(255,255,255); cap.BorderSizePixel = 0
-            cap.AnchorPoint = Vector2.new(0,0); cap.Position = UDim2.new(0,0,0,0)
-            cap.Size = UDim2.new(1,0,0,2); cap.BackgroundTransparency = 0.2
-            Instance.new("UICorner", cap).CornerRadius = UDim.new(1,0); cap.Parent = fill
-
-            -- short label at bottom
-            local lab = Instance.new("TextLabel"); lab.Name = "Label"
-            lab.BackgroundTransparency = 1; lab.Font = Enum.Font.GothamBold
-            lab.TextSize = 9; lab.TextColor3 = Color3.fromRGB(170,170,200)
-            lab.TextXAlignment = Enum.TextXAlignment.Center
-            lab.Position = UDim2.fromOffset(-4, V2_BAR_H + 15); lab.Size = UDim2.fromOffset(V2_BAR_W+8, 12)
-            lab.Text = V2_ABBREV[key] or key:sub(1,2):upper(); lab.Parent = col
-
-            v2Bars[key] = { fill = fill, track = track, col = col, label = lab, val = valTxt, cap = cap, dispRatio = 0 }
-        end
-    end
-
-    local function destroyV2()
-        if v2Bill then pcall(function() v2Bill:Destroy() end); v2Bill = nil end
-        v2Bars = {}
-    end
-
-    local function buildV3()
-        -- Clean up old arcs
-        for _, a in pairs(v3Arcs) do
-            if a.ring  then pcall(function() a.ring:Remove()  end) end
-            if a.arc   then pcall(function() a.arc:Remove()   end) end
-            if a.label then pcall(function() a.label:Remove() end) end
-            if a.value then pcall(function() a.value:Remove() end) end
-        end
-        v3Arcs = {}
-        if not hasDrawing then return end
-        local ABBREV = {Health="HP",Stamina="ST",IFrame="IF",M2="M2",Dodge="DO",Block="BL"}
-        for _, key in ipairs(rowOrder) do
-            v3Arcs[key] = {
-                ring  = newDrawing("Circle",{Filled=false,NumSides=36,Thickness=2.5,Visible=false,Color=Color3.fromRGB(30,30,50),ZIndex=12}),
-                arc   = newDrawing("Circle",{Filled=false,NumSides=36,Thickness=3,Visible=false,Color=Config.Ind_Accent,ZIndex=13}),
-                label = newDrawing("Text",{Size=11,Font=2,Center=true,Outline=true,OutlineColor=Color3.new(0,0,0),Visible=false,Color=Color3.fromRGB(200,200,220),ZIndex=14}),
-                value = newDrawing("Text",{Size=10,Font=2,Center=true,Outline=true,OutlineColor=Color3.new(0,0,0),Visible=false,Color=Color3.fromRGB(255,255,255),ZIndex=14}),
-                dispRatio=0, alpha=0,
-                abbrev = ABBREV[key] or key:sub(1,2):upper(),
-            }
-        end
-    end
-
-    local function destroyV3()
-        for _, a in pairs(v3Arcs) do
-            for _, k2 in ipairs({"ring","arc","label","value"}) do
-                if a[k2] then pcall(function() a[k2]:Remove() end) end
-            end
-        end
-        v3Arcs = {}
-    end
-
-    local function updateV2(char, hum, dt)
-        if not v2Bill or not v2Bill.Parent then
-            buildV2(char); return
-        end
-        -- re-adorn if character changed (respawn)
-        local hrp = getRoot(char)
-        if hrp and v2Bill.Adornee ~= hrp then v2Bill.Adornee = hrp end
-        local a = math.clamp(dt * 14, 0, 1)
-        for _, key in ipairs(rowOrder) do
-            local b = v2Bars[key]
-            if not b then return end
-            local show, ratio, text, color = readIndicator(key, char, hum)
-            b.col.Visible = show and true or false
-            if show then
-                b.dispRatio = lerp(b.dispRatio, ratio or 0, a)
-                local c = color or Config.Ind_Accent
-                b.fill.BackgroundColor3 = c
-                local r = math.clamp(b.dispRatio, 0, 1)
-                b.fill.Size = UDim2.new(1, 0, r, 0)
-                -- value text: strip trailing "s" units for compactness, keep short
-                if b.val then
-                    b.val.Text = text or ""
-                    b.val.TextColor3 = c
-                end
-                -- glow cap only visible when there's a meaningful fill
-                if b.cap then b.cap.Visible = r > 0.04 end
-            end
-        end
-    end
-
-    local function updateV3(char, hum, dt)
-        if not hasDrawing then return end
-        if next(v3Arcs) == nil then buildV3() end
-        local root = getRoot(char)
-        if not root then
-            for _, a in pairs(v3Arcs) do a.ring.Visible=false; a.arc.Visible=false; a.label.Visible=false; a.value.Visible=false end
-            return
-        end
-        -- project a point slightly above the character's head
-        local wp  = root.Position + Vector3.new(0, 4.2, 0)
-        local sp, on = Camera:WorldToViewportPoint(wp)
-        if not on or sp.Z < 0.1 then
-            for _, a in pairs(v3Arcs) do a.ring.Visible=false; a.arc.Visible=false; a.label.Visible=false; a.value.Visible=false end
-            return
-        end
-        local sc   = uiScale()
-        local fade = math.clamp(dt * 12, 0, 1)
-        local cx, cy = sp.X, sp.Y
-        -- arrange N arcs in a row, spaced by 2*r+gap
-        local n    = #rowOrder
-        local r    = math.clamp(V3_RADIUS * sc * 22 / math.max(sp.Z, 5), 14, 50)
-        local gap  = r * 0.35
-        local totalW = n * (2*r + gap) - gap
-        local startX = cx - totalW * 0.5 + r
-
-        for i, key in ipairs(rowOrder) do
-            local a = v3Arcs[key]
-            if not a then break end
-            local show, ratio, text, color = readIndicator(key, char, hum)
-            a.alpha = lerp(a.alpha, show and 1 or 0, fade)
-            a.dispRatio = lerp(a.dispRatio, ratio or 0, fade)
-            local ax = startX + (i-1) * (2*r + gap)
-            local ay = cy
-
-            if a.alpha < 0.02 then
-                a.ring.Visible=false; a.arc.Visible=false; a.label.Visible=false; a.value.Visible=false
-            else
-                local col = color or Config.Ind_Accent
-                local tr  = 1 - a.alpha
-                -- outer ghost ring
-                a.ring.Position = Vector2.new(ax, ay); a.ring.Radius = r
-                a.ring.Transparency = tr + (1 - tr) * 0.65; a.ring.Visible = true
-                -- filled arc simulated by adjusting NumSides proportional to ratio
-                -- (Drawing Circle doesn't support arc directly; we use a small circle that
-                --  visually overlaps — the ring does the outline, the arc dot shows progress)
-                local arcR = r * math.clamp(a.dispRatio, 0, 1)
-                a.arc.Position = Vector2.new(ax, ay); a.arc.Radius = math.max(2, arcR)
-                a.arc.Color = col; a.arc.Transparency = tr; a.arc.Visible = arcR > 1
-                -- center label
-                a.label.Text = a.abbrev
-                a.label.Position = Vector2.new(ax, ay - 6*sc)
-                a.label.Color = Color3.fromRGB(160,160,200); a.label.Transparency = tr; a.label.Visible = true
-                -- value below
-                a.value.Text = text or ""
-                a.value.Position = Vector2.new(ax, ay + 4*sc)
-                a.value.Color = Color3.fromRGB(255,255,255); a.value.Transparency = tr; a.value.Visible = show == true
-            end
-        end
-    end
 
     -- ── Drawing-based cell pool (text + thin bar per row, no chrome) ─────────
     local drawCells = {}
@@ -1506,8 +1327,7 @@ return function(Lib, Core)
     end
 
     -- viewport-relative UI scale so every Drawing style stays readable on phones
-    -- (assigned to the forward-declared `uiScale` above so V2/V3 can call it)
-    uiScale = function()
+    local function uiScale()
         local vp = Camera.ViewportSize
         local s  = math.clamp(vp.Y / 864, 0.85, 1.7)
         if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then s = s * 1.18 end
@@ -1543,101 +1363,54 @@ return function(Lib, Core)
                 local col   = am and am.color or Config.Ind_Accent
                 -- Design applies to every Drawing-based style (Player/Free/Simple), not just Player,
                 -- so the picker is meaningful whichever draw style is active.
-                local design = Config.Ind_PlayerDesign or "Neon"
                 c.edgeA.Visible=false; c.edgeB.Visible=false; c.node.Visible=false
 
-                if design == "Neon" then
-                    -- Neon: dark translucent pill bg + glowing colored left border strip + subtle inner glow line
+                -- Drawing API: Transparency is OPACITY (1 = opaque, 0 = invisible), the
+                -- OPPOSITE of Roblox GUI. c.alpha goes 0→1 as a row fades IN, so element
+                -- Transparency = c.alpha (NOT 1 - c.alpha).
+                -- Simple uses the Neon look only (Cyber/Arc/Minimal removed).
+                do
+                    -- Neon: dark translucent pill bg + glowing colored left strip + dim right echo
                     c.bg.Position  = Vector2.new(left - 4*sc, rowY - 3*sc)
                     c.bg.Size      = Vector2.new(width + 8*sc, txtSize + 12*sc)
                     c.bg.Color     = Color3.fromRGB(6, 6, 14)
-                    c.bg.Transparency = 1 - c.alpha * 0.55
+                    c.bg.Transparency = c.alpha * 0.55
                     c.bg.Visible   = true
                     -- left neon strip
                     c.edgeA.From  = Vector2.new(left - 4*sc, rowY - 3*sc)
                     c.edgeA.To    = Vector2.new(left - 4*sc, rowY + txtSize + 9*sc)
                     c.edgeA.Color = col; c.edgeA.Thickness = math.max(2, 3*sc)
-                    c.edgeA.Transparency = 1 - c.alpha; c.edgeA.Visible = true
+                    c.edgeA.Transparency = c.alpha; c.edgeA.Visible = true
                     -- subtle right echo strip (dim)
                     c.edgeB.From  = Vector2.new(right + 4*sc, rowY - 3*sc)
                     c.edgeB.To    = Vector2.new(right + 4*sc, rowY + txtSize + 9*sc)
                     c.edgeB.Color = col; c.edgeB.Thickness = 1
-                    c.edgeB.Transparency = 1 - c.alpha * 0.35; c.edgeB.Visible = true
-
-                elseif design == "Cyber" then
-                    -- Cyber: no bg, corner tick marks (top-left + bottom-right), scanline track
-                    c.bg.Visible = false
-                    local CW, CH = 7*sc, 4*sc
-                    -- top-left horizontal tick
-                    c.edgeA.From = Vector2.new(left - 2*sc, rowY - 2*sc)
-                    c.edgeA.To   = Vector2.new(left - 2*sc + CW, rowY - 2*sc)
-                    c.edgeA.Color = col; c.edgeA.Thickness = math.max(1, 1.5*sc)
-                    c.edgeA.Transparency = 1 - c.alpha; c.edgeA.Visible = true
-                    -- bottom-right horizontal tick
-                    c.edgeB.From = Vector2.new(right + 2*sc - CW, rowY + txtSize + 5*sc)
-                    c.edgeB.To   = Vector2.new(right + 2*sc, rowY + txtSize + 5*sc)
-                    c.edgeB.Color = col; c.edgeB.Thickness = math.max(1, 1.5*sc)
-                    c.edgeB.Transparency = 1 - c.alpha; c.edgeB.Visible = true
-                    -- dot accent at top-left corner
-                    c.node.Position = Vector2.new(left - 2*sc, rowY - 2*sc)
-                    c.node.Radius   = math.max(2, 2.5*sc)
-                    c.node.Color    = col; c.node.Transparency = 1 - c.alpha; c.node.Visible = true
-
-                elseif design == "Arc" then
-                    -- Arc: wide translucent bg, colored top edge bar that fills with progress
-                    c.bg.Position  = Vector2.new(left - 6*sc, rowY - 4*sc)
-                    c.bg.Size      = Vector2.new(width + 12*sc, txtSize + 14*sc)
-                    c.bg.Color     = lerpColor(Color3.fromRGB(8,8,20), col, 0.07)
-                    c.bg.Transparency = 1 - c.alpha * 0.70
-                    c.bg.Visible   = true
-                    -- top edge full-width ghost line
-                    c.edgeA.From  = Vector2.new(left - 6*sc, rowY - 4*sc)
-                    c.edgeA.To    = Vector2.new(right + 6*sc, rowY - 4*sc)
-                    c.edgeA.Color = Color3.fromRGB(60, 60, 90)
-                    c.edgeA.Thickness = math.max(1, 1.5*sc)
-                    c.edgeA.Transparency = 1 - c.alpha * 0.5; c.edgeA.Visible = true
-                    -- top edge colored progress line (driven by dispRatio)
-                    local fillEndX = (left - 6*sc) + (width + 12*sc) * math.clamp(c.dispRatio, 0, 1)
-                    c.edgeB.From  = Vector2.new(left - 6*sc, rowY - 4*sc)
-                    c.edgeB.To    = Vector2.new(fillEndX, rowY - 4*sc)
-                    c.edgeB.Color = col; c.edgeB.Thickness = math.max(2, 2.5*sc)
-                    c.edgeB.Transparency = 1 - c.alpha; c.edgeB.Visible = true
-
-                else -- "Minimal"
-                    -- Minimal: zero chrome, just a colored diamond bullet + right-aligned value.
-                    -- Ultra clean — no background, no box, no border. Pure text + accent dot.
-                    c.bg.Visible = false; c.edgeA.Visible = false; c.edgeB.Visible = false
-                    c.node.Position = Vector2.new(left - 8*sc, rowY + txtSize * 0.45)
-                    c.node.Radius   = math.max(2, 3*sc)
-                    c.node.Color    = col
-                    c.node.Transparency = 1 - c.alpha; c.node.Visible = true
+                    c.edgeB.Transparency = c.alpha * 0.35; c.edgeB.Visible = true
                 end
 
-                -- Drawing API: Transparency 0 = opaque, 1 = invisible. c.alpha goes 0→1 as
-                -- the row fades IN, so element transparency must be (1 - c.alpha).
                 c.label.Size = txtSize
                 c.label.Text = STAT_LABELS[key] or key
                 c.label.Position = Vector2.new(left, rowY)
                 c.label.Color = WM.txtMute
-                c.label.Transparency = 1 - c.alpha
+                c.label.Transparency = c.alpha
                 c.label.Visible = true
 
                 if am then c.value.Text = am.text end
                 c.value.Size = txtSize
                 c.value.Position = Vector2.new(right - textWidth(c.value), rowY)
                 c.value.Color = WM.txtMain
-                c.value.Transparency = 1 - c.alpha
+                c.value.Transparency = c.alpha
                 c.value.Visible = true
 
                 local lineY = rowY + txtSize + 5 * sc
                 c.track.From = Vector2.new(left, lineY); c.track.To = Vector2.new(right, lineY)
                 c.track.Thickness = math.max(1, 2 * sc)
-                c.track.Color = WM.stroke; c.track.Transparency = 1 - c.alpha * 0.5; c.track.Visible = true
+                c.track.Color = WM.stroke; c.track.Transparency = c.alpha * 0.5; c.track.Visible = true
 
                 local fillW = width * math.clamp(c.dispRatio, 0, 1)
                 c.fill.From = Vector2.new(left, lineY); c.fill.To = Vector2.new(left + fillW, lineY)
                 c.fill.Thickness = math.max(1, 2 * sc)
-                c.fill.Color = col; c.fill.Transparency = 1 - c.alpha; c.fill.Visible = fillW > 0.5
+                c.fill.Color = col; c.fill.Transparency = c.alpha; c.fill.Visible = fillW > 0.5
             end
         end
     end)
@@ -1655,21 +1428,57 @@ return function(Lib, Core)
         local char  = Config.Ind_On and getChar(LocalPlayer) or nil
         local hum   = getHum(char)
 
-        -- toggle which draggable surface is live (only one container is ever shown)
-        if indHolder then
-            if panelBody then panelBody.Visible = (style == "Panel") and char ~= nil end
-            if dragHandle then dragHandle.Visible = (style == "Free") and char ~= nil end
-            if glassBody then glassBody.Visible = (style == "Glass") and char ~= nil end
+        local anchor = Config.Ind_Anchor or "Free"
+        local isGui   = (style == "Panel" or style == "Glass")   -- GUI-based (live in indHolder)
+        local isDraw  = (style == "Simple")                       -- Drawing-based
+
+        -- ── Position the GUI container (indHolder) based on the anchor ──────────
+        -- Free  : follow the smoothed drag position (existing behaviour).
+        -- Player: project a 3D point beside/under the character and pin indHolder there.
+        if indHolder and isGui and char then
+            if anchor == "Player" then
+                local root = getRoot(char)
+                if root then
+                    local side = Config.Ind_PlayerSide or "Left"
+                    local textY = (Config.Ind_PlayerTextY or 0)
+                    local hw = (indHolder.AbsoluteSize.X > 1 and indHolder.AbsoluteSize.X or IND_W)
+                    local hh = (indHolder.AbsoluteSize.Y > 1 and indHolder.AbsoluteSize.Y or 60)
+                    local wp
+                    if side == "Bottom" then
+                        wp = root.Position - Vector3.new(0, 3.6, 0)
+                    else
+                        local dir = (side == "Right") and 1 or -1
+                        wp = root.Position + Camera.CFrame.RightVector * (2.6 * dir)
+                    end
+                    local sp, on = Camera:WorldToViewportPoint(wp)
+                    if on then
+                        local px, py
+                        if side == "Right" then       px = sp.X + 10;        py = sp.Y - hh/2
+                        elseif side == "Left" then    px = sp.X - hw - 10;   py = sp.Y - hh/2
+                        else                          px = sp.X - hw/2;      py = sp.Y + 8 end
+                        py = py + textY
+                        -- ease the container to the projected point (no drag persistence here)
+                        drag.target = Vector2.new(px, py)
+                    end
+                end
+            end
         end
 
-        -- ── GLASS style (liquid-glass draggable HUD, GUI-based) ─────────────────
+        -- ── Visibility of each GUI container (only the active style shows) ──────
+        if indHolder then
+            if panelBody then panelBody.Visible = (style == "Panel") and char ~= nil end
+            if glassBody then glassBody.Visible = (style == "Glass") and char ~= nil end
+            if dragHandle then dragHandle.Visible = false end   -- Free-Drawing handle handled below
+        end
+
+        -- ── GLASS style (liquid-glass HUD, GUI-based) ───────────────────────────
         if char and style == "Glass" and glassBody then
             local a = math.clamp(dt * 12, 0, 1)
             for _, key in ipairs(rowOrder) do
                 local g = glassRows[key]
                 if g then
                     local show, ratio, text, color = readIndicator(key, char, hum)
-                    g.row.Visible = show and true or false
+                    setGlassShown(g, show and true or false)
                     if show then
                         g.dispRatio = lerp(g.dispRatio, ratio or 0, a)
                         local c = color or Config.Ind_Accent
@@ -1681,10 +1490,10 @@ return function(Lib, Core)
                 end
             end
         elseif glassBody then
-            for _, g in pairs(glassRows) do g.row.Visible = false end
+            for _, g in pairs(glassRows) do setGlassShown(g, false) end
         end
 
-        -- ── PANEL style (stacked chips, draggable) ──────────────────────────
+        -- ── PANEL style (stacked chips) ─────────────────────────────────────────
         if char and style == "Panel" and indHolder then
             local a = math.clamp(dt * 12, 0, 1)
             for _, key in ipairs(rowOrder) do
@@ -1703,68 +1512,45 @@ return function(Lib, Core)
             for _, r in pairs(rows) do setRowShown(r, false) end
         end
 
-        -- ── Drawing styles (Simple / Player / Free) ───────────────��─────────
-        local def = DRAW_STYLES[style] and STYLE_DEFS[style] or nil
-        if char and hasDrawing and def then
+        -- ── SIMPLE style (Drawing text-stack, Neon look) ────────────────────────
+        if char and hasDrawing and isDraw then
             local stats = collectStats(char, hum)
             local sc    = uiScale()
             local vp    = Camera.ViewportSize
+            local def   = SIMPLE_DEF
             local width = def.width * sc
             local n     = math.max(#stats, 1)
             local totalH = n * def.row * sc
             local drawn = false
 
-            if style == "Simple" then
-                local ay = math.clamp(Config.Ind_ScreenY or 0.60, 0.2, 0.92)
-                renderDrawStack(stats, dt, def, vp.X * 0.5, vp.Y * ay, sc)
-                drawn = true
-
-            elseif style == "Player" then
-                -- Beside the local player, anchored to a real 3D point. We offset the
-                -- root position by a FIXED number of world studs and re-project every
-                -- frame — so the stack holds a true 3D position that tracks the player
-                -- through space and depth. The horizontal offset uses the camera's right
-                -- vector (not the character CFrame and not GetBoundingBox, whose world
-                -- AABB size oscillated with player yaw and made the panel "rotate with"
-                -- the character). Result: yaw-independent, shiftlock-safe, 3D-anchored.
+            if anchor == "Player" then
                 local root = getRoot(char)
                 if root then
-                    local side = Config.Ind_PlayerSide or "Left"
-                    local gap  = 8 * sc
-                    local SIDE_STUDS = 2.6    -- lateral world offset (close to the body)
-                    local DOWN_STUDS = 3.6    -- vertical world offset for Bottom
-                    local textY = (Config.Ind_PlayerTextY or 0) * sc  -- user vertical nudge
+                    local side  = Config.Ind_PlayerSide or "Left"
+                    local gap   = 8 * sc
+                    local textY = (Config.Ind_PlayerTextY or 0) * sc
                     if side == "Bottom" then
-                        local wp = root.Position - Vector3.new(0, DOWN_STUDS, 0)
+                        local wp = root.Position - Vector3.new(0, 3.6, 0)
                         local fsp, on = Camera:WorldToViewportPoint(wp)
-                        if on then
-                            renderDrawStack(stats, dt, def, fsp.X, fsp.Y + gap + textY, sc)
-                            drawn = true
-                        end
+                        if on then renderDrawStack(stats, dt, def, fsp.X, fsp.Y + gap + textY, sc); drawn = true end
                     else
                         local dir = (side == "Right") and 1 or -1
-                        local wp  = root.Position + Camera.CFrame.RightVector * (SIDE_STUDS * dir)
+                        local wp  = root.Position + Camera.CFrame.RightVector * (2.6 * dir)
                         local esp, on = Camera:WorldToViewportPoint(wp)
                         if on then
                             local cx   = esp.X + dir * (gap + width / 2)
                             local topY = esp.Y - totalH / 2 + textY
-                            renderDrawStack(stats, dt, def, cx, topY, sc)
-                            drawn = true
+                            renderDrawStack(stats, dt, def, cx, topY, sc); drawn = true
                         end
                     end
                 end
-
-            elseif style == "Free" and indHolder then
-                -- Same clean text-stack as Player, but pinned to the draggable HUD
-                -- position (drag.disp = indHolder top-left in absolute px). The invisible
-                -- dragHandle below the stack catches the grab; we resize it every frame
-                -- to match so the whole block is grabbable and clamps to screen edges.
+            else -- Free: pinned to the draggable position, grab handle catches input
                 local baseX, baseY = drag.disp.X, drag.disp.Y
                 renderDrawStack(stats, dt, def, baseX + width / 2, baseY, sc)
                 drawn = true
                 if dragHandle then
+                    dragHandle.Visible = true
                     local scGui = (indUIScale and indUIScale.Scale > 0) and indUIScale.Scale or 1
-                    -- convert the drawn (already-scaled) size back to UIScale-local units
                     dragHandle.Size = UDim2.fromOffset(width / scGui, (totalH + def.txt * sc) / scGui)
                 end
             end
@@ -1772,21 +1558,6 @@ return function(Lib, Core)
             if not drawn then hideAllDrawCells() end
         else
             hideAllDrawCells()
-        end
-
-        -- ── PlayerV2: vertical bar-stack BillboardGui attached to character ──────
-        if char and style == "PlayerV2" then
-            updateV2(char, hum, dt)
-        else
-            -- destroy V2 when switching away to prevent ghost GUI
-            if v2Bill then destroyV2() end
-        end
-
-        -- ── PlayerV3: circular arc gauges via Drawing, 3D-anchored ───────────────
-        if char and style == "PlayerV3" then
-            updateV3(char, hum, dt)
-        else
-            if next(v3Arcs) ~= nil then destroyV3() end
         end
     end)
 
@@ -1997,7 +1768,13 @@ return function(Lib, Core)
 					end
 					p.pos = newPos
 					local sp, on = cam:WorldToViewportPoint(p.pos)
-					local visible = on and sp.Z > 0.05
+					-- Drawing renders fine off-screen (it just clips at the viewport edge),
+					-- so gate visibility on depth only. Using `on` here caused a flicker bug:
+					-- WorldToViewportPoint's `on` flips false the instant the point crosses
+					-- the viewport RECTANGLE edge (not just behind-camera), so a particle
+					-- drifting even 1px past the screen border would vanish and reappear
+					-- every frame as it wobbled across that boundary.
+					local visible = sp.Z > 0.05
 
 					if ptype == "Wireframe" then
 						p.ang = p.ang + p.av*step
@@ -2012,7 +1789,8 @@ return function(Lib, Core)
 							if a[2] and b[2] then
 								l.From=Vector2.new(a[1].X,a[1].Y); l.To=Vector2.new(b[1].X,b[1].Y)
 								l.Color=particleColor((p.z+age*.7+ei*.06)%1)
-								l.Transparency=1 - alpha*(.55+.35*p.z); l.Visible=true
+								-- Drawing API: Transparency is OPACITY (1=opaque, 0=invisible)
+								l.Transparency=alpha*(.55+.35*p.z); l.Visible=true
 							else l.Visible=false end
 						end
 
@@ -2025,50 +1803,50 @@ return function(Lib, Core)
 							p.dot.Position = Vector2.new(sp.X,sp.Y)
 							p.dot.Radius   = radius
 							p.dot.Color    = particleColor((p.z+age*.3)%1)
-							p.dot.Transparency = 1 - alpha*(.65+.3*p.z); p.dot.Visible=true
+							-- Drawing API: Transparency is OPACITY (1=opaque, 0=invisible)
+							p.dot.Transparency = alpha*(.65+.3*p.z); p.dot.Visible=true
 							-- glow ring slightly larger, complementary color
 							p.ring.Position = Vector2.new(sp.X,sp.Y)
 							p.ring.Radius   = radius*1.55
 							p.ring.Color    = particleColor((p.z+age*.3+.5)%1)
-							p.ring.Transparency = 1 - alpha*(.45+.35*p.z); p.ring.Visible=true
+							p.ring.Transparency = alpha*(.45+.35*p.z); p.ring.Visible=true
 						else p.dot.Visible=false; p.ring.Visible=false end
 
 					else -- "Sparks"
 						if visible then
-							-- Sparks: small depth-clamped flash elongated in travel direction.
-							-- The tail probe uses the SAME clamped depth so it never explodes on
-							-- screen. Visibility uses only sp.Z (Drawing clips off-screen itself),
-							-- so a spark partially past the viewport edge no longer flickers off.
-							local depthSafe = math.max(sp.Z, 6)
-							local sp2, on2 = cam:WorldToViewportPoint(p.pos + p.vel * 0.03)
+							-- Sparks: a bright streak elongated along travel direction + a small
+							-- perpendicular flash at the tip. Drawing API Transparency is OPACITY
+							-- (1=opaque). Visibility uses only sp.Z so a spark whose tip is off the
+							-- viewport edge doesn't flicker off. Streak length scales with the real
+							-- on-screen velocity (clamped) so slow embers are short, fast ones streak.
+							local depthSafe = math.max(sp.Z, 4)
+							local sp2, on2 = cam:WorldToViewportPoint(p.pos + p.vel * 0.04)
 							local tailX = on2 and (sp2.X - sp.X) or 0
 							local tailY = on2 and (sp2.Y - sp.Y) or 0
 							local tailLen = math.sqrt(tailX * tailX + tailY * tailY)
-							if tailLen < 0.5 then tailX, tailY = 0, -2 end
-							-- normalize tail direction then apply a fixed clamped pixel length,
-							-- so fast particles don't draw kilometre-long streaks
-							local tMag = math.sqrt(tailX*tailX + tailY*tailY) + 0.001
-							tailX, tailY = tailX / tMag, tailY / tMag
-							local tscale = math.clamp((1 + p.size) * 9 / depthSafe, 0.4, 9)
-							local sparkLen = math.clamp(tscale * 3, 2, 14)
+							if tailLen < 0.5 then tailX, tailY = 0, -2; tailLen = 2 end
+							local nX, nY = tailX / tailLen, tailY / tailLen
+							-- base pixel size from depth (bigger when closer), decent minimum so
+							-- sparks are actually visible, capped so they never fill the screen
+							local base = math.clamp((2 + p.size * 2.5) * 20 / depthSafe, 3, 22)
+							-- streak length blends base size with a bit of the real screen motion
+							local sparkLen = math.clamp(base + math.min(tailLen * 0.5, 10), 4, 30)
 							local l1 = p.lines[1]
-							l1.From = Vector2.new(sp.X, sp.Y)
-							l1.To   = Vector2.new(sp.X - tailX * sparkLen, sp.Y - tailY * sparkLen)
+							l1.From = Vector2.new(sp.X + nX * sparkLen * 0.35, sp.Y + nY * sparkLen * 0.35)
+							l1.To   = Vector2.new(sp.X - nX * sparkLen * 0.65, sp.Y - nY * sparkLen * 0.65)
 							l1.Color = particleColor((p.z + age * 0.6) % 1)
-							l1.Thickness = math.max(1, tscale * 0.35)
-							l1.Transparency = 1 - alpha * (0.75 + 0.2 * p.z)
+							l1.Thickness = math.max(1.5, base * 0.16)
+							l1.Transparency = alpha * (0.8 + 0.2 * p.z)
 							l1.Visible = true
-							-- perpendicular cross-flash at tip
+							-- perpendicular cross-flash near the head
 							local l2 = p.lines[2]
-							local perpX, perpY = -tailY, tailX
-							local pMag = math.sqrt(perpX * perpX + perpY * perpY) + 0.001
-							perpX, perpY = perpX / pMag, perpY / pMag
-							local w = math.clamp(tscale * 0.7, 0.5, 4)
+							local perpX, perpY = -nY, nX
+							local w = math.clamp(base * 0.28, 1.5, 6)
 							l2.From = Vector2.new(sp.X - perpX * w, sp.Y - perpY * w)
 							l2.To   = Vector2.new(sp.X + perpX * w, sp.Y + perpY * w)
 							l2.Color = particleColor((p.z + age * 0.6 + 0.25) % 1)
-							l2.Thickness = math.max(1, tscale * 0.09)
-							l2.Transparency = 1 - alpha * (0.6 + 0.3 * p.z)
+							l2.Thickness = math.max(1.5, base * 0.14)
+							l2.Transparency = alpha * (0.65 + 0.3 * p.z)
 							l2.Visible = true
 						else for _, l in ipairs(p.lines) do l.Visible = false end end
 					end
@@ -2427,29 +2205,44 @@ return function(Lib, Core)
             set = function(v) Config.Ind_On = v end,
             Desc = "Animated HUD",
         })
-        -- per-style setting elements (their visibility is driven by the Style dropdown)
-        local styleEls = {}   -- element -> { style1, style2, ... } (nil/"*" = always visible)
+        -- Per-setting visibility is driven by a PREDICATE that reads the current
+        -- Style + Anchor. Each element registers a function(style, anchor) -> bool.
+        local styleEls = {}   -- element -> predicate(style, anchor)
         local function applyStyleVis()
-            local cur = Config.Ind_Style
-            for el, styles in pairs(styleEls) do
-                local vis = false
-                if styles == "*" then vis = true
-                else for _, s in ipairs(styles) do if s == cur then vis = true break end end end
-                pcall(function() el:SetVisibility(vis) end)
+            local s, a = Config.Ind_Style, Config.Ind_Anchor
+            for el, pred in pairs(styleEls) do
+                local ok, vis = pcall(pred, s, a)
+                pcall(function() el:SetVisibility(ok and vis or false) end)
             end
         end
 
+        -- Style = the visual design. Only three now: Panel, Simple, Glass.
         pcall(function()
             sInd:Dropdown({
                 Name = "Style",
-                Options = { "Panel", "Free", "Player", "Simple", "Glass", "PlayerV2", "PlayerV3" },
+                Options = { "Panel", "Simple", "Glass" },
                 Default = Config.Ind_Style,
                 Callback = function(v)
                     if type(v) == "string" and v ~= "" then Config.Ind_Style = v; applyStyleVis() end
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Glass = liquid-glass draggable HUD (Nursultan/Neverlose style) | PlayerV2 = vertical bar pills above char | PlayerV3 = circular arc gauges above char." })
+        sInd:SubLabel({ Text = "Panel = chip HUD | Simple = clean neon text-stack | Glass = liquid-glass HUD (Nursultan/Neverlose)." })
+
+        -- Anchor = placement, shared by ALL three styles.
+        --   Player = pinned beside/under your character (pick a side)
+        --   Free   = a screen position you can drag
+        pcall(function()
+            sInd:Dropdown({
+                Name = "Anchor",
+                Options = { "Free", "Player" },
+                Default = Config.Ind_Anchor,
+                Callback = function(v)
+                    if type(v) == "string" and v ~= "" then Config.Ind_Anchor = v; applyStyleVis() end
+                end,
+            }, ctx.flag("VIS_IND_Anchor"))
+        end)
+        sInd:SubLabel({ Text = "Free = drag it anywhere | Player = stuck to your character." })
 
         sInd:Divider()
         sInd:Header({ Name = "Cooldowns" })
@@ -2464,17 +2257,16 @@ return function(Lib, Core)
         sInd:Header({ Name = "Appearance" })
         colorpick(sInd, "Accent Color", "VIS_IND_Accent", Config.Ind_Accent, function(c) Config.Ind_Accent = c end)
 
-        -- ── Per-style settings (shown only for the relevant style) ──
-        -- Draggable styles (Panel / Free): reset button + drag lock.
+        -- ── Anchor=Free settings: reset button + drag lock ──
         local resetBtn = sInd:Button({ Name = "Reset HUD Position", Callback = function() resetPos() end })
-        styleEls[resetBtn] = { "Panel", "Free", "Glass" }
+        styleEls[resetBtn] = function(_, a) return a == "Free" end
         local dragToggle = boolToggle(sInd, "Drag", "Ind Drag",
             function() return Config.Ind_Drag end, function(v) Config.Ind_Drag = v end)
-        styleEls[dragToggle] = { "Panel", "Free", "Glass" }
+        styleEls[dragToggle] = function(_, a) return a == "Free" end
         local dragHint = sInd:SubLabel({ Text = "Grab the HUD to move it. Turn Drag off to lock it" })
-        styleEls[dragHint] = { "Panel", "Free", "Glass" }
+        styleEls[dragHint] = function(_, a) return a == "Free" end
 
-        -- Player: which side of the character the stack sits on.
+        -- ── Anchor=Player settings: side + vertical nudge ──
         pcall(function()
             local sideDd = sInd:Dropdown({
                 Name = "Player Side",
@@ -2482,42 +2274,20 @@ return function(Lib, Core)
                 Default = Config.Ind_PlayerSide,
                 Callback = function(v) if type(v) == "string" and v ~= "" then Config.Ind_PlayerSide = v end end,
             }, ctx.flag("VIS_IND_PlayerSide"))
-            styleEls[sideDd] = { "Player" }
+            styleEls[sideDd] = function(_, a) return a == "Player" end
         end)
-
-        -- Design: one of four looks. Applies to every Drawing style (Player/Free/Simple).
-        pcall(function()
-            local designDd = sInd:Dropdown({
-                Name = "Design",
-                Options = { "Neon", "Cyber", "Arc", "Minimal" },
-                Default = Config.Ind_PlayerDesign,
-                Callback = function(v) if type(v) == "string" and v ~= "" then Config.Ind_PlayerDesign = v end end,
-            }, ctx.flag("VIS_IND_PlayerDesign"))
-            styleEls[designDd] = { "Player", "Free", "Simple" }
-        end)
-        local designHint = sInd:SubLabel({ Text = "Neon = dark pill + glowing border | Cyber = corner ticks + dot | Arc = progress top-edge bar | Minimal = clean bullet dot (Player, Free, Simple)." })
-        styleEls[designHint] = { "Player", "Free", "Simple" }
-
-        -- Player: vertical text nudge relative to the character.
         local playerTextY = slider(sInd, {
-            Name = "Text Position", Flag = "VIS_IND_PlayerTextY", Default = math.floor(Config.Ind_PlayerTextY or 0),
+            Name = "Vertical Offset", Flag = "VIS_IND_PlayerTextY", Default = math.floor(Config.Ind_PlayerTextY or 0),
             Min = -120, Max = 120, Suffix = "px", Callback = function(v) Config.Ind_PlayerTextY = v end,
         })
-        styleEls[playerTextY] = { "Player" }
+        styleEls[playerTextY] = function(_, a) return a == "Player" end
 
-        -- Simple: vertical position on screen.
-        local screenYSlider = slider(sInd, {
-            Name = "Screen Position", Flag = "VIS_IND_ScreenY", Default = math.floor((Config.Ind_ScreenY or 0.6) * 100),
-            Min = 20, Max = 92, Suffix = "%", Callback = function(v) Config.Ind_ScreenY = v / 100 end,
-        })
-        styleEls[screenYSlider] = { "Simple" }
-
-        -- All styles: manual scale on top of the automatic mobile rescale.
+        -- ── Every style has a Scale slider ──
         local scaleSlider = slider(sInd, {
             Name = "Scale", Flag = "VIS_IND_Scale", Default = math.floor((Config.Ind_Scale or 1) * 100),
             Min = 60, Max = 200, Suffix = "%", Callback = function(v) Config.Ind_Scale = v / 100 end,
         })
-        styleEls[scaleSlider] = { "Panel", "Free", "Player", "Simple" }
+        styleEls[scaleSlider] = function() return true end
 
         applyStyleVis()
 
@@ -2563,8 +2333,6 @@ return function(Lib, Core)
         end
         drawCells = {}
         indUIScale = nil
-        destroyV2()
-        destroyV3()
         if screenGui then pcall(function() screenGui:Destroy() end); screenGui = nil end
     end
 
