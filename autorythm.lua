@@ -2534,6 +2534,34 @@ return function(Lib, Core)
         return piece == piece:upper() and "w" or "b"
     end
 
+    -- Independent fallback validator for the pawn two-square advance ("double push").
+    -- The game's own Moves_ModuleScript.pseudoLegal has a confirmed decompile-shadowing
+    -- bug in exactly this branch (a `v18` local is read before it is declared, then
+    -- re-declared inside the `if`), which can make the live legalMovesFrom() reject or
+    -- miscompute a perfectly legal double push. We do NOT reimplement the game's whole
+    -- move generator (king-safety/pins for every piece stays the game's job); this is a
+    -- narrow, from-scratch check using only our own already-independently-built FEN
+    -- state (squares/side), scoped to the one move shape the game engine is known to
+    -- mishandle. It is only ever consulted as a fallback after the primary game-engine
+    -- check has already rejected the move.
+    local function ownDoublePushLegal(squares, side, parsed)
+        if type(squares) ~= "table" or type(parsed) ~= "table" then return false end
+        if parsed.promo then return false end -- a double push can never be a promotion
+        local piece = squares[parsed.from]
+        if type(piece) ~= "string" or piece:lower() ~= "p" or pieceColor(piece) ~= side then return false end
+
+        local fromFile, fromRank = parsed.from % 8, math.floor(parsed.from / 8)
+        local toFile, toRank = parsed.to % 8, math.floor(parsed.to / 8)
+        local dir = side == "w" and 1 or -1
+        local startRank = side == "w" and 1 or 6
+        if fromFile ~= toFile or fromRank ~= startRank or toRank ~= fromRank + 2 * dir then return false end
+
+        local midSquare = (fromRank + dir) * 8 + fromFile
+        if squares[midSquare] ~= nil then return false end -- path blocked
+        if squares[parsed.to] ~= nil then return false end -- destination occupied
+        return true
+    end
+
     local function validateLiveMove(mirror, myColor, parsed)
         if type(mirror) ~= "table" or type(parsed) ~= "table" then return false end
         local state = rawget(mirror, "state")
@@ -2542,13 +2570,26 @@ return function(Lib, Core)
         if type(squares) ~= "table" or pieceColor(squares[parsed.from]) ~= myColor then return false end
         if type(mirror.legalMovesFrom) ~= "function" then return false end
         local ok, legal = pcall(mirror.legalMovesFrom, mirror, parsed.from)
-        if not ok or type(legal) ~= "table" then return false end
+        if not ok or type(legal) ~= "table" then
+            -- The game's own legal-move call errored; still allow the narrow, safe
+            -- double-push fallback rather than unconditionally rejecting the move.
+            if ownDoublePushLegal(squares, myColor, parsed) then
+                return true, "engine legalMovesFrom errored; accepted via independent double-push check"
+            end
+            return false
+        end
         for _, move in ipairs(legal) do
             if type(move) == "table" and move.from == parsed.from and move.to == parsed.to then
                 local expected = parsed.promo
                 local actual = type(move.promo) == "string" and move.promo:lower() or nil
                 if expected == actual or (expected == nil and actual == nil) then return true end
             end
+        end
+        -- legalMovesFrom did not list this move. Before rejecting, check for the one
+        -- documented game-engine bug we can safely route around: a two-square pawn
+        -- advance from its starting rank with both intervening squares empty.
+        if ownDoublePushLegal(squares, myColor, parsed) then
+            return true, "engine legalMovesFrom rejected a structurally legal double push; accepted via independent check"
         end
         return false
     end
@@ -2824,10 +2865,14 @@ return function(Lib, Core)
             chessLog("stale result rejected", accepted.move)
             return
         end
-        if not color or not validateLiveMove(mirror, color, accepted.parsed) then
+        local liveOk, liveReason = false, nil
+        if color then liveOk, liveReason = validateLiveMove(mirror, color, accepted.parsed) end
+        if not liveOk then
             State.status = "API move failed live validation"
             chessLog("live validation rejected", accepted.move, "color=" .. tostring(color), "turn=" .. tostring(mirror.state.side))
             return
+        elseif liveReason then
+            chessLog("live validation fallback:", liveReason, "move=" .. tostring(accepted.move))
         end
         if accepted.depth < State.bestDepth and not accepted.final then return end
         State.bestDepth = math.max(State.bestDepth, accepted.depth)
