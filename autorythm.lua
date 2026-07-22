@@ -2405,6 +2405,43 @@ return function(Lib, Core)
         return ("abcdefgh"):sub(index % 8 + 1, index % 8 + 1) .. tostring(math.floor(index / 8) + 1)
     end
 
+    -- Build FEN directly from the live mirror state. Do not trust mirror:fen() as the
+    -- only source: the shipped Board.toFEN path can produce a syntactically valid but
+    -- engine-invalid FEN after moves (the API then answers type="error").
+    local function chessStateToFEN(state)
+        if type(state) ~= "table" or type(state.squares) ~= "table" then return nil end
+        local ranks = {}
+        for rank = 7, 0, -1 do
+            local row, empty = "", 0
+            for file = 0, 7 do
+                local piece = state.squares[rank * 8 + file]
+                if piece == nil then
+                    empty = empty + 1
+                elseif type(piece) == "string" and piece:match("^[prnbqkPRNBQK]$") then
+                    if empty > 0 then row = row .. tostring(empty); empty = 0 end
+                    row = row .. piece
+                else
+                    return nil
+                end
+            end
+            if empty > 0 then row = row .. tostring(empty) end
+            ranks[#ranks + 1] = row
+        end
+        local rights = type(state.castling) == "table" and state.castling or {}
+        local castling = ""
+        if rights.wk then castling = castling .. "K" end
+        if rights.wq then castling = castling .. "Q" end
+        if rights.bk then castling = castling .. "k" end
+        if rights.bq then castling = castling .. "q" end
+        if castling == "" then castling = "-" end
+        local side = state.side == "b" and "b" or "w"
+        local ep = state.ep ~= nil and squareName(state.ep) or "-"
+        if not ep then ep = "-" end
+        return string.format("%s %s %s %s %d %d", table.concat(ranks, "/"), side, castling, ep,
+            math.max(0, math.floor(tonumber(state.halfmove) or 0)),
+            math.max(1, math.floor(tonumber(state.fullmove) or 1)))
+    end
+
     local function parseMove(value)
         if type(value) ~= "string" then return nil end
         value = value:lower():gsub("%s+", "")
@@ -2541,6 +2578,10 @@ return function(Lib, Core)
         notify = function() end,
     }
 
+    local function chessLog(...)
+        print("[ChessEngine]", ...)
+    end
+
     local function looksLikeChess(value)
         if type(value) ~= "table" then return false end
         if type(rawget(value, "legalTargets")) ~= "table" then return false end
@@ -2599,9 +2640,9 @@ return function(Lib, Core)
         local chess = findChessState(force)
         if not chess or rawget(chess, "active") ~= true then return nil end
         local mirror = rawget(chess, "mirror")
-        if type(mirror) ~= "table" or type(mirror.fen) ~= "function" then return nil end
-        local ok, fen = pcall(mirror.fen, mirror)
-        if not ok or not validFEN(fen) then return nil end
+        if type(mirror) ~= "table" then return nil end
+        local fen = chessStateToFEN(rawget(mirror, "state"))
+        if not validFEN(fen) then return nil end
         local color = rawget(chess, "myColor") or rawget(chess, "seatColor")
         if color ~= "w" and color ~= "b" then color = nil end
         return chess, mirror, fen, color
@@ -2619,6 +2660,7 @@ return function(Lib, Core)
         State.ws = nil
         State.connecting = false
         if closeIt and old then pcall(function() old:Close() end) end
+        if old then chessLog(closeIt and "socket closed" or "socket dropped") end
     end
 
     local function clearHint()
@@ -2703,11 +2745,16 @@ return function(Lib, Core)
 
     local function sendPosition(force)
         local chess, mirror, fen, color = liveSnapshot(force)
-        if not chess then State.status = "no live chess state"; return false, "no active chess game" end
+        if not chess then
+            State.status = "no live chess state"
+            chessLog("send skipped: no active live state")
+            return false, "no active chess game"
+        end
         if Config.Chess.OnlyMyTurn and (not color or mirror.state.side ~= color) then
             clearHint()
             State.sentFen = nil
             State.pending = nil
+            State.status = "waiting for my turn"
             return false, "waiting for your turn"
         end
         if not State.ws then State.status = "socket disconnected"; return false, "websocket is not connected" end
@@ -2730,32 +2777,65 @@ return function(Lib, Core)
             State.nextConnect = os.clock() + (Config.Chess.ReconnectDelay or 2)
             return false, "websocket send failed: " .. tostring(err)
         end
+        State.lastFen = fen
         State.sentFen = fen
         State.pending = { clientTaskId = taskId, serverTaskId = nil, fen = fen }
         State.bestDepth = 0
         State.status = "position sent"
+        chessLog("sent", fen, "color=" .. tostring(color), "turn=" .. tostring(mirror.state.side),
+            "depth=" .. tostring(payload.depth), "time=" .. tostring(payload.maxThinkingTime))
         clearHint()
         return true, "position sent"
     end
 
     local function onSocketMessage(message)
-        if type(message) ~= "string" or not State.pending then return end
+        if type(message) ~= "string" then return end
         local okDecode, data = pcall(HttpService.JSONDecode, HttpService, message)
-        if not okDecode or type(data) ~= "table" then State.lastError = "invalid websocket JSON"; return end
+        if not okDecode or type(data) ~= "table" then
+            State.lastError = "invalid websocket JSON"
+            chessLog("invalid JSON:", tostring(message):sub(1, 300))
+            return
+        end
         State.lastPacket = tostring(data.type or "unknown") .. " depth=" .. tostring(data.depth or "-")
+        if data.type == "error" then
+            State.status = "API error"
+            State.lastError = tostring(data.text or data.error or message)
+            chessLog("API ERROR:", State.lastError, "fen=" .. tostring(data.fen or (State.pending and State.pending.fen)))
+            return
+        elseif data.type == "log" or data.type == "info" then
+            chessLog(string.upper(tostring(data.type)), tostring(data.text or ""))
+            return
+        end
+        if not State.pending then
+            chessLog("ignored actionable packet without pending request", tostring(data.type), tostring(data.move))
+            return
+        end
         if not Config.Chess.Progressive and data.type ~= "bestmove" then return end
         local accepted = acceptResponse(data, State.pending, State.bestDepth)
-        if not accepted then return end
+        if not accepted then
+            chessLog("rejected packet", tostring(data.type), tostring(data.move), "depth=" .. tostring(data.depth),
+                "task=" .. tostring(data.taskId))
+            return
+        end
 
         local chess, mirror, fen, color = liveSnapshot(false)
-        if not chess or fen ~= State.pending.fen then State.status = "stale position rejected"; return end
-        if not color or not validateLiveMove(mirror, color, accepted.parsed) then State.status = "API move failed live validation"; return end
+        if not chess or fen ~= State.pending.fen then
+            State.status = "stale position rejected"
+            chessLog("stale result rejected", accepted.move)
+            return
+        end
+        if not color or not validateLiveMove(mirror, color, accepted.parsed) then
+            State.status = "API move failed live validation"
+            chessLog("live validation rejected", accepted.move, "color=" .. tostring(color), "turn=" .. tostring(mirror.state.side))
+            return
+        end
         if accepted.depth < State.bestDepth and not accepted.final then return end
         State.bestDepth = math.max(State.bestDepth, accepted.depth)
 
         local previousMove = State.hintMove
         local shown, renderErr = renderHint(chess, fen, accepted.parsed)
         State.status = shown and ("hint " .. accepted.move) or ("render failed: " .. tostring(renderErr))
+        chessLog(shown and "hint" or "render failed", accepted.move, "depth=" .. tostring(accepted.depth), tostring(renderErr or ""))
         if shown and Config.Chess.NotifyMove and (accepted.final or previousMove ~= accepted.move) then
             local suffix = accepted.mate and (" | mate " .. tostring(accepted.mate))
                 or (accepted.eval and string.format(" | eval %.2f", accepted.eval) or "")
@@ -2771,6 +2851,8 @@ return function(Lib, Core)
         local connect = currentSocketConnector()
         if type(connect) ~= "function" then
             State.nextConnect = now + 10
+            State.status = "WebSocket API unavailable"
+            chessLog("WebSocket.connect unavailable")
             return false
         end
         State.connecting = true
@@ -2778,16 +2860,21 @@ return function(Lib, Core)
         State.connecting = false
         if not ok or not socket then
             State.nextConnect = now + (Config.Chess.ReconnectDelay or 2)
+            State.status = "connection failed"
+            State.lastError = tostring(socket)
+            chessLog("connection failed:", tostring(socket))
             return false
         end
         State.ws = socket
         State.nextConnect = 0
         State.status = "websocket connected"
+        chessLog("websocket connected")
         if socket.OnMessage and type(socket.OnMessage.Connect) == "function" then
             State.wsMessageConn = socket.OnMessage:Connect(onSocketMessage)
         end
         if socket.OnClose and type(socket.OnClose.Connect) == "function" then
             State.wsCloseConn = socket.OnClose:Connect(function()
+                chessLog("websocket OnClose")
                 dropSocket(false)
                 State.nextConnect = os.clock() + (Config.Chess.ReconnectDelay or 2)
             end)
@@ -2810,6 +2897,7 @@ return function(Lib, Core)
             return
         end
         if State.lastFen ~= fen then
+            chessLog("position changed", State.lastFen and "old=" .. State.lastFen or "initial", "new=" .. fen)
             State.lastFen = fen
             State.pending = nil
             State.bestDepth = 0
@@ -2977,13 +3065,21 @@ return function(Lib, Core)
             end,
         })
         sCE:Button({
-            Name = "Diagnostics",
+            Name = "Print Diagnostics",
             Callback = function()
                 local _, mirror, fen, color = liveSnapshot(true)
                 local turn = mirror and mirror.state and mirror.state.side or "-"
-                notify("ChessEngine", string.format("status=%s | ws=%s | fen=%s | color=%s turn=%s | packet=%s | err=%s",
-                    tostring(State.status), tostring(State.ws ~= nil), tostring(fen ~= nil), tostring(color), tostring(turn),
-                    tostring(State.lastPacket or "none"), tostring(State.lastError or "none")))
+                chessLog("DIAGNOSTICS",
+                    "status=" .. tostring(State.status),
+                    "ws=" .. tostring(State.ws ~= nil),
+                    "fen=" .. tostring(fen),
+                    "color=" .. tostring(color),
+                    "turn=" .. tostring(turn),
+                    "packet=" .. tostring(State.lastPacket or "none"),
+                    "error=" .. tostring(State.lastError or "none"),
+                    "auto=" .. tostring(Config.Chess.AutoAnalyze),
+                    "pending=" .. tostring(State.pending ~= nil),
+                    "sentFen=" .. tostring(State.sentFen))
             end,
         })
 
