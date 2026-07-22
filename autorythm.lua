@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 --  Misc module for the Syllinse loader (AutoParry game, UniverseId 9199655655).
---  Two features, both built into ctx.tabs.Misc:
+--  Misc features, all built into ctx.tabs.Misc:
 --
 --    1. AutoRythm  — auto-plays the in-game RHYTHM MINIGAME
 --       (ReplicatedStorage.Shared.Services.RhythmService) with frame-perfect
@@ -10,6 +10,10 @@
 --       workspace) onto the nearest chalk whiteboard
 --       (ReplicatedStorage.Shared.Services.WhiteboardService) by firing the
 --       game's own WhiteboardDrawBatch remote with raster stroke data.
+--
+--    3. ChessEngine — reads the chess client's authoritative live FEN, sends it
+--       to chess-api.com over WebSocket, validates the returned move against the
+--       live legal-move generator, and highlights the source/destination cells.
 --
 --  Loader contract (same as movement/visuals):
 --    • file body returns function(Lib, Core) → returns a handle with
@@ -48,6 +52,18 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 return function(Lib, Core)
+    -- Luraph macro raw shim. The per-frame rhythm step is wrapped in
+    -- LPH_NO_VIRTUALIZE(function() ... end) so Luraph keeps the frame-perfect
+    -- timing native. You CANNOT declare a local/variable named LPH_* — Luraph
+    -- reserves the prefix and errors ("cannot be used as a variable name"). So when
+    -- run raw we install an identity fallback under that name via a STRING key
+    -- (concat so the reserved token never appears). After Luraph this line is dead.
+    do
+        local k = "LPH" .. "_NO_VIRTUALIZE"
+        local G = (type(getgenv) == "function") and getgenv() or _G
+        if not G[k] then G[k] = function(f) return f end end
+    end
+
     local Players           = game:GetService("Players")
     local RunService        = game:GetService("RunService")
     local CoreGui           = game:GetService("CoreGui")
@@ -55,6 +71,7 @@ return function(Lib, Core)
     local CollectionService = game:GetService("CollectionService")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Workspace         = game:GetService("Workspace")
+    local HttpService       = game:GetService("HttpService")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -89,6 +106,22 @@ return function(Lib, Core)
             Mode     = "Rainbow",   -- chalk colour: "Rainbow" | "Random" | a color key
             Delay    = 0.35,        -- seconds between take/drop actions
             Cooldown = 3,           -- seconds a rate-limited item type is skipped
+        },
+
+        Chess = {
+            Enabled          = false,
+            AutoAnalyze      = true,
+            OnlyMyTurn       = true,
+            Progressive      = true,
+            Depth            = 12,
+            ThinkingTime     = 50,
+            PollRate         = 0.20,
+            ReconnectDelay   = 2,
+            FromColor        = Color3.fromRGB(66, 166, 255),
+            ToColor          = Color3.fromRGB(85, 255, 135),
+            FillTransparency = 0.42,
+            AlwaysOnTop      = false,
+            NotifyMove       = true,
         },
     }
 
@@ -256,7 +289,9 @@ return function(Lib, Core)
         rawset(engine, "__ar_guardToken", GUARD_TOKEN)
     end
 
-    local function step()
+    -- [LURAPH] per-frame rhythm autoplay step — the frame-perfect timing path.
+    -- Kept native under Luraph so tap/hold timing isn't slowed by virtualization.
+    local step = LPH_NO_VIRTUALIZE(function()
         if not Config.AutoRythm_On then return end
         local engine = getEngine()
         if not engine then return end
@@ -333,7 +368,7 @@ return function(Lib, Core)
                 end
             end
         end
-    end
+    end)
 
     -- ═══════════════════════════ AUTO DRAW ══════════════════════════════════
     local CHALK_COLOR = Color3.fromRGB(242, 242, 238)
@@ -2359,6 +2394,446 @@ return function(Lib, Core)
         end)
     end
 
+    -- ═══════════════════════════ CHESS ENGINE ══════════════════════════════
+    local function squareFromName(name)
+        if type(name) ~= "string" or not name:match("^[a-h][1-8]$") then return nil end
+        return (tonumber(name:sub(2, 2)) - 1) * 8 + (string.byte(name, 1) - 97)
+    end
+
+    local function squareName(index)
+        if type(index) ~= "number" or index % 1 ~= 0 or index < 0 or index > 63 then return nil end
+        return ("abcdefgh"):sub(index % 8 + 1, index % 8 + 1) .. tostring(math.floor(index / 8) + 1)
+    end
+
+    local function parseMove(value)
+        if type(value) ~= "string" then return nil end
+        value = value:lower():gsub("%s+", "")
+        local fromName, toName, promo = value:match("^([a-h][1-8])([a-h][1-8])([qrbn]?)$")
+        if not fromName then return nil end
+        return {
+            raw = value,
+            fromName = fromName,
+            toName = toName,
+            from = squareFromName(fromName),
+            to = squareFromName(toName),
+            promo = promo ~= "" and promo or nil,
+        }
+    end
+
+    local function validFEN(fen)
+        if type(fen) ~= "string" then return false end
+        local fields = {}
+        for field in fen:gmatch("%S+") do fields[#fields + 1] = field end
+        if #fields ~= 6 then return false end
+
+        local ranks = {}
+        for rank in fields[1]:gmatch("[^/]+") do ranks[#ranks + 1] = rank end
+        if #ranks ~= 8 then return false end
+        for _, rank in ipairs(ranks) do
+            local width = 0
+            for ch in rank:gmatch(".") do
+                local digit = tonumber(ch)
+                if digit then
+                    if digit < 1 or digit > 8 then return false end
+                    width = width + digit
+                elseif ch:match("[prnbqkPRNBQK]") then
+                    width = width + 1
+                else
+                    return false
+                end
+            end
+            if width ~= 8 then return false end
+        end
+
+        if fields[2] ~= "w" and fields[2] ~= "b" then return false end
+        if fields[3] ~= "-" then
+            local seen = {}
+            if #fields[3] > 4 then return false end
+            for ch in fields[3]:gmatch(".") do
+                if not ch:match("[KQkq]") or seen[ch] then return false end
+                seen[ch] = true
+            end
+        end
+        if fields[4] ~= "-" and not fields[4]:match("^[a-h][36]$") then return false end
+        local halfmove, fullmove = tonumber(fields[5]), tonumber(fields[6])
+        if not halfmove or halfmove < 0 or halfmove % 1 ~= 0 then return false end
+        if not fullmove or fullmove < 1 or fullmove % 1 ~= 0 then return false end
+        return true
+    end
+
+    local function acceptResponse(data, pending, currentDepth)
+        if type(data) ~= "table" or type(pending) ~= "table" then return nil end
+        if data.type ~= "move" and data.type ~= "bestmove" then return nil end
+        if tostring(data.taskId or "") ~= tostring(pending.taskId or "") then return nil end
+        if data.fen ~= pending.fen then return nil end
+        local move = parseMove(data.move or data.lan)
+        if not move then return nil end
+        local depth = tonumber(data.depth) or 0
+        if data.type ~= "bestmove" and depth < (tonumber(currentDepth) or 0) then return nil end
+        return {
+            move = move.raw,
+            parsed = move,
+            depth = depth,
+            final = data.type == "bestmove",
+            eval = tonumber(data.eval),
+            mate = tonumber(data.mate),
+            san = type(data.san) == "string" and data.san or nil,
+            text = type(data.text) == "string" and data.text or nil,
+        }
+    end
+
+    local function pieceColor(piece)
+        if type(piece) ~= "string" or #piece ~= 1 then return nil end
+        return piece == piece:upper() and "w" or "b"
+    end
+
+    local function validateLiveMove(mirror, myColor, parsed)
+        if type(mirror) ~= "table" or type(parsed) ~= "table" then return false end
+        local state = rawget(mirror, "state")
+        if type(state) ~= "table" or state.side ~= myColor then return false end
+        local squares = rawget(state, "squares")
+        if type(squares) ~= "table" or pieceColor(squares[parsed.from]) ~= myColor then return false end
+        if type(mirror.legalMovesFrom) ~= "function" then return false end
+        local ok, legal = pcall(mirror.legalMovesFrom, mirror, parsed.from)
+        if not ok or type(legal) ~= "table" then return false end
+        for _, move in ipairs(legal) do
+            if type(move) == "table" and move.from == parsed.from and move.to == parsed.to then
+                local expected = parsed.promo
+                local actual = type(move.promo) == "string" and move.promo:lower() or nil
+                if expected == actual or (expected == nil and actual == nil) then return true end
+            end
+        end
+        return false
+    end
+
+
+    local State = {
+        running = false,
+        chess = nil,
+        lastScan = 0,
+        lastFen = nil,
+        sentFen = nil,
+        pending = nil,
+        bestDepth = 0,
+        ws = nil,
+        wsMessageConn = nil,
+        wsCloseConn = nil,
+        connecting = false,
+        nextConnect = 0,
+        requestSeq = 0,
+        folder = nil,
+        hintFen = nil,
+        hintMove = nil,
+        loopToken = 0,
+        notify = function() end,
+    }
+
+    local function looksLikeChess(value)
+        if type(value) ~= "table" then return false end
+        if type(rawget(value, "legalTargets")) ~= "table" then return false end
+        if type(rawget(value, "spectating")) ~= "table" then return false end
+        if rawget(value, "ctx") == nil then return false end
+        local mirror = rawget(value, "mirror")
+        if mirror ~= nil and type(mirror) ~= "table" then return false end
+        return rawget(value, "active") ~= nil and rawget(value, "seated") ~= nil
+    end
+
+    local CHESS_KEYS = { "ctx", "boardView", "mirror", "myColor", "tableId", "active", "seated", "legalTargets", "spectating" }
+    local function atChessSeat()
+        local character = LocalPlayer and LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local seat = humanoid and humanoid.SeatPart
+        if not seat then return false end
+        if seat:GetAttribute("ChessSeatID") ~= nil then return true end
+        local value = seat:FindFirstChild("ChessSeatID")
+        return value ~= nil and value:IsA("ValueBase")
+    end
+
+    local function findChessState(force)
+        if looksLikeChess(State.chess) then return State.chess end
+        State.chess = nil
+        -- The full state lives in GC, but there is no reason to touch GC while the
+        -- player is not even sitting at a tagged chess seat. This cheap Instance-tree
+        -- gate keeps the expensive fallback completely idle during normal gameplay.
+        if not force and not atChessSeat() then return nil end
+        local now = os.clock()
+        if not force and now - State.lastScan < 2 then return nil end
+        State.lastScan = now
+
+        local G = (type(getgenv) == "function" and getgenv()) or _G
+        if type(G.filtergc) == "function" then
+            local ok, result = pcall(G.filtergc, "table", { Keys = CHESS_KEYS }, false)
+            if ok and type(result) == "table" then
+                if looksLikeChess(result) then State.chess = result; return result end
+                for _, value in ipairs(result) do
+                    if looksLikeChess(value) then State.chess = value; return value end
+                end
+            end
+        end
+        -- Full GC is a last resort and is rate-limited to the same one-second scan.
+        if type(G.getgc) == "function" then
+            local ok, values = pcall(G.getgc, true)
+            if ok and type(values) == "table" then
+                for _, value in ipairs(values) do
+                    if looksLikeChess(value) then State.chess = value; return value end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function liveSnapshot(force)
+        local chess = findChessState(force)
+        if not chess or rawget(chess, "active") ~= true then return nil end
+        local mirror = rawget(chess, "mirror")
+        if type(mirror) ~= "table" or type(mirror.fen) ~= "function" then return nil end
+        local ok, fen = pcall(mirror.fen, mirror)
+        if not ok or not validFEN(fen) then return nil end
+        local color = rawget(chess, "myColor") or rawget(chess, "seatColor")
+        if color ~= "w" and color ~= "b" then color = nil end
+        return chess, mirror, fen, color
+    end
+
+    local function disconnectSignal(conn)
+        if conn then pcall(function() conn:Disconnect() end) end
+    end
+
+    local function dropSocket(closeIt)
+        disconnectSignal(State.wsMessageConn)
+        disconnectSignal(State.wsCloseConn)
+        State.wsMessageConn, State.wsCloseConn = nil, nil
+        local old = State.ws
+        State.ws = nil
+        State.connecting = false
+        if closeIt and old then pcall(function() old:Close() end) end
+    end
+
+    local function clearHint()
+        if State.folder then pcall(function() State.folder:Destroy() end) end
+        State.folder = nil
+        State.hintFen = nil
+        State.hintMove = nil
+    end
+
+    local function ensureHintFolder()
+        clearHint()
+        local camera = Workspace and Workspace.CurrentCamera
+        if not camera then return nil end
+        local folder = Instance.new("Folder")
+        folder.Name = "SyllinseChessEngineHint"
+        folder.Parent = camera
+        State.folder = folder
+        return folder
+    end
+
+    local function makeCellAdornee(folder, geo, index)
+        local tiles = type(geo) == "table" and rawget(geo, "squareToTile")
+        local tile = type(tiles) == "table" and tiles[index] or nil
+        if typeof(tile) == "Instance" then return tile end
+        if type(geo) ~= "table" or type(geo.squareToWorld) ~= "function" then return nil end
+        local ok, world = pcall(geo.squareToWorld, geo, index)
+        if not ok or typeof(world) ~= "Vector3" then return nil end
+        local cell = tonumber(rawget(geo, "cell"))
+        local plate = rawget(geo, "plateCFrame")
+        if not cell or typeof(plate) ~= "CFrame" then return nil end
+        local part = Instance.new("Part")
+        part.Name = "Cell_" .. tostring(squareName(index) or index)
+        part.Size = Vector3.new(cell, 0.06, cell)
+        part.CFrame = plate.Rotation + world
+        part.Anchored = true
+        part.CanCollide = false
+        part.CanQuery = false
+        part.CanTouch = false
+        part.Transparency = 1
+        part.Parent = folder
+        return part
+    end
+
+    local function addCellHighlight(folder, adornee, name, color, destination)
+        if not adornee then return false end
+        local h = Instance.new("Highlight")
+        h.Name = name
+        h.Adornee = adornee
+        h.FillColor = color
+        h.OutlineColor = color
+        h.FillTransparency = math.clamp(Config.Chess.FillTransparency or 0.42, 0, 1)
+        h.OutlineTransparency = destination and 0 or 0.15
+        h.DepthMode = Config.Chess.AlwaysOnTop and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+        h.Parent = folder
+        return true
+    end
+
+    local function renderHint(chess, fen, parsed)
+        local boardView = rawget(chess, "boardView")
+        local geo = type(boardView) == "table" and rawget(boardView, "geo") or nil
+        if type(geo) ~= "table" then return false, "board geometry unavailable" end
+        local folder = ensureHintFolder()
+        if not folder then return false, "camera unavailable" end
+        local fromAdornee = makeCellAdornee(folder, geo, parsed.from)
+        local toAdornee = makeCellAdornee(folder, geo, parsed.to)
+        local fromOk = addCellHighlight(folder, fromAdornee, "From_" .. parsed.fromName, Config.Chess.FromColor, false)
+        local toOk = addCellHighlight(folder, toAdornee, "To_" .. parsed.toName, Config.Chess.ToColor, true)
+        if not fromOk or not toOk then clearHint(); return false, "could not resolve board cells" end
+        State.hintFen = fen
+        State.hintMove = parsed.raw
+        return true
+    end
+
+    local function currentSocketConnector()
+        local G = (type(getgenv) == "function" and getgenv()) or _G
+        local wsLib = rawget(G, "WebSocket") or rawget(G, "websocket")
+        if type(wsLib) == "table" then
+            return wsLib.connect or wsLib.Connect
+        end
+        return nil
+    end
+
+    local function sendPosition(force)
+        local chess, mirror, fen, color = liveSnapshot(force)
+        if not chess then return false, "no active chess game" end
+        if Config.Chess.OnlyMyTurn and (not color or mirror.state.side ~= color) then
+            clearHint()
+            State.sentFen = nil
+            State.pending = nil
+            return false, "waiting for your turn"
+        end
+        if not State.ws then return false, "websocket is not connected" end
+        if not force and State.sentFen == fen then return true, "already analyzed" end
+
+        State.requestSeq = State.requestSeq + 1
+        local taskId = string.format("syllinse-%d-%d", State.requestSeq, math.floor(os.clock() * 1000))
+        local payload = {
+            fen = fen,
+            variants = 1,
+            depth = math.clamp(math.floor(Config.Chess.Depth or 12), 1, 18),
+            maxThinkingTime = math.clamp(math.floor(Config.Chess.ThinkingTime or 50), 1, 100),
+            taskId = taskId,
+        }
+        local okEncode, encoded = pcall(HttpService.JSONEncode, HttpService, payload)
+        if not okEncode then return false, "JSON encode failed" end
+        local okSend, err = pcall(State.ws.Send, State.ws, encoded)
+        if not okSend then
+            dropSocket(false)
+            State.nextConnect = os.clock() + (Config.Chess.ReconnectDelay or 2)
+            return false, "websocket send failed: " .. tostring(err)
+        end
+        State.sentFen = fen
+        State.pending = { taskId = taskId, fen = fen }
+        State.bestDepth = 0
+        clearHint()
+        return true, "position sent"
+    end
+
+    local function onSocketMessage(message)
+        if type(message) ~= "string" or not State.pending then return end
+        local okDecode, data = pcall(HttpService.JSONDecode, HttpService, message)
+        if not okDecode or type(data) ~= "table" then return end
+        if not Config.Chess.Progressive and data.type ~= "bestmove" then return end
+        local accepted = acceptResponse(data, State.pending, State.bestDepth)
+        if not accepted then return end
+
+        local chess, mirror, fen, color = liveSnapshot(false)
+        if not chess or fen ~= State.pending.fen then return end
+        if not color or not validateLiveMove(mirror, color, accepted.parsed) then return end
+        if accepted.depth < State.bestDepth and not accepted.final then return end
+        State.bestDepth = math.max(State.bestDepth, accepted.depth)
+
+        local previousMove = State.hintMove
+        local shown = renderHint(chess, fen, accepted.parsed)
+        if shown and Config.Chess.NotifyMove and (accepted.final or previousMove ~= accepted.move) then
+            local suffix = accepted.mate and (" | mate " .. tostring(accepted.mate))
+                or (accepted.eval and string.format(" | eval %.2f", accepted.eval) or "")
+            State.notify("ChessEngine", string.format("%s -> %s | depth %d%s",
+                accepted.parsed.fromName, accepted.parsed.toName, accepted.depth, suffix))
+        end
+    end
+
+    local function connectSocket(force)
+        if State.ws or State.connecting then return State.ws ~= nil end
+        local now = os.clock()
+        if not force and now < State.nextConnect then return false end
+        local connect = currentSocketConnector()
+        if type(connect) ~= "function" then
+            State.nextConnect = now + 10
+            return false
+        end
+        State.connecting = true
+        local ok, socket = pcall(connect, "wss://chess-api.com/v1")
+        State.connecting = false
+        if not ok or not socket then
+            State.nextConnect = now + (Config.Chess.ReconnectDelay or 2)
+            return false
+        end
+        State.ws = socket
+        State.nextConnect = 0
+        if socket.OnMessage and type(socket.OnMessage.Connect) == "function" then
+            State.wsMessageConn = socket.OnMessage:Connect(onSocketMessage)
+        end
+        if socket.OnClose and type(socket.OnClose.Connect) == "function" then
+            State.wsCloseConn = socket.OnClose:Connect(function()
+                dropSocket(false)
+                State.nextConnect = os.clock() + (Config.Chess.ReconnectDelay or 2)
+            end)
+        end
+        State.sentFen = nil
+        State.pending = nil
+        task.defer(function()
+            if Config.Chess.Enabled and Config.Chess.AutoAnalyze then sendPosition(false) end
+        end)
+        return true
+    end
+
+    local function tick()
+        if not Config.Chess.Enabled then return end
+        if not State.ws then connectSocket(false) end
+        local chess, mirror, fen, color = liveSnapshot(false)
+        if not chess then
+            if State.hintFen then clearHint() end
+            State.lastFen = nil
+            return
+        end
+        if State.lastFen ~= fen then
+            State.lastFen = fen
+            State.pending = nil
+            State.bestDepth = 0
+            if State.hintFen ~= fen then clearHint() end
+            if Config.Chess.AutoAnalyze and (not Config.Chess.OnlyMyTurn or (color and mirror.state.side == color)) then
+                sendPosition(false)
+            else
+                State.sentFen = nil
+            end
+        elseif Config.Chess.AutoAnalyze and State.ws and State.sentFen ~= fen
+            and (not Config.Chess.OnlyMyTurn or (color and mirror.state.side == color)) then
+            sendPosition(false)
+        end
+    end
+
+    local function startLoop()
+        if State.running then return end
+        State.running = true
+        State.loopToken = State.loopToken + 1
+        local token = State.loopToken
+        task.spawn(function()
+            while State.running and token == State.loopToken do
+                local ok = pcall(tick)
+                if not ok then State.chess = nil end
+                task.wait(math.clamp(Config.Chess.PollRate or 0.20, 0.10, 1.00))
+            end
+        end)
+    end
+
+    local function stopAll()
+        State.running = false
+        State.loopToken = State.loopToken + 1
+        clearHint()
+        dropSocket(true)
+        State.chess = nil
+        State.pending = nil
+        State.sentFen = nil
+        State.lastFen = nil
+    end
+
+
     -- ═══════════════════════════════ MODULE ════════════════════════════════��
     local M = {}
     local _conn
@@ -2377,6 +2852,7 @@ return function(Lib, Core)
                     Config.AutoRythm_On = false
                     stopAutoDraw()
                     chalkStop()
+                    stopAll()
                     if _conn then _conn:Disconnect(); _conn = nil end
                 end)
             end
@@ -2421,6 +2897,111 @@ return function(Lib, Core)
         end
 
         local Misc = ctx.tabs.Misc
+
+        State.notify = notify
+
+        -- ─────────────── Section: ChessEngine (Left) ───────────────
+        local chessCfg = Config.Chess
+        local sCE = Misc:Section({ Side = "Left" })
+        sCE:Header({ Name = "ChessEngine" })
+        feature(sCE, {
+            Title = "ChessEngine", Flag = "Misc_ChessEngine",
+            get = function() return chessCfg.Enabled end,
+            set = function(v)
+                chessCfg.Enabled = v and true or false
+                if chessCfg.Enabled then
+                    startLoop()
+                    connectSocket(true)
+                else
+                    stopAll()
+                end
+            end,
+            Desc = "Gets the best move from chess-api and highlights both cells locally",
+        })
+        sCE:SubLabel({ Text = "Uses the games live FEN and validates every API move before showing it" })
+        sCE:Toggle({
+            Name = "Auto Analyze", Default = chessCfg.AutoAnalyze,
+            Callback = function(v)
+                chessCfg.AutoAnalyze = v and true or false
+                State.sentFen = nil
+                if chessCfg.Enabled and chessCfg.AutoAnalyze then sendPosition(true) end
+            end,
+        }, ctx.flag("Misc_ChessEngine_Auto"))
+        sCE:Toggle({
+            Name = "Only My Turn", Default = chessCfg.OnlyMyTurn,
+            Callback = function(v) chessCfg.OnlyMyTurn = v and true or false; State.sentFen = nil end,
+        }, ctx.flag("Misc_ChessEngine_MyTurn"))
+        sCE:Toggle({
+            Name = "Progressive Results", Default = chessCfg.Progressive,
+            Callback = function(v) chessCfg.Progressive = v and true or false end,
+        }, ctx.flag("Misc_ChessEngine_Progressive"))
+        sCE:Button({
+            Name = "Analyze Current Position",
+            Callback = function()
+                if not chessCfg.Enabled then
+                    notify("ChessEngine", "Enable ChessEngine first")
+                    return
+                end
+                if not State.ws and not connectSocket(true) then
+                    notify("ChessEngine", "WebSocket API unavailable")
+                    return
+                end
+                local ok, reason = sendPosition(true)
+                notify("ChessEngine", ok and "Position sent" or tostring(reason))
+            end,
+        })
+        sCE:Button({ Name = "Clear Hint", Callback = clearHint })
+        sCE:Button({
+            Name = "Reconnect WebSocket",
+            Callback = function()
+                dropSocket(true)
+                State.nextConnect = 0
+                notify("ChessEngine", connectSocket(true) and "WebSocket connected" or "WebSocket connection failed")
+            end,
+        })
+
+        sCE:Divider()
+        sCE:Header({ Name = "Engine" })
+        slider(sCE, {
+            Name = "Depth", Flag = "Misc_ChessEngine_Depth",
+            Default = chessCfg.Depth, Min = 1, Max = 18, Precision = 0,
+            Callback = function(v) chessCfg.Depth = v; State.sentFen = nil end,
+        })
+        slider(sCE, {
+            Name = "Thinking Time", Flag = "Misc_ChessEngine_Time",
+            Default = chessCfg.ThinkingTime, Min = 1, Max = 100, Precision = 0, Suffix = " ms",
+            Callback = function(v) chessCfg.ThinkingTime = v; State.sentFen = nil end,
+        })
+        slider(sCE, {
+            Name = "Position Poll", Flag = "Misc_ChessEngine_Poll",
+            Default = chessCfg.PollRate, Min = 0.1, Max = 1, Precision = 2, Suffix = "s",
+            Callback = function(v) chessCfg.PollRate = v end,
+        })
+        sCE:SubLabel({ Text = "GC lookup runs only at a chess seat, then the live state is cached" })
+
+        sCE:Divider()
+        sCE:Header({ Name = "Highlights" })
+        sCE:Colorpicker({
+            Name = "From Cell", Default = chessCfg.FromColor,
+            Callback = function(c) chessCfg.FromColor = c; State.sentFen = nil end,
+        }, ctx.flag("Misc_ChessEngine_FromColor"))
+        sCE:Colorpicker({
+            Name = "To Cell", Default = chessCfg.ToColor,
+            Callback = function(c) chessCfg.ToColor = c; State.sentFen = nil end,
+        }, ctx.flag("Misc_ChessEngine_ToColor"))
+        slider(sCE, {
+            Name = "Fill Transparency", Flag = "Misc_ChessEngine_Transparency",
+            Default = chessCfg.FillTransparency, Min = 0, Max = 1, Precision = 2,
+            Callback = function(v) chessCfg.FillTransparency = v; State.sentFen = nil end,
+        })
+        sCE:Toggle({
+            Name = "Always On Top", Default = chessCfg.AlwaysOnTop,
+            Callback = function(v) chessCfg.AlwaysOnTop = v and true or false; State.sentFen = nil end,
+        }, ctx.flag("Misc_ChessEngine_AlwaysOnTop"))
+        sCE:Toggle({
+            Name = "Move Notifications", Default = chessCfg.NotifyMove,
+            Callback = function(v) chessCfg.NotifyMove = v and true or false end,
+        }, ctx.flag("Misc_ChessEngine_Notify"))
 
         -- ─────────────── Section: AutoRythm (Left) ───────────────
         local sAR = Misc:Section({ Side = "Left" })
