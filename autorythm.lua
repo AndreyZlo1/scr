@@ -2435,8 +2435,37 @@ return function(Lib, Core)
         if rights.bq then castling = castling .. "q" end
         if castling == "" then castling = "-" end
         local side = state.side == "b" and "b" or "w"
-        local ep = state.ep ~= nil and squareName(state.ep) or "-"
-        if not ep then ep = "-" end
+        -- chess-api (and Stockfish) reject a FEN where the ep square is set but no
+        -- enemy pawn can actually capture en passant. The game engine stores the ep
+        -- transit square after every double push, even when there is no capturing pawn.
+        -- We must validate it before encoding it in the FEN.
+        local ep = "-"
+        if state.ep ~= nil then
+            local epIdx = state.ep
+            local epFile = epIdx % 8
+            local epRank = math.floor(epIdx / 8)
+            -- The capturing pawn does NOT sit on the ep square's rank; it sits on the
+            -- rank the just-moved enemy pawn landed on (one rank further from ep, in
+            -- the direction that pawn just travelled). side == state.side (side to
+            -- move now) tells us who moved last: if it's now black's turn, white just
+            -- pushed up (landed rank = epRank + 1); if it's now white's turn, black
+            -- just pushed down (landed rank = epRank - 1).
+            local capturerRank = side == "b" and (epRank + 1) or (epRank - 1)
+            local canCapture = false
+            local capturerPiece = side == "w" and "P" or "p"
+            if capturerRank >= 0 and capturerRank <= 7 then
+                for _, df in ipairs({-1, 1}) do
+                    local adjFile = epFile + df
+                    if adjFile >= 0 and adjFile <= 7 then
+                        local sq = state.squares[capturerRank * 8 + adjFile]
+                        if sq == capturerPiece then canCapture = true; break end
+                    end
+                end
+            end
+            if canCapture then
+                ep = squareName(epIdx) or "-"
+            end
+        end
         return string.format("%s %s %s %s %d %d", table.concat(ranks, "/"), side, castling, ep,
             math.max(0, math.floor(tonumber(state.halfmove) or 0)),
             math.max(1, math.floor(tonumber(state.fullmove) or 1)))
