@@ -73,6 +73,7 @@ return function(Lib, Core)
     local Workspace         = game:GetService("Workspace")
     local HttpService       = game:GetService("HttpService")
     local TweenService      = game:GetService("TweenService")
+    local UserInputService  = game:GetService("UserInputService")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -123,7 +124,10 @@ return function(Lib, Core)
             FillTransparency = 0.42,
             AlwaysOnTop      = false,
             NotifyMove       = true,
-            ShowOverlay      = true,   -- 2D board + eval bar overlay
+            ShowOverlay      = true,   -- eval overlay
+            ShowBoard        = true,   -- render the 2D board beside the eval bar
+            OverlayScale     = 100,    -- percent; persisted through the UI flags
+            DebugLogs        = false,  -- executor-console diagnostics only
         },
     }
 
@@ -2446,16 +2450,18 @@ return function(Lib, Core)
             local epIdx = state.ep
             local epFile = epIdx % 8
             local epRank = math.floor(epIdx / 8)
-            -- The capturing pawn does NOT sit on the ep square's rank; it sits on the
-            -- rank the just-moved enemy pawn landed on (one rank further from ep, in
-            -- the direction that pawn just travelled). side == state.side (side to
-            -- move now) tells us who moved last: if it's now black's turn, white just
-            -- pushed up (landed rank = epRank + 1); if it's now white's turn, black
-            -- just pushed down (landed rank = epRank - 1).
-            local capturerRank = side == "b" and (epRank + 1) or (epRank - 1)
+            -- `state.ep` is not trustworthy by itself: the game sometimes leaves it
+            -- at a pawn's destination after an ordinary one-square move (e7-e6 -> e6).
+            -- A real FEN ep square is valid only after a DOUBLE push. Therefore the
+            -- just-moved enemy pawn must be exactly one rank beyond the transit square.
+            local movedPawnRank = side == "b" and (epRank + 1) or (epRank - 1)
+            local movedPawn = side == "b" and "P" or "p"
+            local isRealDoublePush = movedPawnRank >= 0 and movedPawnRank <= 7
+                and state.squares[movedPawnRank * 8 + epFile] == movedPawn
+            local capturerRank = movedPawnRank
             local canCapture = false
             local capturerPiece = side == "w" and "P" or "p"
-            if capturerRank >= 0 and capturerRank <= 7 then
+            if isRealDoublePush then
                 for _, df in ipairs({-1, 1}) do
                     local adjFile = epFile + df
                     if adjFile >= 0 and adjFile <= 7 then
@@ -2464,9 +2470,7 @@ return function(Lib, Core)
                     end
                 end
             end
-            if canCapture then
-                ep = squareName(epIdx) or "-"
-            end
+            if canCapture then ep = squareName(epIdx) or "-" end
         end
         return string.format("%s %s %s %s %d %d", table.concat(ranks, "/"), side, castling, ep,
             math.max(0, math.floor(tonumber(state.halfmove) or 0)),
@@ -2671,7 +2675,10 @@ return function(Lib, Core)
         State.overlay = nil
         State.overlayFen = nil
         State.overlayVisible = false
-        if overlay and overlay.gui then pcall(function() overlay.gui:Destroy() end) end
+        if overlay then
+            for _, conn in ipairs(overlay.connections or {}) do pcall(function() conn:Disconnect() end) end
+            if overlay.gui then pcall(function() overlay.gui:Destroy() end) end
+        end
     end
 
     local function setOverlayVisible(visible)
@@ -2710,7 +2717,11 @@ return function(Lib, Core)
         group.BackgroundTransparency = 1
         group.Size = UDim2.fromOffset(300, 300)
         group.Position = UDim2.new(0, 28, 0.5, -150)
+        group.Active = true
         group.Parent = gui
+        local scale = Instance.new("UIScale")
+        scale.Scale = math.clamp((Config.Chess.OverlayScale or 100) / 100, 0.5, 1.75)
+        scale.Parent = group
 
         local shell = Instance.new("Frame")
         shell.Size = UDim2.fromScale(1, 1)
@@ -2727,20 +2738,9 @@ return function(Lib, Core)
         shellStroke.Transparency = 0.3
         shellStroke.Parent = shell
 
-        local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(1, -34, 0, 20)
-        title.Position = UDim2.fromOffset(25, 5)
-        title.BackgroundTransparency = 1
-        title.Text = "CHESS ENGINE"
-        title.TextColor3 = Color3.fromRGB(210, 230, 255)
-        title.Font = Enum.Font.GothamBold
-        title.TextSize = 10
-        title.TextXAlignment = Enum.TextXAlignment.Left
-        title.Parent = shell
-
         local evalText = Instance.new("TextLabel")
-        evalText.Size = UDim2.fromOffset(34, 20)
-        evalText.Position = UDim2.fromOffset(258, 5)
+        evalText.Size = UDim2.fromOffset(44, 20)
+        evalText.Position = UDim2.fromOffset(244, 5)
         evalText.BackgroundTransparency = 1
         evalText.Text = "0.00"
         evalText.TextColor3 = Color3.fromRGB(235, 240, 248)
@@ -2807,7 +2807,35 @@ return function(Lib, Core)
                 cells[rank * 8 + file] = image
             end
         end
-        State.overlay = { gui = gui, group = group, cells = cells, white = white, black = black, evalText = evalText }
+        local connections = {}
+        State.overlay = {
+            gui = gui, group = group, scale = scale, shell = shell, board = board,
+            cells = cells, white = white, black = black, evalText = evalText,
+            connections = connections,
+        }
+        local dragging, dragStart, startPos
+        connections[#connections + 1] = group.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                dragging, dragStart, startPos = true, input.Position, group.Position
+                local release
+                release = input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                        if release then release:Disconnect() end
+                    end
+                end)
+                connections[#connections + 1] = release
+            end
+        end)
+        connections[#connections + 1] = UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch) then
+                local delta = input.Position - dragStart
+                group.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end)
         return State.overlay
     end
 
@@ -2817,6 +2845,9 @@ return function(Lib, Core)
             return
         end
         local overlay = makeOverlay()
+        overlay.scale.Scale = math.clamp((Config.Chess.OverlayScale or 100) / 100, 0.5, 1.75)
+        overlay.board.Visible = Config.Chess.ShowBoard and true or false
+        overlay.shell.Size = Config.Chess.ShowBoard and UDim2.fromOffset(300, 300) or UDim2.fromOffset(30, 300)
         if State.overlayFen ~= fen then
             local placement = type(fen) == "string" and fen:match("^(%S+)") or nil
             if not placement then return end
@@ -2848,7 +2879,7 @@ return function(Lib, Core)
     end
 
     local function chessLog(...)
-        print("[ChessEngine]", ...)
+        if Config.Chess.DebugLogs then print("[ChessEngine]", ...) end
     end
 
     local function looksLikeChess(value)
@@ -3376,6 +3407,19 @@ return function(Lib, Core)
                 if not chessCfg.ShowOverlay and State.overlay then setOverlayVisible(false) end
             end,
         }, ctx.flag("Misc_ChessEngine_Overlay"))
+        sCE:Toggle({
+            Name = "2D Board", Default = chessCfg.ShowBoard,
+            Callback = function(v) chessCfg.ShowBoard = v and true or false end,
+        }, ctx.flag("Misc_ChessEngine_Board"))
+        slider(sCE, {
+            Name = "Overlay Scale", Flag = "Misc_ChessEngine_OverlayScale",
+            Default = chessCfg.OverlayScale, Min = 50, Max = 175, Precision = 0, Suffix = "%",
+            Callback = function(v) chessCfg.OverlayScale = v end,
+        })
+        sCE:Toggle({
+            Name = "Debug Logs", Default = chessCfg.DebugLogs,
+            Callback = function(v) chessCfg.DebugLogs = v and true or false end,
+        }, ctx.flag("Misc_ChessEngine_Debug"))
         sCE:Toggle({
             Name = "Move Notifications", Default = chessCfg.NotifyMove,
             Callback = function(v) chessCfg.NotifyMove = v and true or false end,
