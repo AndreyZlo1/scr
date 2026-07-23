@@ -72,6 +72,7 @@ return function(Lib, Core)
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Workspace         = game:GetService("Workspace")
     local HttpService       = game:GetService("HttpService")
+    local TweenService      = game:GetService("TweenService")
 
     local LocalPlayer = Players.LocalPlayer
 
@@ -122,6 +123,7 @@ return function(Lib, Core)
             FillTransparency = 0.42,
             AlwaysOnTop      = false,
             NotifyMove       = true,
+            ShowOverlay      = true,   -- 2D board + eval bar overlay
         },
     }
 
@@ -2551,7 +2553,9 @@ return function(Lib, Core)
             parsed = move,
             depth = depth,
             final = data.type == "bestmove",
-            eval = tonumber(data.eval),
+            -- chess-api has used both `eval` (pawns) and `centipawns` across
+            -- response shapes. Normalize them once for the overlay's white-centric bar.
+            eval = tonumber(data.eval) or ((tonumber(data.centipawns) or 0) / 100),
             mate = tonumber(data.mate),
             san = type(data.san) == "string" and data.san or nil,
             text = type(data.text) == "string" and data.text or nil,
@@ -2645,8 +2649,203 @@ return function(Lib, Core)
         status = "idle",
         lastError = nil,
         lastPacket = nil,
+        eval = nil,
+        evalMate = nil,
+        overlay = nil,
+        overlayFen = nil,
+        overlayVisible = false,
         notify = function() end,
     }
+
+    local PIECE_IMAGES = {
+        P = "rbxassetid://12414175509", p = "rbxassetid://12446604722",
+        K = "rbxassetid://12414181580", k = "rbxassetid://12446620898",
+        Q = "rbxassetid://12414180706", q = "rbxassetid://12446617367",
+        R = "rbxassetid://12414179583", r = "rbxassetid://12446625094",
+        B = "rbxassetid://12414178467", b = "rbxassetid://12446612440",
+        N = "rbxassetid://12414177497", n = "rbxassetid://12446609273",
+    }
+
+    local function destroyOverlay()
+        local overlay = State.overlay
+        State.overlay = nil
+        State.overlayFen = nil
+        State.overlayVisible = false
+        if overlay and overlay.gui then pcall(function() overlay.gui:Destroy() end) end
+    end
+
+    local function setOverlayVisible(visible)
+        local overlay = State.overlay
+        if not overlay or State.overlayVisible == visible then return end
+        State.overlayVisible = visible
+        overlay.group.Visible = true
+        local tween = TweenService:Create(overlay.group, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            GroupTransparency = visible and 0 or 1,
+        })
+        tween:Play()
+        if not visible then
+            task.delay(0.24, function()
+                if State.overlay == overlay and not State.overlayVisible then overlay.group.Visible = false end
+            end)
+        end
+    end
+
+    local function makeOverlay()
+        if State.overlay then return State.overlay end
+        local parent = (type(gethui) == "function" and gethui()) or CoreGui
+        local old = parent:FindFirstChild("SyllinseChessOverlay")
+        if old then old:Destroy() end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "SyllinseChessOverlay"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 40
+        gui.Parent = parent
+
+        local group = Instance.new("CanvasGroup")
+        group.Name = "Overlay"
+        group.GroupTransparency = 1
+        group.Visible = false
+        group.BackgroundTransparency = 1
+        group.Size = UDim2.fromOffset(300, 300)
+        group.Position = UDim2.new(0, 28, 0.5, -150)
+        group.Parent = gui
+
+        local shell = Instance.new("Frame")
+        shell.Size = UDim2.fromScale(1, 1)
+        shell.BackgroundColor3 = Color3.fromRGB(20, 24, 31)
+        shell.BackgroundTransparency = 0.08
+        shell.BorderSizePixel = 0
+        shell.Parent = group
+        local shellCorner = Instance.new("UICorner")
+        shellCorner.CornerRadius = UDim.new(0, 7)
+        shellCorner.Parent = shell
+        local shellStroke = Instance.new("UIStroke")
+        shellStroke.Color = Color3.fromRGB(88, 169, 255)
+        shellStroke.Thickness = 1
+        shellStroke.Transparency = 0.3
+        shellStroke.Parent = shell
+
+        local title = Instance.new("TextLabel")
+        title.Size = UDim2.new(1, -34, 0, 20)
+        title.Position = UDim2.fromOffset(25, 5)
+        title.BackgroundTransparency = 1
+        title.Text = "CHESS ENGINE"
+        title.TextColor3 = Color3.fromRGB(210, 230, 255)
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 10
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.Parent = shell
+
+        local evalText = Instance.new("TextLabel")
+        evalText.Size = UDim2.fromOffset(34, 20)
+        evalText.Position = UDim2.fromOffset(258, 5)
+        evalText.BackgroundTransparency = 1
+        evalText.Text = "0.00"
+        evalText.TextColor3 = Color3.fromRGB(235, 240, 248)
+        evalText.Font = Enum.Font.GothamBold
+        evalText.TextSize = 10
+        evalText.TextXAlignment = Enum.TextXAlignment.Right
+        evalText.Parent = shell
+
+        local evalBar = Instance.new("Frame")
+        evalBar.Size = UDim2.fromOffset(8, 248)
+        evalBar.Position = UDim2.fromOffset(10, 34)
+        evalBar.BackgroundColor3 = Color3.fromRGB(26, 30, 37)
+        evalBar.BorderSizePixel = 0
+        evalBar.Parent = shell
+        local barCorner = Instance.new("UICorner")
+        barCorner.CornerRadius = UDim.new(0, 4)
+        barCorner.Parent = evalBar
+        local black = Instance.new("Frame")
+        black.Name = "Black"
+        black.AnchorPoint = Vector2.new(0, 0)
+        black.Position = UDim2.fromScale(0, 0)
+        black.Size = UDim2.fromScale(1, 0.5)
+        black.BackgroundColor3 = Color3.fromRGB(31, 35, 43)
+        black.BorderSizePixel = 0
+        black.Parent = evalBar
+        local blackCorner = Instance.new("UICorner")
+        blackCorner.CornerRadius = UDim.new(0, 4)
+        blackCorner.Parent = black
+        local white = Instance.new("Frame")
+        white.Name = "White"
+        white.AnchorPoint = Vector2.new(0, 1)
+        white.Position = UDim2.fromScale(0, 1)
+        white.Size = UDim2.fromScale(1, 0.5)
+        white.BackgroundColor3 = Color3.fromRGB(232, 238, 245)
+        white.BorderSizePixel = 0
+        white.Parent = evalBar
+        local whiteCorner = Instance.new("UICorner")
+        whiteCorner.CornerRadius = UDim.new(0, 4)
+        whiteCorner.Parent = white
+
+        local board = Instance.new("Frame")
+        board.Size = UDim2.fromOffset(258, 258)
+        board.Position = UDim2.fromOffset(27, 30)
+        board.BackgroundTransparency = 1
+        board.Parent = shell
+        local cells = {}
+        for rank = 7, 0, -1 do
+            for file = 0, 7 do
+                local cell = Instance.new("Frame")
+                local displayRank = 7 - rank
+                cell.Size = UDim2.fromOffset(32.25, 32.25)
+                cell.Position = UDim2.fromOffset(file * 32.25, displayRank * 32.25)
+                cell.BackgroundColor3 = ((file + rank) % 2 == 0)
+                    and Color3.fromRGB(232, 215, 184) or Color3.fromRGB(151, 108, 76)
+                cell.BorderSizePixel = 0
+                cell.Parent = board
+                local image = Instance.new("ImageLabel")
+                image.Size = UDim2.fromScale(0.86, 0.86)
+                image.Position = UDim2.fromScale(0.5, 0.5)
+                image.AnchorPoint = Vector2.new(0.5, 0.5)
+                image.BackgroundTransparency = 1
+                image.ScaleType = Enum.ScaleType.Fit
+                image.Parent = cell
+                cells[rank * 8 + file] = image
+            end
+        end
+        State.overlay = { gui = gui, group = group, cells = cells, white = white, black = black, evalText = evalText }
+        return State.overlay
+    end
+
+    local function updateOverlay(fen)
+        if not Config.Chess.ShowOverlay then
+            if State.overlay then setOverlayVisible(false) end
+            return
+        end
+        local overlay = makeOverlay()
+        if State.overlayFen ~= fen then
+            local placement = type(fen) == "string" and fen:match("^(%S+)") or nil
+            if not placement then return end
+            -- A full 64-cell clear is cheap and runs only when the FEN changes.
+            -- It prevents a captured/moved piece from remaining on the 2D board.
+            for _, image in pairs(overlay.cells) do image.Image = "" end
+            local rank, file = 7, 0
+            for ch in placement:gmatch(".") do
+                if ch == "/" then rank = rank - 1; file = 0
+                else
+                    local count = tonumber(ch)
+                    if count then file = file + count
+                    else
+                        local image = overlay.cells[rank * 8 + file]
+                        if image then image.Image = PIECE_IMAGES[ch] or "" end
+                        file = file + 1
+                    end
+                end
+            end
+            State.overlayFen = fen
+        end
+        local eval = tonumber(State.eval) or 0
+        local whiteShare = State.evalMate and (State.evalMate > 0 and 1 or 0)
+            or math.clamp(0.5 + math.atan(eval / 3) / math.pi, 0.03, 0.97)
+        overlay.white.Size = UDim2.fromScale(1, whiteShare)
+        overlay.black.Size = UDim2.fromScale(1, 1 - whiteShare)
+        overlay.evalText.Text = State.evalMate and ("M" .. tostring(State.evalMate)) or string.format("%+.2f", eval)
+        setOverlayVisible(true)
+    end
 
     local function chessLog(...)
         print("[ChessEngine]", ...)
@@ -2905,6 +3104,9 @@ return function(Lib, Core)
         end
         if accepted.depth < State.bestDepth and not accepted.final then return end
         State.bestDepth = math.max(State.bestDepth, accepted.depth)
+        State.eval = accepted.eval
+        State.evalMate = accepted.mate
+        updateOverlay(fen)
 
         local previousMove = State.hintMove
         local shown, renderErr = renderHint(chess, fen, accepted.parsed)
@@ -2920,6 +3122,13 @@ return function(Lib, Core)
 
     local function connectSocket(force)
         if State.ws or State.connecting then return State.ws ~= nil end
+        -- Do not establish a network connection merely because the feature is enabled.
+        -- A live active chess state is the in-game gate, so outside a match there is
+        -- no socket, no event connection, and no reconnect loop.
+        if not liveSnapshot(false) then
+            State.status = "waiting for chess game"
+            return false
+        end
         local now = os.clock()
         if not force and now < State.nextConnect then return false end
         local connect = currentSocketConnector()
@@ -2963,13 +3172,16 @@ return function(Lib, Core)
 
     local function tick()
         if not Config.Chess.Enabled then return end
-        if not State.ws then connectSocket(false) end
         local chess, mirror, fen, color = liveSnapshot(false)
         if not chess then
             if State.hintFen then clearHint() end
+            if State.overlay then destroyOverlay() end
+            if State.ws then dropSocket(true) end
             State.lastFen = nil
             return
         end
+        updateOverlay(fen)
+        if not State.ws then connectSocket(false) end
         if State.lastFen ~= fen then
             chessLog("position changed", State.lastFen and "old=" .. State.lastFen or "initial", "new=" .. fen)
             State.lastFen = fen
@@ -3010,6 +3222,9 @@ return function(Lib, Core)
         State.pending = nil
         State.sentFen = nil
         State.lastFen = nil
+        State.eval = nil
+        State.evalMate = nil
+        destroyOverlay()
     end
 
 
@@ -3114,48 +3329,7 @@ return function(Lib, Core)
             Name = "Progressive Results", Default = chessCfg.Progressive,
             Callback = function(v) chessCfg.Progressive = v and true or false end,
         }, ctx.flag("Misc_ChessEngine_Progressive"))
-        sCE:Button({
-            Name = "Analyze Current Position",
-            Callback = function()
-                if not chessCfg.Enabled then
-                    notify("ChessEngine", "Enable ChessEngine first")
-                    return
-                end
-                if not State.ws and not connectSocket(true) then
-                    notify("ChessEngine", "WebSocket API unavailable")
-                    return
-                end
-                local ok, reason = sendPosition(true)
-                notify("ChessEngine", ok and "Position sent" or tostring(reason))
-            end,
-        })
         sCE:Button({ Name = "Clear Hint", Callback = clearHint })
-        sCE:Button({
-            Name = "Reconnect WebSocket",
-            Callback = function()
-                dropSocket(true)
-                State.nextConnect = 0
-                notify("ChessEngine", connectSocket(true) and "WebSocket connected" or "WebSocket connection failed")
-            end,
-        })
-        sCE:Button({
-            Name = "Print Diagnostics",
-            Callback = function()
-                local _, mirror, fen, color = liveSnapshot(true)
-                local turn = mirror and mirror.state and mirror.state.side or "-"
-                chessLog("DIAGNOSTICS",
-                    "status=" .. tostring(State.status),
-                    "ws=" .. tostring(State.ws ~= nil),
-                    "fen=" .. tostring(fen),
-                    "color=" .. tostring(color),
-                    "turn=" .. tostring(turn),
-                    "packet=" .. tostring(State.lastPacket or "none"),
-                    "error=" .. tostring(State.lastError or "none"),
-                    "auto=" .. tostring(Config.Chess.AutoAnalyze),
-                    "pending=" .. tostring(State.pending ~= nil),
-                    "sentFen=" .. tostring(State.sentFen))
-            end,
-        })
 
         sCE:Divider()
         sCE:Header({ Name = "Engine" })
@@ -3195,6 +3369,13 @@ return function(Lib, Core)
             Name = "Always On Top", Default = chessCfg.AlwaysOnTop,
             Callback = function(v) chessCfg.AlwaysOnTop = v and true or false; State.sentFen = nil end,
         }, ctx.flag("Misc_ChessEngine_AlwaysOnTop"))
+        sCE:Toggle({
+            Name = "Overlay", Default = chessCfg.ShowOverlay,
+            Callback = function(v)
+                chessCfg.ShowOverlay = v and true or false
+                if not chessCfg.ShowOverlay and State.overlay then setOverlayVisible(false) end
+            end,
+        }, ctx.flag("Misc_ChessEngine_Overlay"))
         sCE:Toggle({
             Name = "Move Notifications", Default = chessCfg.NotifyMove,
             Callback = function(v) chessCfg.NotifyMove = v and true or false end,
