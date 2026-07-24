@@ -2107,12 +2107,38 @@ return function(Lib, Core)
     --   2) getloadedmodules() — every loaded ModuleScript, incl. destroyed ones
     --   3) getnilinstances() — instances parented to nil (destroyed)
     --   4) filtergc/getgc — grab the returned table directly by its NextForKey key
+    -- A real auth INSTANCE (created via setmetatable(state, proto)) vs the class
+    -- prototype: the prototype also carries a NextForKey function but has no instance
+    -- state, so calling NextForKey on it crashes ("AuthServiceClient:351 attempt to
+    -- index nil with 'GetAttribute'"). The prototype has rawget(proto,"__index")==proto;
+    -- an instance does not. Always reject the prototype when grabbing from the GC.
+    local function isAuthInstance(v)
+        if not authIsValid(v) then return false end
+        if rawget(v, "__index") == v then return false end
+        return true
+    end
+
     local _authClient
     local function chalkAuth()
         if _authClient ~= nil then return _authClient or nil end
         local G = (getgenv and getgenv()) or _G
 
-        -- 1) Normal require via the tree.
+        -- 0) Cheapest AND warning-free: grab the live auth INSTANCE straight from the
+        --    GC (skipping the prototype). This avoids the "require() on a destroyed
+        --    ModuleScript" warning that the require fallbacks below emit.
+        if type(G.filtergc) == "function" then
+            pcall(function()
+                local list = G.filtergc("table", { Keys = { "NextForKey" } }, false)
+                if type(list) == "table" then
+                    for _, t in ipairs(list) do
+                        if isAuthInstance(t) then _authClient = t; break end
+                    end
+                end
+            end)
+        end
+
+        -- 1) Normal require via the tree (fallback if the GC grab missed).
+        if not _authClient then
         pcall(function()
             local shared = ReplicatedStorage:FindFirstChild("Shared")
             local svc    = shared and shared:FindFirstChild("Services")
@@ -2123,15 +2149,6 @@ return function(Lib, Core)
                 if authIsValid(mod) then _authClient = mod end
             end
         end)
-
-        -- 1b) Prefer the GC grab BEFORE any destroyed-module require, so we don't
-        --     trigger "require() should not be called on a destroyed ModuleScript".
-        --     ChalkSpammer already proved this path resolves the live auth table.
-        if not _authClient and type(G.filtergc) == "function" then
-            pcall(function()
-                local t = G.filtergc("table", { Keys = { "NextForKey" } }, true)
-                if authIsValid(t) then _authClient = t end
-            end)
         end
 
         -- 2) getloadedmodules(): find the (possibly destroyed) ModuleScript and
@@ -2160,18 +2177,26 @@ return function(Lib, Core)
             end)
         end
 
-        -- 4) filtergc / getgc: pull the returned auth table straight out of the GC
-        --    by matching its NextForKey key (bypasses the ModuleScript entirely).
+        -- 4) filtergc / getgc: pull the live auth table out of the GC, but SKIP the
+        --    class prototype/metatable. It ALSO exposes a NextForKey function yet has
+        --    no per-instance state, so calling NextForKey on it indexes nil (the
+        --    "AuthServiceClient:351 attempt to index nil with 'GetAttribute'" crash).
+        --    A real instance has `getmetatable(inst).NextForKey`; the prototype has
+        --    `rawget(proto,"__index") == proto`.
         if not _authClient and type(G.filtergc) == "function" then
             pcall(function()
-                local t = G.filtergc("table", { Keys = { "NextForKey" } }, true)
-                if authIsValid(t) then _authClient = t end
+                local list = G.filtergc("table", { Keys = { "NextForKey" } }, false)
+                if type(list) == "table" then
+                    for _, t in ipairs(list) do
+                        if isAuthInstance(t) then _authClient = t; break end
+                    end
+                end
             end)
         end
         if not _authClient and type(G.getgc) == "function" then
             pcall(function()
                 for _, obj in ipairs(G.getgc(true)) do
-                    if authIsValid(obj) then _authClient = obj break end
+                    if isAuthInstance(obj) then _authClient = obj; break end
                 end
             end)
         end
@@ -2683,6 +2708,16 @@ return function(Lib, Core)
                     for k = 1, args.n do
                         if type(args[k]) == "number" then PN.noteIdx = k; break end
                     end
+                    -- Report the captured payload so it can be locked in / shared with me.
+                    if type(rconsoleprint) == "function" then
+                        pcall(rconsoleprint, ("[AutoPiano] captured %d arg(s); note = arg[%s]\n"):format(args.n, tostring(PN.noteIdx)))
+                        for k = 1, args.n do
+                            pcall(rconsoleprint, ("  arg[%d] %s = %s\n"):format(k, typeof(args[k]), tostring(args[k])))
+                        end
+                    end
+                    task.defer(function()
+                        pcall(notify, "AutoPiano", ("learned payload: %d arg(s), note=arg[%s]"):format(args.n, tostring(PN.noteIdx)))
+                    end)
                 end
             end
             return old(self, ...)
