@@ -2441,37 +2441,22 @@ return function(Lib, Core)
         if rights.bq then castling = castling .. "q" end
         if castling == "" then castling = "-" end
         local side = state.side == "b" and "b" or "w"
-        -- chess-api (and Stockfish) reject a FEN where the ep square is set but no
-        -- enemy pawn can actually capture en passant. The game engine stores the ep
-        -- transit square after every double push, even when there is no capturing pawn.
-        -- We must validate it before encoding it in the FEN.
+        -- EN PASSANT: always encode "-". chess-api.com (a Stockfish wrapper) rejects
+        -- EVERY FEN whose ep field is not "-" -- not just an "impossible" ep, but even
+        -- a textbook-legal double push with a real capturer already on the board
+        -- (e.g. 1.e4 c5 2.e5 d5 -> ".. w KQkq d6 .."). It answers
+        --   { type = "error", text = "Cannot evaluate given position - wrong FEN." }
+        -- and no hint renders. Verified live in 2026 against BOTH the POST endpoint and
+        -- the wss://chess-api.com/v1 socket this script uses: the identical position
+        -- with ep = "-" is accepted and analysed normally.
+        --
+        -- This is the "enemy pushed a pawn and the engine died" bug. The old code
+        -- emitted the ep square whenever an adjacent friendly pawn existed (canCapture),
+        -- which is EXACTLY the case the API refuses, so a double push landing beside one
+        -- of our pawns nuked the whole request. Dropping the ep square costs only the
+        -- rare case where the en-passant capture itself is the single best move -- a
+        -- negligible eval difference versus losing the entire position analysis.
         local ep = "-"
-        if state.ep ~= nil then
-            local epIdx = state.ep
-            local epFile = epIdx % 8
-            local epRank = math.floor(epIdx / 8)
-            -- `state.ep` is not trustworthy by itself: the game sometimes leaves it
-            -- at a pawn's destination after an ordinary one-square move (e7-e6 -> e6).
-            -- A real FEN ep square is valid only after a DOUBLE push. Therefore the
-            -- just-moved enemy pawn must be exactly one rank beyond the transit square.
-            local movedPawnRank = side == "b" and (epRank + 1) or (epRank - 1)
-            local movedPawn = side == "b" and "P" or "p"
-            local isRealDoublePush = movedPawnRank >= 0 and movedPawnRank <= 7
-                and state.squares[movedPawnRank * 8 + epFile] == movedPawn
-            local capturerRank = movedPawnRank
-            local canCapture = false
-            local capturerPiece = side == "w" and "P" or "p"
-            if isRealDoublePush then
-                for _, df in ipairs({-1, 1}) do
-                    local adjFile = epFile + df
-                    if adjFile >= 0 and adjFile <= 7 then
-                        local sq = state.squares[capturerRank * 8 + adjFile]
-                        if sq == capturerPiece then canCapture = true; break end
-                    end
-                end
-            end
-            if canCapture then ep = squareName(epIdx) or "-" end
-        end
         return string.format("%s %s %s %s %d %d", table.concat(ranks, "/"), side, castling, ep,
             math.max(0, math.floor(tonumber(state.halfmove) or 0)),
             math.max(1, math.floor(tonumber(state.fullmove) or 1)))
@@ -2739,14 +2724,16 @@ return function(Lib, Core)
         shellStroke.Parent = shell
 
         local evalText = Instance.new("TextLabel")
-        evalText.Size = UDim2.fromOffset(44, 20)
-        evalText.Position = UDim2.fromOffset(244, 5)
+        evalText.Name = "EvalText"
+        evalText.Size = UDim2.new(1, -4, 0, 14)
+        evalText.Position = UDim2.fromOffset(2, 3)
         evalText.BackgroundTransparency = 1
         evalText.Text = "0.00"
         evalText.TextColor3 = Color3.fromRGB(235, 240, 248)
         evalText.Font = Enum.Font.GothamBold
-        evalText.TextSize = 10
-        evalText.TextXAlignment = Enum.TextXAlignment.Right
+        evalText.TextSize = 9
+        evalText.TextScaled = false
+        evalText.TextXAlignment = Enum.TextXAlignment.Center
         evalText.Parent = shell
 
         local evalBar = Instance.new("Frame")
