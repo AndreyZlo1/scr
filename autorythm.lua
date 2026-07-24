@@ -111,10 +111,9 @@ return function(Lib, Core)
         },
 
         AutoGreen = {
-            Auto        = false,               -- auto-fire perfect shots while holding the ball in range
-            Interval    = 1.6,                 -- seconds between auto shots (game cooldown SHOOT_REMOTE_COOLDOWN_SEC = 1.5)
             MaxDistance = 100,                 -- do not shoot beyond this (BasketballModule.SHOOT_MAX_RIM_DISTANCE)
             Jitter      = 0.02,                -- timing jitter around perfect (0 = dead-center green; captured green was ~0.0099)
+            Anim        = true,                -- play the Jumpshot animation locally so the shot looks legit
             AuthKey     = "Basketball.Shoot",  -- NextForKey key for the shot token; if shots don't register, try "Item.Activate"
         },
 
@@ -134,6 +133,7 @@ return function(Lib, Core)
             NotifyMove       = true,
             ShowOverlay      = true,   -- eval overlay
             ShowBoard        = true,   -- render the 2D board beside the eval bar
+            DragBoard        = true,   -- allow dragging the 2D board overlay (toggle off to lock it in place)
             OverlayScale     = 100,    -- percent; persisted through the UI flags
             DebugLogs        = false,  -- executor-console diagnostics only
         },
@@ -2423,8 +2423,8 @@ return function(Lib, Core)
     --                         so it is the raw rim, not a spread-adjusted aim point)
     --
     -- Because WE fire the shot, do NOT also press the game's Shoot key (F) — that would
-    -- fire a second, badly-timed shot. Use the Perfect Shot keybind / Auto Shoot below.
-    local AG = { last = 0, conn = nil }
+    -- fire a second, badly-timed shot. Use the Perfect Shot button / keybind below.
+    local AG = { last = 0, animId = nil, kfs = nil }
 
     -- Nearest CollectionService "Rim" (the same source BasketballModule.findClosestRimXZ
     -- uses). Returns (rimPart, distance) by 3D distance from our HumanoidRootPart.
@@ -2453,13 +2453,63 @@ return function(Lib, Core)
         return ok and type(equipped) == "string" and equipped:lower():find("basketball") ~= nil
     end
 
+    -- Make our self-fired shot LOOK legit by playing the real Jumpshot on our own
+    -- character. The game's shot anims are raw KeyframeSequences (no upload id), so we
+    -- register the KFS with KeyframeSequenceProvider and load the returned content id
+    -- onto our Animator. The server already replicates the shot pose to other players
+    -- when it receives BasketballShoot; this just restores it on OUR screen (which the
+    -- game's own controller would have played on the F-press we're bypassing).
+    local function agFindShotKFS()
+        if AG.kfs ~= nil then return AG.kfs or nil end
+        local found
+        pcall(function()
+            for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+                if d:IsA("KeyframeSequence") and d.Name:lower():find("jumpshot") then found = d; break end
+            end
+        end)
+        AG.kfs = found or false
+        return found
+    end
+
+    local function agPlayShotAnim()
+        if not Config.AutoGreen.Anim then return end
+        local char     = LocalPlayer and LocalPlayer.Character
+        local hum      = char and char:FindFirstChildOfClass("Humanoid")
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if not animator then return end
+        task.spawn(function()
+            local id = AG.animId
+            if not id then
+                local kfs = agFindShotKFS()
+                if not kfs then return end
+                -- RegisterKeyframeSequence yields; cache the content id after the first call.
+                local ok, res = pcall(function()
+                    return game:GetService("KeyframeSequenceProvider"):RegisterKeyframeSequence(kfs)
+                end)
+                if not ok or type(res) ~= "string" then return end
+                id = res; AG.animId = res
+            end
+            local anim = Instance.new("Animation")
+            anim.AnimationId = id
+            local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
+            if ok and track then
+                pcall(function() track.Priority = Enum.AnimationPriority.Action end)
+                pcall(function() track:Play(0.1) end)
+                task.delay(1.2, function() pcall(function() track:Stop(0.25) end) end)
+            end
+        end)
+    end
+
     -- Fire ONE perfect shot at the nearest rim. Returns (ok, reason).
     local function agShootPerfect()
         if not agHasBall() then return false, "no basketball equipped" end
+        -- Respect the game's shot cooldown (SHOOT_REMOTE_COOLDOWN_SEC = 1.5) so we never
+        -- burn a token on a shot the server would drop.
+        if os.clock() - AG.last < 1.5 then return false, "on cooldown" end
         local rim, dist = agNearestRim()
         if not rim then return false, "no rim found nearby" end
         if dist and dist > (Config.AutoGreen.MaxDistance or 100) then
-            return false, ("too far from rim (%.0f studs)"):format(dist)
+            return false, ("too far from rim (%.0f)"):format(dist)
         end
         local remotes = ReplicatedStorage:FindFirstChild("Remotes")
         local shoot   = remotes and remotes:FindFirstChild("BasketballShoot")
@@ -2474,24 +2524,8 @@ return function(Lib, Core)
         local ok, err = pcall(function() shoot:FireServer(token, check, nonce, timing, rim.Position) end)
         if not ok then return false, "FireServer error: " .. tostring(err) end
         AG.last = os.clock()
+        agPlayShotAnim()
         return true
-    end
-
-    local function agStop()
-        Config.AutoGreen.Auto = false
-        if AG.conn then AG.conn:Disconnect(); AG.conn = nil end
-    end
-
-    local function agStart()
-        if AG.conn then return end
-        AG.conn = RunService.Heartbeat:Connect(function()
-            if not Config.AutoGreen.Auto then return end
-            if os.clock() - AG.last < math.max(1.5, Config.AutoGreen.Interval or 1.6) then return end
-            if not agHasBall() then return end
-            local rim, dist = agNearestRim()
-            if not rim or (dist and dist > (Config.AutoGreen.MaxDistance or 100)) then return end
-            pcall(agShootPerfect)
-        end)
     end
 
     -- ═══════════════════════════ CHESS ENGINE ══════════════════════════════
@@ -2896,6 +2930,7 @@ return function(Lib, Core)
         }
         local dragging, dragStart, startPos
         connections[#connections + 1] = group.InputBegan:Connect(function(input)
+            if not Config.Chess.DragBoard then return end
             if input.UserInputType == Enum.UserInputType.MouseButton1
                 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging, dragStart, startPos = true, input.Position, group.Position
@@ -3352,14 +3387,12 @@ return function(Lib, Core)
             end)
         end
         chalkStart()
-        agStart()
         pcall(function()
             if Core and Core.On then
                 Core:On("unload", function()
                     Config.AutoRythm_On = false
                     stopAutoDraw()
                     chalkStop()
-                    agStop()
                     stopAll()
                     if _conn then _conn:Disconnect(); _conn = nil end
                 end)
@@ -3494,6 +3527,11 @@ return function(Lib, Core)
             Name = "2D Board", Default = chessCfg.ShowBoard,
             Callback = function(v) chessCfg.ShowBoard = v and true or false end,
         }, ctx.flag("Misc_ChessEngine_Board"))
+        sCE:Toggle({
+            Name = "Drag Board", Default = chessCfg.DragBoard,
+            Callback = function(v) chessCfg.DragBoard = v and true or false end,
+        }, ctx.flag("Misc_ChessEngine_DragBoard"))
+        sCE:SubLabel({ Text = "OFF locks the overlay in place so you can't drag it by accident." })
         slider(sCE, {
             Name = "Overlay Scale", Flag = "Misc_ChessEngine_OverlayScale",
             Default = chessCfg.OverlayScale, Min = 50, Max = 175, Precision = 0, Suffix = "%",
@@ -3530,7 +3568,7 @@ return function(Lib, Core)
         local ag = Config.AutoGreen
         local sAG2 = Misc:Section({ Side = "Left" })
         sAG2:Header({ Name = "AutoGreen" })
-        sAG2:SubLabel({ Text = "Guaranteed PERFECT basketball shots. Equip the ball, then use the keybind or Auto below. DON'T press the game's Shoot key (F) yourself or you'll fire a second, badly-timed shot." })
+        sAG2:SubLabel({ Text = "Guaranteed PERFECT basketball shots. Equip the ball, bind a key below and press it to shoot. DON'T press the game's Shoot key (F) yourself or you'll fire a second, badly-timed shot." })
         sAG2:Button({
             Name = "Perfect Shot",
             Callback = function()
@@ -3546,21 +3584,16 @@ return function(Lib, Core)
                 if not ok then notify("AutoGreen", "failed: " .. tostring(reason or "unknown")) end
             end,
         })
-        sAG2:SubLabel({ Text = "Bind a key and press it to shoot a green. This is your shoot button instead of F." })
+        sAG2:SubLabel({ Text = "This is your shoot button instead of F." })
         sAG2:Divider()
         sAG2:Toggle({
-            Name = "Auto Shoot", Default = ag.Auto,
-            Callback = function(v) ag.Auto = v and true or false end,
-        }, ctx.flag("Misc_AutoGreen_Auto"))
-        sAG2:SubLabel({ Text = "While ON: auto-fires a perfect shot whenever you hold the ball within range." })
-        slider(sAG2, {
-            Name = "Auto Interval", Flag = "Misc_AutoGreen_Interval",
-            Default = ag.Interval, Min = 1.5, Max = 5, Precision = 1, Suffix = "s",
-            Callback = function(v) ag.Interval = v end,
-        })
+            Name = "Shot Animation", Default = ag.Anim,
+            Callback = function(v) ag.Anim = v and true or false end,
+        }, ctx.flag("Misc_AutoGreen_Anim"))
+        sAG2:SubLabel({ Text = "Plays the Jumpshot on you so the shot looks legit." })
         slider(sAG2, {
             Name = "Max Distance", Flag = "Misc_AutoGreen_MaxDist",
-            Default = ag.MaxDistance, Min = 10, Max = 100, Precision = 0, Suffix = " studs",
+            Default = ag.MaxDistance, Min = 10, Max = 100, Precision = 0,
             Callback = function(v) ag.MaxDistance = v end,
         })
         sAG2:SubLabel({ Text = "If shots don't register, the shot auth key differs from Basketball.Shoot — tell me and I'll switch it (likely Item.Activate)." })
