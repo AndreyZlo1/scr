@@ -110,6 +110,14 @@ return function(Lib, Core)
             Cooldown = 3,           -- seconds a rate-limited item type is skipped
         },
 
+        AutoGreen = {
+            Auto        = false,               -- auto-fire perfect shots while holding the ball in range
+            Interval    = 1.6,                 -- seconds between auto shots (game cooldown SHOOT_REMOTE_COOLDOWN_SEC = 1.5)
+            MaxDistance = 100,                 -- do not shoot beyond this (BasketballModule.SHOOT_MAX_RIM_DISTANCE)
+            Jitter      = 0.02,                -- timing jitter around perfect (0 = dead-center green; captured green was ~0.0099)
+            AuthKey     = "Basketball.Shoot",  -- NextForKey key for the shot token; if shots don't register, try "Item.Activate"
+        },
+
         Chess = {
             Enabled          = false,
             AutoAnalyze      = true,
@@ -2400,6 +2408,92 @@ return function(Lib, Core)
         end)
     end
 
+    -- ═══════════════════════════ AUTOGREEN (BASKETBALL) ═════════════════════
+    -- Fires a guaranteed PERFECT ("green") basketball shot through the game's own
+    -- BasketballShoot remote. NO hook: we mint a valid rolling auth token via the
+    -- game's AuthServiceClient (exactly like the Chalk spammer mints Item.Unequip /
+    -- Dispenser.Request tokens) and fire the shot ourselves. Hooking __namecall was
+    -- both unnecessary and unstable here.
+    --
+    -- Payload confirmed at runtime — BasketballShoot:FireServer(token, check, nonce, timing, targetPos):
+    --   token, check, nonce = AuthServiceClient:NextForKey("Basketball.Shoot")
+    --                         (token/check roll every shot; nonce is a per-session constant)
+    --   timing (number)     = release error; ~0 == PERFECT green, ~4 == early/late miss
+    --   targetPos (Vector3) = world position of the rim being shot at (constant per hoop,
+    --                         so it is the raw rim, not a spread-adjusted aim point)
+    --
+    -- Because WE fire the shot, do NOT also press the game's Shoot key (F) — that would
+    -- fire a second, badly-timed shot. Use the Perfect Shot keybind / Auto Shoot below.
+    local AG = { last = 0, conn = nil }
+
+    -- Nearest CollectionService "Rim" (the same source BasketballModule.findClosestRimXZ
+    -- uses). Returns (rimPart, distance) by 3D distance from our HumanoidRootPart.
+    local function agNearestRim()
+        local char = LocalPlayer and LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return nil end
+        local best, bestD
+        local ok, tagged = pcall(function() return CollectionService:GetTagged("Rim") end)
+        if not ok or type(tagged) ~= "table" then return nil end
+        for _, part in ipairs(tagged) do
+            if typeof(part) == "Instance" and part:IsA("BasePart") and part.Parent then
+                local d = (part.Position - root.Position).Magnitude
+                if not bestD or d < bestD then best, bestD = part, d end
+            end
+        end
+        return best, bestD
+    end
+
+    -- Do we currently hold the basketball? The server only accepts a shot while the
+    -- ball is equipped (same ItemEquipped attribute the chalk check reads).
+    local function agHasBall()
+        local char = LocalPlayer and LocalPlayer.Character
+        if not char then return false end
+        local ok, equipped = pcall(function() return char:GetAttribute("ItemEquipped") end)
+        return ok and type(equipped) == "string" and equipped:lower():find("basketball") ~= nil
+    end
+
+    -- Fire ONE perfect shot at the nearest rim. Returns (ok, reason).
+    local function agShootPerfect()
+        if not agHasBall() then return false, "no basketball equipped" end
+        local rim, dist = agNearestRim()
+        if not rim then return false, "no rim found nearby" end
+        if dist and dist > (Config.AutoGreen.MaxDistance or 100) then
+            return false, ("too far from rim (%.0f studs)"):format(dist)
+        end
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local shoot   = remotes and remotes:FindFirstChild("BasketballShoot")
+        if not (shoot and shoot:IsA("RemoteEvent")) then return false, "BasketballShoot remote missing" end
+        local auth = chalkAuth()
+        if not auth then return false, "AuthServiceClient unavailable" end
+        local token, check, nonce = auth:NextForKey(Config.AutoGreen.AuthKey or "Basketball.Shoot")
+        if nonce == 0 then return false, "auth returned no token (rate limited / wrong key?)" end
+        -- timing ~0 == green. A hair of jitter avoids an exactly-constant signature while
+        -- staying deep inside the perfect window (captured green ≈ 0.0099, misses ≈ 4.0).
+        local timing = math.random() * math.max(0, Config.AutoGreen.Jitter or 0.02)
+        local ok, err = pcall(function() shoot:FireServer(token, check, nonce, timing, rim.Position) end)
+        if not ok then return false, "FireServer error: " .. tostring(err) end
+        AG.last = os.clock()
+        return true
+    end
+
+    local function agStop()
+        Config.AutoGreen.Auto = false
+        if AG.conn then AG.conn:Disconnect(); AG.conn = nil end
+    end
+
+    local function agStart()
+        if AG.conn then return end
+        AG.conn = RunService.Heartbeat:Connect(function()
+            if not Config.AutoGreen.Auto then return end
+            if os.clock() - AG.last < math.max(1.5, Config.AutoGreen.Interval or 1.6) then return end
+            if not agHasBall() then return end
+            local rim, dist = agNearestRim()
+            if not rim or (dist and dist > (Config.AutoGreen.MaxDistance or 100)) then return end
+            pcall(agShootPerfect)
+        end)
+    end
+
     -- ═══════════════════════════ CHESS ENGINE ══════════════════════════════
     local function squareFromName(name)
         if type(name) ~= "string" or not name:match("^[a-h][1-8]$") then return nil end
@@ -3258,12 +3352,14 @@ return function(Lib, Core)
             end)
         end
         chalkStart()
+        agStart()
         pcall(function()
             if Core and Core.On then
                 Core:On("unload", function()
                     Config.AutoRythm_On = false
                     stopAutoDraw()
                     chalkStop()
+                    agStop()
                     stopAll()
                     if _conn then _conn:Disconnect(); _conn = nil end
                 end)
@@ -3429,6 +3525,45 @@ return function(Lib, Core)
             Callback = function(v) Config.Offset = v end,
         })
         sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if ur client has audio/display lag. Taps stay PERFECT within about +-43ms." })
+
+        -- ─────────────── Section: AutoGreen (Left) ───────────────
+        local ag = Config.AutoGreen
+        local sAG2 = Misc:Section({ Side = "Left" })
+        sAG2:Header({ Name = "AutoGreen" })
+        sAG2:SubLabel({ Text = "Guaranteed PERFECT basketball shots. Equip the ball, then use the keybind or Auto below. DON'T press the game's Shoot key (F) yourself or you'll fire a second, badly-timed shot." })
+        sAG2:Button({
+            Name = "Perfect Shot",
+            Callback = function()
+                local ok, reason = agShootPerfect()
+                notify("AutoGreen", ok and "green shot fired" or ("failed: " .. tostring(reason or "unknown")))
+            end,
+        })
+        ctx.keybind(sAG2, {
+            Name = "Perfect Shot Key",
+            Flag = ctx.flag("Misc_AutoGreen_KB"),
+            Toggle = function()
+                local ok, reason = agShootPerfect()
+                if not ok then notify("AutoGreen", "failed: " .. tostring(reason or "unknown")) end
+            end,
+        })
+        sAG2:SubLabel({ Text = "Bind a key and press it to shoot a green. This is your shoot button instead of F." })
+        sAG2:Divider()
+        sAG2:Toggle({
+            Name = "Auto Shoot", Default = ag.Auto,
+            Callback = function(v) ag.Auto = v and true or false end,
+        }, ctx.flag("Misc_AutoGreen_Auto"))
+        sAG2:SubLabel({ Text = "While ON: auto-fires a perfect shot whenever you hold the ball within range." })
+        slider(sAG2, {
+            Name = "Auto Interval", Flag = "Misc_AutoGreen_Interval",
+            Default = ag.Interval, Min = 1.5, Max = 5, Precision = 1, Suffix = "s",
+            Callback = function(v) ag.Interval = v end,
+        })
+        slider(sAG2, {
+            Name = "Max Distance", Flag = "Misc_AutoGreen_MaxDist",
+            Default = ag.MaxDistance, Min = 10, Max = 100, Precision = 0, Suffix = " studs",
+            Callback = function(v) ag.MaxDistance = v end,
+        })
+        sAG2:SubLabel({ Text = "If shots don't register, the shot auth key differs from Basketball.Shoot — tell me and I'll switch it (likely Item.Activate)." })
 
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
