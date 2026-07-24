@@ -111,10 +111,8 @@ return function(Lib, Core)
         },
 
         AutoGreen = {
-            MaxDistance = 100,                 -- do not shoot beyond this (BasketballModule.SHOOT_MAX_RIM_DISTANCE)
-            Jitter      = 0.02,                -- timing jitter around perfect (0 = dead-center green; captured green was ~0.0099)
-            Anim        = true,                -- play the Jumpshot animation locally so the shot looks legit
-            AuthKey     = "Basketball.Shoot",  -- NextForKey key for the shot token; if shots don't register, try "Item.Activate"
+            On     = false,   -- hook outgoing basketball shots and force PERFECT timing (real animation + bar stay)
+            Jitter = 0.02,    -- tiny spread around perfect so the timing isn't an exactly-constant 0 signature
         },
 
         AutoPiano = {
@@ -2450,139 +2448,74 @@ return function(Lib, Core)
     end
 
     -- ═══════════════════════════ AUTOGREEN (BASKETBALL) ═════════════════════
-    -- Fires a guaranteed PERFECT ("green") basketball shot through the game's own
-    -- BasketballShoot remote. NO hook: we mint a valid rolling auth token via the
-    -- game's AuthServiceClient (exactly like the Chalk spammer mints Item.Unequip /
-    -- Dispenser.Request tokens) and fire the shot ourselves. Hooking __namecall was
-    -- both unnecessary and unstable here.
+    -- Forces every basketball shot to land PERFECT. Rather than firing the shot
+    -- ourselves (which skipped the animation + shot bar), we install ONE light
+    -- __namecall hook and rewrite only the timing argument of the game's own
+    -- BasketballShoot:FireServer as it leaves. You shoot normally with F, so the real
+    -- Jumpshot animation and the shot meter both play; the server just receives a
+    -- perfect release. The auth token + target the game generated pass through
+    -- untouched — nothing to mint.
     --
-    -- Payload confirmed at runtime — BasketballShoot:FireServer(token, check, nonce, timing, targetPos):
-    --   token, check, nonce = AuthServiceClient:NextForKey("Basketball.Shoot")
-    --                         (token/check roll every shot; nonce is a per-session constant)
-    --   timing (number)     = release error; ~0 == PERFECT green, ~4 == early/late miss
-    --   targetPos (Vector3) = world position of the rim being shot at (constant per hoop,
-    --                         so it is the raw rim, not a spread-adjusted aim point)
-    --
-    -- Because WE fire the shot, do NOT also press the game's Shoot key (F) — that would
-    -- fire a second, badly-timed shot. Use the Perfect Shot button / keybind below.
-    local AG = { last = 0, animId = nil, animObj = nil }
+    -- Payload (captured at runtime): FireServer(token, check, nonce, timing, targetPos)
+    --   timing = release error; ~0 == PERFECT green, ~4 == early/late miss. We rewrite
+    --   arg 4 to ~0. The hot path is a single `self == remote` pointer compare, so on
+    --   every OTHER remote call the hook costs essentially nothing (safe on weak PCs).
+    -- Earlier "hooks freeze the game" was a heavy probe that ran filtergc on every
+    -- namecall; this does no such thing.
+    local AGState = { on = false, hooked = false, remote = nil }
 
-    -- Nearest CollectionService "Rim" (the same source BasketballModule.findClosestRimXZ
-    -- uses). Returns (rimPart, distance) by 3D distance from our HumanoidRootPart.
-    local function agNearestRim()
-        local char = LocalPlayer and LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if not root then return nil end
-        local best, bestD
-        local ok, tagged = pcall(function() return CollectionService:GetTagged("Rim") end)
-        if not ok or type(tagged) ~= "table" then return nil end
-        for _, part in ipairs(tagged) do
-            if typeof(part) == "Instance" and part:IsA("BasePart") and part.Parent then
-                local d = (part.Position - root.Position).Magnitude
-                if not bestD or d < bestD then best, bestD = part, d end
-            end
-        end
-        return best, bestD
-    end
-
-    -- Do we currently hold the basketball? The server only accepts a shot while the
-    -- ball is equipped (same ItemEquipped attribute the chalk check reads).
-    local function agHasBall()
-        local char = LocalPlayer and LocalPlayer.Character
-        if not char then return false end
-        local ok, equipped = pcall(function() return char:GetAttribute("ItemEquipped") end)
-        return ok and type(equipped) == "string" and equipped:lower():find("basketball") ~= nil
-    end
-
-    -- Make our self-fired shot LOOK legit by playing the real Jumpshot on our own
-    -- character (the game's controller would play it on the F-press we bypass; the
-    -- server replicates the pose to others). Prefer a real Animation object (uploaded
-    -- id -> replicates to everyone); fall back to registering the raw KeyframeSequence
-    -- locally via KeyframeSequenceProvider. Search once, cache the result.
-    local function agAnimLog(msg)
-        if type(rconsoleprint) == "function" then pcall(rconsoleprint, "[AutoGreen anim] " .. msg .. "\n") end
-    end
-    local function agFindShotAnim()
-        if AG.animObj ~= nil then return AG.animObj or nil end
-        local found
-        pcall(function()
-            for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-                local ok, nm = pcall(function() return d.Name end)
-                if ok and type(nm) == "string" and nm:lower():find("jumpshot") then
-                    if d:IsA("Animation") then found = d; return end          -- best: uploaded id
-                    if d:IsA("KeyframeSequence") and not found then found = d end
-                end
-            end
-        end)
-        AG.animObj = found or false
-        if not found then agAnimLog("no 'Jumpshot' Animation/KeyframeSequence found in ReplicatedStorage") end
-        return found
-    end
-
-    local function agPlayShotAnim()
-        if not Config.AutoGreen.Anim then return end
-        local char     = LocalPlayer and LocalPlayer.Character
-        local hum      = char and char:FindFirstChildOfClass("Humanoid")
-        local animator = hum and hum:FindFirstChildOfClass("Animator")
-        if not animator then return end
-        task.spawn(function()
-            local id = AG.animId
-            if not id then
-                local obj = agFindShotAnim()
-                if not obj then return end
-                if obj:IsA("Animation") then
-                    id = obj.AnimationId
-                else
-                    -- raw KeyframeSequence -> register for a local content id (yields).
-                    local ok, res = pcall(function()
-                        return game:GetService("KeyframeSequenceProvider"):RegisterKeyframeSequence(obj)
-                    end)
-                    if not ok or type(res) ~= "string" then
-                        agAnimLog("RegisterKeyframeSequence failed/blocked by executor: " .. tostring(res))
-                        AG.animObj = nil   -- allow a retry next shot
-                        return
-                    end
-                    id = res
-                end
-                AG.animId = id
-            end
-            local anim = Instance.new("Animation")
-            anim.AnimationId = id
-            local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
-            if not ok or not track then agAnimLog("LoadAnimation failed: " .. tostring(track)); AG.animId = nil; return end
-            pcall(function() track.Priority = Enum.AnimationPriority.Action end)
-            local okp = pcall(function() track:Play(0.1) end)
-            if not okp then agAnimLog("Play failed") end
-            task.delay(1.2, function() pcall(function() track:Stop(0.25) end) end)
-        end)
-    end
-
-    -- Fire ONE perfect shot at the nearest rim. Returns (ok, reason).
-    local function agShootPerfect()
-        if not agHasBall() then return false, "no basketball equipped" end
-        -- Respect the game's shot cooldown (SHOOT_REMOTE_COOLDOWN_SEC = 1.5) so we never
-        -- burn a token on a shot the server would drop.
-        if os.clock() - AG.last < 1.5 then return false, "on cooldown" end
-        local rim, dist = agNearestRim()
-        if not rim then return false, "no rim found nearby" end
-        if dist and dist > (Config.AutoGreen.MaxDistance or 100) then
-            return false, ("too far from rim (%.0f)"):format(dist)
-        end
+    local function agShootRemote()
+        if AGState.remote and AGState.remote.Parent then return AGState.remote end
         local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-        local shoot   = remotes and remotes:FindFirstChild("BasketballShoot")
-        if not (shoot and shoot:IsA("RemoteEvent")) then return false, "BasketballShoot remote missing" end
-        local auth = chalkAuth()
-        if not auth then return false, "AuthServiceClient unavailable" end
-        local token, check, nonce = auth:NextForKey(Config.AutoGreen.AuthKey or "Basketball.Shoot")
-        if nonce == 0 then return false, "auth returned no token (rate limited / wrong key?)" end
-        -- timing ~0 == green. A hair of jitter avoids an exactly-constant signature while
-        -- staying deep inside the perfect window (captured green ≈ 0.0099, misses ≈ 4.0).
-        local timing = math.random() * math.max(0, Config.AutoGreen.Jitter or 0.02)
-        local ok, err = pcall(function() shoot:FireServer(token, check, nonce, timing, rim.Position) end)
-        if not ok then return false, "FireServer error: " .. tostring(err) end
-        AG.last = os.clock()
-        agPlayShotAnim()
+        local r = remotes and remotes:FindFirstChild("BasketballShoot")
+        AGState.remote = (r and r:IsA("RemoteEvent")) and r or nil
+        return AGState.remote
+    end
+
+    local function agInstallHook()
+        if AGState.hooked then return true end
+        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+            return false, "executor lacks hookmetamethod"
+        end
+        agShootRemote()
+        local old
+        old = hookmetamethod(game, "__namecall", (newcclosure or function(f) return f end)(function(self, ...)
+            -- Fast path: do nothing unless enabled AND this is exactly the shot remote.
+            if AGState.on and self == AGState.remote then
+                local mine = (type(checkcaller) == "function") and checkcaller() or false
+                if not mine then
+                    local ok, m = pcall(getnamecallmethod)
+                    if ok and m == "FireServer" then
+                        local a = table.pack(...)
+                        -- (token, check, nonce, timing, targetPos): force timing (arg 4) to perfect.
+                        if a.n >= 4 and type(a[4]) == "number" then
+                            a[4] = math.random() * math.max(0, Config.AutoGreen.Jitter or 0.02)
+                            return old(self, table.unpack(a, 1, a.n))
+                        end
+                    end
+                end
+            end
+            return old(self, ...)
+        end))
+        AGState.hooked = true
         return true
+    end
+
+    local function agSetEnabled(on, notify)
+        on = on and true or false
+        Config.AutoGreen.On = on
+        AGState.on = on
+        if on then
+            local ok, err = agInstallHook()
+            if not ok then
+                Config.AutoGreen.On = false; AGState.on = false
+                if notify then notify("AutoGreen", err or "can't install hook") end
+                return
+            end
+            if not agShootRemote() and notify then
+                notify("AutoGreen", "on — BasketballShoot not found yet; it resolves near a court")
+            end
+        end
     end
 
     -- ═══════════════════════════ AUTOPIANO ══════════════════════════════════
@@ -2614,9 +2547,11 @@ return function(Lib, Core)
         return (r and r:IsA("RemoteEvent")) and r or nil
     end
 
-    -- Fire one note. Uses a captured payload template when we have one (Learn Note),
-    -- otherwise just the note integer (the most likely shape).
+    -- Fire one note. Confirmed payload (from Learn Note): FireServer("play", note),
+    -- arg1 = the string "play", arg2 = the integer note number. A captured template
+    -- (Learn Note) overrides this if a build ever differs.
     local function pianoFire(remote, note)
+        note = math.clamp(math.floor(note + 0.5), 1, 88)
         if PN.template and PN.noteIdx then
             local t, n = PN.template, PN.template.n or #PN.template
             local a = {}
@@ -2624,7 +2559,7 @@ return function(Lib, Core)
             a[PN.noteIdx] = note
             pcall(function() remote:FireServer(table.unpack(a, 1, n)) end)
         else
-            pcall(function() remote:FireServer(note) end)
+            pcall(function() remote:FireServer("play", note) end)
         end
     end
 
@@ -3763,38 +3698,16 @@ return function(Lib, Core)
         sAR:SubLabel({ Text = "0 = frame-perfect. Only nudge if ur client has audio/display lag. Taps stay PERFECT within about +-43ms." })
 
         -- ─────────────── Section: AutoGreen (Left) ───────────────
-        local ag = Config.AutoGreen
         local sAG2 = Misc:Section({ Side = "Left" })
         sAG2:Header({ Name = "AutoGreen" })
-        sAG2:SubLabel({ Text = "Guaranteed PERFECT basketball shots. Equip the ball, bind a key below and press it to shoot. DON'T press the game's Shoot key (F) yourself or you'll fire a second, badly-timed shot." })
-        sAG2:Button({
-            Name = "Perfect Shot",
-            Callback = function()
-                local ok, reason = agShootPerfect()
-                notify("AutoGreen", ok and "green shot fired" or ("failed: " .. tostring(reason or "unknown")))
-            end,
+        sAG2:SubLabel({ Text = "Every basketball shot lands PERFECT (green). Play normally with F — the real animation and shot bar still show; we just fix the release timing as the shot leaves." })
+        feature(sAG2, {
+            Title = "AutoGreen", Flag = "Misc_AutoGreen",
+            get = function() return Config.AutoGreen.On end,
+            set = function(v) agSetEnabled(v, notify) end,
+            Desc = "forces every basketball shot to green",
         })
-        ctx.keybind(sAG2, {
-            Name = "Perfect Shot Key",
-            Flag = ctx.flag("Misc_AutoGreen_KB"),
-            Toggle = function()
-                local ok, reason = agShootPerfect()
-                if not ok then notify("AutoGreen", "failed: " .. tostring(reason or "unknown")) end
-            end,
-        })
-        sAG2:SubLabel({ Text = "This is your shoot button instead of F." })
-        sAG2:Divider()
-        sAG2:Toggle({
-            Name = "Shot Animation", Default = ag.Anim,
-            Callback = function(v) ag.Anim = v and true or false end,
-        }, ctx.flag("Misc_AutoGreen_Anim"))
-        sAG2:SubLabel({ Text = "Plays the Jumpshot on you so the shot looks legit." })
-        slider(sAG2, {
-            Name = "Max Distance", Flag = "Misc_AutoGreen_MaxDist",
-            Default = ag.MaxDistance, Min = 10, Max = 100, Precision = 0,
-            Callback = function(v) ag.MaxDistance = v end,
-        })
-        sAG2:SubLabel({ Text = "If shots don't register, the shot auth key differs from Basketball.Shoot — tell me and I'll switch it (likely Item.Activate)." })
+        sAG2:SubLabel({ Text = "Turn on, then just shoot with F like normal." })
 
         -- ─────────────── Section: AutoPiano (Right) ───────────────
         local pn = Config.AutoPiano
