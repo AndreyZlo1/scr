@@ -117,6 +117,12 @@ return function(Lib, Core)
             AuthKey     = "Basketball.Shoot",  -- NextForKey key for the shot token; if shots don't register, try "Item.Activate"
         },
 
+        AutoPiano = {
+            Sheet    = "",   -- pasted Virtual Piano sheet (letter macro, e.g. from virtualpiano.net)
+            Tempo    = 180,  -- ms per note step (lower = faster)
+            BaseNote = 8,    -- game note number the sheet's LOWEST key maps to (tune the octave up/down)
+        },
+
         Chess = {
             Enabled          = false,
             AutoAnalyze      = true,
@@ -2118,6 +2124,16 @@ return function(Lib, Core)
             end
         end)
 
+        -- 1b) Prefer the GC grab BEFORE any destroyed-module require, so we don't
+        --     trigger "require() should not be called on a destroyed ModuleScript".
+        --     ChalkSpammer already proved this path resolves the live auth table.
+        if not _authClient and type(G.filtergc) == "function" then
+            pcall(function()
+                local t = G.filtergc("table", { Keys = { "NextForKey" } }, true)
+                if authIsValid(t) then _authClient = t end
+            end)
+        end
+
         -- 2) getloadedmodules(): find the (possibly destroyed) ModuleScript and
         --    re-require it — require is cached per instance, so this returns the
         --    same live table the game uses.
@@ -2424,7 +2440,7 @@ return function(Lib, Core)
     --
     -- Because WE fire the shot, do NOT also press the game's Shoot key (F) — that would
     -- fire a second, badly-timed shot. Use the Perfect Shot button / keybind below.
-    local AG = { last = 0, animId = nil, kfs = nil }
+    local AG = { last = 0, animId = nil, animObj = nil }
 
     -- Nearest CollectionService "Rim" (the same source BasketballModule.findClosestRimXZ
     -- uses). Returns (rimPart, distance) by 3D distance from our HumanoidRootPart.
@@ -2454,20 +2470,27 @@ return function(Lib, Core)
     end
 
     -- Make our self-fired shot LOOK legit by playing the real Jumpshot on our own
-    -- character. The game's shot anims are raw KeyframeSequences (no upload id), so we
-    -- register the KFS with KeyframeSequenceProvider and load the returned content id
-    -- onto our Animator. The server already replicates the shot pose to other players
-    -- when it receives BasketballShoot; this just restores it on OUR screen (which the
-    -- game's own controller would have played on the F-press we're bypassing).
-    local function agFindShotKFS()
-        if AG.kfs ~= nil then return AG.kfs or nil end
+    -- character (the game's controller would play it on the F-press we bypass; the
+    -- server replicates the pose to others). Prefer a real Animation object (uploaded
+    -- id -> replicates to everyone); fall back to registering the raw KeyframeSequence
+    -- locally via KeyframeSequenceProvider. Search once, cache the result.
+    local function agAnimLog(msg)
+        if type(rconsoleprint) == "function" then pcall(rconsoleprint, "[AutoGreen anim] " .. msg .. "\n") end
+    end
+    local function agFindShotAnim()
+        if AG.animObj ~= nil then return AG.animObj or nil end
         local found
         pcall(function()
             for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-                if d:IsA("KeyframeSequence") and d.Name:lower():find("jumpshot") then found = d; break end
+                local ok, nm = pcall(function() return d.Name end)
+                if ok and type(nm) == "string" and nm:lower():find("jumpshot") then
+                    if d:IsA("Animation") then found = d; return end          -- best: uploaded id
+                    if d:IsA("KeyframeSequence") and not found then found = d end
+                end
             end
         end)
-        AG.kfs = found or false
+        AG.animObj = found or false
+        if not found then agAnimLog("no 'Jumpshot' Animation/KeyframeSequence found in ReplicatedStorage") end
         return found
     end
 
@@ -2480,23 +2503,32 @@ return function(Lib, Core)
         task.spawn(function()
             local id = AG.animId
             if not id then
-                local kfs = agFindShotKFS()
-                if not kfs then return end
-                -- RegisterKeyframeSequence yields; cache the content id after the first call.
-                local ok, res = pcall(function()
-                    return game:GetService("KeyframeSequenceProvider"):RegisterKeyframeSequence(kfs)
-                end)
-                if not ok or type(res) ~= "string" then return end
-                id = res; AG.animId = res
+                local obj = agFindShotAnim()
+                if not obj then return end
+                if obj:IsA("Animation") then
+                    id = obj.AnimationId
+                else
+                    -- raw KeyframeSequence -> register for a local content id (yields).
+                    local ok, res = pcall(function()
+                        return game:GetService("KeyframeSequenceProvider"):RegisterKeyframeSequence(obj)
+                    end)
+                    if not ok or type(res) ~= "string" then
+                        agAnimLog("RegisterKeyframeSequence failed/blocked by executor: " .. tostring(res))
+                        AG.animObj = nil   -- allow a retry next shot
+                        return
+                    end
+                    id = res
+                end
+                AG.animId = id
             end
             local anim = Instance.new("Animation")
             anim.AnimationId = id
             local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
-            if ok and track then
-                pcall(function() track.Priority = Enum.AnimationPriority.Action end)
-                pcall(function() track:Play(0.1) end)
-                task.delay(1.2, function() pcall(function() track:Stop(0.25) end) end)
-            end
+            if not ok or not track then agAnimLog("LoadAnimation failed: " .. tostring(track)); AG.animId = nil; return end
+            pcall(function() track.Priority = Enum.AnimationPriority.Action end)
+            local okp = pcall(function() track:Play(0.1) end)
+            if not okp then agAnimLog("Play failed") end
+            task.delay(1.2, function() pcall(function() track:Stop(0.25) end) end)
         end)
     end
 
@@ -2526,6 +2558,136 @@ return function(Lib, Core)
         AG.last = os.clock()
         agPlayShotAnim()
         return true
+    end
+
+    -- ═══════════════════════════ AUTOPIANO ══════════════════════════════════
+    -- Auto-plays a song on the in-game piano. Paste a Virtual Piano sheet (the letter
+    -- macros you get from sites like virtualpiano.net) into the Sheet box and press
+    -- Play; each key is translated to the game's note number and sent through the
+    -- piano's own InstrumentPiano remote on a timer. Sit at a piano first.
+    --
+    -- Notes are an integer note number (verified in PianoVisualize: octave = ceil(note/12),
+    -- key part named tostring(note)). No auth token was found for piano notes, so we fire
+    -- the note directly. If your build needs a different payload, use "Learn Note" once to
+    -- capture the exact shape from one real keypress.
+    local PN = { playing = false, token = 0, template = nil, noteIdx = nil, learning = false, hooked = false }
+
+    -- Standard 61-key Virtual Piano char -> semitone (0 = lowest key). Naturals plus
+    -- shift-sharps; any other char is treated as a rest/separator.
+    local VP_SEMI = {
+        ["1"]=0,["!"]=1,["2"]=2,["@"]=3,["3"]=4,["4"]=5,["$"]=6,["5"]=7,["%"]=8,["6"]=9,["^"]=10,["7"]=11,
+        ["8"]=12,["*"]=13,["9"]=14,["("]=15,["0"]=16,
+        ["q"]=17,["Q"]=18,["w"]=19,["W"]=20,["e"]=21,["E"]=22,["r"]=23,
+        ["t"]=24,["T"]=25,["y"]=26,["Y"]=27,["u"]=28,["i"]=29,["I"]=30,["o"]=31,["O"]=32,["p"]=33,["P"]=34,["a"]=35,
+        ["s"]=36,["S"]=37,["d"]=38,["D"]=39,["f"]=40,["g"]=41,["G"]=42,["h"]=43,["H"]=44,["j"]=45,["J"]=46,["k"]=47,
+        ["l"]=48,["L"]=49,["z"]=50,["x"]=51,["X"]=52,["c"]=53,["v"]=54,["V"]=55,["b"]=56,["B"]=57,["n"]=58,["m"]=59,
+    }
+
+    local function pianoRemote()
+        local r = ReplicatedStorage:FindFirstChild("Remotes")
+        r = r and r:FindFirstChild("InstrumentPiano")
+        return (r and r:IsA("RemoteEvent")) and r or nil
+    end
+
+    -- Fire one note. Uses a captured payload template when we have one (Learn Note),
+    -- otherwise just the note integer (the most likely shape).
+    local function pianoFire(remote, note)
+        if PN.template and PN.noteIdx then
+            local t, n = PN.template, PN.template.n or #PN.template
+            local a = {}
+            for k = 1, n do a[k] = t[k] end
+            a[PN.noteIdx] = note
+            pcall(function() remote:FireServer(table.unpack(a, 1, n)) end)
+        else
+            pcall(function() remote:FireServer(note) end)
+        end
+    end
+
+    -- Parse a Virtual Piano sheet into steps: each step = { notes = {semitone,...}, gap = n }.
+    -- Bracketed groups [..] play together (a chord); whitespace/"|" add rest units.
+    local function pianoParse(sheet)
+        local steps, i, len = {}, 1, #sheet
+        while i <= len do
+            local c = sheet:sub(i, i)
+            if c == "[" then
+                local j = sheet:find("]", i + 1, true) or len
+                local chord = {}
+                for k = i + 1, j - 1 do
+                    local s = VP_SEMI[sheet:sub(k, k)]
+                    if s then chord[#chord + 1] = s end
+                end
+                if #chord > 0 then steps[#steps + 1] = { notes = chord, gap = 0 } end
+                i = j + 1
+            elseif c == " " or c == "\n" or c == "\r" or c == "\t" or c == "|" then
+                if #steps > 0 then steps[#steps].gap = steps[#steps].gap + 1 end
+                i = i + 1
+            else
+                local s = VP_SEMI[c]
+                if s then steps[#steps + 1] = { notes = { s }, gap = 0 } end
+                i = i + 1
+            end
+        end
+        return steps
+    end
+
+    local function pianoStop()
+        PN.playing = false
+        PN.token = PN.token + 1
+    end
+
+    -- Play the pasted sheet. One lightweight coroutine that yields between notes
+    -- (no per-frame polling), so it costs nothing while idle and is gentle on weak PCs.
+    local function pianoPlay(notify)
+        local remote = pianoRemote()
+        if not remote then notify("AutoPiano", "InstrumentPiano remote missing"); return end
+        local steps = pianoParse(Config.AutoPiano.Sheet or "")
+        if #steps == 0 then notify("AutoPiano", "paste a Virtual Piano sheet first"); return end
+        pianoStop()                  -- cancel any current playback (bumps PN.token)
+        local token = PN.token       -- this run owns the new token
+        PN.playing = true
+        task.spawn(function()
+            local base = math.floor(Config.AutoPiano.BaseNote or 8)
+            local unit = math.max(0.03, (Config.AutoPiano.Tempo or 180) / 1000)
+            for _, st in ipairs(steps) do
+                if token ~= PN.token or not PN.playing then break end
+                for _, s in ipairs(st.notes) do pianoFire(remote, base + s) end
+                task.wait(unit * (1 + (st.gap or 0)))
+            end
+            if token == PN.token then PN.playing = false end
+        end)
+        notify("AutoPiano", ("playing %d steps"):format(#steps))
+    end
+
+    -- Optional: learn the exact InstrumentPiano payload from ONE real keypress. Installs
+    -- a MINIMAL, self-inerting __namecall hook (a single equality + flag check per call,
+    -- no GC scans), so it will not freeze the client like a heavy logging hook. After it
+    -- captures once it becomes a pure pass-through.
+    local function pianoLearn(notify)
+        local remote = pianoRemote()
+        if not remote then notify("AutoPiano", "InstrumentPiano remote missing"); return end
+        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+            notify("AutoPiano", "executor lacks hookmetamethod — can't learn"); return
+        end
+        PN.learning = true
+        if PN.hooked then notify("AutoPiano", "learn armed — play ONE piano key"); return end
+        PN.hooked = true
+        local old
+        old = hookmetamethod(game, "__namecall", (newcclosure or function(f) return f end)(function(self, ...)
+            if PN.learning and self == remote then
+                local ok, m = pcall(getnamecallmethod)
+                local mine = (type(checkcaller) == "function") and checkcaller() or false
+                if ok and m == "FireServer" and not mine then
+                    PN.learning = false
+                    local args = table.pack(...)
+                    PN.template = args
+                    for k = 1, args.n do
+                        if type(args[k]) == "number" then PN.noteIdx = k; break end
+                    end
+                end
+            end
+            return old(self, ...)
+        end))
+        notify("AutoPiano", "learn armed — play ONE piano key now")
     end
 
     -- ═══════════════════════════ CHESS ENGINE ══════════════════════════════
@@ -3393,6 +3555,7 @@ return function(Lib, Core)
                     Config.AutoRythm_On = false
                     stopAutoDraw()
                     chalkStop()
+                    pianoStop()
                     stopAll()
                     if _conn then _conn:Disconnect(); _conn = nil end
                 end)
@@ -3597,6 +3760,38 @@ return function(Lib, Core)
             Callback = function(v) ag.MaxDistance = v end,
         })
         sAG2:SubLabel({ Text = "If shots don't register, the shot auth key differs from Basketball.Shoot — tell me and I'll switch it (likely Item.Activate)." })
+
+        -- ─────────────── Section: AutoPiano (Right) ───────────────
+        local pn = Config.AutoPiano
+        local sPN = Misc:Section({ Side = "Right" })
+        sPN:Header({ Name = "AutoPiano" })
+        sPN:SubLabel({ Text = "Sit at a piano, paste a Virtual Piano sheet (letters from sites like virtualpiano.net), then press Play." })
+        sPN:Input({
+            Name = "Sheet", Placeholder = "paste notes e.g. [8p] a s d [0o]", Default = pn.Sheet,
+            Callback = function(t) pn.Sheet = t or "" end,
+        }, ctx.flag("Misc_AutoPiano_Sheet"))
+        sPN:Button({ Name = "Play", Callback = function() pianoPlay(notify) end })
+        sPN:Button({ Name = "Stop", Callback = function() pianoStop(); notify("AutoPiano", "stopped") end })
+        ctx.keybind(sPN, {
+            Name = "Play / Stop Key",
+            Flag = ctx.flag("Misc_AutoPiano_KB"),
+            Toggle = function() if PN.playing then pianoStop() else pianoPlay(notify) end end,
+        })
+        sPN:Divider()
+        slider(sPN, {
+            Name = "Tempo", Flag = "Misc_AutoPiano_Tempo",
+            Default = pn.Tempo, Min = 60, Max = 600, Precision = 0, Suffix = " ms",
+            Callback = function(v) pn.Tempo = v end,
+        })
+        sPN:SubLabel({ Text = "ms per note. Lower = faster." })
+        slider(sPN, {
+            Name = "Base Note", Flag = "Misc_AutoPiano_Base",
+            Default = pn.BaseNote, Min = 1, Max = 40, Precision = 0,
+            Callback = function(v) pn.BaseNote = v end,
+        })
+        sPN:SubLabel({ Text = "Shifts the whole song up/down to fit the piano's octaves." })
+        sPN:Button({ Name = "Learn Note", Callback = function() pianoLearn(notify) end })
+        sPN:SubLabel({ Text = "Only if notes don't play: click this, then press ONE real piano key to capture the payload." })
 
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
