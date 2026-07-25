@@ -101,14 +101,9 @@ return function(Lib, Core)
         THud_Drag    = true,      -- allow dragging (Anchor = Free)
         THud_Scale   = 1.0,
         THud_Opacity = 100,       -- panel opacity %
-        THud_Bars    = true,      -- show the bar block at all
-        THud_Corner  = 10,        -- corner rounding px
-        THud_Avatar  = true,      -- live 3D clone of the target (real pose, moves with them)
-        THud_Health  = true,
-        THud_Stamina = true,
-        THud_M2      = true,      -- heavy cooldown in seconds
-        THud_State   = true,      -- Blocking / Stunned / Attacking...
-        THud_Dist    = true,
+        THud_Avatar  = true,      -- static in-game portrait of the target
+        THud_Stamina = true,      -- show the stamina bar (only appears while it isn't full)
+        THud_M2      = true,      -- show the heavy bar (only appears while it's on cooldown)
         THud_Accent  = Color3.fromRGB(255, 96, 96),
         THud_HitFlash= true,      -- flash + kick the panel when we land a hit on them
 
@@ -2213,87 +2208,49 @@ return function(Lib, Core)
     -- prebuilt part-pair list (no FindFirstChild in the loop), and everything early-outs when the
     -- HUD is off or there is no target.
     local TH = {
-        gui = nil, root = nil, scale = nil,      -- instances
-        vp = nil, world = nil, cam = nil,        -- ViewportFrame bits
-        clone = nil, pairs = nil, cloneOf = nil, -- live 3D avatar
-        bars = nil, txt = nil,                   -- readout widgets
-        model = nil,                             -- current target model
-        shown = false, anim = 0,                 -- entrance/exit progress 0..1
-        flash = 0,                               -- hit flash 0..1
-        kick = 0,                                -- hit "punch" offset
-        hp = 0, stam = 0, m2 = 0,                -- smoothed bar values
+        gui = nil, root = nil, scale = nil, corner = nil, stroke = nil,
+        vp = nil, world = nil, cam = nil,          -- ViewportFrame bits (static avatar)
+        clone = nil, cloneOf = nil,                -- avatar clone (posed ONCE, then left alone)
+        nameLbl = nil, numLbl = nil,               -- name + the number on the right
+        hp = nil, stam = nil, m2 = nil,            -- the three thin bars
+        model = nil,
+        shown = false, anim = 0,
+        flash = 0, kick = 0,
+        hpV = 0, stamV = 0, m2V = 0,               -- smoothed bar fills
+        stamA = 0, m2A = 0,                        -- per-bar fade alpha (0 = hidden)
         drag = { target = Vector2.new(0, 0), disp = Vector2.new(0, 0), active = false,
                  startIn = Vector2.new(0, 0), startPos = Vector2.new(0, 0) },
         m2trk = { active = false, t0 = 0, dur = 1 },
-        lastPose = 0,
+        follow = nil,
     }
-    local TH_W, TH_H = 268, 104
+    -- [V94] Minimal strip, modelled on the reference screenshot: small dark pill, square avatar on
+    -- the left, bold name, a number on the right, one thin bar under the name. Stamina and heavy
+    -- bars are STACKED under it and only exist when they have something to say.
+    local TH_W, TH_H = 176, 46
+    local TH_PAD, TH_AV = 5, 36          -- padding, avatar side
+    local TH_BAR_H, TH_BAR_GAP = 3, 3
 
-    -- Read the target AutoParry published (see publishTarget in the AutoParry module).
-    local function thGetTarget()
-        if type(getgenv) ~= "function" then return nil end
-        local t = getgenv().AP_TARGET
-        if type(t) ~= "table" then return nil end
-        local m = t.model
-        if typeof(m) ~= "Instance" or not m.Parent then return nil end
-        -- stale guard: if AutoParry stopped updating (unloaded / crashed) drop the panel
-        if type(t.t) == "number" and (os.clock() - t.t) > 3 then return nil end
-        return t
-    end
-
-    local function thMkBar(parent, y, col, label)
-        local holder = Instance.new("Frame")
-        holder.BackgroundTransparency = 1
-        holder.Position = UDim2.new(0, 0, 0, y)
-        holder.Size = UDim2.new(1, 0, 0, 14)
-        holder.Parent = parent
-
-        local lbl = Instance.new("TextLabel")
-        lbl.BackgroundTransparency = 1
-        lbl.Size = UDim2.new(0, 46, 1, 0)
-        lbl.Font = Enum.Font.GothamMedium
-        lbl.TextSize = 10
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.TextColor3 = WM.txtMute
-        lbl.Text = label
-        lbl.Parent = holder
-
+    local function thMkThinBar(parent, y, col)
         local track = Instance.new("Frame")
-        track.BackgroundColor3 = WM.bgChip
+        track.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+        track.BackgroundTransparency = 0.35
         track.BorderSizePixel = 0
-        track.Position = UDim2.new(0, 46, 0.5, -3)
-        track.Size = UDim2.new(1, -84, 0, 6)
-        track.Parent = holder
+        track.Position = UDim2.new(0, 0, 0, y)
+        track.Size = UDim2.new(1, 0, 0, TH_BAR_H)
+        track.Parent = parent
         local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(1, 0); tc.Parent = track
-
         local fill = Instance.new("Frame")
         fill.BackgroundColor3 = col
         fill.BorderSizePixel = 0
         fill.Size = UDim2.new(0, 0, 1, 0)
         fill.Parent = track
         local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
-
-        local val = Instance.new("TextLabel")
-        val.BackgroundTransparency = 1
-        val.AnchorPoint = Vector2.new(1, 0)
-        val.Position = UDim2.new(1, 0, 0, 0)
-        val.Size = UDim2.new(0, 36, 1, 0)
-        val.Font = Enum.Font.GothamBold
-        val.TextSize = 10
-        val.TextXAlignment = Enum.TextXAlignment.Right
-        val.TextColor3 = WM.txtMain
-        val.Text = "—"
-        val.Parent = holder
-
-        return { fill = fill, val = val, holder = holder }
+        return { track = track, fill = fill }
     end
 
-    -- [V93] GROUP FADE. Only the root's BackgroundTransparency was animated before, so the panel's
-    -- background dissolved while every child (text, bars, stroke, viewport) stayed fully opaque and
-    -- then snapped away with Visible=false — exactly the ugly pop the user reported. Roblox has no
-    -- "group transparency" for a plain Frame, so we walk the descendants once, remember each one's
-    -- BASE transparency, and drive them all from a single alpha. Cached in TH.fadeList so the walk
-    -- happens once per build, not per frame.
+    -- [V93] GROUP FADE. Only the root's BackgroundTransparency used to animate, so every child
+    -- snapped away instead of fading. Roblox has no group transparency for a Frame, so we snapshot
+    -- each descendant's BASE transparency once and drive them all from one alpha.
     local function thCollectFade()
         local list = {}
         local function add(inst, prop)
@@ -2303,7 +2260,7 @@ return function(Lib, Core)
         if not TH.root then return end
         add(TH.root, "BackgroundTransparency")
         for _, d in ipairs(TH.root:GetDescendants()) do
-            if d:IsA("TextLabel") or d:IsA("TextButton") then
+            if d:IsA("TextLabel") then
                 add(d, "TextTransparency"); add(d, "TextStrokeTransparency"); add(d, "BackgroundTransparency")
             elseif d:IsA("UIStroke") then
                 add(d, "Transparency")
@@ -2316,17 +2273,15 @@ return function(Lib, Core)
         TH.fadeList = list
     end
 
-    -- alpha 1 = fully visible (base values), alpha 0 = fully faded out
+    -- alpha 1 = fully visible (base values), 0 = gone
     local function thApplyFade(alpha)
         local list = TH.fadeList
         if not list then return end
-        if math.abs((TH.fadeApplied or -1) - alpha) < 0.004 then return end   -- skip redundant writes
+        if math.abs((TH.fadeApplied or -1) - alpha) < 0.004 then return end
         TH.fadeApplied = alpha
         for i = 1, #list do
             local e = list[i]
-            if e.inst.Parent then
-                e.inst[e.prop] = e.base + (1 - e.base) * (1 - alpha)
-            end
+            if e.inst.Parent then e.inst[e.prop] = e.base + (1 - e.base) * (1 - alpha) end
         end
     end
 
@@ -2343,88 +2298,79 @@ return function(Lib, Core)
 
         local root = Instance.new("Frame")
         root.Name = "THud"
-        root.BackgroundColor3 = WM.bgDark
-        root.BackgroundTransparency = WM.bgTransp
+        root.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+        root.BackgroundTransparency = 0.15
         root.BorderSizePixel = 0
         root.Size = UDim2.fromOffset(TH_W, TH_H)
         root.Visible = false
-        root.Active = true                    -- grabbable for drag
+        root.Active = true
         root.Parent = gui
         TH.root = root
-        local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 10); rc.Parent = root
+        local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 8); rc.Parent = root
         TH.corner = rc
         local rs = Instance.new("UIStroke")
-        rs.Thickness = 1; rs.Color = WM.stroke; rs.Transparency = 0.35
+        rs.Thickness = 1; rs.Color = Color3.fromRGB(40, 40, 55); rs.Transparency = 0.4
         rs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; rs.Parent = root
         TH.stroke = rs
-
         TH.scale = Instance.new("UIScale"); TH.scale.Scale = 1; TH.scale.Parent = root
 
-        -- accent strip along the top (also the hit-flash surface)
-        local accent = Instance.new("Frame")
-        accent.BackgroundColor3 = Config.THud_Accent
-        accent.BorderSizePixel = 0
-        accent.Size = UDim2.new(1, 0, 0, 2)
-        accent.Parent = root
-        TH.accent = accent
-
-        -- ── left: live 3D avatar ────────────────────────────────────────────
+        -- ── avatar (square, static) ─────────────────────────────────────────
         local vp = Instance.new("ViewportFrame")
-        vp.BackgroundColor3 = WM.bgChip
-        vp.BackgroundTransparency = 0.25
+        vp.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+        vp.BackgroundTransparency = 0.2
         vp.BorderSizePixel = 0
-        vp.Position = UDim2.new(0, 8, 0, 10)
-        vp.Size = UDim2.fromOffset(84, TH_H - 20)
-        vp.Ambient = Color3.fromRGB(190, 190, 200)
+        vp.Position = UDim2.new(0, TH_PAD, 0, TH_PAD)
+        vp.Size = UDim2.fromOffset(TH_AV, TH_AV)
+        vp.Ambient = Color3.fromRGB(200, 200, 210)
         vp.LightColor = Color3.fromRGB(255, 255, 255)
-        vp.LightDirection = Vector3.new(-0.4, -1, -0.6)
+        vp.LightDirection = Vector3.new(-0.3, -1, -0.6)
         vp.Parent = root
-        local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(0, 8); vc.Parent = vp
+        local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(0, 6); vc.Parent = vp
         TH.vp = vp
+        local world = Instance.new("WorldModel"); world.Parent = vp; TH.world = world
+        local cam = Instance.new("Camera"); cam.FieldOfView = 28; cam.Parent = vp
+        vp.CurrentCamera = cam; TH.cam = cam
 
-        local world = Instance.new("WorldModel"); world.Parent = vp
-        TH.world = world
-        local cam = Instance.new("Camera"); cam.FieldOfView = 40; cam.Parent = vp
-        vp.CurrentCamera = cam
-        TH.cam = cam
-
-        -- ── right: readout ──────────────────────────────────────────────────
+        -- ── right column: name + number + bars ──────────────────────────────
         local col = Instance.new("Frame")
         col.BackgroundTransparency = 1
-        col.Position = UDim2.new(0, 100, 0, 8)
-        col.Size = UDim2.new(1, -108, 1, -14)
+        col.Position = UDim2.new(0, TH_PAD + TH_AV + 7, 0, TH_PAD + 1)
+        col.Size = UDim2.new(1, -(TH_PAD * 2 + TH_AV + 7), 1, -(TH_PAD * 2 + 2))
         col.Parent = root
 
         local nameLbl = Instance.new("TextLabel")
         nameLbl.BackgroundTransparency = 1
-        nameLbl.Size = UDim2.new(1, 0, 0, 14)
+        nameLbl.Size = UDim2.new(1, -38, 0, 15)
         nameLbl.Font = Enum.Font.GothamBold
         nameLbl.TextSize = 12
         nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+        nameLbl.TextYAlignment = Enum.TextYAlignment.Center
         nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-        nameLbl.TextColor3 = WM.txtMain
+        nameLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
         nameLbl.Text = "—"
         nameLbl.Parent = col
+        TH.nameLbl = nameLbl
 
-        local sub = Instance.new("TextLabel")
-        sub.BackgroundTransparency = 1
-        sub.Position = UDim2.new(0, 0, 0, 15)
-        sub.Size = UDim2.new(1, 0, 0, 11)
-        sub.Font = Enum.Font.GothamMedium
-        sub.TextSize = 10
-        sub.TextXAlignment = Enum.TextXAlignment.Left
-        sub.TextColor3 = WM.txtMute
-        sub.Text = ""
-        sub.Parent = col
+        -- the number on the right (health, like the reference)
+        local numLbl = Instance.new("TextLabel")
+        numLbl.BackgroundTransparency = 1
+        numLbl.AnchorPoint = Vector2.new(1, 0)
+        numLbl.Position = UDim2.new(1, 0, 0, 0)
+        numLbl.Size = UDim2.fromOffset(38, 15)
+        numLbl.Font = Enum.Font.GothamBold
+        numLbl.TextSize = 12
+        numLbl.TextXAlignment = Enum.TextXAlignment.Right
+        numLbl.TextColor3 = Config.THud_Accent
+        numLbl.Text = ""
+        numLbl.Parent = col
+        TH.numLbl = numLbl
 
-        TH.bars = {
-            hp   = thMkBar(col, 30, Color3.fromRGB(90, 220, 90), "HP"),
-            stam = thMkBar(col, 47, Color3.fromRGB(255, 200, 80), "STAM"),
-            m2   = thMkBar(col, 64, Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255), "HEAVY"),
-        }
-        TH.txt = { name = nameLbl, sub = sub }
+        -- bars stack under the name: HP always, then stamina, then heavy
+        local y = 19
+        TH.hp   = thMkThinBar(col, y, Config.THud_Accent);                     y = y + TH_BAR_H + TH_BAR_GAP
+        TH.stam = thMkThinBar(col, y, Color3.fromRGB(255, 205, 90));           y = y + TH_BAR_H + TH_BAR_GAP
+        TH.m2   = thMkThinBar(col, y, Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255))
 
-        -- drag: reuse the same global pointer handlers pattern as the indicator HUD
         root.InputBegan:Connect(function(input)
             if not (Config.THud_Drag and (Config.THud_Anchor or "Free") ~= "Player") then return end
             if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -2439,8 +2385,7 @@ return function(Lib, Core)
             if input.UserInputType == Enum.UserInputType.MouseMovement
             or input.UserInputType == Enum.UserInputType.Touch then
                 local cur = Vector2.new(input.Position.X, input.Position.Y)
-                local d = cur - TH.drag.startIn
-                TH.drag.target = TH.drag.startPos + d
+                TH.drag.target = TH.drag.startPos + (cur - TH.drag.startIn)
             end
         end)
         dragConns[#dragConns + 1] = UserInputService.InputEnded:Connect(function(input)
@@ -2450,15 +2395,12 @@ return function(Lib, Core)
             end
         end)
 
-        -- start bottom-left-ish
         local vpz = Camera.ViewportSize
-        TH.drag.target = Vector2.new(24, vpz.Y * 0.5)
+        TH.drag.target = Vector2.new(24, vpz.Y * 0.55)
         TH.drag.disp = TH.drag.target
-
-        thCollectFade()   -- [V93] snapshot base transparencies for the group fade
+        thCollectFade()
     end
 
-    -- Drop the current 3D clone and its part pairing.
     local function thClearClone()
         if TH.clone then pcall(function() TH.clone:Destroy() end) end
         TH.clone, TH.pairs, TH.cloneOf = nil, nil, nil
@@ -2472,6 +2414,10 @@ return function(Lib, Core)
     -- put on it) — NOT the player's Roblox profile avatar / headshot thumbnail, which in this game
     -- looks different. Everything visual is kept; only live behaviour (scripts, sounds, emitters,
     -- Humanoid/Animator) is stripped since the pose is driven by copying CFrames.
+    -- [V94] STATIC avatar. The user asked for a plain still portrait (no live animation), so we
+    -- clone the character once, freeze the pose we captured at that moment, and never touch it
+    -- again — no per-tick CFrame copying at all. Still the in-GAME rig (real body scale, clothes,
+    -- accessories), NOT the Roblox profile headshot, which looks different in this game.
     local function thBuildClone(char)
         thClearClone()
         if not (Config.THud_Avatar and char) then return end
@@ -2483,7 +2429,6 @@ return function(Lib, Core)
             return c
         end)
         if not ok or not clone then return end
-        -- strip anything live: we only want geometry, the pose comes from CFrame copying
         for _, d in ipairs(clone:GetDescendants()) do
             if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript")
             or d:IsA("Sound") or d:IsA("ParticleEmitter") or d:IsA("Trail")
@@ -2492,38 +2437,24 @@ return function(Lib, Core)
                 pcall(function() d:Destroy() end)
             end
         end
-        local pairsList = {}
-        for _, d in ipairs(char:GetDescendants()) do
+        for _, d in ipairs(clone:GetDescendants()) do
             if d:IsA("BasePart") then
-                local m = clone:FindFirstChild(d.Name, true)
-                if m and m:IsA("BasePart") then
-                    m.Anchored = true; m.CanCollide = false; m.CastShadow = false
-                    pairsList[#pairsList + 1] = { d, m }
-                end
+                d.Anchored = true; d.CanCollide = false; d.CastShadow = false
             end
         end
         clone.Parent = TH.world
-        TH.clone, TH.pairs, TH.cloneOf = clone, pairsList, char
+        TH.clone, TH.cloneOf = clone, char
+
+        -- Frame the shot ONCE on the head/upper body, straight on, so it reads like a portrait.
+        local head = clone:FindFirstChild("Head") or clone:FindFirstChild("UpperTorso")
+                  or clone:FindFirstChild("Torso") or clone:FindFirstChildWhichIsA("BasePart")
+        if head and TH.cam then
+            local p = head.Position
+            -- look at the face from slightly in front and above
+            TH.cam.CFrame = CFrame.lookAt(p + Vector3.new(0, 0.25, 4.2), p + Vector3.new(0, 0.05, 0))
+        end
     end
 
-    -- Copy the live pose into the clone + frame the camera on the torso.
-    local function thPose(char)
-        local list = TH.pairs
-        if not list then return end
-        for i = 1, #list do
-            local src, dst = list[i][1], list[i][2]
-            if src.Parent and dst.Parent then dst.CFrame = src.CFrame end
-        end
-        local root = getRoot(char)
-        if root and TH.cam then
-            -- frame from slightly above and in front, looking at the chest
-            local look = root.CFrame.LookVector
-            local flat = Vector3.new(look.X, 0, look.Z)
-            flat = (flat.Magnitude > 0.05) and flat.Unit or Vector3.new(0, 0, -1)
-            local focus = root.Position + Vector3.new(0, 0.4, 0)
-            TH.cam.CFrame = CFrame.lookAt(focus + flat * 7.5 + Vector3.new(0, 1.2, 0), focus)
-        end
-    end
 
     -- Where the panel sits this frame. Two modes, same as the Indicators HUD:
     --   Free   → wherever you dragged it (smoothed, clamped on screen)
@@ -2596,18 +2527,19 @@ return function(Lib, Core)
         local t = thGetTarget()
         local char = t and t.model or nil
 
-        -- target changed → rebuild the 3D clone and reset the bars so they animate in
+        -- new target → rebuild the still portrait and reset the bars so they animate in
         if char ~= TH.model then
             TH.model = char
             if char then
                 thBuildClone(char)
-                TH.hp, TH.stam, TH.m2 = 0, 0, 0
+                TH.hpV, TH.stamV, TH.m2V = 0, 0, 0
+                TH.stamA, TH.m2A = 0, 0
             else
                 thClearClone()
             end
         end
 
-        -- entrance / exit animation (ease both ways)
+        -- entrance / exit
         local want = char and 1 or 0
         TH.anim = TH.anim + (want - TH.anim) * math.clamp(dt * 9, 0, 1)
         if TH.anim < 0.01 and want == 0 then
@@ -2617,132 +2549,113 @@ return function(Lib, Core)
         end
         if TH.root and not TH.root.Visible then TH.root.Visible = true end
         TH.shown = true
+        local ease = TH.anim * TH.anim * (3 - 2 * TH.anim)     -- smoothstep
+
         if not char then
-            -- fading out: keep sliding, skip all the reads
             local ax, ay = thPlace(dt, nil)
-            local ease = TH.anim * TH.anim
-            TH.root.Position = UDim2.fromOffset(math.floor(ax + 0.5), math.floor(ay + (1 - ease) * 18 + 0.5))
-            thApplyFade(ease)   -- [V93] fade the WHOLE panel out, not just its background
+            TH.root.Position = UDim2.fromOffset(math.floor(ax + 0.5), math.floor(ay + (1 - ease) * 14 + 0.5))
+            thApplyFade(ease)
             return
         end
 
-        -- ── live pose (throttled: 30/s is plenty for a 84px viewport) ────────
-        local nowc = os.clock()
-        if Config.THud_Avatar then
-            if TH.vp and not TH.vp.Visible then TH.vp.Visible = true end
-            if nowc - TH.lastPose >= 1 / 30 then
-                TH.lastPose = nowc
-                thPose(char)
-            end
-        elseif TH.vp and TH.vp.Visible then
-            TH.vp.Visible = false
+        if TH.vp then
+            local wantAv = Config.THud_Avatar ~= false
+            if TH.vp.Visible ~= wantAv then TH.vp.Visible = wantAv end
         end
 
-        -- ── readout ─────────────────────────────────────────────────────────
+        -- ── reads ───────────────────────────────────────────────────────────
         local hum = getHum(char)
         local hpR = (hum and hum.MaxHealth > 0) and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
         local stamA = char:GetAttribute("Stamina")
-        local stamR = (type(stamA) == "number") and math.clamp(stamA / 100, 0, 1) or 0
-        local m2left = 0
-        local m2R = readTargetM2Ratio(char, TH.m2trk)
-        if m2R then m2left = m2R * math.max(TH.m2trk.dur, 0.01) end
+        local stamR = (type(stamA) == "number") and math.clamp(stamA / 100, 0, 1) or 1
+        local m2R = readTargetM2Ratio(char, TH.m2trk)      -- nil when not on cooldown
 
-        -- smooth the bars so they slide instead of snapping
+        -- smooth the fills
         local k = math.clamp(dt * 12, 0, 1)
-        TH.hp   = TH.hp + (hpR - TH.hp) * k
-        TH.stam = TH.stam + (stamR - TH.stam) * k
-        TH.m2   = TH.m2 + ((m2R or 0) - TH.m2) * k
+        TH.hpV   = TH.hpV + (hpR - TH.hpV) * k
+        TH.stamV = TH.stamV + (stamR - TH.stamV) * k
+        TH.m2V   = TH.m2V + ((m2R or 0) - TH.m2V) * k
 
-        local b = TH.bars
-        local barsOn = Config.THud_Bars ~= false   -- master gate for the whole bar block
-        if barsOn and Config.THud_Health then
-            b.hp.holder.Visible = true
-            b.hp.fill.Size = UDim2.new(TH.hp, 0, 1, 0)
-            b.hp.fill.BackgroundColor3 = lerpColor(HP_LOW, HP_HIGH, TH.hp)
-            local txt = hum and string.format("%d", math.floor(hum.Health + 0.5)) or "—"
-            if b.hp.val.Text ~= txt then b.hp.val.Text = txt end
-        else b.hp.holder.Visible = false end
+        -- [V94] Bars only exist when they have something to say:
+        --   stamina → only while NOT full
+        --   heavy   → only while actually on cooldown
+        -- Both fade their own alpha in/out instead of popping, and the bar is collapsed to zero
+        -- height when fully faded so the panel doesn't keep dead space.
+        local wantStam = (Config.THud_Stamina ~= false) and (stamR < 0.995) and 1 or 0
+        local wantM2   = (Config.THud_M2 ~= false) and (m2R ~= nil) and 1 or 0
+        local fk = math.clamp(dt * 8, 0, 1)
+        TH.stamA = TH.stamA + (wantStam - TH.stamA) * fk
+        TH.m2A   = TH.m2A + (wantM2 - TH.m2A) * fk
 
-        if barsOn and Config.THud_Stamina then
-            b.stam.holder.Visible = true
-            b.stam.fill.Size = UDim2.new(TH.stam, 0, 1, 0)
-            local txt = (type(stamA) == "number") and string.format("%d", math.floor(stamA + 0.5)) or "—"
-            if b.stam.val.Text ~= txt then b.stam.val.Text = txt end
-        else b.stam.holder.Visible = false end
-
-        if barsOn and Config.THud_M2 then
-            b.m2.holder.Visible = true
-            b.m2.fill.Size = UDim2.new(TH.m2, 0, 1, 0)
-            local txt = (m2R and m2left > 0.05) and string.format("%.1fs", m2left) or "ready"
-            if b.m2.val.Text ~= txt then b.m2.val.Text = txt end
-        else b.m2.holder.Visible = false end
-
-        -- name + subline (state / style / distance / incoming attack)
-        local nm = t.name or char.Name
-        if TH.txt.name.Text ~= nm then TH.txt.name.Text = nm end
-        local parts = {}
-        if Config.THud_State then
-            local st = readState(char)
-            if st then parts[#parts + 1] = st end
-        end
-        if t.style and t.style ~= "" then parts[#parts + 1] = t.style end
-        if Config.THud_Dist then
-            -- NOTE: not using _frLpRoot here — that is only refreshed while ESP is on, so with
-            -- ESP off it would be a stale/nil root. One getChar+getRoot per tick is cheap.
-            local lpc = getChar(LocalPlayer)
-            local myRoot, thRoot = lpc and getRoot(lpc) or nil, getRoot(char)
-            if myRoot and thRoot then
-                parts[#parts + 1] = string.format("%dm", math.floor((thRoot.Position - myRoot.Position).Magnitude + 0.5))
+        local function applyBar(bar, fillFrac, alpha, y)
+            if not bar then return y end
+            if alpha < 0.02 then
+                if bar.track.Visible then bar.track.Visible = false end
+                return y
             end
+            if not bar.track.Visible then bar.track.Visible = true end
+            local h = math.max(1, math.floor(TH_BAR_H * alpha + 0.5))
+            bar.track.Position = UDim2.new(0, 0, 0, y)
+            bar.track.Size = UDim2.new(1, 0, 0, h)
+            bar.fill.Size = UDim2.new(math.clamp(fillFrac, 0, 1), 0, 1, 0)
+            return y + h + math.floor(TH_BAR_GAP * alpha + 0.5)
         end
-        if t.threatens and t.kind then
-            parts[#parts + 1] = string.format("%s in %.0fms", t.kind, (t.contactIn or 0) * 1000)
-        end
-        local sub = table.concat(parts, "  ·  ")
-        if TH.txt.sub.Text ~= sub then TH.txt.sub.Text = sub end
 
-        -- ── hit flash + kick ────────────────────────────────────────────────
+        local y = 19
+        y = applyBar(TH.hp, TH.hpV, 1, y)                  -- HP is always there
+        y = applyBar(TH.stam, TH.stamV, TH.stamA, y)
+        y = applyBar(TH.m2, TH.m2V, TH.m2A, y)
+
+        if TH.hp then
+            local c = lerpColor(HP_LOW, HP_HIGH, TH.hpV)
+            if TH.hp.fill.BackgroundColor3 ~= c then TH.hp.fill.BackgroundColor3 = c end
+        end
+
+        -- name + the number on the right (health, like the reference shot)
+        local nm = t.name or char.Name
+        if TH.nameLbl.Text ~= nm then TH.nameLbl.Text = nm end
+        local numTxt = ""
+        if m2R and Config.THud_M2 ~= false then
+            numTxt = string.format("%.1f", m2R * math.max(TH.m2trk.dur, 0.01))   -- heavy cd wins the slot
+        elseif hum then
+            numTxt = string.format("%d", math.floor(hum.Health + 0.5))
+        end
+        if TH.numLbl.Text ~= numTxt then TH.numLbl.Text = numTxt end
+        local numCol = (m2R and Config.THud_M2 ~= false)
+            and (Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255)) or Config.THud_Accent
+        if TH.numLbl.TextColor3 ~= numCol then TH.numLbl.TextColor3 = numCol end
+
+        -- hit flash: a quick stroke-colour pop + panel kick (transparency is owned by thApplyFade)
         TH.flash = TH.flash * (1 - math.clamp(dt * 6, 0, 1))
         TH.kick  = TH.kick  * (1 - math.clamp(dt * 9, 0, 1))
-        local acc = Config.THud_Accent
-        -- NOTE: don't touch UIStroke.Transparency here — thApplyFade owns every transparency on
-        -- the panel, and fighting it would make the flash flicker during the fade. Colour + size
-        -- carry the hit feedback instead.
-        if TH.flash > 0.02 then
-            TH.accent.BackgroundColor3 = acc:Lerp(Color3.new(1, 1, 1), TH.flash)
-            TH.accent.Size = UDim2.new(1, 0, 0, 2 + TH.flash * 3)
-        else
-            if TH.accent.BackgroundColor3 ~= acc then TH.accent.BackgroundColor3 = acc end
-            if TH.accent.Size.Y.Offset ~= 2 then TH.accent.Size = UDim2.new(1, 0, 0, 2) end
+        if TH.stroke then
+            local sc = (TH.flash > 0.02)
+                and Config.THud_Accent:Lerp(Color3.new(1, 1, 1), TH.flash)
+                or Color3.fromRGB(40, 40, 55)
+            if TH.stroke.Color ~= sc then TH.stroke.Color = sc end
         end
 
-        -- ── place + scale + entrance ease ────────────────────────────────────
-        local sc = math.clamp(Config.THud_Scale or 1, 0.5, 2) * (0.94 + 0.06 * TH.anim)
+        -- place + scale
+        local sc = math.clamp(Config.THud_Scale or 1, 0.5, 2) * (0.96 + 0.04 * TH.anim)
         if math.abs((TH.scale.Scale or 1) - sc) > 0.001 then TH.scale.Scale = sc end
-        -- [V93] user customisation applied here (cheap change-guarded writes)
         local op = math.clamp((tonumber(Config.THud_Opacity) or 100) / 100, 0.05, 1)
         if TH._op ~= op then
             TH._op = op
-            -- feed opacity into the fade base so thApplyFade keeps respecting it
             for _, e in ipairs(TH.fadeList or {}) do
                 if e.prop == "BackgroundTransparency" and e.inst == TH.root then
-                    e.base = 1 - (1 - WM.bgTransp) * op
+                    e.base = 1 - 0.85 * op
                 end
             end
             TH.fadeApplied = nil
         end
-        local cr = math.clamp(math.floor(tonumber(Config.THud_Corner) or 10), 0, 20)
-        if TH._cr ~= cr and TH.corner then TH._cr = cr; TH.corner.CornerRadius = UDim.new(0, cr) end
-
         local ax, ay = thPlace(dt, char)
-        local ease = TH.anim * TH.anim * (3 - 2 * TH.anim)     -- smoothstep
         local px = math.floor(ax + 0.5)
-        local py = math.floor(ay + (1 - ease) * 18 - TH.kick * 4 + 0.5)
+        local py = math.floor(ay + (1 - ease) * 14 - TH.kick * 3 + 0.5)
         if TH._lx ~= px or TH._ly ~= py then
             TH.root.Position = UDim2.fromOffset(px, py)
             TH._lx, TH._ly = px, py
         end
-        thApplyFade(ease)   -- [V93] whole-panel fade (text/bars/stroke/viewport included)
+        thApplyFade(ease)
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -2793,6 +2706,19 @@ return function(Lib, Core)
             -- [PERF] Throttle the heavy redraw to MaxFPS. We accumulate real time and only run the
             -- pipeline once per frame-budget, passing the ACCUMULATED dt so every lerp/animation
             -- advances by true elapsed time (smooth even though we tick fewer times/sec).
+            -- [V94] SELF COSMETICS RUN FIRST, OUTSIDE THE THROTTLE. They were inside it, so with
+            -- MaxFPS at 60 on a 144Hz client the hat/circle/halo were redrawn ~2.4x less often than
+            -- the character actually moved → the jitter the user reported. They are cheap (a handful
+            -- of projections) so they get a full-rate tick; the heavy ESP pipeline stays throttled.
+            if hasDrawing then
+                if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
+                    cosUpdate(tick())
+                    _cosWasOn = true
+                elseif _cosWasOn then
+                    cosHideAll(); _cosWasOn = false     -- one hide pass, then stop touching them
+                end
+            end
+
             _acc = _acc + dt
             local budget = (Config.MaxFPS and Config.MaxFPS > 0) and (1 / Config.MaxFPS) or 0
             if _acc < budget then return end
@@ -2830,15 +2756,7 @@ return function(Lib, Core)
 			if #HitFX.systems>0 then renderHitFX(fdt) end
 			-- [V92] TargetHUD: cheap no-op when disabled (first line of thUpdate bails out)
 			thUpdate(fdt)
-			-- [V93] Self cosmetics on the SAME Heartbeat tick (camera already settled → no drift)
-			if hasDrawing then
-				if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
-					cosUpdate(tick())
-					_cosWasOn = true
-				elseif _cosWasOn then
-					cosHideAll(); _cosWasOn = false     -- one hide pass, then stop touching them
-				end
-			end
+
             end))
     end
 
@@ -3118,61 +3036,71 @@ return function(Lib, Core)
         applyParticleTypeVis()
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
-        -- ─────────────── [V93] Cosmetics (self) ───────────────
-        local sCos = V:Section({ Side = "Left" })
-        sCos:Header({ Name = "Cosmetics" })
-        sCos:SubLabel({ Text = "drawn on urself. runs on the same tick as esp so it never drifts with shiftlock" })
-        sCos:Toggle({ Name = "China Hat", Default = Config.Hat_On,
+        -- ─────────────── [V94] Cosmetics: one section per feature ───────────────
+        -- Shared colour controls live in their own little section so each feature section stays
+        -- short (the old single mega-section was the "too many settings" problem).
+        local sHat = V:Section({ Side = "Left" })
+        sHat:Header({ Name = "China Hat" })
+        sHat:Toggle({ Name = "Enabled", Default = Config.Hat_On,
             Callback = function(v) Config.Hat_On = v and true or false end }, ctx.flag("VIS_Hat_On"))
-        slider(sCos, { Name = "Hat Scale", Flag = "VIS_Hat_Scale",
+        sHat:SubLabel({ Text = "cone of lines over ur head" })
+        slider(sHat, { Name = "Size", Flag = "VIS_Hat_Scale",
             Default = math.floor((Config.Hat_Scale or 0.85) * 100), Min = 30, Max = 200, Suffix = "%",
             Callback = function(v) Config.Hat_Scale = v / 100 end })
-        slider(sCos, { Name = "Hat Height", Flag = "VIS_Hat_Y",
+        slider(sHat, { Name = "Height", Flag = "VIS_Hat_Y",
             Default = math.floor((Config.Hat_YOffset or 1.6) * 10), Min = 0, Max = 50, Suffix = "",
             Callback = function(v) Config.Hat_YOffset = v / 10 end })
-        slider(sCos, { Name = "Hat Lines", Flag = "VIS_Hat_Parts",
+        slider(sHat, { Name = "Density", Flag = "VIS_Hat_Parts",
             Default = Config.Hat_Parts or 50, Min = 8, Max = 80, Suffix = "",
             Callback = function(v) Config.Hat_Parts = v end })
-        sCos:Toggle({ Name = "Hat Rim", Default = Config.Hat_Rim,
+        sHat:Toggle({ Name = "Brim", Default = Config.Hat_Rim,
             Callback = function(v) Config.Hat_Rim = v and true or false end }, ctx.flag("VIS_Hat_Rim"))
-        sCos:Divider()
-        sCos:Toggle({ Name = "Circle", Default = Config.Circle_On,
+
+        local sCir = V:Section({ Side = "Left" })
+        sCir:Header({ Name = "Circle" })
+        sCir:Toggle({ Name = "Enabled", Default = Config.Circle_On,
             Callback = function(v) Config.Circle_On = v and true or false end }, ctx.flag("VIS_Cir_On"))
-        slider(sCos, { Name = "Circle Radius", Flag = "VIS_Cir_R",
+        sCir:SubLabel({ Text = "ring around ur feet" })
+        slider(sCir, { Name = "Size", Flag = "VIS_Cir_R",
             Default = math.floor((Config.Circle_Radius or 1.7) * 10), Min = 5, Max = 60, Suffix = "",
             Callback = function(v) Config.Circle_Radius = v / 10 end })
-        slider(sCos, { Name = "Circle Height", Flag = "VIS_Cir_Y",
+        slider(sCir, { Name = "Height", Flag = "VIS_Cir_Y",
             Default = math.floor((Config.Circle_YOffset or -3) * 10), Min = -60, Max = 30, Suffix = "",
             Callback = function(v) Config.Circle_YOffset = v / 10 end })
-        slider(sCos, { Name = "Circle Segments", Flag = "VIS_Cir_P",
+        slider(sCir, { Name = "Density", Flag = "VIS_Cir_P",
             Default = Config.Circle_Parts or 30, Min = 6, Max = 60, Suffix = "",
             Callback = function(v) Config.Circle_Parts = v end })
-        sCos:Toggle({ Name = "Jump Animate", Default = Config.Circle_Jump,
+        sCir:Toggle({ Name = "Bob On Jump", Default = Config.Circle_Jump,
             Callback = function(v) Config.Circle_Jump = v and true or false end }, ctx.flag("VIS_Cir_J"))
-        sCos:SubLabel({ Text = "circle bobs while ur airborne" })
-        sCos:Divider()
-        sCos:Toggle({ Name = "Halo", Default = Config.Nimb_On,
+
+        local sNimb = V:Section({ Side = "Left" })
+        sNimb:Header({ Name = "Halo" })
+        sNimb:Toggle({ Name = "Enabled", Default = Config.Nimb_On,
             Callback = function(v) Config.Nimb_On = v and true or false end }, ctx.flag("VIS_Nimb_On"))
-        slider(sCos, { Name = "Halo Radius", Flag = "VIS_Nimb_R",
+        sNimb:SubLabel({ Text = "ring floating above ur head" })
+        slider(sNimb, { Name = "Size", Flag = "VIS_Nimb_R",
             Default = math.floor((Config.Nimb_Radius or 1.7) * 10), Min = 5, Max = 60, Suffix = "",
             Callback = function(v) Config.Nimb_Radius = v / 10 end })
-        slider(sCos, { Name = "Halo Height", Flag = "VIS_Nimb_Y",
+        slider(sNimb, { Name = "Height", Flag = "VIS_Nimb_Y",
             Default = math.floor((Config.Nimb_YOffset or 2.7) * 10), Min = 0, Max = 60, Suffix = "",
             Callback = function(v) Config.Nimb_YOffset = v / 10 end })
-        slider(sCos, { Name = "Halo Segments", Flag = "VIS_Nimb_P",
+        slider(sNimb, { Name = "Density", Flag = "VIS_Nimb_P",
             Default = Config.Nimb_Parts or 30, Min = 6, Max = 60, Suffix = "",
             Callback = function(v) Config.Nimb_Parts = v end })
-        sCos:Divider()
-        sCos:Header({ Name = "Colors" })
-        sCos:Toggle({ Name = "Gradient", Default = Config.Cos_Gradient ~= false,
+
+        local sCosCol = V:Section({ Side = "Left" })
+        sCosCol:Header({ Name = "Cosmetic Colors" })
+        sCosCol:SubLabel({ Text = "shared by hat / circle / halo" })
+        sCosCol:Toggle({ Name = "Gradient", Default = Config.Cos_Gradient ~= false,
             Callback = function(v) Config.Cos_Gradient = v and true or false end }, ctx.flag("VIS_Cos_Grad"))
-        colorpick(sCos, "Color A", "VIS_Cos_A", Config.Cos_ColorA,
+        colorpick(sCosCol, "Color A", "VIS_Cos_A", Config.Cos_ColorA,
             function(c) if typeof(c) == "Color3" then Config.Cos_ColorA = c end end)
-        colorpick(sCos, "Color B", "VIS_Cos_B", Config.Cos_ColorB,
+        colorpick(sCosCol, "Color B", "VIS_Cos_B", Config.Cos_ColorB,
             function(c) if typeof(c) == "Color3" then Config.Cos_ColorB = c end end)
-        slider(sCos, { Name = "Gradient Speed", Flag = "VIS_Cos_GS",
+        slider(sCosCol, { Name = "Cycle Speed", Flag = "VIS_Cos_GS",
             Default = Config.Cos_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
             Callback = function(v) Config.Cos_GradSpeed = v end })
+
 
         -- ─────────────── [V92] TargetHUD ───────────────
         local sTH = V:Section({ Side = "Right" })
@@ -3181,28 +3109,22 @@ return function(Lib, Core)
             Title = "TargetHUD", Flag = "VIS_THUD",
             get = function() return Config.THud_On end,
             set = function(v) Config.THud_On = v end,
-            Desc = "live panel for whoever autoparry is tracking\n3d avatar + hp/stam/heavy cd",
+            Desc = "minimal panel for whoever autoparry is tracking",
         })
         sTH:SubLabel({ Text = "needs autoparry on — it publishes the target. no target = hud hides itself" })
         sTH:Divider()
         sTH:Header({ Name = "Elements" })
-        sTH:Toggle({ Name = "3D Avatar", Default = Config.THud_Avatar,
+        sTH:Toggle({ Name = "Avatar", Default = Config.THud_Avatar,
             Callback = function(v) Config.THud_Avatar = v and true or false end }, ctx.flag("VIS_THUD_Av"))
-        sTH:SubLabel({ Text = "real 3d model of them, moves/swings/blocks live (not a profile pic)" })
-        sTH:Toggle({ Name = "Health", Default = Config.THud_Health,
-            Callback = function(v) Config.THud_Health = v and true or false end }, ctx.flag("VIS_THUD_HP"))
-        sTH:Toggle({ Name = "Stamina", Default = Config.THud_Stamina,
+        sTH:SubLabel({ Text = "still portrait of their in-game character" })
+        sTH:Toggle({ Name = "Stamina Bar", Default = Config.THud_Stamina,
             Callback = function(v) Config.THud_Stamina = v and true or false end }, ctx.flag("VIS_THUD_St"))
-        sTH:Toggle({ Name = "Heavy Cooldown", Default = Config.THud_M2,
+        sTH:SubLabel({ Text = "only shows up while their stam isn't full, fades in/out" })
+        sTH:Toggle({ Name = "Heavy Bar", Default = Config.THud_M2,
             Callback = function(v) Config.THud_M2 = v and true or false end }, ctx.flag("VIS_THUD_M2"))
-        sTH:SubLabel({ Text = "their m2 cd in seconds — u see exactly when they can heavy again" })
-        sTH:Toggle({ Name = "State", Default = Config.THud_State,
-            Callback = function(v) Config.THud_State = v and true or false end }, ctx.flag("VIS_THUD_Sta"))
-        sTH:Toggle({ Name = "Distance", Default = Config.THud_Dist,
-            Callback = function(v) Config.THud_Dist = v and true or false end }, ctx.flag("VIS_THUD_Di"))
+        sTH:SubLabel({ Text = "only while their m2 is actually on cd — the number turns into the cd too" })
         sTH:Toggle({ Name = "Hit Flash", Default = Config.THud_HitFlash,
             Callback = function(v) Config.THud_HitFlash = v and true or false end }, ctx.flag("VIS_THUD_Fl"))
-        sTH:SubLabel({ Text = "panel flashes + kicks when u land a hit on them" })
         sTH:Divider()
         sTH:Header({ Name = "Placement" })
         -- Anchor works like the Indicators HUD: Player-only settings are HIDDEN unless the anchor
@@ -3247,12 +3169,6 @@ return function(Lib, Core)
         slider(sTH, { Name = "Opacity", Flag = "VIS_THUD_Opacity",
             Default = Config.THud_Opacity or 100, Min = 10, Max = 100, Suffix = "%",
             Callback = function(v) Config.THud_Opacity = v end })
-        slider(sTH, { Name = "Corner Radius", Flag = "VIS_THUD_Corner",
-            Default = Config.THud_Corner or 10, Min = 0, Max = 20, Suffix = " px",
-            Callback = function(v) Config.THud_Corner = v end })
-        sTH:Toggle({ Name = "Bars", Default = Config.THud_Bars ~= false,
-            Callback = function(v) Config.THud_Bars = v and true or false end }, ctx.flag("VIS_THUD_Bars"))
-        sTH:SubLabel({ Text = "master switch for the hp/stam/heavy block" })
         colorpick(sTH, "Accent", "VIS_THUD_Accent", Config.THud_Accent,
             function(c) if typeof(c) == "Color3" then Config.THud_Accent = c end end)
 
