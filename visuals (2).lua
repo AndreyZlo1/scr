@@ -87,6 +87,23 @@ return function(Lib, Core)
         Ind_ScreenY = 0.60,      -- vertical position (frac) for screen-anchored styles
         Ind_Scale   = 1.0,       -- extra manual scale multiplier for Drawing styles
 
+        -- [V92] TargetHUD — panel for the enemy AutoParry is currently tracking. The target is
+        -- published by the AutoParry module through getgenv().AP_TARGET (the modules are separate
+        -- files and don't share state directly), so this panel simply stays hidden if AutoParry
+        -- isn't running or has no target.
+        THud_On      = false,
+        THud_Anchor  = "Free",    -- "Enemy" (follows them on screen) | "Left" | "Right" | "Bottom" | "Free" (draggable)
+        THud_Drag    = true,      -- allow dragging (Anchor = Free)
+        THud_Scale   = 1.0,
+        THud_Avatar  = true,      -- live 3D clone of the target (real pose, moves with them)
+        THud_Health  = true,
+        THud_Stamina = true,
+        THud_M2      = true,      -- heavy cooldown in seconds
+        THud_State   = true,      -- Blocking / Stunned / Attacking...
+        THud_Dist    = true,
+        THud_Accent  = Color3.fromRGB(255, 96, 96),
+        THud_HitFlash= true,      -- flash + kick the panel when we land a hit on them
+
         -- Hit direction
         HitDir_On    = false,
         HitDir_Color = Color3.fromRGB(255, 74, 74),
@@ -530,6 +547,7 @@ return function(Lib, Core)
     -- for EVERY tracked player within a single frame, so we resolve them ONCE per
     -- Heartbeat tick (see the render loop) instead of re-doing getChar/getRoot and
     -- a ViewportSize read for all N players every frame.
+    local thOnHit   -- [V92] assigned in the TargetHUD section below (forward-declared for confirmedHit)
     local _frLpRoot, _frVP
 	local _espPlayers = {}
 	local _espCount = 0
@@ -1836,7 +1854,11 @@ return function(Lib, Core)
 		s.Volume=math.clamp(Config.HitSound_Volume or 0.75,0,1); s.Parent=SoundService
 		Debris:AddItem(s,4); s:Play()
 	end
+	-- [V92] forward decl: confirmedHit (here) fires the TargetHUD flash, but thOnHit is defined
+	-- further down with the rest of the HUD. Without this the call would compile to a global
+	-- lookup and silently do nothing.
 	local function confirmedHit(victim)
+		thOnHit(victim)   -- [V92] flash/kick the TargetHUD when the hit is on our tracked target
 		if not Config.HitFX_On then return end
 		if Config.HitSound_On then playHitSound() end
 		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if root then spawnParticles(root.Position) end end
@@ -2009,6 +2031,467 @@ return function(Lib, Core)
 	end)
 
     -- ═══════════════════════════════════════════════════════════════════════
+    -- [V92] TARGET HUD — live panel for whoever AutoParry is tracking
+    -- ═══════════════════════════════════════════════════════════════════════
+    -- Left side is a REAL 3D view of the enemy: we clone their character into a ViewportFrame
+    -- once, then copy every part's CFrame each tick, so the model breathes, swings and blocks
+    -- exactly like they do in-world (a static headshot would miss all of that). Right side is the
+    -- combat readout: HP, stamina, heavy cooldown in seconds, state, distance.
+    --
+    -- Cost control: the clone is built ONCE per target (not per frame), CFrame copying walks a
+    -- prebuilt part-pair list (no FindFirstChild in the loop), and everything early-outs when the
+    -- HUD is off or there is no target.
+    local TH = {
+        gui = nil, root = nil, scale = nil,      -- instances
+        vp = nil, world = nil, cam = nil,        -- ViewportFrame bits
+        clone = nil, pairs = nil, cloneOf = nil, -- live 3D avatar
+        bars = nil, txt = nil,                   -- readout widgets
+        model = nil,                             -- current target model
+        shown = false, anim = 0,                 -- entrance/exit progress 0..1
+        flash = 0,                               -- hit flash 0..1
+        kick = 0,                                -- hit "punch" offset
+        hp = 0, stam = 0, m2 = 0,                -- smoothed bar values
+        drag = { target = Vector2.new(0, 0), disp = Vector2.new(0, 0), active = false,
+                 startIn = Vector2.new(0, 0), startPos = Vector2.new(0, 0) },
+        m2trk = { active = false, t0 = 0, dur = 1 },
+        lastPose = 0,
+    }
+    local TH_W, TH_H = 268, 104
+
+    -- Read the target AutoParry published (see publishTarget in the AutoParry module).
+    local function thGetTarget()
+        if type(getgenv) ~= "function" then return nil end
+        local t = getgenv().AP_TARGET
+        if type(t) ~= "table" then return nil end
+        local m = t.model
+        if typeof(m) ~= "Instance" or not m.Parent then return nil end
+        -- stale guard: if AutoParry stopped updating (unloaded / crashed) drop the panel
+        if type(t.t) == "number" and (os.clock() - t.t) > 3 then return nil end
+        return t
+    end
+
+    local function thMkBar(parent, y, col, label)
+        local holder = Instance.new("Frame")
+        holder.BackgroundTransparency = 1
+        holder.Position = UDim2.new(0, 0, 0, y)
+        holder.Size = UDim2.new(1, 0, 0, 14)
+        holder.Parent = parent
+
+        local lbl = Instance.new("TextLabel")
+        lbl.BackgroundTransparency = 1
+        lbl.Size = UDim2.new(0, 46, 1, 0)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextSize = 10
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextColor3 = WM.txtMute
+        lbl.Text = label
+        lbl.Parent = holder
+
+        local track = Instance.new("Frame")
+        track.BackgroundColor3 = WM.bgChip
+        track.BorderSizePixel = 0
+        track.Position = UDim2.new(0, 46, 0.5, -3)
+        track.Size = UDim2.new(1, -84, 0, 6)
+        track.Parent = holder
+        local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(1, 0); tc.Parent = track
+
+        local fill = Instance.new("Frame")
+        fill.BackgroundColor3 = col
+        fill.BorderSizePixel = 0
+        fill.Size = UDim2.new(0, 0, 1, 0)
+        fill.Parent = track
+        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
+
+        local val = Instance.new("TextLabel")
+        val.BackgroundTransparency = 1
+        val.AnchorPoint = Vector2.new(1, 0)
+        val.Position = UDim2.new(1, 0, 0, 0)
+        val.Size = UDim2.new(0, 36, 1, 0)
+        val.Font = Enum.Font.GothamBold
+        val.TextSize = 10
+        val.TextXAlignment = Enum.TextXAlignment.Right
+        val.TextColor3 = WM.txtMain
+        val.Text = "—"
+        val.Parent = holder
+
+        return { fill = fill, val = val, holder = holder }
+    end
+
+    local function thBuild()
+        if TH.gui then return end
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "\0SylTHud"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 9998
+        pcall(function() gui.Parent = guiParent() end)
+        if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+        TH.gui = gui
+
+        local root = Instance.new("Frame")
+        root.Name = "THud"
+        root.BackgroundColor3 = WM.bgDark
+        root.BackgroundTransparency = WM.bgTransp
+        root.BorderSizePixel = 0
+        root.Size = UDim2.fromOffset(TH_W, TH_H)
+        root.Visible = false
+        root.Active = true                    -- grabbable for drag
+        root.Parent = gui
+        TH.root = root
+        local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 10); rc.Parent = root
+        local rs = Instance.new("UIStroke")
+        rs.Thickness = 1; rs.Color = WM.stroke; rs.Transparency = 0.35
+        rs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; rs.Parent = root
+        TH.stroke = rs
+
+        TH.scale = Instance.new("UIScale"); TH.scale.Scale = 1; TH.scale.Parent = root
+
+        -- accent strip along the top (also the hit-flash surface)
+        local accent = Instance.new("Frame")
+        accent.BackgroundColor3 = Config.THud_Accent
+        accent.BorderSizePixel = 0
+        accent.Size = UDim2.new(1, 0, 0, 2)
+        accent.Parent = root
+        TH.accent = accent
+
+        -- ── left: live 3D avatar ────────────────────────────────────────────
+        local vp = Instance.new("ViewportFrame")
+        vp.BackgroundColor3 = WM.bgChip
+        vp.BackgroundTransparency = 0.25
+        vp.BorderSizePixel = 0
+        vp.Position = UDim2.new(0, 8, 0, 10)
+        vp.Size = UDim2.fromOffset(84, TH_H - 20)
+        vp.Ambient = Color3.fromRGB(190, 190, 200)
+        vp.LightColor = Color3.fromRGB(255, 255, 255)
+        vp.LightDirection = Vector3.new(-0.4, -1, -0.6)
+        vp.Parent = root
+        local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(0, 8); vc.Parent = vp
+        TH.vp = vp
+
+        local world = Instance.new("WorldModel"); world.Parent = vp
+        TH.world = world
+        local cam = Instance.new("Camera"); cam.FieldOfView = 40; cam.Parent = vp
+        vp.CurrentCamera = cam
+        TH.cam = cam
+
+        -- ── right: readout ──────────────────────────────────────────────────
+        local col = Instance.new("Frame")
+        col.BackgroundTransparency = 1
+        col.Position = UDim2.new(0, 100, 0, 8)
+        col.Size = UDim2.new(1, -108, 1, -14)
+        col.Parent = root
+
+        local nameLbl = Instance.new("TextLabel")
+        nameLbl.BackgroundTransparency = 1
+        nameLbl.Size = UDim2.new(1, 0, 0, 14)
+        nameLbl.Font = Enum.Font.GothamBold
+        nameLbl.TextSize = 12
+        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+        nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+        nameLbl.TextColor3 = WM.txtMain
+        nameLbl.Text = "—"
+        nameLbl.Parent = col
+
+        local sub = Instance.new("TextLabel")
+        sub.BackgroundTransparency = 1
+        sub.Position = UDim2.new(0, 0, 0, 15)
+        sub.Size = UDim2.new(1, 0, 0, 11)
+        sub.Font = Enum.Font.GothamMedium
+        sub.TextSize = 10
+        sub.TextXAlignment = Enum.TextXAlignment.Left
+        sub.TextColor3 = WM.txtMute
+        sub.Text = ""
+        sub.Parent = col
+
+        TH.bars = {
+            hp   = thMkBar(col, 30, Color3.fromRGB(90, 220, 90), "HP"),
+            stam = thMkBar(col, 47, Color3.fromRGB(255, 200, 80), "STAM"),
+            m2   = thMkBar(col, 64, Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255), "HEAVY"),
+        }
+        TH.txt = { name = nameLbl, sub = sub }
+
+        -- drag: reuse the same global pointer handlers pattern as the indicator HUD
+        root.InputBegan:Connect(function(input)
+            if not (Config.THud_Drag and (Config.THud_Anchor or "Free") == "Free") then return end
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+                TH.drag.active = true
+                TH.drag.startIn = Vector2.new(input.Position.X, input.Position.Y)
+                TH.drag.startPos = TH.drag.target
+            end
+        end)
+        dragConns[#dragConns + 1] = UserInputService.InputChanged:Connect(function(input)
+            if not TH.drag.active then return end
+            if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+                local cur = Vector2.new(input.Position.X, input.Position.Y)
+                local d = cur - TH.drag.startIn
+                TH.drag.target = TH.drag.startPos + d
+            end
+        end)
+        dragConns[#dragConns + 1] = UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+                TH.drag.active = false
+            end
+        end)
+
+        -- start bottom-left-ish
+        local vpz = Camera.ViewportSize
+        TH.drag.target = Vector2.new(24, vpz.Y * 0.5)
+        TH.drag.disp = TH.drag.target
+    end
+
+    -- Drop the current 3D clone and its part pairing.
+    local function thClearClone()
+        if TH.clone then pcall(function() TH.clone:Destroy() end) end
+        TH.clone, TH.pairs, TH.cloneOf = nil, nil, nil
+    end
+
+    -- Build the live avatar: clone the character, strip everything that costs us nothing visually
+    -- (scripts, sounds, particles), and pre-pair source→clone parts so the per-tick pose copy is a
+    -- flat array walk with zero lookups.
+    local function thBuildClone(char)
+        thClearClone()
+        if not (Config.THud_Avatar and char) then return end
+        local ok, clone = pcall(function()
+            local arch = char.Archivable
+            char.Archivable = true
+            local c = char:Clone()
+            char.Archivable = arch
+            return c
+        end)
+        if not ok or not clone then return end
+        -- strip anything live: we only want geometry, the pose comes from CFrame copying
+        for _, d in ipairs(clone:GetDescendants()) do
+            if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript")
+            or d:IsA("Sound") or d:IsA("ParticleEmitter") or d:IsA("Trail")
+            or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Humanoid") or d:IsA("Animator")
+            or d:IsA("BillboardGui") or d:IsA("Light") then
+                pcall(function() d:Destroy() end)
+            end
+        end
+        local pairsList = {}
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") then
+                local m = clone:FindFirstChild(d.Name, true)
+                if m and m:IsA("BasePart") then
+                    m.Anchored = true; m.CanCollide = false; m.CastShadow = false
+                    pairsList[#pairsList + 1] = { d, m }
+                end
+            end
+        end
+        clone.Parent = TH.world
+        TH.clone, TH.pairs, TH.cloneOf = clone, pairsList, char
+    end
+
+    -- Copy the live pose into the clone + frame the camera on the torso.
+    local function thPose(char)
+        local list = TH.pairs
+        if not list then return end
+        for i = 1, #list do
+            local src, dst = list[i][1], list[i][2]
+            if src.Parent and dst.Parent then dst.CFrame = src.CFrame end
+        end
+        local root = getRoot(char)
+        if root and TH.cam then
+            -- frame from slightly above and in front, looking at the chest
+            local look = root.CFrame.LookVector
+            local flat = Vector3.new(look.X, 0, look.Z)
+            flat = (flat.Magnitude > 0.05) and flat.Unit or Vector3.new(0, 0, -1)
+            local focus = root.Position + Vector3.new(0, 0.4, 0)
+            TH.cam.CFrame = CFrame.lookAt(focus + flat * 7.5 + Vector3.new(0, 1.2, 0), focus)
+        end
+    end
+
+    -- Where the panel sits this frame (anchor modes).
+    local function thPlace(dt, targetChar)
+        local vpz = Camera.ViewportSize
+        local w, h = TH_W * (TH.scale and TH.scale.Scale or 1), TH_H * (TH.scale and TH.scale.Scale or 1)
+        local anchor = Config.THud_Anchor or "Free"
+        if anchor == "Free" then
+            local nx = math.clamp(TH.drag.target.X, 0, math.max(vpz.X - w, 0))
+            local ny = math.clamp(TH.drag.target.Y, 0, math.max(vpz.Y - h, 0))
+            TH.drag.target = Vector2.new(nx, ny)
+            TH.drag.disp = TH.drag.disp:Lerp(TH.drag.target, math.clamp(dt * 16, 0, 1))
+            return TH.drag.disp.X, TH.drag.disp.Y
+        elseif anchor == "Left" then
+            return 24, vpz.Y * 0.5 - h * 0.5
+        elseif anchor == "Right" then
+            return vpz.X - w - 24, vpz.Y * 0.5 - h * 0.5
+        elseif anchor == "Bottom" then
+            return vpz.X * 0.5 - w * 0.5, vpz.Y - h - 90
+        else -- "Enemy": follow them on screen
+            local root = targetChar and getRoot(targetChar)
+            if root and Camera then
+                local sp, on = Camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3.4, 0))
+                if on and sp.Z > 0 then
+                    return math.clamp(sp.X - w * 0.5, 0, math.max(vpz.X - w, 0)),
+                           math.clamp(sp.Y - h - 12, 0, math.max(vpz.Y - h, 0))
+                end
+            end
+            return vpz.X * 0.5 - w * 0.5, vpz.Y * 0.28
+        end
+    end
+
+    -- Called by the existing hit pipeline (CombatBroadcastURE M1Hit/M2Hit) when WE land a hit.
+    function thOnHit(victimName)   -- forward-declared above
+        if not (Config.THud_On and Config.THud_HitFlash) then return end
+        local m = TH.model
+        if not m or m.Name ~= victimName then return end
+        TH.flash = 1
+        TH.kick = 1
+    end
+
+    local thUpdate = LPH_NO_VIRTUALIZE(function(dt)
+        if not Config.THud_On then
+            if TH.shown then
+                TH.shown = false
+                if TH.root then TH.root.Visible = false end
+                thClearClone(); TH.model = nil
+            end
+            return
+        end
+        thBuild()
+        local t = thGetTarget()
+        local char = t and t.model or nil
+
+        -- target changed → rebuild the 3D clone and reset the bars so they animate in
+        if char ~= TH.model then
+            TH.model = char
+            if char then
+                thBuildClone(char)
+                TH.hp, TH.stam, TH.m2 = 0, 0, 0
+            else
+                thClearClone()
+            end
+        end
+
+        -- entrance / exit animation (ease both ways)
+        local want = char and 1 or 0
+        TH.anim = TH.anim + (want - TH.anim) * math.clamp(dt * 9, 0, 1)
+        if TH.anim < 0.01 and want == 0 then
+            if TH.root and TH.root.Visible then TH.root.Visible = false end
+            TH.shown = false
+            return
+        end
+        if TH.root and not TH.root.Visible then TH.root.Visible = true end
+        TH.shown = true
+        if not char then
+            -- fading out: keep sliding, skip all the reads
+            local ax, ay = thPlace(dt, nil)
+            local ease = TH.anim * TH.anim
+            TH.root.Position = UDim2.fromOffset(math.floor(ax + 0.5), math.floor(ay + (1 - ease) * 18 + 0.5))
+            TH.root.BackgroundTransparency = 1 - (1 - WM.bgTransp) * ease
+            return
+        end
+
+        -- ── live pose (throttled: 30/s is plenty for a 84px viewport) ────────
+        local nowc = os.clock()
+        if Config.THud_Avatar then
+            if TH.vp and not TH.vp.Visible then TH.vp.Visible = true end
+            if nowc - TH.lastPose >= 1 / 30 then
+                TH.lastPose = nowc
+                thPose(char)
+            end
+        elseif TH.vp and TH.vp.Visible then
+            TH.vp.Visible = false
+        end
+
+        -- ── readout ─────────────────────────────────────────────────────────
+        local hum = getHum(char)
+        local hpR = (hum and hum.MaxHealth > 0) and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
+        local stamA = char:GetAttribute("Stamina")
+        local stamR = (type(stamA) == "number") and math.clamp(stamA / 100, 0, 1) or 0
+        local m2left = 0
+        local m2R = readTargetM2Ratio(char, TH.m2trk)
+        if m2R then m2left = m2R * math.max(TH.m2trk.dur, 0.01) end
+
+        -- smooth the bars so they slide instead of snapping
+        local k = math.clamp(dt * 12, 0, 1)
+        TH.hp   = TH.hp + (hpR - TH.hp) * k
+        TH.stam = TH.stam + (stamR - TH.stam) * k
+        TH.m2   = TH.m2 + ((m2R or 0) - TH.m2) * k
+
+        local b = TH.bars
+        if Config.THud_Health then
+            b.hp.holder.Visible = true
+            b.hp.fill.Size = UDim2.new(TH.hp, 0, 1, 0)
+            b.hp.fill.BackgroundColor3 = lerpColor(HP_LOW, HP_HIGH, TH.hp)
+            local txt = hum and string.format("%d", math.floor(hum.Health + 0.5)) or "—"
+            if b.hp.val.Text ~= txt then b.hp.val.Text = txt end
+        else b.hp.holder.Visible = false end
+
+        if Config.THud_Stamina then
+            b.stam.holder.Visible = true
+            b.stam.fill.Size = UDim2.new(TH.stam, 0, 1, 0)
+            local txt = (type(stamA) == "number") and string.format("%d", math.floor(stamA + 0.5)) or "—"
+            if b.stam.val.Text ~= txt then b.stam.val.Text = txt end
+        else b.stam.holder.Visible = false end
+
+        if Config.THud_M2 then
+            b.m2.holder.Visible = true
+            b.m2.fill.Size = UDim2.new(TH.m2, 0, 1, 0)
+            local txt = (m2R and m2left > 0.05) and string.format("%.1fs", m2left) or "ready"
+            if b.m2.val.Text ~= txt then b.m2.val.Text = txt end
+        else b.m2.holder.Visible = false end
+
+        -- name + subline (state / style / distance / incoming attack)
+        local nm = t.name or char.Name
+        if TH.txt.name.Text ~= nm then TH.txt.name.Text = nm end
+        local parts = {}
+        if Config.THud_State then
+            local st = readState(char)
+            if st then parts[#parts + 1] = st end
+        end
+        if t.style and t.style ~= "" then parts[#parts + 1] = t.style end
+        if Config.THud_Dist then
+            -- NOTE: not using _frLpRoot here — that is only refreshed while ESP is on, so with
+            -- ESP off it would be a stale/nil root. One getChar+getRoot per tick is cheap.
+            local lpc = getChar(LocalPlayer)
+            local myRoot, thRoot = lpc and getRoot(lpc) or nil, getRoot(char)
+            if myRoot and thRoot then
+                parts[#parts + 1] = string.format("%dm", math.floor((thRoot.Position - myRoot.Position).Magnitude + 0.5))
+            end
+        end
+        if t.threatens and t.kind then
+            parts[#parts + 1] = string.format("%s in %.0fms", t.kind, (t.contactIn or 0) * 1000)
+        end
+        local sub = table.concat(parts, "  ·  ")
+        if TH.txt.sub.Text ~= sub then TH.txt.sub.Text = sub end
+
+        -- ── hit flash + kick ────────────────────────────────────────────────
+        TH.flash = TH.flash * (1 - math.clamp(dt * 6, 0, 1))
+        TH.kick  = TH.kick  * (1 - math.clamp(dt * 9, 0, 1))
+        local acc = Config.THud_Accent
+        if TH.flash > 0.02 then
+            TH.accent.BackgroundColor3 = acc:Lerp(Color3.new(1, 1, 1), TH.flash)
+            TH.accent.Size = UDim2.new(1, 0, 0, 2 + TH.flash * 3)
+            TH.stroke.Transparency = 0.35 - TH.flash * 0.3
+        else
+            if TH.accent.BackgroundColor3 ~= acc then TH.accent.BackgroundColor3 = acc end
+            if TH.accent.Size.Y.Offset ~= 2 then TH.accent.Size = UDim2.new(1, 0, 0, 2) end
+            if TH.stroke.Transparency ~= 0.35 then TH.stroke.Transparency = 0.35 end
+        end
+
+        -- ── place + scale + entrance ease ────────────────────────────────────
+        local sc = math.clamp(Config.THud_Scale or 1, 0.5, 2) * (0.94 + 0.06 * TH.anim)
+        if math.abs((TH.scale.Scale or 1) - sc) > 0.001 then TH.scale.Scale = sc end
+        local ax, ay = thPlace(dt, char)
+        local ease = TH.anim * TH.anim * (3 - 2 * TH.anim)     -- smoothstep
+        local px = math.floor(ax + 0.5)
+        local py = math.floor(ay + (1 - ease) * 18 - TH.kick * 4 + 0.5)
+        if TH._lx ~= px or TH._ly ~= py then
+            TH.root.Position = UDim2.fromOffset(px, py)
+            TH._lx, TH._ly = px, py
+        end
+        local bgT = 1 - (1 - WM.bgTransp) * ease
+        if math.abs((TH.root.BackgroundTransparency or 0) - bgT) > 0.01 then
+            TH.root.BackgroundTransparency = bgT
+        end
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════════════
     -- Lifecycle wiring
     -- ═══════════════════════════��═══════════════════════════════════════════
     local conns = {}
@@ -2091,6 +2574,8 @@ return function(Lib, Core)
 			pollLocalDamage()
 			if Config.HitDir_On or #hitArrows > 0 then updateHitDir() end
 			if #HitFX.systems>0 then renderHitFX(fdt) end
+			-- [V92] TargetHUD: cheap no-op when disabled (first line of thUpdate bails out)
+			thUpdate(fdt)
             end))
     end
 
@@ -2370,6 +2855,53 @@ return function(Lib, Core)
         applyParticleTypeVis()
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
+        -- ─────────────── [V92] TargetHUD ───────────────
+        local sTH = V:Section({ Side = "Right" })
+        sTH:Header({ Name = "TargetHUD" })
+        feature(sTH, {
+            Title = "TargetHUD", Flag = "VIS_THUD",
+            get = function() return Config.THud_On end,
+            set = function(v) Config.THud_On = v end,
+            Desc = "live panel for whoever autoparry is tracking\n3d avatar + hp/stam/heavy cd",
+        })
+        sTH:SubLabel({ Text = "needs autoparry on — it publishes the target. no target = hud hides itself" })
+        sTH:Divider()
+        sTH:Header({ Name = "Elements" })
+        sTH:Toggle({ Name = "3D Avatar", Default = Config.THud_Avatar,
+            Callback = function(v) Config.THud_Avatar = v and true or false end }, ctx.flag("VIS_THUD_Av"))
+        sTH:SubLabel({ Text = "real 3d model of them, moves/swings/blocks live (not a profile pic)" })
+        sTH:Toggle({ Name = "Health", Default = Config.THud_Health,
+            Callback = function(v) Config.THud_Health = v and true or false end }, ctx.flag("VIS_THUD_HP"))
+        sTH:Toggle({ Name = "Stamina", Default = Config.THud_Stamina,
+            Callback = function(v) Config.THud_Stamina = v and true or false end }, ctx.flag("VIS_THUD_St"))
+        sTH:Toggle({ Name = "Heavy Cooldown", Default = Config.THud_M2,
+            Callback = function(v) Config.THud_M2 = v and true or false end }, ctx.flag("VIS_THUD_M2"))
+        sTH:SubLabel({ Text = "their m2 cd in seconds — u see exactly when they can heavy again" })
+        sTH:Toggle({ Name = "State", Default = Config.THud_State,
+            Callback = function(v) Config.THud_State = v and true or false end }, ctx.flag("VIS_THUD_Sta"))
+        sTH:Toggle({ Name = "Distance", Default = Config.THud_Dist,
+            Callback = function(v) Config.THud_Dist = v and true or false end }, ctx.flag("VIS_THUD_Di"))
+        sTH:Toggle({ Name = "Hit Flash", Default = Config.THud_HitFlash,
+            Callback = function(v) Config.THud_HitFlash = v and true or false end }, ctx.flag("VIS_THUD_Fl"))
+        sTH:SubLabel({ Text = "panel flashes + kicks when u land a hit on them" })
+        sTH:Divider()
+        sTH:Header({ Name = "Placement" })
+        sTH:Dropdown({
+            Name = "Anchor",
+            Options = { "Free", "Enemy", "Left", "Right", "Bottom" },
+            Default = Config.THud_Anchor or "Free",
+            Callback = function(v) if type(v) == "string" and v ~= "" then Config.THud_Anchor = v end end,
+        }, ctx.flag("VIS_THUD_Anchor"))
+        sTH:SubLabel({ Text = "Free = drag it anywhere · Enemy = floats above them · or pin to a screen edge" })
+        sTH:Toggle({ Name = "Drag", Default = Config.THud_Drag,
+            Callback = function(v) Config.THud_Drag = v and true or false end }, ctx.flag("VIS_THUD_Drag"))
+        sTH:SubLabel({ Text = "grab the panel to move it (Free anchor only)" })
+        slider(sTH, { Name = "Scale", Flag = "VIS_THUD_Scale",
+            Default = math.floor((Config.THud_Scale or 1) * 100), Min = 50, Max = 200, Suffix = "%",
+            Callback = function(v) Config.THud_Scale = v / 100 end })
+        colorpick(sTH, "Accent", "VIS_THUD_Accent", Config.THud_Accent,
+            function(c) if typeof(c) == "Color3" then Config.THud_Accent = c end end)
+
         local sInd = V:Section({ Side = "Right" })
         sInd:Header({ Name = "Indicators" })
         feature(sInd, {
@@ -2499,6 +3031,11 @@ return function(Lib, Core)
         hitArrows = {}
 		for _,sys in ipairs(HitFX.systems) do destroySystem(sys) end
 		HitFX.systems={}
+        -- [V92] tear down the TargetHUD (its 3D clone lives in a ViewportFrame we own)
+        thClearClone()
+        if TH.gui then pcall(function() TH.gui:Destroy() end) end
+        TH.gui, TH.root, TH.vp, TH.world, TH.cam, TH.model = nil, nil, nil, nil, nil, nil
+        TH.shown, TH.anim = false, 0
         for _, c in pairs(drawCells) do
             for _, key in ipairs({ "bg", "edgeA", "edgeB", "node", "label", "value", "track", "fill" }) do
                 if c[key] then pcall(function() c[key]:Remove() end) end
