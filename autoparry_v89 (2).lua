@@ -461,7 +461,7 @@ local Config = {
 	VizRingSeg    = 30,     -- segments in the ring (more = smoother, costs 2 projections each)
 	VizRingMirror = true,   -- draw the mirrored/opposite ring (the thing that sells the 3D)
 	VizRingTilt   = 0.7,    -- how far Orbit/OrbitSwirl push the band through depth (studs)
-	VizRingBands  = 4,      -- OrbitSwirl only: how many woven bands (the "chains" look)
+	VizRingBlur   = true,   -- translucent copy under the ribbon (the glow in the reference)
 	-- [V94] How we face the target: "LookAt" rotates the character (server-safe, what we always
 	-- did) | "AimLock" points the CAMERA instead and lets the game turn us (way less snappy).
 	RotationMethod = "LookAt",
@@ -5714,6 +5714,34 @@ end
 -- Orbit styles also draw a MIRRORED ring (the segment angles negated and the depth inverted) —
 -- that second pass is what actually sells the 3D effect in the reference.
 -- Segment count is user-controlled; each segment costs 2 viewport projections, so it is clamped.
+-- [V94.1] TARGET RING — now matching the reference properly.
+-- The reference does NOT draw thin lines: every segment is a Drawing "Quad" spanning the gap
+-- between radius*0.95 and radius, i.e. a FILLED RIBBON, and each segment is pushed through depth
+-- by cos(t + i/seg*2pi) * tilt so the ribbon undulates in 3D. On top of that it draws:
+--   • a mirrored ribbon (angles negated, depth inverted) — the crossing second band
+--   • a translucent "blur" copy slightly below, which is what gives it that glowy body
+-- OrbitSwirl is simply that same ribbon with the whole thing rotating (angle += t*speed*0.75) —
+-- it is NOT a stack of many rings, which is what I wrongly built before.
+-- Filled geometry comes from TriPool (2 triangles per quad); Flat still uses the cheap line ring.
+Viz.ribbonQuad = function(cam, a, b, c, d, color, transp)
+	-- a,b = inner edge (angle1, angle2), c,d = outer edge (angle2, angle1)
+	local a2, az = Viz.proj(cam, a); if not a2 then return end
+	local b2, bz = Viz.proj(cam, b); if not b2 then return end
+	local c2, cz = Viz.proj(cam, c); if not c2 then return end
+	local d2, dz = Viz.proj(cam, d); if not d2 then return end
+	if az <= 0 or bz <= 0 or cz <= 0 or dz <= 0 then return end
+	local t1 = TriPool:get()
+	if t1 then
+		t1.PointA, t1.PointB, t1.PointC = a2, b2, c2
+		t1.Color, t1.Transparency, t1.Visible = color, transp, true
+	end
+	local t2 = TriPool:get()
+	if t2 then
+		t2.PointA, t2.PointB, t2.PointC = a2, c2, d2
+		t2.Color, t2.Transparency, t2.Visible = color, transp, true
+	end
+end
+
 Viz.drawRing = function(cam, model, hrp, hot)
 	local footY = hrp.Position.Y - 2.8
 	local radius = 3.2
@@ -5725,62 +5753,68 @@ Viz.drawRing = function(cam, model, hrp, hot)
 	radius = radius * (Config.VizRingScale or 1.0)
 	local spd   = Config.VizRingSpeed or 1.0
 	local style = Config.VizRingStyle or "Flat"
-	local orbit = (style == "Orbit" or style == "OrbitSwirl")
-	local seg   = math.clamp(math.floor(Config.VizRingSeg or RING_SEG), 8, 48)
+	local seg   = math.clamp(math.floor(Config.VizRingSeg or 30), 8, 48)
 	local t     = Viz.t * spd
 	local cx, cz = hrp.Position.X, hrp.Position.Z
 
-	-- Orbit rides at body height (a band around them); Flat stays on the ground.
-	local y = footY
-	if orbit then
-		local h = (bs and bs.Y or 5) * 0.5
-		y = footY + h + math.sin(t * 1.6) * 0.35      -- gentle bob so it isn't static
-	end
-	-- OrbitSwirl spins the whole band; Orbit keeps the segment phase fixed.
-	local swirl = (style == "OrbitSwirl") and (t * 0.75) or 0
-	local tilt  = orbit and (Config.VizRingTilt or 0.7) or 0
-	local pulse = 1 + math.sin(t * 3.0) * 0.05
-	local thick = (hot and 4 or 2.5) + (orbit and 0.5 or 0)
-
-	local wpts = Viz.ringPts   -- persistent buffer: no per-frame table alloc
-	for i = 0, seg - 1 do
-		local a = i / seg * math.pi * 2 + swirl
-		local r = radius * pulse * (orbit and 1 or (1 + math.sin(a * 4 + t * 5) * 0.03))
-		-- depth wave: this is the bit that turns a flat circle into a tilted 3D band
-		local dy = orbit and (math.cos(t * spd + i / seg * math.pi * 2) * tilt) or 0
-		wpts[i] = Vector3.new(cx + math.cos(a) * r, y + dy, cz + math.sin(a) * r)
-	end
-	for i = 0, seg - 1 do
-		local j = (i + 1) % seg
-		local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 + t * 2.2)
-		Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
-	end
-
-	-- [V94] EXTRA BANDS. Orbit draws ONE mirrored band (the crossing ring). OrbitSwirl is the
-	-- "chains" look from the reference: several thin bands at different phase offsets and slightly
-	-- different radii, all counter-rotating, so they weave around the target like linked chains
-	-- instead of being one lonely spinning hoop.
-	local bands = 0
-	if orbit and Config.VizRingMirror ~= false then
-		bands = (style == "OrbitSwirl") and math.clamp(math.floor(Config.VizRingBands or 4), 1, 8) or 1
-	end
-	for b = 1, bands do
-		-- each band gets its own phase + a slightly different radius/height so they don't overlap
-		local phase = (b / bands) * math.pi          -- spread the bands around
-		local rMul  = 1 - (b - 1) * 0.06             -- inner bands sit a touch tighter
-		local dir   = (b % 2 == 0) and 1 or -1       -- alternate spin direction → the weave
+	-- ── Flat: the classic cheap line ring on the floor ───────────────────────
+	if style ~= "Orbit" and style ~= "OrbitSwirl" then
+		local pulse = 1 + math.sin(t * 3.0) * 0.05
+		local wpts = Viz.ringPts
 		for i = 0, seg - 1 do
-			local a = dir * (i / seg * math.pi * 2 + swirl) + phase
-			local r = radius * pulse * rMul
-			local dy = dir * (math.cos(t * spd + i / seg * math.pi * 2 + phase) * tilt)
-			wpts[i] = Vector3.new(cx + math.cos(a) * r, y + dy, cz + math.sin(a) * r)
+			local a = i / seg * math.pi * 2
+			local r = radius * pulse * (1 + math.sin(a * 4 + t * 5) * 0.03)
+			wpts[i] = Vector3.new(cx + math.cos(a) * r, footY, cz + math.sin(a) * r)
 		end
-		-- thinner than the main band so a stack of them still reads as separate chains
-		local bthick = math.max(1.2, thick - 0.6 - (b - 1) * 0.15)
+		local thick = hot and 4 or 2.5
 		for i = 0, seg - 1 do
 			local j = (i + 1) % seg
-			local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 - t * 2.2 + phase)
-			Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingB:Lerp(Config.RingA, f), bthick)
+			local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 + t * 2.2)
+			Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
+		end
+		return
+	end
+
+	-- ── Orbit / OrbitSwirl: filled undulating ribbon ─────────────────────────
+	local bodyY = footY + ((bs and bs.Y or 5) * 0.5)
+	local swirl = (style == "OrbitSwirl") and (t * 0.75) or 0
+	local tilt  = Config.VizRingTilt or 0.7
+	local rIn   = radius * 0.95
+	local BLUR_DROP = 0.05                    -- the reference offsets its blur copy by this much
+
+	for i = 0, seg - 1 do
+		local a1 = (i / seg) * math.pi * 2 + swirl
+		local a2 = ((i + 1) / seg) * math.pi * 2 + swirl
+		-- depth wave: same offset for the whole segment, so the ribbon bends smoothly
+		local dy = math.cos(t + (i / seg) * math.pi * 2) * tilt
+		local f  = 0.5 + 0.5 * math.sin((i / seg) * math.pi * 2 + t * 2.2)
+		local col = Config.RingA:Lerp(Config.RingB, f)
+
+		local y = bodyY + dy
+		local i1 = Vector3.new(cx + math.cos(a1) * rIn, y, cz + math.sin(a1) * rIn)
+		local i2 = Vector3.new(cx + math.cos(a2) * rIn, y, cz + math.sin(a2) * rIn)
+		local o2 = Vector3.new(cx + math.cos(a2) * radius, y, cz + math.sin(a2) * radius)
+		local o1 = Vector3.new(cx + math.cos(a1) * radius, y, cz + math.sin(a1) * radius)
+		Viz.ribbonQuad(cam, i1, i2, o2, o1, col, hot and 0 or 0.08)
+
+		-- translucent blur copy just under it (the glow in the reference)
+		if Config.VizRingBlur ~= false then
+			local yb = y - BLUR_DROP
+			Viz.ribbonQuad(cam,
+				Vector3.new(i1.X, yb, i1.Z), Vector3.new(i2.X, yb, i2.Z),
+				Vector3.new(o2.X, yb, o2.Z), Vector3.new(o1.X, yb, o1.Z), col, 0.7)
+		end
+
+		-- mirrored ribbon: negated angles + inverted depth = the crossing band
+		if Config.VizRingMirror ~= false then
+			local m1, m2 = -a1, -a2
+			local ym = bodyY - dy
+			Viz.ribbonQuad(cam,
+				Vector3.new(cx + math.cos(m1) * rIn, ym, cz + math.sin(m1) * rIn),
+				Vector3.new(cx + math.cos(m2) * rIn, ym, cz + math.sin(m2) * rIn),
+				Vector3.new(cx + math.cos(m2) * radius, ym, cz + math.sin(m2) * radius),
+				Vector3.new(cx + math.cos(m1) * radius, ym, cz + math.sin(m1) * radius),
+				Config.RingB:Lerp(Config.RingA, f), hot and 0.1 or 0.25)
 		end
 	end
 end
@@ -6455,7 +6489,7 @@ return function(_Lib, _Core)
 				if type(v) == "string" and v ~= "" then Config.VizRingStyle = v; ringVis() end
 			end,
 		}, ctx.flag("AP_VizRingStyle"))
-		apVis:SubLabel({ Text = "Flat = ring at their feet · Orbit = 3d band · OrbitSwirl = woven chains" })
+		apVis:SubLabel({ Text = "Flat = line ring at their feet\nOrbit = filled 3d ribbon · OrbitSwirl = same ribbon, spinning" })
 		slider(apVis, { Name = "Size", Flag = "AP_VizRingScale",
 			Default = math.floor((Config.VizRingScale or 1) * 100), Min = 40, Max = 250, Suffix = "%",
 			Callback = function(v) Config.VizRingScale = v / 100 end })
@@ -6468,9 +6502,12 @@ return function(_Lib, _Core)
 		ringOrbitEls[#ringOrbitEls + 1] = slider(apVis, { Name = "Depth", Flag = "AP_VizRingTilt",
 			Default = math.floor((Config.VizRingTilt or 0.7) * 100), Min = 10, Max = 200, Suffix = "%",
 			Callback = function(v) Config.VizRingTilt = v / 100 end })
-		ringSwirlEls[#ringSwirlEls + 1] = slider(apVis, { Name = "Chains", Flag = "AP_VizRingBands",
-			Default = Config.VizRingBands or 4, Min = 1, Max = 8, Suffix = "",
-			Callback = function(v) Config.VizRingBands = v end })
+		ringOrbitEls[#ringOrbitEls + 1] = boolToggle(apVis, "Glow", "Ring Glow",
+			function() return Config.VizRingBlur ~= false end,
+			function(v) Config.VizRingBlur = v end)
+		ringOrbitEls[#ringOrbitEls + 1] = boolToggle(apVis, "Mirror Band", "Ring Mirror",
+			function() return Config.VizRingMirror ~= false end,
+			function(v) Config.VizRingMirror = v end)
 		ringVis()
 		apVis:Colorpicker({ Name = "Color A", Default = Config.RingA,
 			Callback = function(c) Config.RingA = c end }, ctx.flag("AP_RingA"))
