@@ -116,9 +116,11 @@ return function(Lib, Core)
         },
 
         AutoPiano = {
-            Sheet     = "",    -- pasted Virtual Piano sheet (letter macro, e.g. from virtualpiano.net)
-            Tempo     = 180,   -- ms per note step (lower = faster)
-            Transpose = 0,     -- shift every note by N semitones (0 = exact; use if it sits too high/low)
+            Sheet      = "",   -- pasted Virtual Piano sheet (letter macro, e.g. from virtualpiano.net)
+            MidiFile   = "",   -- .mid filename in the executor workspace to play with real timing
+            Tempo      = 180,  -- ms per note step for SHEET playback (lower = faster)
+            Speed      = 100,  -- MIDI playback speed % (100 = original tempo)
+            Transpose  = 0,    -- shift every note by N semitones (0 = exact; use if it sits too high/low)
             LocalSound = true, -- also play each note on our own client so WE hear it (others always do)
         },
 
@@ -2529,8 +2531,7 @@ return function(Lib, Core)
     -- note number is the 1-based index of the character in PIANO_KEYS below (61 keys,
     -- C2..C7). This is the same QWERTY layout virtualpiano.net uses, so pasted sheets
     -- map 1:1. Payload confirmed: InstrumentPiano:FireServer("play", note).
-    local PN = { playing = false, token = 0, template = nil, noteIdx = nil,
-                 learning = false, hooked = false, sndFolder = nil, templates = nil }
+    local PN = { playing = false, token = 0, sndFolder = nil, templates = nil }
 
     -- Exact char -> note-number layout copied from PianoClient (index in string = note).
     local PIANO_KEYS = "1!2@34$5%6^78*9(0qQwWeErtTyYuiIoOpPasSdDfgGhHjJklLzZxcCvVbBnm"
@@ -2590,18 +2591,10 @@ return function(Lib, Core)
     end
 
     -- Fire one note: InstrumentPiano:FireServer("play", note) (others hear it) AND play
-    -- it locally (we hear it). A captured Learn-Note template overrides the payload.
+    -- it locally (we hear it).
     local function pianoFire(remote, note)
         note = math.clamp(math.floor(note + 0.5), 1, 61)   -- game piano is 61 keys (C2..C7)
-        if PN.template and PN.noteIdx then
-            local t, n = PN.template, PN.template.n or #PN.template
-            local a = {}
-            for k = 1, n do a[k] = t[k] end
-            a[PN.noteIdx] = note
-            pcall(function() remote:FireServer(table.unpack(a, 1, n)) end)
-        else
-            pcall(function() remote:FireServer("play", note) end)
-        end
+        pcall(function() remote:FireServer("play", note) end)
         pianoLocalSound(note)
     end
 
@@ -2637,69 +2630,131 @@ return function(Lib, Core)
         PN.token = PN.token + 1
     end
 
-    -- Play the pasted sheet. One lightweight coroutine that yields between notes
-    -- (no per-frame polling), so it costs nothing while idle and is gentle on weak PCs.
-    local function pianoPlay(notify)
+    -- Are we actually sitting at a piano? The game sets the character attribute
+    -- "PlayingInstrument" to "Piano" while seated (PianoClient.u60). Gate playback on
+    -- this so Play does nothing off-bench and a running song stops the instant you
+    -- stand up / leave the seat.
+    local function pianoSeated()
+        local char = LocalPlayer and LocalPlayer.Character
+        if not char then return false end
+        local ok, inst = pcall(function() return char:GetAttribute("PlayingInstrument") end)
+        return ok and inst == "Piano"
+    end
+
+    -- Minimal Standard MIDI parser -> event list. Collects note-on events + the first
+    -- tempo, converts ticks to seconds (constant-tempo assumption — fine for songs),
+    -- maps MIDI note -> game note (C2 / MIDI 36 -> 1) folding out-of-range notes into
+    -- octaves. Returns { {notes={...}, after=seconds}, ... } or nil,err.
+    local function pianoParseMidi(data)
+        if type(data) ~= "string" or data:sub(1, 4) ~= "MThd" then return nil, "not a MIDI file" end
+        local pos = 9
+        local function u8() local b = data:byte(pos) or 0; pos = pos + 1; return b end
+        local function u16() local a, b = data:byte(pos, pos + 1); pos = pos + 2; return (a or 0) * 256 + (b or 0) end
+        local function u32() local a, b, c, d = data:byte(pos, pos + 3); pos = pos + 4; return (((a or 0) * 256 + (b or 0)) * 256 + (c or 0)) * 256 + (d or 0) end
+        u16(); local ntrk = u16(); local division = u16()
+        if division == 0 or division >= 0x8000 then division = 480 end
+        local notes, tempoUs = {}, nil
+        for _ = 1, ntrk do
+            if data:sub(pos, pos + 3) ~= "MTrk" then break end
+            pos = pos + 4
+            local tlen = u32()
+            local tend = pos + tlen
+            local tick, status = 0, 0
+            while pos < tend do
+                local dt, b = 0, 0
+                repeat b = u8(); dt = dt * 128 + (b % 128) until b < 128
+                tick = tick + dt
+                local peek = data:byte(pos) or 0
+                if peek >= 0x80 then status = peek; pos = pos + 1 end
+                local hi = math.floor(status / 16)
+                if status == 0xFF then
+                    local meta = u8(); local len = 0
+                    repeat local x = u8(); len = len * 128 + (x % 128) until x < 128
+                    if meta == 0x51 and len == 3 and not tempoUs then
+                        local a, b2, c = data:byte(pos, pos + 2)
+                        tempoUs = ((a or 0) * 256 + (b2 or 0)) * 256 + (c or 0)
+                    end
+                    pos = pos + len
+                elseif status == 0xF0 or status == 0xF7 then
+                    local len = 0
+                    repeat local x = u8(); len = len * 128 + (x % 128) until x < 128
+                    pos = pos + len
+                elseif hi == 0x9 then
+                    local n = u8(); local vel = u8()
+                    if vel > 0 then notes[#notes + 1] = { tick = tick, note = n } end
+                elseif hi == 0x8 then pos = pos + 2
+                elseif hi == 0xC or hi == 0xD then pos = pos + 1
+                else pos = pos + 2 end
+            end
+            pos = tend
+        end
+        if #notes == 0 then return nil, "no notes found in MIDI" end
+        table.sort(notes, function(a, b) return a.tick < b.tick end)
+        local spt = ((tempoUs or 500000) / 1000000) / division   -- seconds per tick
+        local function toGame(m)
+            local n = m - 35            -- MIDI 36 (C2) -> game note 1
+            while n < 1 do n = n + 12 end
+            while n > 61 do n = n - 12 end
+            return n
+        end
+        local events, i = {}, 1
+        while i <= #notes do
+            local tk = notes[i].tick
+            local group = {}
+            while i <= #notes and notes[i].tick == tk do group[#group + 1] = toGame(notes[i].note); i = i + 1 end
+            local nextTk = notes[i] and notes[i].tick or tk
+            events[#events + 1] = { notes = group, after = (nextTk - tk) * spt }
+        end
+        return events
+    end
+
+    -- Shared player: fire each group, wait its gap, and STOP the moment we leave the
+    -- seat or another play/stop supersedes us. One coroutine, task.wait between notes,
+    -- so it costs nothing when idle (gentle on weak PCs).
+    local function pianoRun(events, notify)
         local remote = pianoRemote()
         if not remote then notify("AutoPiano", "InstrumentPiano remote missing"); return end
-        local steps = pianoParse(Config.AutoPiano.Sheet or "")
-        if #steps == 0 then notify("AutoPiano", "paste a Virtual Piano sheet first"); return end
-        pianoStop()                  -- cancel any current playback (bumps PN.token)
-        local token = PN.token       -- this run owns the new token
+        if not pianoSeated() then notify("AutoPiano", "sit at a piano first — you're not seated"); return end
+        if not events or #events == 0 then notify("AutoPiano", "nothing to play"); return end
+        pianoStop()
+        local token = PN.token
         PN.playing = true
         task.spawn(function()
             local transpose = math.floor(Config.AutoPiano.Transpose or 0)
-            local unit = math.max(0.03, (Config.AutoPiano.Tempo or 180) / 1000)
-            for _, st in ipairs(steps) do
-                if token ~= PN.token or not PN.playing then break end
-                for _, n in ipairs(st.notes) do pianoFire(remote, n + transpose) end
-                task.wait(unit * (1 + (st.gap or 0)))
+            local speed = math.max(0.1, (Config.AutoPiano.Speed or 100) / 100)
+            for _, ev in ipairs(events) do
+                if token ~= PN.token or not PN.playing or not pianoSeated() then break end
+                for _, n in ipairs(ev.notes) do pianoFire(remote, n + transpose) end
+                local after = (ev.after or 0) / speed
+                if after > 0 then task.wait(after) end
             end
             if token == PN.token then PN.playing = false end
         end)
-        notify("AutoPiano", ("playing %d steps"):format(#steps))
+        notify("AutoPiano", ("playing %d notes"):format(#events))
     end
 
-    -- Optional: learn the exact InstrumentPiano payload from ONE real keypress. Installs
-    -- a MINIMAL, self-inerting __namecall hook (a single equality + flag check per call,
-    -- no GC scans), so it will not freeze the client like a heavy logging hook. After it
-    -- captures once it becomes a pure pass-through.
-    local function pianoLearn(notify)
-        local remote = pianoRemote()
-        if not remote then notify("AutoPiano", "InstrumentPiano remote missing"); return end
-        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
-            notify("AutoPiano", "executor lacks hookmetamethod — can't learn"); return
+    -- Play the pasted Virtual Piano sheet (uniform Tempo timing).
+    local function pianoPlaySheet(notify)
+        local steps = pianoParse(Config.AutoPiano.Sheet or "")
+        if #steps == 0 then notify("AutoPiano", "paste a Virtual Piano sheet first"); return end
+        local unit = math.max(0.03, (Config.AutoPiano.Tempo or 180) / 1000)
+        local events = {}
+        for _, st in ipairs(steps) do
+            events[#events + 1] = { notes = st.notes, after = unit * (1 + (st.gap or 0)) }
         end
-        PN.learning = true
-        if PN.hooked then notify("AutoPiano", "learn armed — play ONE piano key"); return end
-        PN.hooked = true
-        local old
-        old = hookmetamethod(game, "__namecall", (newcclosure or function(f) return f end)(function(self, ...)
-            if PN.learning and self == remote then
-                local ok, m = pcall(getnamecallmethod)
-                local mine = (type(checkcaller) == "function") and checkcaller() or false
-                if ok and m == "FireServer" and not mine then
-                    PN.learning = false
-                    local args = table.pack(...)
-                    PN.template = args
-                    for k = 1, args.n do
-                        if type(args[k]) == "number" then PN.noteIdx = k; break end
-                    end
-                    -- Report the captured payload so it can be locked in / shared with me.
-                    if type(rconsoleprint) == "function" then
-                        pcall(rconsoleprint, ("[AutoPiano] captured %d arg(s); note = arg[%s]\n"):format(args.n, tostring(PN.noteIdx)))
-                        for k = 1, args.n do
-                            pcall(rconsoleprint, ("  arg[%d] %s = %s\n"):format(k, typeof(args[k]), tostring(args[k])))
-                        end
-                    end
-                    task.defer(function()
-                        pcall(notify, "AutoPiano", ("learned payload: %d arg(s), note=arg[%s]"):format(args.n, tostring(PN.noteIdx)))
-                    end)
-                end
-            end
-            return old(self, ...)
-        end))
-        notify("AutoPiano", "learn armed — play ONE piano key now")
+        pianoRun(events, notify)
+    end
+
+    -- Play a .mid file placed in the executor workspace (real timing from the MIDI).
+    local function pianoPlayMidi(notify)
+        local name = Config.AutoPiano.MidiFile or ""
+        if name == "" then notify("AutoPiano", "enter a .mid filename from your executor workspace"); return end
+        if type(readfile) ~= "function" then notify("AutoPiano", "executor has no readfile"); return end
+        local ok, data = pcall(readfile, name)
+        if not ok or type(data) ~= "string" then notify("AutoPiano", "can't read '" .. name .. "' — put the .mid in the executor workspace"); return end
+        local events, err = pianoParseMidi(data)
+        if not events then notify("AutoPiano", "MIDI error: " .. tostring(err)); return end
+        pianoRun(events, notify)
     end
 
     -- ═══════════════════════════ CHESS ENGINE ══════════════════════════════
@@ -3753,27 +3808,47 @@ return function(Lib, Core)
 
         -- ─────────────── Section: AutoPiano (Right) ───────────────
         local pn = Config.AutoPiano
+        -- Verified example (derived from the exact note map): Beethoven — Ode to Joy.
+        local EXAMPLE_ODE = "u u i o o i u y t t y u u y y u u i o o i u y t t y u y t t"
         local sPN = Misc:Section({ Side = "Right" })
         sPN:Header({ Name = "AutoPiano" })
-        sPN:SubLabel({ Text = "Sit at a piano, paste a Virtual Piano sheet (letters from sites like virtualpiano.net), then press Play." })
+        sPN:SubLabel({ Text = "Sit at a piano first. Paste a Virtual Piano sheet, load a .mid, or hit the example." })
         sPN:Input({
-            Name = "Sheet", Placeholder = "paste notes e.g. [8p] a s d [0o]", Default = pn.Sheet,
+            Name = "Sheet", Placeholder = "paste VP notes e.g. [8p] a s d [0o]", Default = pn.Sheet,
             Callback = function(t) pn.Sheet = t or "" end,
         }, ctx.flag("Misc_AutoPiano_Sheet"))
-        sPN:Button({ Name = "Play", Callback = function() pianoPlay(notify) end })
+        sPN:Button({ Name = "Play Sheet", Callback = function() pianoPlaySheet(notify) end })
         sPN:Button({ Name = "Stop", Callback = function() pianoStop(); notify("AutoPiano", "stopped") end })
         ctx.keybind(sPN, {
             Name = "Play / Stop Key",
             Flag = ctx.flag("Misc_AutoPiano_KB"),
-            Toggle = function() if PN.playing then pianoStop() else pianoPlay(notify) end end,
+            Toggle = function() if PN.playing then pianoStop() else pianoPlaySheet(notify) end end,
         })
+        sPN:Button({
+            Name = "Example: Ode to Joy",
+            Callback = function() pn.Sheet = EXAMPLE_ODE; pianoPlaySheet(notify) end,
+        })
+        sPN:Divider()
+        sPN:Header({ Name = "MIDI" })
+        sPN:SubLabel({ Text = "Drop a .mid into your executor workspace folder, type its filename, then Play MIDI. Any song works." })
+        sPN:Input({
+            Name = "MIDI File", Placeholder = "song.mid", Default = pn.MidiFile,
+            Callback = function(t) pn.MidiFile = t or "" end,
+        }, ctx.flag("Misc_AutoPiano_Midi"))
+        sPN:Button({ Name = "Play MIDI", Callback = function() pianoPlayMidi(notify) end })
+        slider(sPN, {
+            Name = "Speed", Flag = "Misc_AutoPiano_Speed",
+            Default = pn.Speed, Min = 25, Max = 300, Precision = 0, Suffix = " %",
+            Callback = function(v) pn.Speed = v end,
+        })
+        sPN:SubLabel({ Text = "MIDI playback speed (100 = original tempo)." })
         sPN:Divider()
         slider(sPN, {
             Name = "Tempo", Flag = "Misc_AutoPiano_Tempo",
             Default = pn.Tempo, Min = 60, Max = 600, Precision = 0, Suffix = " ms",
             Callback = function(v) pn.Tempo = v end,
         })
-        sPN:SubLabel({ Text = "ms per note. Lower = faster." })
+        sPN:SubLabel({ Text = "Sheet speed: ms per note. Lower = faster." })
         slider(sPN, {
             Name = "Transpose", Flag = "Misc_AutoPiano_Transpose",
             Default = pn.Transpose, Min = -24, Max = 24, Precision = 0,
@@ -3785,8 +3860,6 @@ return function(Lib, Core)
             Callback = function(v) pn.LocalSound = v and true or false end,
         }, ctx.flag("Misc_AutoPiano_LocalSound"))
         sPN:SubLabel({ Text = "Plays each note on your client too (others always hear it)." })
-        sPN:Button({ Name = "Learn Note", Callback = function() pianoLearn(notify) end })
-        sPN:SubLabel({ Text = "Only if notes don't register: click, then press ONE real piano key to capture the payload." })
 
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
