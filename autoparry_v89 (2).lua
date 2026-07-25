@@ -461,7 +461,6 @@ local Config = {
 	VizRingSeg    = 30,     -- segments in the ring (more = smoother, costs 2 projections each)
 	VizRingMirror = true,   -- draw the mirrored/opposite ring (the thing that sells the 3D)
 	VizRingTilt   = 0.7,    -- how far Orbit/OrbitSwirl push the band through depth (studs)
-	VizRingBlur   = true,   -- translucent copy under the ribbon (the glow in the reference)
 	-- [V94] How we face the target: "LookAt" rotates the character (server-safe, what we always
 	-- did) | "AimLock" points the CAMERA instead and lets the game turn us (way less snappy).
 	RotationMethod = "LookAt",
@@ -5779,8 +5778,7 @@ Viz.drawRing = function(cam, model, hrp, hot)
 	local bodyY = footY + ((bs and bs.Y or 5) * 0.5)
 	local swirl = (style == "OrbitSwirl") and (t * 0.75) or 0
 	local tilt  = Config.VizRingTilt or 0.7
-	local rIn   = radius * 0.95
-	local BLUR_DROP = 0.05                    -- the reference offsets its blur copy by this much
+	local rIn   = radius * 0.985      -- [V94.2] tighter band (was 0.95 — user wanted them closer)
 
 	for i = 0, seg - 1 do
 		local a1 = (i / seg) * math.pi * 2 + swirl
@@ -5797,24 +5795,16 @@ Viz.drawRing = function(cam, model, hrp, hot)
 		local o1 = Vector3.new(cx + math.cos(a1) * radius, y, cz + math.sin(a1) * radius)
 		Viz.ribbonQuad(cam, i1, i2, o2, o1, col, hot and 0 or 0.08)
 
-		-- translucent blur copy just under it (the glow in the reference)
-		if Config.VizRingBlur ~= false then
-			local yb = y - BLUR_DROP
-			Viz.ribbonQuad(cam,
-				Vector3.new(i1.X, yb, i1.Z), Vector3.new(i2.X, yb, i2.Z),
-				Vector3.new(o2.X, yb, o2.Z), Vector3.new(o1.X, yb, o1.Z), col, 0.7)
-		end
-
-		-- mirrored ribbon: negated angles + inverted depth = the crossing band
+		-- [V94.2] mirrored pass is a plain LINE again (the filled second ribbon + the blur copy were
+		-- both more logic than they were worth). Negated angle + inverted depth still gives the
+		-- crossing band that sells the 3D.
 		if Config.VizRingMirror ~= false then
-			local m1, m2 = -a1, -a2
 			local ym = bodyY - dy
-			Viz.ribbonQuad(cam,
-				Vector3.new(cx + math.cos(m1) * rIn, ym, cz + math.sin(m1) * rIn),
-				Vector3.new(cx + math.cos(m2) * rIn, ym, cz + math.sin(m2) * rIn),
-				Vector3.new(cx + math.cos(m2) * radius, ym, cz + math.sin(m2) * radius),
-				Vector3.new(cx + math.cos(m1) * radius, ym, cz + math.sin(m1) * radius),
-				Config.RingB:Lerp(Config.RingA, f), hot and 0.1 or 0.25)
+			local rMid = (rIn + radius) * 0.5
+			Viz.drawWorldSeg(cam,
+				Vector3.new(cx + math.cos(-a1) * rMid, ym, cz + math.sin(-a1) * rMid),
+				Vector3.new(cx + math.cos(-a2) * rMid, ym, cz + math.sin(-a2) * rMid),
+				Config.RingB:Lerp(Config.RingA, f), hot and 3 or 2)
 		end
 	end
 end
@@ -6502,9 +6492,6 @@ return function(_Lib, _Core)
 		ringOrbitEls[#ringOrbitEls + 1] = slider(apVis, { Name = "Depth", Flag = "AP_VizRingTilt",
 			Default = math.floor((Config.VizRingTilt or 0.7) * 100), Min = 10, Max = 200, Suffix = "%",
 			Callback = function(v) Config.VizRingTilt = v / 100 end })
-		ringOrbitEls[#ringOrbitEls + 1] = boolToggle(apVis, "Glow", "Ring Glow",
-			function() return Config.VizRingBlur ~= false end,
-			function(v) Config.VizRingBlur = v end)
 		ringOrbitEls[#ringOrbitEls + 1] = boolToggle(apVis, "Mirror Band", "Ring Mirror",
 			function() return Config.VizRingMirror ~= false end,
 			function(v) Config.VizRingMirror = v end)
