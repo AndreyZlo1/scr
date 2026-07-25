@@ -90,7 +90,7 @@ return function(Lib, Core)
             File       = "",     -- image file in the executor workspace
             Source     = "",     -- "url" | "file": which input the user touched last
             Quality    = 80,     -- 1-100: single knob for detail + colour fidelity
-            Speed      = 400,    -- points/second painted (local+server together); batched into ≤24-pt packets so few packets are sent
+            Speed      = 12,     -- PACKETS/second sent to the server (game's own ceiling is ~12.5; each packet holds up to 24 points)
             Threshold  = 16,     -- brightness (0-255) below which a pixel is skipped
             SkipBg     = false,  -- OFF by default so black pixels ARE drawn (was skipping them)
             Mono       = false,  -- draw everything in chalk white instead of colour
@@ -1858,24 +1858,34 @@ return function(Lib, Core)
         -- WhiteboardDrawBatch remote drops packets if flooded, but because each packet
         -- now carries up to 23 segments we send far fewer packets for the same paint
         -- rate, so it finishes much faster and cleaner than the old 1-segment-per-fire.
+        -- PACING IS PER-PACKET, NOT PER-POINT. WhiteboardDrawBatch is a BLINK_UNRELIABLE
+        -- remote (verified in Shared.Network.Client: its Fire uses BLINK_UNRELIABLE_REMOTE),
+        -- so excess packets are silently DROPPED. That is exactly the "draws fine for me,
+        -- incomplete for others at high speed" bug: our local render never goes through the
+        -- network, so only the replicated copy loses strokes. The game itself never exceeds
+        -- one batch per 0.08s — flushStroke fires only when tick()-last >= 0.08 or the
+        -- stroke hit 24 points (WhiteboardServiceClient.flushStroke) — i.e. ~12.5 pkt/sec.
+        -- We therefore pace by PACKETS/second and clamp to the game's own ceiling; each
+        -- packet still carries up to 24 points, so ~300 points/sec still lands, intact.
         local sync     = opts.sync
         local sent, rendered = 0, false
-        local perSec   = math.clamp(math.floor(opts.speed or 400), 30, 4000)
-        local burstCap = math.max(24, math.floor(perSec * 0.15))
-        local budget, last = 0, os.clock()
+        local pktPerSec = math.clamp(tonumber(opts.speed) or 12, 1, 12.5)
+        local minGap    = 1 / pktPerSec
+        local lastFire  = 0
         for bi = 1, nbatch do
             if token ~= _drawToken then break end
             local batch = batches[bi]
-            local cost = #batch.pts
-            while budget < cost do
-                RunService.Heartbeat:Wait()
+            -- Only the SERVER path needs the rate limit; local-only draws can run free.
+            if sync then
+                while os.clock() - lastFire < minGap do
+                    RunService.Heartbeat:Wait()
+                    if token ~= _drawToken then break end
+                end
                 if token ~= _drawToken then break end
-                local now = os.clock()
-                budget = math.min(burstCap, budget + (now - last) * perSec)
-                last = now
+                lastFire = os.clock()
+            elseif (bi % 8) == 0 then
+                RunService.Heartbeat:Wait()
             end
-            if token ~= _drawToken then break end
-            budget = budget - cost
             local rok, fok = drawBatch(board, batch.r, batch.g, batch.b, batch.pts, sync)
             if rok then rendered = true end
             if fok then sent = sent + 1 end
@@ -2745,13 +2755,39 @@ return function(Lib, Core)
         pianoRun(events, notify)
     end
 
-    -- Play a .mid file placed in the executor workspace (real timing from the MIDI).
+    -- Play a MIDI: either a direct URL or a .mid file in the executor workspace. URLs are
+    -- downloaded straight into memory (nothing written to disk), using the same UNC getter
+    -- order as Auto Draw — httpget is binary-safe, request/http_request can truncate binary
+    -- bodies at null bytes on some builds, so they come last.
     local function pianoPlayMidi(notify)
-        local name = Config.AutoPiano.MidiFile or ""
-        if name == "" then notify("AutoPiano", "enter a .mid filename from your executor workspace"); return end
-        if type(readfile) ~= "function" then notify("AutoPiano", "executor has no readfile"); return end
-        local ok, data = pcall(readfile, name)
-        if not ok or type(data) ~= "string" then notify("AutoPiano", "can't read '" .. name .. "' — put the .mid in the executor workspace"); return end
+        local src = Config.AutoPiano.MidiFile or ""
+        if src == "" then notify("AutoPiano", "paste a .mid URL or a filename from your executor workspace"); return end
+
+        local data
+        if src:match("^https?://") then
+            local dlOk = pcall(function()
+                if type(httpget) == "function" then
+                    data = httpget(src)
+                elseif type(http_request) == "function" then
+                    local res = http_request({ Url = src, Method = "GET" })
+                    data = res and res.Body
+                elseif type(request) == "function" then
+                    local res = request({ Url = src, Method = "GET" })
+                    data = res and res.Body
+                end
+            end)
+            if not dlOk or type(data) ~= "string" or #data == 0 then
+                notify("AutoPiano", "download failed — check the URL and that HTTP is enabled"); return
+            end
+        else
+            if type(readfile) ~= "function" then notify("AutoPiano", "executor has no readfile"); return end
+            local ok, res = pcall(readfile, src)
+            if not ok or type(res) ~= "string" then
+                notify("AutoPiano", "can't read '" .. src .. "' — put the .mid in the executor workspace"); return
+            end
+            data = res
+        end
+
         local events, err = pianoParseMidi(data)
         if not events then notify("AutoPiano", "MIDI error: " .. tostring(err)); return end
         pianoRun(events, notify)
@@ -3797,7 +3833,7 @@ return function(Lib, Core)
         -- ─────────────── Section: AutoGreen (Left) ───────────────
         local sAG2 = Misc:Section({ Side = "Left" })
         sAG2:Header({ Name = "AutoGreen" })
-        sAG2:SubLabel({ Text = "Every basketball shot lands PERFECT (green). Play normally with F — the real animation and shot bar still show; we just fix the release timing as the shot leaves." })
+        sAG2:SubLabel({ Text = "Every basketball shot lands PERFECT" })
         feature(sAG2, {
             Title = "AutoGreen", Flag = "Misc_AutoGreen",
             get = function() return Config.AutoGreen.On end,
@@ -3830,9 +3866,9 @@ return function(Lib, Core)
         })
         sPN:Divider()
         sPN:Header({ Name = "MIDI" })
-        sPN:SubLabel({ Text = "Drop a .mid into your executor workspace folder, type its filename, then Play MIDI. Any song works." })
+        sPN:SubLabel({ Text = "Paste a direct .mid link, or drop a .mid in ur executor workspace and type its filename" })
         sPN:Input({
-            Name = "MIDI File", Placeholder = "song.mid", Default = pn.MidiFile,
+            Name = "MIDI URL / File", Placeholder = "https://.../song.mid  or  song.mid", Default = pn.MidiFile,
             Callback = function(t) pn.MidiFile = t or "" end,
         }, ctx.flag("Misc_AutoPiano_Midi"))
         sPN:Button({ Name = "Play MIDI", Callback = function() pianoPlayMidi(notify) end })
@@ -3859,7 +3895,7 @@ return function(Lib, Core)
             Name = "Hear Myself", Default = pn.LocalSound,
             Callback = function(v) pn.LocalSound = v and true or false end,
         }, ctx.flag("Misc_AutoPiano_LocalSound"))
-        sPN:SubLabel({ Text = "Plays each note on your client too (others always hear it)." })
+        sPN:SubLabel({ Text = "Plays each note on ur client too (others always hear it)." })
 
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
@@ -3999,10 +4035,10 @@ return function(Lib, Core)
         sAD:SubLabel({ Text = "ON: sends strokes to the server so the drawing persists and others see it" })
         slider(sAD, {
             Name = "Draw Speed", Flag = "Misc_AutoDraw_Speed",
-            Default = ad.Speed, Min = 30, Max = 4000, Precision = 0, Suffix = " pts/s",
+            Default = ad.Speed, Min = 1, Max = 12, Precision = 0,
             Callback = function(v) ad.Speed = v end,
         })
-        sAD:SubLabel({ Text = "Points/second painted. Your screen and the server fill in together through the game's own draw path, so both look identical" })
+        sAD:SubLabel({ Text = "Packets/second (each carries up to 24 points). The draw remote is unreliable and the game itself never exceeds ~12, so higher would be dropped and others would see an incomplete drawing. Lower it if ur ping is bad." })
 
         -- ── Size & position ────────────────────────────────────────────
         sAD:Divider()
