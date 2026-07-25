@@ -116,9 +116,10 @@ return function(Lib, Core)
         },
 
         AutoPiano = {
-            Sheet    = "",   -- pasted Virtual Piano sheet (letter macro, e.g. from virtualpiano.net)
-            Tempo    = 180,  -- ms per note step (lower = faster)
-            BaseNote = 8,    -- game note number the sheet's LOWEST key maps to (tune the octave up/down)
+            Sheet     = "",    -- pasted Virtual Piano sheet (letter macro, e.g. from virtualpiano.net)
+            Tempo     = 180,   -- ms per note step (lower = faster)
+            Transpose = 0,     -- shift every note by N semitones (0 = exact; use if it sits too high/low)
+            LocalSound = true, -- also play each note on our own client so WE hear it (others always do)
         },
 
         Chess = {
@@ -2520,26 +2521,21 @@ return function(Lib, Core)
 
     -- ═══════════════════════════ AUTOPIANO ══════════════════════════════════
     -- Auto-plays a song on the in-game piano. Paste a Virtual Piano sheet (the letter
-    -- macros you get from sites like virtualpiano.net) into the Sheet box and press
-    -- Play; each key is translated to the game's note number and sent through the
-    -- piano's own InstrumentPiano remote on a timer. Sit at a piano first.
+    -- macros from sites like virtualpiano.net) into the Sheet box and press Play; each
+    -- key maps to the game's note number and is sent through InstrumentPiano on a timer.
+    -- Sit at a piano first.
     --
-    -- Notes are an integer note number (verified in PianoVisualize: octave = ceil(note/12),
-    -- key part named tostring(note)). No auth token was found for piano notes, so we fire
-    -- the note directly. If your build needs a different payload, use "Learn Note" once to
-    -- capture the exact shape from one real keypress.
-    local PN = { playing = false, token = 0, template = nil, noteIdx = nil, learning = false, hooked = false }
+    -- Note mapping is EXACT — taken from the game's own PianoClient.LetterToNote: the
+    -- note number is the 1-based index of the character in PIANO_KEYS below (61 keys,
+    -- C2..C7). This is the same QWERTY layout virtualpiano.net uses, so pasted sheets
+    -- map 1:1. Payload confirmed: InstrumentPiano:FireServer("play", note).
+    local PN = { playing = false, token = 0, template = nil, noteIdx = nil,
+                 learning = false, hooked = false, sndFolder = nil, templates = nil }
 
-    -- Standard 61-key Virtual Piano char -> semitone (0 = lowest key). Naturals plus
-    -- shift-sharps; any other char is treated as a rest/separator.
-    local VP_SEMI = {
-        ["1"]=0,["!"]=1,["2"]=2,["@"]=3,["3"]=4,["4"]=5,["$"]=6,["5"]=7,["%"]=8,["6"]=9,["^"]=10,["7"]=11,
-        ["8"]=12,["*"]=13,["9"]=14,["("]=15,["0"]=16,
-        ["q"]=17,["Q"]=18,["w"]=19,["W"]=20,["e"]=21,["E"]=22,["r"]=23,
-        ["t"]=24,["T"]=25,["y"]=26,["Y"]=27,["u"]=28,["i"]=29,["I"]=30,["o"]=31,["O"]=32,["p"]=33,["P"]=34,["a"]=35,
-        ["s"]=36,["S"]=37,["d"]=38,["D"]=39,["f"]=40,["g"]=41,["G"]=42,["h"]=43,["H"]=44,["j"]=45,["J"]=46,["k"]=47,
-        ["l"]=48,["L"]=49,["z"]=50,["x"]=51,["X"]=52,["c"]=53,["v"]=54,["V"]=55,["b"]=56,["B"]=57,["n"]=58,["m"]=59,
-    }
+    -- Exact char -> note-number layout copied from PianoClient (index in string = note).
+    local PIANO_KEYS = "1!2@34$5%6^78*9(0qQwWeErtTyYuiIoOpPasSdDfgGhHjJklLzZxcCvVbBnm"
+    -- The 6 piano sample banks (PianoShared.PianoSounds), in order.
+    local PIANO_SOUNDS = { "233836579", "233844049", "233845680", "233852841", "233854135", "233856105" }
 
     local function pianoRemote()
         local r = ReplicatedStorage:FindFirstChild("Remotes")
@@ -2547,11 +2543,56 @@ return function(Lib, Core)
         return (r and r:IsA("RemoteEvent")) and r or nil
     end
 
-    -- Fire one note. Confirmed payload (from Learn Note): FireServer("play", note),
-    -- arg1 = the string "play", arg2 = the integer note number. A captured template
-    -- (Learn Note) overrides this if a build ever differs.
+    -- Build the 6 sample templates once (muted, preloaded), mirroring PianoClient's
+    -- rebuildSoundTemplates. Used to play the note LOCALLY so WE hear our own auto-play
+    -- (the game only plays a note locally on a real keypress, which we bypass; its
+    -- OnClientEvent ignores echoes from ourselves, so without this we stay silent).
+    local function pianoBuildTemplates()
+        if PN.templates then return end
+        local SoundService = game:GetService("SoundService")
+        local folder = Instance.new("Folder")
+        folder.Name = "SyllinseAutoPianoSounds"
+        folder.Parent = SoundService
+        PN.sndFolder = folder
+        PN.templates = {}
+        for i, id in ipairs(PIANO_SOUNDS) do
+            local sid, speed = id, 1
+            if sid == "233845680" then sid = "233844049"; speed = 1.12246 end
+            local s = Instance.new("Sound")
+            s.Name = "APSample_" .. i
+            s.SoundId = "rbxassetid://" .. sid
+            s.PlaybackSpeed = speed
+            s.Volume = 0
+            s.RollOffMode = Enum.RollOffMode.Linear
+            s.Parent = folder
+            PN.templates[i] = s
+        end
+        pcall(function() game:GetService("ContentProvider"):PreloadAsync(PN.templates) end)
+    end
+
+    -- Play one note locally, replicating PianoClient.u27: bank = ceil(((note-1)%12+1)/2),
+    -- pitch is a TimePosition seek into the long sample (not PlaybackSpeed).
+    local function pianoLocalSound(note)
+        if not Config.AutoPiano.LocalSound then return end
+        pianoBuildTemplates()
+        local within = (note - 1) % 12 + 1
+        local octave = math.ceil(note / 12)
+        local bank   = math.ceil(within / 2)
+        local tmpl   = PN.templates and PN.templates[bank]
+        if not tmpl then return end
+        local ok, s = pcall(function() return tmpl:Clone() end)
+        if not ok or not s then return end
+        s.Volume = 0.82
+        s.Parent = PN.sndFolder
+        local timePos = (octave - 1) * 16 + 8 * (1 - within % 2) + (octave - 0.9) / 15
+        pcall(function() s.TimePosition = timePos; s:Play() end)
+        game:GetService("Debris"):AddItem(s, 4)
+    end
+
+    -- Fire one note: InstrumentPiano:FireServer("play", note) (others hear it) AND play
+    -- it locally (we hear it). A captured Learn-Note template overrides the payload.
     local function pianoFire(remote, note)
-        note = math.clamp(math.floor(note + 0.5), 1, 88)
+        note = math.clamp(math.floor(note + 0.5), 1, 61)   -- game piano is 61 keys (C2..C7)
         if PN.template and PN.noteIdx then
             local t, n = PN.template, PN.template.n or #PN.template
             local a = {}
@@ -2561,9 +2602,10 @@ return function(Lib, Core)
         else
             pcall(function() remote:FireServer("play", note) end)
         end
+        pianoLocalSound(note)
     end
 
-    -- Parse a Virtual Piano sheet into steps: each step = { notes = {semitone,...}, gap = n }.
+    -- Parse a Virtual Piano sheet into steps: each step = { notes = {noteNumber,...}, gap = n }.
     -- Bracketed groups [..] play together (a chord); whitespace/"|" add rest units.
     local function pianoParse(sheet)
         local steps, i, len = {}, 1, #sheet
@@ -2573,8 +2615,8 @@ return function(Lib, Core)
                 local j = sheet:find("]", i + 1, true) or len
                 local chord = {}
                 for k = i + 1, j - 1 do
-                    local s = VP_SEMI[sheet:sub(k, k)]
-                    if s then chord[#chord + 1] = s end
+                    local n = (PIANO_KEYS:find(sheet:sub(k, k), 1, true))
+                    if n then chord[#chord + 1] = n end
                 end
                 if #chord > 0 then steps[#steps + 1] = { notes = chord, gap = 0 } end
                 i = j + 1
@@ -2582,8 +2624,8 @@ return function(Lib, Core)
                 if #steps > 0 then steps[#steps].gap = steps[#steps].gap + 1 end
                 i = i + 1
             else
-                local s = VP_SEMI[c]
-                if s then steps[#steps + 1] = { notes = { s }, gap = 0 } end
+                local n = (PIANO_KEYS:find(c, 1, true))
+                if n then steps[#steps + 1] = { notes = { n }, gap = 0 } end
                 i = i + 1
             end
         end
@@ -2606,11 +2648,11 @@ return function(Lib, Core)
         local token = PN.token       -- this run owns the new token
         PN.playing = true
         task.spawn(function()
-            local base = math.floor(Config.AutoPiano.BaseNote or 8)
+            local transpose = math.floor(Config.AutoPiano.Transpose or 0)
             local unit = math.max(0.03, (Config.AutoPiano.Tempo or 180) / 1000)
             for _, st in ipairs(steps) do
                 if token ~= PN.token or not PN.playing then break end
-                for _, s in ipairs(st.notes) do pianoFire(remote, base + s) end
+                for _, n in ipairs(st.notes) do pianoFire(remote, n + transpose) end
                 task.wait(unit * (1 + (st.gap or 0)))
             end
             if token == PN.token then PN.playing = false end
@@ -3733,13 +3775,18 @@ return function(Lib, Core)
         })
         sPN:SubLabel({ Text = "ms per note. Lower = faster." })
         slider(sPN, {
-            Name = "Base Note", Flag = "Misc_AutoPiano_Base",
-            Default = pn.BaseNote, Min = 1, Max = 40, Precision = 0,
-            Callback = function(v) pn.BaseNote = v end,
+            Name = "Transpose", Flag = "Misc_AutoPiano_Transpose",
+            Default = pn.Transpose, Min = -24, Max = 24, Precision = 0,
+            Callback = function(v) pn.Transpose = v end,
         })
-        sPN:SubLabel({ Text = "Shifts the whole song up/down to fit the piano's octaves." })
+        sPN:SubLabel({ Text = "Semitone shift. 0 = exact; nudge only if a song sits too high/low." })
+        sPN:Toggle({
+            Name = "Hear Myself", Default = pn.LocalSound,
+            Callback = function(v) pn.LocalSound = v and true or false end,
+        }, ctx.flag("Misc_AutoPiano_LocalSound"))
+        sPN:SubLabel({ Text = "Plays each note on your client too (others always hear it)." })
         sPN:Button({ Name = "Learn Note", Callback = function() pianoLearn(notify) end })
-        sPN:SubLabel({ Text = "Only if notes don't play: click this, then press ONE real piano key to capture the payload." })
+        sPN:SubLabel({ Text = "Only if notes don't register: click, then press ONE real piano key to capture the payload." })
 
         -- ─────────────── Section: Chalk Spammer (Right) ───────────────
         local chk = Config.Chalk
