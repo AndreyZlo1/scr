@@ -4834,14 +4834,14 @@ local function toggleDesyncTest()
 		-- ма��симальный приорите��, чтобы перебивать walk/run (Movement) — берём Action4 если есть
 		local topPrio = Enum.AnimationPriority.Action
 		pcall(function() topPrio = Enum.AnimationPriority.Action4 end)
-		-- [V91] DESYNC WEIGHT FIX. This used to be `and 1 or 0.03`: with DesyncClientVisible
-	-- off (the default) every decoy played at weight 0.03, which barely moves the rig, so
-	-- what OTHER clients received was still essentially the real swing pose — the decoy
-	-- fooled nobody and idlemask/prerun looked like dead toggles. Roblox replicates track
-	-- weight, so a mask must actually WIN the pose: full weight at top priority. Hiding it
-	-- from ourselves is not possible via weight (weight is what replicates), so
-	-- DesyncClientVisible now only controls a small local fade, not the replicated weight.
-	local wgt = Config.DesyncClientVisible and 1 or 0.92
+		-- [V91.2] ANTI-AUTOPARRY WEIGHT — this is NOT the desync-mask weight. What fools an
+		-- enemy resolver here is the AnimationPlayed EVENT (a fresh Stop→Play replicates the
+		-- attack state), not how hard the pose is driven. In V91 I raised this to 0.92 along
+		-- with the mask weight; that made the decoy actually win the pose, so on your screen
+		-- your character visibly replays the swing over and over (u reported "animations start
+		-- playing"). Back to a whisper weight: the event still fires and still replicates, the
+		-- rig barely moves, so u only get the tiny twitch u had before.
+		local wgt = Config.DesyncClientVisible and 1 or 0.03
 		pcall(function()
 			track.Priority = topPrio
 			track.Looped = true
@@ -5238,6 +5238,19 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	-- срабатывает AnimationPlayed. Раньше delay-хук хватал их и делал Stop/replay ��� decoy
 	-- дёргался. Пропускаем наши собственные decoy-треки — трогаем только реальные атаки.
 	if track == _testTrack or track == _decoyTrack then return end
+	-- [V91.2] MUTUAL EXCLUSION with Anti-AutoParry. Both features drive the same animation
+	-- channel: Anti-AutoParry re-Plays its decoy at Action4 every ~0.35s to keep replicating a
+	-- fake attack state, while delay-mode Stops the REAL swing and re-Plays it later. Run both
+	-- and the rig gets Stop/Play from two owners in the same window — that is the "animations
+	-- start playing" u saw. Anti-AutoParry owns the channel while it is on; the packet-side
+	-- modes (firedelay/prerun) are unaffected and still work alongside it.
+	if DesyncTest.on then
+		if (os.clock() - (State.lastAAPSkipLog or 0)) > 2 then
+			State.lastAAPSkipLog = os.clock()
+			aclog("[desync] anim-delay skipped — anti-autoparry owns the anim channel (use firedelay instead)")
+		end
+		return
+	end
 
 	local window = (Config.DesyncDelayMs or 0) / 1000 + 0.05
 	_desyncBusyUntil[track] = now + window
