@@ -44,6 +44,18 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 return function(Lib, Core)
+    -- Luraph macro raw shim. The per-frame movement steps are wrapped in
+    -- LPH_NO_VIRTUALIZE(function() ... end) so Luraph keeps the CFrame/velocity
+    -- math native. You CANNOT declare a local/variable named LPH_* — Luraph
+    -- reserves the prefix and errors ("cannot be used as a variable name"). So when
+    -- run raw we install an identity fallback under that name via a STRING key
+    -- (concat so the reserved token never appears). After Luraph this line is dead.
+    do
+        local k = "LPH" .. "_NO_VIRTUALIZE"
+        local G = (type(getgenv) == "function") and getgenv() or _G
+        if not G[k] then G[k] = function(f) return f end end
+    end
+
     local Players          = game:GetService("Players")
     local RunService       = game:GetService("RunService")
     local UserInputService  = game:GetService("UserInputService")
@@ -125,7 +137,7 @@ return function(Lib, Core)
         AntiRagdoll_On = false,
     }
 
-    -- ═════════════════════════ Character helpers ═════════════════════����══════
+    -- ═════════════════════════ Character helpers ═════════════════════�����══════
     local function getChar()
         local c = LocalPlayer.Character
         if not c or not c.Parent then return nil end
@@ -227,7 +239,8 @@ return function(Lib, Core)
     -- CFrame  → shift the root by moveVec*speed*dt (positional, beats the WalkSpeed
     --           anti-cheat since WalkSpeed itself is untouched).
     -- Velocity→ set horizontal AssemblyLinearVelocity, keep gravity on Y.
-    local function stepSpeed(dt)
+    -- [LURAPH] per-frame speed step — kept native under Luraph.
+    local stepSpeed = LPH_NO_VIRTUALIZE(function(dt)
         if not Config.Speed_On then return end
         local char, hum, root = getParts(); if not hum then return end
         -- FIX: never shove the root while the game has us locked/anchored (grapple, ragdoll,
@@ -242,7 +255,7 @@ return function(Lib, Core)
         else -- CFrame
             root.CFrame = root.CFrame + (moveDir * speed * dt)
         end
-    end
+    end)
 
     -- ════════════════════════════════ FLY ═══════════════════════════════════
     local flyUp, flyDown = 0, 0        -- vertical input state
@@ -287,7 +300,8 @@ return function(Lib, Core)
         flyActive = false
     end
 
-    local function stepFly(dt)
+    -- [LURAPH] per-frame fly step — kept native under Luraph.
+    local stepFly = LPH_NO_VIRTUALIZE(function(dt)
         if not Config.Fly_On then
             if flyActive then stopFlyPhysics(); clearFlyInput() end
             return
@@ -319,7 +333,7 @@ return function(Lib, Core)
             root.AssemblyLinearVelocity = Vector3.zero
             root.CFrame = root.CFrame + ((horizontal + vertical) * dt)
         end
-    end
+    end)
 
     -- ═══════════════════════════════ NOCLIP ═════════════════════════════════
     -- Standard client noclip: force CanCollide=false on our parts every PreSimulation frame
@@ -358,10 +372,14 @@ return function(Lib, Core)
             end
         end
     end
+    -- [PERF] persistent wrapper: the pcall below allocated a closure PER PART (~10 per call),
+    -- and restoreCollide fires on every noclip toggle AND every ragdoll start/end — a burst of
+    -- allocations at exactly the worst moment for frame time.
+    local function _setCollide(p, v) p.CanCollide = v end
     local function restoreCollide()
         for part, orig in pairs(_noclipTouched) do
             if typeof(part) == "Instance" and part.Parent then
-                pcall(function() part.CanCollide = orig end)
+                pcall(_setCollide, part, orig)
             end
         end
         table.clear(_noclipTouched)
@@ -447,6 +465,7 @@ return function(Lib, Core)
         [Enum.HumanoidStateType.GettingUp]   = true,
         [Enum.HumanoidStateType.Seated]      = true,
     }
+    local function _humGetState(h) return h:GetState() end
     local function selfRagdolled(char)
         if char:GetAttribute("Ragdoll") == true or char:GetAttribute("Downed") == true
            or char:GetAttribute("RagdollLaunchApplied") == true then
@@ -455,7 +474,9 @@ return function(Lib, Core)
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum then
             if hum.PlatformStand == true then return true end
-            local ok, st = pcall(function() return hum:GetState() end)
+            -- [PERF] pcall with an inline closure allocated a fresh closure EVERY PreSimulation
+            -- frame while noclip was on. Persistent wrapper → zero allocation.
+            local ok, st = pcall(_humGetState, hum)
             if ok and RAGDOLL_STATES[st] then return true end
         end
         return false
@@ -463,7 +484,8 @@ return function(Lib, Core)
 
     local RAGDOLL_GRACE = 0.5     -- keep collisions this long AFTER ragdoll clears (let get-up finish)
     local _noclipActive, _ragdollClearedAt = false, 0
-    local function stepNoClip()
+    -- [LURAPH] per-frame noclip step — kept native under Luraph.
+    local stepNoClip = LPH_NO_VIRTUALIZE(function()
         if not Config.NoClip_On then
             if _noclipActive then restoreCollide(); _noclipActive = false end
             return
@@ -487,7 +509,7 @@ return function(Lib, Core)
             local victim = getCarriedVictim(char)
             if victim then unCollide(victim) end
         end
-    end
+    end)
 
     -- ══════════��════════ HOOK-BASED FEATURES ════════��════���════════════��═════
     -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
@@ -671,6 +693,9 @@ return function(Lib, Core)
     end
 
     -- called for every track the local Humanoid plays (optional M1 anim-speed visual)
+    local function _trackPlaying(t) return t.IsPlaying end
+    local function _trackAdjust(t, spd) t:AdjustSpeed(spd) end
+
     local function onAnimPlayed(track)
         if not Config.NoDelay_On then return end
         local mul = animSpeedMul()
@@ -684,11 +709,12 @@ return function(Lib, Core)
         -- re-assert for a short window so the game's own AdjustSpeed can't override us
         task.spawn(function()
             local t0 = os.clock()
+            -- [PERF] these two pcalls used to allocate a closure EACH, every frame, for 0.3s
+            -- per swing — with fast combos several of these loops overlap (~140 closures).
             while os.clock() - t0 < 0.3 do
-                local playing = true
-                pcall(function() playing = track.IsPlaying end)
-                if not playing then break end
-                pcall(function() track:AdjustSpeed(target) end)
+                local okP, playing = pcall(_trackPlaying, track)
+                if okP and not playing then break end
+                pcall(_trackAdjust, track, target)
                 task.wait()
             end
         end)
@@ -883,7 +909,7 @@ return function(Lib, Core)
     -- the hot path is a cheap pointer compare instead of an Instance property index per call.
     local _myChar = LocalPlayer.Character
 
-    -- ══════════════════════════ DODGE TWEAKS ════════════════════════════════
+    -- ══════════════════════════ DODGE TWEAKS ══════════════════════��═════════
     -- SPEED: the dash velocity reads the `DashSpeed` module upvalue directly (Evasive.lua:701)
     -- and the config field (Evasive.DashSpeed) — we patch both. This works.
     --
@@ -1002,6 +1028,7 @@ return function(Lib, Core)
         _evHooked = (_origEvasive ~= nil)
         return _evHooked
     end
+    local function _setGrant(c) c:SetAttribute("OutnumberedEvasiveGrant", true) end
     -- Cheap per-frame keeper: writes only when the desired value actually changed.
     local function driveDodge()
         if not Config.Dodge_On then return end
@@ -1024,7 +1051,9 @@ return function(Lib, Core)
             if _evCdIdx and ev then pcall(debug.setupvalue, ev.Evasive, _evCdIdx, base) end
             _appliedCd = base
         end
-        installEvasiveHook()   -- idempotent; makes the custom cooldown actually apply
+        -- [PERF] installEvasiveHook was called on EVERY Heartbeat. It early-returns once hooked,
+        -- but that's still a call + upvalue read every frame forever; latch it instead.
+        if not _evHooked then installEvasiveHook() end
 
         -- DODGE EVERYWHERE — assert the game's own u51 bypass (skips the hit/stun/guard-broken/
         -- cant-anything gates internally). It ALSO zeroes the game's deadlines, but that no longer
@@ -1033,7 +1062,7 @@ return function(Lib, Core)
         if Config.Dodge_Everywhere then
             local c = _myChar
             if c and c:GetAttribute("OutnumberedEvasiveGrant") ~= true then
-                pcall(function() c:SetAttribute("OutnumberedEvasiveGrant", true) end)
+                pcall(_setGrant, c)   -- [PERF] persistent wrapper, was a closure per Heartbeat
             end
         end
     end
@@ -1176,6 +1205,9 @@ return function(Lib, Core)
         flyActive = false
         clearFlyInput()
         table.clear(_noclipTouched)   -- old parts are gone; new char re-uncollides while NoClip on
+        table.clear(_partCache)       -- [PERF/leak] the part cache is keyed by the character MODEL
+                                      -- with strong keys, so without this the previous character
+                                      -- (and its part list) stayed referenced for the whole session
         _carryVictim, _carryCacheT = nil, 0
         _noclipActive = Config.NoClip_On
         task.wait(0.5)
