@@ -99,18 +99,26 @@ return function(Lib, Core)
         THud_InsetX  = 16,        -- horizontal gap from the enemy (px, Player anchor)
         THud_InsetY  = 0,         -- vertical nudge (px, Player anchor)
         THud_Drag    = true,      -- allow dragging (Anchor = Free)
+        THud_Smooth  = 16,        -- follow smoothing (higher = snappier, lower = floatier)
         THud_Scale   = 1.0,
         THud_Opacity = 100,       -- panel opacity %
         THud_Avatar  = true,      -- static in-game portrait of the target
         THud_Stamina = true,      -- show the stamina bar (only appears while it isn't full)
         THud_M2      = true,      -- show the heavy bar (only appears while it's on cooldown)
         THud_Accent  = Color3.fromRGB(255, 96, 96),
-        THud_HitFlash= true,      -- flash + kick the panel when we land a hit on them
+        -- [V94.2] hit feedback: orb burst out of the avatar + a smooth panel shake
+        THud_HitFlash= true,      -- master: react at all when we land a hit
+        THud_Orbs    = true,      -- spray the gradient orbs
+        THud_OrbCount= 14,        -- how many per hit
+        THud_OrbTime = 0.55,      -- how long they live (sec)
+        THud_OrbColor= Color3.fromRGB(255, 255, 255),   -- second gradient stop (accent is the first)
 
         -- [V93] Self cosmetics (ported from the ChinaHat reference): drawn on YOUR character.
         -- All three are Drawing-based rings/cones projected from world space, so they need the
         -- camera to be settled → they run on the same HEARTBEAT tick as the ESP, not RenderStepped.
         -- [V94.1] every feature owns its OWN colours + gradient speed (they used to share one set)
+        -- how hard the cosmetic anchors are smoothed (higher = snappier, lower = floatier)
+        Cos_Smooth     = 22,
         Hat_Gradient   = true,
         Hat_ColorA     = Color3.fromRGB(90, 150, 255),
         Hat_ColorB     = Color3.fromRGB(170, 110, 255),
@@ -2143,12 +2151,37 @@ return function(Lib, Core)
         end
     end
 
+    -- [V94.2] Smoothed anchor points. Replicated part positions arrive in steps, so projecting them
+    -- raw makes the rings pop between frames while you run — that is the jitter. We keep our own
+    -- smoothed copy of the root/head position and ease it toward the real one every tick. The rate
+    -- is framerate-independent (1 - exp) so it feels identical at 30 and 240 fps, and a distance
+    -- gate snaps instantly on teleports/respawns instead of visibly gliding across the map.
+    local cosSm = { root = nil, head = nil, last = 0 }
+    local function cosSmooth(key, target, dtSec)
+        local cur = cosSm[key]
+        if not cur then cosSm[key] = target; return target end
+        if (target - cur).Magnitude > 12 then cosSm[key] = target; return target end   -- teleport
+        local a = 1 - math.exp(-(Config.Cos_Smooth or 22) * dtSec)
+        local nv = cur:Lerp(target, math.clamp(a, 0, 1))
+        cosSm[key] = nv
+        return nv
+    end
+
     local function cosUpdate(t)
         local char = getChar(LocalPlayer)
-        if not char then cosHideAll(); return end
+        if not char then cosHideAll(); cosSm.root, cosSm.head = nil, nil; return end
         local root = getRoot(char)
-        local head = char:FindFirstChild("Head") or root
+        local headPart = char:FindFirstChild("Head") or root
         if not root then cosHideAll(); return end
+
+        -- real elapsed time between cosmetic ticks (this runs off Heartbeat)
+        local nowc = os.clock()
+        local dtSec = math.clamp(nowc - (cosSm.last > 0 and cosSm.last or nowc - 1/60), 1/240, 0.1)
+        cosSm.last = nowc
+
+        -- smoothed anchors used for ALL the geometry below
+        local rootPos = cosSmooth("root", root.Position, dtSec)
+        local headPos = headPart and cosSmooth("head", headPart.Position, dtSec) or rootPos
 
         cosBegin()
 
@@ -2162,34 +2195,34 @@ return function(Lib, Core)
                 if airborne then yOff = yOff + math.sin(t * 6) * 0.5 + 0.6 end
             end
             local n = math.clamp(math.floor(Config.Circle_Parts or 30), 6, 60)
-            cosRing(root.Position.X, root.Position.Y + yOff, root.Position.Z,
+            cosRing(rootPos.X, rootPos.Y + yOff, rootPos.Z,
                     Config.Circle_Radius or 1.7, n, t,
                     Config.Circle_Gradient, Config.Circle_ColorA, Config.Circle_ColorB, Config.Circle_GradSpeed)
         end
 
         -- ── halo above the head ─────────────────────────────────────────────
-        if Config.Nimb_On and head then
+        if Config.Nimb_On and headPart then
             local n = math.clamp(math.floor(Config.Nimb_Parts or 30), 6, 60)
-            cosRing(head.Position.X, head.Position.Y + (Config.Nimb_YOffset or 2.7), head.Position.Z,
+            cosRing(headPos.X, headPos.Y + (Config.Nimb_YOffset or 2.7), headPos.Z,
                     Config.Nimb_Radius or 1.7, n, t,
                     Config.Nimb_Gradient, Config.Nimb_ColorA, Config.Nimb_ColorB, Config.Nimb_GradSpeed)
         end
 
         -- ── china hat (cone of lines from an apex down to a brim ring) ───────
-        if Config.Hat_On and head then
+        if Config.Hat_On and headPart then
             local scale = Config.Hat_Scale or 0.85
             local n = math.clamp(math.floor(Config.Hat_Parts or 50), 6, 80)
             local hatH, hatR = 2.15 * scale, 1.95 * scale
-            local apexY = head.Position.Y + (Config.Hat_YOffset or 1.6)
-            local apex = Vector3.new(head.Position.X, apexY, head.Position.Z)
+            local apexY = headPos.Y + (Config.Hat_YOffset or 1.6)
+            local apex = Vector3.new(headPos.X, apexY, headPos.Z)
             local ap2d, apOn = Camera:WorldToViewportPoint(apex)
             local brimY = apexY - hatH / 3
             if apOn and ap2d.Z > 0 then
                 local apV = Vector2.new(ap2d.X, ap2d.Y)
                 for i = 1, n do
                     local a = (i / n) * math.pi * 2
-                    local wp = Vector3.new(head.Position.X + math.cos(a) * hatR, brimY,
-                                           head.Position.Z + math.sin(a) * hatR)
+                    local wp = Vector3.new(headPos.X + math.cos(a) * hatR, brimY,
+                                           headPos.Z + math.sin(a) * hatR)
                     local sp, on = Camera:WorldToViewportPoint(wp)
                     if on and sp.Z > 0 then
                         local ln = cosLine()
@@ -2199,7 +2232,7 @@ return function(Lib, Core)
                     end
                 end
                 if Config.Hat_Rim then
-                    cosRing(head.Position.X, brimY, head.Position.Z, hatR, math.min(n, 40), t,
+                    cosRing(headPos.X, brimY, headPos.Z, hatR, math.min(n, 40), t,
                             Config.Hat_Gradient, Config.Hat_ColorA, Config.Hat_ColorB, Config.Hat_GradSpeed)
                 end
             end
@@ -2227,7 +2260,7 @@ return function(Lib, Core)
         hp = nil, stam = nil, m2 = nil,            -- the three thin bars
         model = nil,
         shown = false, anim = 0,
-        flash = 0, kick = 0,
+        shake = 0, hpPulse = 0, lastHp = nil,   -- [V94.2] hit shake + hp-drop pulse
         hpV = 0, stamV = 0, m2V = 0,               -- smoothed bar fills
         stamA = 0, m2A = 0,                        -- per-bar fade alpha (0 = hidden)
         drag = { target = Vector2.new(0, 0), disp = Vector2.new(0, 0), active = false,
@@ -2240,7 +2273,7 @@ return function(Lib, Core)
     -- bars are STACKED under it and only exist when they have something to say.
     local TH_W, TH_H = 176, 46
     local TH_PAD, TH_AV = 5, 36          -- padding, avatar side
-    local TH_BAR_H, TH_BAR_GAP = 3, 3
+    local TH_BAR_H, TH_BAR_GAP = 5, 3     -- [V94.2] bars were too thin to read; 3px -> 5px
 
     -- [V94.1] RESTORED: this got wiped when the HUD build block was rewritten, which is why
     -- thUpdate blew up with "attempt to call a nil value" and the panel never appeared.
@@ -2258,8 +2291,9 @@ return function(Lib, Core)
 
     local function thMkThinBar(parent, y, col)
         local track = Instance.new("Frame")
-        track.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
-        track.BackgroundTransparency = 0.35
+        -- darker, more opaque trough so the fill pops against it
+        track.BackgroundColor3 = Color3.fromRGB(4, 4, 7)
+        track.BackgroundTransparency = 0.1
         track.BorderSizePixel = 0
         track.Position = UDim2.new(0, 0, 0, y)
         track.Size = UDim2.new(1, 0, 0, TH_BAR_H)
@@ -2271,7 +2305,15 @@ return function(Lib, Core)
         fill.Size = UDim2.new(0, 0, 1, 0)
         fill.Parent = track
         local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
-        return { track = track, fill = fill }
+        -- HP pulse overlay: a brighter ghost that flashes when the value drops (see thUpdate)
+        local pulse = Instance.new("Frame")
+        pulse.BackgroundColor3 = Color3.new(1, 1, 1)
+        pulse.BackgroundTransparency = 1
+        pulse.BorderSizePixel = 0
+        pulse.Size = UDim2.new(1, 0, 1, 0)
+        pulse.Parent = fill
+        local pc = Instance.new("UICorner"); pc.CornerRadius = UDim.new(1, 0); pc.Parent = pulse
+        return { track = track, fill = fill, pulse = pulse }
     end
 
     -- [V93] GROUP FADE. Only the root's BackgroundTransparency used to animate, so every child
@@ -2308,6 +2350,75 @@ return function(Lib, Core)
         for i = 1, #list do
             local e = list[i]
             if e.inst.Parent then e.inst[e.prop] = e.base + (1 - e.base) * (1 - alpha) end
+        end
+    end
+
+    -- [V94.2] ORB BURST — the hit animation. The old accent-flash was ugly, so instead the panel
+    -- sprays small gradient "orbs" out of the avatar which drift, fade and shrink. They are plain
+    -- Frames with a full UICorner (perfect circles), pooled and reused: a burst never allocates
+    -- after the first one. Each orb keeps its own velocity/life so the spray looks organic.
+    local ORB_POOL = {}
+    local function thOrb()
+        for i = 1, #ORB_POOL do
+            local o = ORB_POOL[i]
+            if not o.alive then return o end
+        end
+        local f = Instance.new("Frame")
+        f.BorderSizePixel = 0
+        f.AnchorPoint = Vector2.new(0.5, 0.5)
+        f.BackgroundTransparency = 1
+        f.ZIndex = 5
+        f.Visible = false
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(1, 0); c.Parent = f
+        local rec = { inst = f, alive = false, pos = Vector2.new(), vel = Vector2.new(), life = 0, max = 1, size = 6 }
+        ORB_POOL[#ORB_POOL + 1] = rec
+        return rec
+    end
+
+    local function thBurst()
+        if not (TH.root and Config.THud_Orbs ~= false) then return end
+        local n = math.clamp(math.floor(tonumber(Config.THud_OrbCount) or 14), 1, 40)
+        local life = math.clamp(tonumber(Config.THud_OrbTime) or 0.55, 0.1, 3)
+        -- spawn from the avatar's centre (in panel-local coords)
+        local ox, oy = TH_PAD + TH_AV * 0.5, TH_PAD + TH_AV * 0.5
+        for i = 1, n do
+            local o = thOrb()
+            if o.inst.Parent ~= TH.root then o.inst.Parent = TH.root end
+            local a = math.random() * math.pi * 2
+            local spd = 40 + math.random() * 90
+            o.pos = Vector2.new(ox, oy)
+            o.vel = Vector2.new(math.cos(a) * spd, math.sin(a) * spd)
+            o.size = 3 + math.random() * 4
+            o.max, o.life, o.alive = life * (0.7 + math.random() * 0.6), 0, true
+            -- gradient across the two cosmetic-ish colours: accent -> heavy colour
+            local f = math.random()
+            o.inst.BackgroundColor3 = Config.THud_Accent:Lerp(
+                Config.THud_OrbColor or Color3.fromRGB(255, 255, 255), f)
+            o.inst.Size = UDim2.fromOffset(o.size, o.size)
+            o.inst.Position = UDim2.fromOffset(ox, oy)
+            o.inst.BackgroundTransparency = 0
+            o.inst.Visible = true
+        end
+    end
+
+    local function thOrbStep(dt)
+        for i = 1, #ORB_POOL do
+            local o = ORB_POOL[i]
+            if o.alive then
+                o.life = o.life + dt
+                local k = o.life / o.max
+                if k >= 1 then
+                    o.alive = false
+                    if o.inst.Visible then o.inst.Visible = false end
+                else
+                    o.vel = o.vel * (1 - math.min(dt * 2.6, 0.9))       -- drag
+                    o.pos = o.pos + o.vel * dt
+                    local sz = math.max(1, o.size * (1 - k * 0.7))       -- shrink
+                    o.inst.Size = UDim2.fromOffset(sz, sz)
+                    o.inst.Position = UDim2.fromOffset(math.floor(o.pos.X + 0.5), math.floor(o.pos.Y + 0.5))
+                    o.inst.BackgroundTransparency = k * k                -- ease-out fade
+                end
+            end
         end
     end
 
@@ -2474,10 +2585,17 @@ return function(Lib, Core)
         -- Frame the shot ONCE on the head/upper body, straight on, so it reads like a portrait.
         local head = clone:FindFirstChild("Head") or clone:FindFirstChild("UpperTorso")
                   or clone:FindFirstChild("Torso") or clone:FindFirstChildWhichIsA("BasePart")
+        -- [V94.2] Frame the shot along the CHARACTER'S OWN FACING, not a fixed world axis. Using
+        -- world +Z meant that if they happened to face sideways we photographed their ear/back —
+        -- that's the "enemy is standing to my right, can't see his head" report. We take the head's
+        -- LookVector (flattened), stand that far in FRONT of it and look back at the face.
         if head and TH.cam then
             local p = head.Position
-            -- look at the face from slightly in front and above
-            TH.cam.CFrame = CFrame.lookAt(p + Vector3.new(0, 0.25, 4.2), p + Vector3.new(0, 0.05, 0))
+            local lv = head.CFrame.LookVector
+            local flat = Vector3.new(lv.X, 0, lv.Z)
+            flat = (flat.Magnitude > 0.05) and flat.Unit or Vector3.new(0, 0, 1)
+            local eye = p + flat * 3.6 + Vector3.new(0, 0.35, 0)
+            TH.cam.CFrame = CFrame.lookAt(eye, p + Vector3.new(0, 0.02, 0))
         end
     end
 
@@ -2495,7 +2613,11 @@ return function(Lib, Core)
             local nx = math.clamp(TH.drag.target.X, 0, math.max(vpz.X - w, 0))
             local ny = math.clamp(TH.drag.target.Y, 0, math.max(vpz.Y - h, 0))
             TH.drag.target = Vector2.new(nx, ny)
-            TH.drag.disp = TH.drag.disp:Lerp(TH.drag.target, math.clamp(dt * 16, 0, 1))
+            local nowd = os.clock()
+            local ddt = math.clamp(nowd - (TH.dragT or nowd), 1/240, 0.25)
+            TH.dragT = nowd
+            TH.drag.disp = TH.drag.disp:Lerp(TH.drag.target,
+                math.clamp(1 - math.exp(-(tonumber(Config.THud_Smooth) or 16) * ddt), 0, 1))
             return TH.drag.disp.X, TH.drag.disp.Y
         end
 
@@ -2506,9 +2628,10 @@ return function(Lib, Core)
             local sp, on = Camera:WorldToViewportPoint(root.Position)
             if on and sp.Z > 0 then ex, ey = sp.X, sp.Y end
         end
-        if not ex then   -- offscreen → park it centre-top so it doesn't jump to a stale spot
-            return vpz.X * 0.5 - w * 0.5, vpz.Y * 0.22
-        end
+        -- [V94.2] Enemy off screen → DON'T fall back to a screen position. The panel is anchored to
+        -- them, so if they can't be seen it shouldn't be shown at all (returning nil tells the caller
+        -- to hide it).
+        if not ex then return nil end
         local ix = tonumber(Config.THud_InsetX) or 16
         local iy = tonumber(Config.THud_InsetY) or 0
         local side = Config.THud_Side or "Right"
@@ -2526,8 +2649,20 @@ return function(Lib, Core)
         px = math.clamp(px, 0, math.max(vpz.X - w, 0))
         py = math.clamp(py, 0, math.max(vpz.Y - h, 0))
         -- smooth the follow so it glides with them instead of jittering per frame
-        TH.follow = TH.follow or Vector2.new(px, py)
-        TH.follow = TH.follow:Lerp(Vector2.new(px, py), math.clamp(dt * 18, 0, 1))
+        -- [V94.2] Framerate-independent follow. The old `dt * 18` used the ACCUMULATED throttle dt,
+        -- so the step size changed every tick and the panel stuttered whenever the camera moved.
+        -- Exponential smoothing on real elapsed time is stable regardless of tick spacing, and a
+        -- big-jump snap avoids a long slide when the target changes or teleports.
+        local want = Vector2.new(px, py)
+        local nowc = os.clock()
+        local sdt = math.clamp(nowc - (TH.followT or nowc), 1/240, 0.25)
+        TH.followT = nowc
+        if not TH.follow or (want - TH.follow).Magnitude > math.max(vpz.X, vpz.Y) * 0.35 then
+            TH.follow = want
+        else
+            local a = 1 - math.exp(-(tonumber(Config.THud_Smooth) or 16) * sdt)
+            TH.follow = TH.follow:Lerp(want, math.clamp(a, 0, 1))
+        end
         return TH.follow.X, TH.follow.Y
     end
 
@@ -2536,8 +2671,8 @@ return function(Lib, Core)
         if not (Config.THud_On and Config.THud_HitFlash) then return end
         local m = TH.model
         if not m or m.Name ~= victimName then return end
-        TH.flash = 1
-        TH.kick = 1
+        TH.shake = 1        -- [V94.2] smooth shake, decays in thUpdate
+        thBurst()           -- and spray the orbs out of the avatar
     end
 
     local thUpdate = LPH_NO_VIRTUALIZE(function(dt)
@@ -2545,6 +2680,10 @@ return function(Lib, Core)
             if TH.shown then
                 TH.shown = false
                 if TH.root then TH.root.Visible = false end
+                for i = 1, #ORB_POOL do
+                    local o = ORB_POOL[i]
+                    if o.alive then o.alive = false; o.inst.Visible = false end
+                end
                 thClearClone(); TH.model = nil
             end
             return
@@ -2579,6 +2718,7 @@ return function(Lib, Core)
 
         if not char then
             local ax, ay = thPlace(dt, nil)
+            if not ax then TH.root.Visible = false; return end   -- nothing to anchor to
             TH.root.Position = UDim2.fromOffset(math.floor(ax + 0.5), math.floor(ay + (1 - ease) * 14 + 0.5))
             thApplyFade(ease)
             return
@@ -2651,14 +2791,23 @@ return function(Lib, Core)
             and (Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255)) or Config.THud_Accent
         if TH.numLbl.TextColor3 ~= numCol then TH.numLbl.TextColor3 = numCol end
 
-        -- hit flash: a quick stroke-colour pop + panel kick (transparency is owned by thApplyFade)
-        TH.flash = TH.flash * (1 - math.clamp(dt * 6, 0, 1))
-        TH.kick  = TH.kick  * (1 - math.clamp(dt * 9, 0, 1))
-        if TH.stroke then
-            local sc = (TH.flash > 0.02)
-                and Config.THud_Accent:Lerp(Color3.new(1, 1, 1), TH.flash)
-                or Color3.fromRGB(40, 40, 55)
-            if TH.stroke.Color ~= sc then TH.stroke.Color = sc end
+        -- [V94.2] hit feedback: orbs + a smooth decaying shake. No colour flashing.
+        thOrbStep(dt)
+        TH.shake = (TH.shake or 0) * (1 - math.clamp(dt * 4.5, 0, 1))
+        if TH.shake < 0.004 then TH.shake = 0 end
+
+        -- HP bar pulse: brighten the fill briefly whenever their health actually drops
+        local pulseK = 0
+        if TH.hp and TH.hp.pulse then
+            local hpNow = hum and hum.Health or nil
+            if hpNow and TH.lastHp and hpNow < TH.lastHp - 0.01 then TH.hpPulse = 1 end
+            TH.lastHp = hpNow
+            TH.hpPulse = (TH.hpPulse or 0) * (1 - math.clamp(dt * 5, 0, 1))
+            pulseK = TH.hpPulse
+            local want = 1 - pulseK * 0.55
+            if math.abs((TH.hp.pulse.BackgroundTransparency or 1) - want) > 0.01 then
+                TH.hp.pulse.BackgroundTransparency = want
+            end
         end
 
         -- place + scale
@@ -2675,8 +2824,23 @@ return function(Lib, Core)
             TH.fadeApplied = nil
         end
         local ax, ay = thPlace(dt, char)
-        local px = math.floor(ax + 0.5)
-        local py = math.floor(ay + (1 - ease) * 14 - TH.kick * 3 + 0.5)
+        if not ax then
+            -- anchored to an enemy we can't see → hide, don't park it somewhere random
+            if TH.root.Visible then TH.root.Visible = false end
+            return
+        end
+        if not TH.root.Visible then TH.root.Visible = true end
+        -- shake = a quick decaying wobble on both axes (different frequencies so it isn't a
+        -- straight line), scaled by how fresh the hit is
+        local sh = TH.shake or 0
+        local shx, shy = 0, 0
+        if sh > 0 then
+            local tt = os.clock() * 45
+            shx = math.sin(tt) * sh * 5
+            shy = math.sin(tt * 1.7 + 1.1) * sh * 4
+        end
+        local px = math.floor(ax + shx + 0.5)
+        local py = math.floor(ay + (1 - ease) * 14 + shy + 0.5)
         if TH._lx ~= px or TH._ly ~= py then
             TH.root.Position = UDim2.fromOffset(px, py)
             TH._lx, TH._ly = px, py
@@ -2690,35 +2854,24 @@ return function(Lib, Core)
     local conns = {}
     local function track(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
 
-    -- [V94.1] COSMETICS DRIVER — BindToRenderStep at Camera+1.
-    -- Why not Heartbeat: Heartbeat fires during the physics step, BEFORE the frame is rendered, so
-    -- the positions we read there are one frame behind what the player is about to see. On your own
-    -- character (which moves every single frame) that reads as constant jitter — the ESP doesn't
-    -- suffer because it tracks OTHER players, whose replicated positions only update a few times a
-    -- second anyway. BindToRenderStep with a priority just AFTER Camera means: camera already
-    -- solved for this frame (no shiftlock drift) AND we draw into the very frame being rendered
-    -- (no one-frame lag). This is the standard place for world-space Drawing overlays.
-    local COS_BIND = "\0SylCos"
-    local cosBound, cosWasOn = false, false
-    local function cosBind()
-        if cosBound then return end
-        local ok = pcall(function()
-            RunService:BindToRenderStep(COS_BIND, Enum.RenderPriority.Camera.Value + 1, function()
-                if not hasDrawing then return end
-                if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
-                    cosUpdate(tick())
-                    cosWasOn = true
-                elseif cosWasOn then
-                    cosHideAll(); cosWasOn = false      -- one hide pass, then stop touching them
-                end
-            end)
-        end)
-        cosBound = ok
-    end
-    local function cosUnbind()
-        if not cosBound then return end
-        pcall(function() RunService:UnbindFromRenderStep(COS_BIND) end)
-        cosBound = false
+    -- [V94.2] COSMETICS DRIVER — back on HEARTBEAT (shiftlock stays correct there: Heartbeat runs
+    -- after the camera update, RenderStepped does not, which is why the render-step attempt made the
+    -- overlay slide under shiftlock).
+    --
+    -- The jitter was never about WHICH signal we use — it is that the character's replicated position
+    -- lands in discrete steps, so re-projecting it raw makes the ring pop between positions. Fix is
+    -- INTERPOLATION: cosUpdate smooths the anchor point toward the real one every tick (exponential
+    -- smoothing, framerate-independent), so the drawing glides instead of stepping. Snap-teleport
+    -- detection keeps it from lagging behind on respawn/tp.
+    local cosWasOn = false
+    local function cosTick()
+        if not hasDrawing then return end
+        if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
+            cosUpdate(tick())
+            cosWasOn = true
+        elseif cosWasOn then
+            cosHideAll(); cosWasOn = false      -- one hide pass, then stop touching them
+        end
     end
 
     local function hookLocalHumanoid()
@@ -2733,7 +2886,6 @@ return function(Lib, Core)
 
         buildIndicatorGui()
         hookLocalHumanoid()
-        cosBind()   -- [V94.1] cosmetics render on the render step, not Heartbeat (see cosBind)
 
         track(LocalPlayer.CharacterAdded, function()
             task.wait(0.4)
@@ -2764,6 +2916,15 @@ return function(Lib, Core)
             -- [PERF] Throttle the heavy redraw to MaxFPS. We accumulate real time and only run the
             -- pipeline once per frame-budget, passing the ACCUMULATED dt so every lerp/animation
             -- advances by true elapsed time (smooth even though we tick fewer times/sec).
+            -- [V94.2] Cosmetics tick EVERY Heartbeat (before the ESP throttle). They are cheap and
+            -- they follow YOUR character, which moves every frame — throttling them is what made
+            -- them look choppy. Smoothing lives inside cosUpdate.
+            cosTick()
+            -- [V94.2] TargetHUD also ticks EVERY Heartbeat. It follows an on-screen point that moves
+            -- with the camera, so running it at the throttled ESP rate is what made it stutter while
+            -- looking around. It bails out on its first line when disabled.
+            thUpdate(dt)
+
             _acc = _acc + dt
             local budget = (Config.MaxFPS and Config.MaxFPS > 0) and (1 / Config.MaxFPS) or 0
             if _acc < budget then return end
@@ -2799,8 +2960,6 @@ return function(Lib, Core)
 			pollLocalDamage()
 			if Config.HitDir_On or #hitArrows > 0 then updateHitDir() end
 			if #HitFX.systems>0 then renderHitFX(fdt) end
-			-- [V92] TargetHUD: cheap no-op when disabled (first line of thUpdate bails out)
-			thUpdate(fdt)
 
             end))
     end
@@ -3106,6 +3265,10 @@ return function(Lib, Core)
             function(c) if typeof(c) == "Color3" then Config.Hat_ColorA = c end end)
         colorpick(sHat, "Color B", "VIS_Hat_B", Config.Hat_ColorB,
             function(c) if typeof(c) == "Color3" then Config.Hat_ColorB = c end end)
+        slider(sHat, { Name = "Smoothing", Flag = "VIS_Cos_Sm",
+            Default = Config.Cos_Smooth or 22, Min = 6, Max = 60, Suffix = "",
+            Callback = function(v) Config.Cos_Smooth = v end })
+        sHat:SubLabel({ Text = "shared follow smoothing for hat/circle/halo\nhigher = snappier, lower = floatier" })
         slider(sHat, { Name = "Cycle Speed", Flag = "VIS_Hat_GS",
             Default = Config.Hat_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
             Callback = function(v) Config.Hat_GradSpeed = v end })
@@ -3181,8 +3344,23 @@ return function(Lib, Core)
         sTH:Toggle({ Name = "Heavy Bar", Default = Config.THud_M2,
             Callback = function(v) Config.THud_M2 = v and true or false end }, ctx.flag("VIS_THUD_M2"))
         sTH:SubLabel({ Text = "only while their m2 is actually on cd — the number turns into the cd too" })
-        sTH:Toggle({ Name = "Hit Flash", Default = Config.THud_HitFlash,
+        sTH:Divider()
+        sTH:Header({ Name = "Hit Reaction" })
+        sTH:Toggle({ Name = "React To Hits", Default = Config.THud_HitFlash,
             Callback = function(v) Config.THud_HitFlash = v and true or false end }, ctx.flag("VIS_THUD_Fl"))
+        sTH:SubLabel({ Text = "panel shakes + hp bar pulses when u land a hit" })
+        sTH:Toggle({ Name = "Orb Burst", Default = Config.THud_Orbs ~= false,
+            Callback = function(v) Config.THud_Orbs = v and true or false end }, ctx.flag("VIS_THUD_Orb"))
+        sTH:SubLabel({ Text = "gradient orbs spray out of the avatar and fade" })
+        slider(sTH, { Name = "Orb Count", Flag = "VIS_THUD_OrbN",
+            Default = Config.THud_OrbCount or 14, Min = 1, Max = 40, Suffix = "",
+            Callback = function(v) Config.THud_OrbCount = v end })
+        slider(sTH, { Name = "Orb Lifetime", Flag = "VIS_THUD_OrbT",
+            Default = math.floor((Config.THud_OrbTime or 0.55) * 1000), Min = 150, Max = 2000, Suffix = " ms",
+            Callback = function(v) Config.THud_OrbTime = v / 1000 end })
+        colorpick(sTH, "Orb Color", "VIS_THUD_OrbC", Config.THud_OrbColor,
+            function(c) if typeof(c) == "Color3" then Config.THud_OrbColor = c end end)
+        sTH:SubLabel({ Text = "orbs fade from the accent colour into this one" })
         sTH:Divider()
         sTH:Header({ Name = "Placement" })
         -- Anchor works like the Indicators HUD: Player-only settings are HIDDEN unless the anchor
@@ -3224,6 +3402,10 @@ return function(Lib, Core)
         slider(sTH, { Name = "Scale", Flag = "VIS_THUD_Scale",
             Default = math.floor((Config.THud_Scale or 1) * 100), Min = 50, Max = 200, Suffix = "%",
             Callback = function(v) Config.THud_Scale = v / 100 end })
+        slider(sTH, { Name = "Follow Smoothing", Flag = "VIS_THUD_Smooth",
+            Default = Config.THud_Smooth or 16, Min = 4, Max = 40, Suffix = "",
+            Callback = function(v) Config.THud_Smooth = v end })
+        sTH:SubLabel({ Text = "how tightly it tracks — higher = snappier, lower = floatier" })
         slider(sTH, { Name = "Opacity", Flag = "VIS_THUD_Opacity",
             Default = Config.THud_Opacity or 100, Min = 10, Max = 100, Suffix = "%",
             Callback = function(v) Config.THud_Opacity = v end })
@@ -3359,7 +3541,6 @@ return function(Lib, Core)
         hitArrows = {}
 		for _,sys in ipairs(HitFX.systems) do destroySystem(sys) end
 		HitFX.systems={}
-        cosUnbind()    -- [V94.1] drop the render-step binding first
         cosDestroy()   -- [V93] remove the cosmetic Drawing pools
         -- [V92] tear down the TargetHUD (its 3D clone lives in a ViewportFrame we own)
         thClearClone()
