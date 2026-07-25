@@ -461,6 +461,11 @@ local Config = {
 	VizRingSeg    = 30,     -- segments in the ring (more = smoother, costs 2 projections each)
 	VizRingMirror = true,   -- draw the mirrored/opposite ring (the thing that sells the 3D)
 	VizRingTilt   = 0.7,    -- how far Orbit/OrbitSwirl push the band through depth (studs)
+	VizRingBands  = 4,      -- OrbitSwirl only: how many woven bands (the "chains" look)
+	-- [V94] How we face the target: "LookAt" rotates the character (server-safe, what we always
+	-- did) | "AimLock" points the CAMERA instead and lets the game turn us (way less snappy).
+	RotationMethod = "LookAt",
+	AimLockLerp    = 0.35,   -- how hard AimLock pulls the camera (1 = instant snap)
 	VizHitbox     = true,   -- бокс хитбокса цели
 	VizRestrict   = true,   -- зона ограничения (keep-out)
 	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
@@ -5751,18 +5756,31 @@ Viz.drawRing = function(cam, model, hrp, hot)
 		Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
 	end
 
-	-- mirrored pass (orbit only): negated angle + inverted depth = the crossing second band
+	-- [V94] EXTRA BANDS. Orbit draws ONE mirrored band (the crossing ring). OrbitSwirl is the
+	-- "chains" look from the reference: several thin bands at different phase offsets and slightly
+	-- different radii, all counter-rotating, so they weave around the target like linked chains
+	-- instead of being one lonely spinning hoop.
+	local bands = 0
 	if orbit and Config.VizRingMirror ~= false then
+		bands = (style == "OrbitSwirl") and math.clamp(math.floor(Config.VizRingBands or 4), 1, 8) or 1
+	end
+	for b = 1, bands do
+		-- each band gets its own phase + a slightly different radius/height so they don't overlap
+		local phase = (b / bands) * math.pi          -- spread the bands around
+		local rMul  = 1 - (b - 1) * 0.06             -- inner bands sit a touch tighter
+		local dir   = (b % 2 == 0) and 1 or -1       -- alternate spin direction → the weave
 		for i = 0, seg - 1 do
-			local a = -(i / seg * math.pi * 2 + swirl)
-			local r = radius * pulse
-			local dy = -(math.cos(t * spd + i / seg * math.pi * 2) * tilt)
+			local a = dir * (i / seg * math.pi * 2 + swirl) + phase
+			local r = radius * pulse * rMul
+			local dy = dir * (math.cos(t * spd + i / seg * math.pi * 2 + phase) * tilt)
 			wpts[i] = Vector3.new(cx + math.cos(a) * r, y + dy, cz + math.sin(a) * r)
 		end
+		-- thinner than the main band so a stack of them still reads as separate chains
+		local bthick = math.max(1.2, thick - 0.6 - (b - 1) * 0.15)
 		for i = 0, seg - 1 do
 			local j = (i + 1) % seg
-			local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 - t * 2.2)
-			Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingB:Lerp(Config.RingA, f), thick)
+			local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 - t * 2.2 + phase)
+			Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingB:Lerp(Config.RingA, f), bthick)
 		end
 	end
 end
@@ -5927,7 +5945,14 @@ local applyFacing = LPH_NO_VIRTUALIZE(function()
 	-- [V91/perf] reuse the character we already resolved above (`ec`) instead of calling
 	-- localChar() a second time in the same frame.
 	local hum = ec and ec:FindFirstChildOfClass("Humanoid")
-	if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceHum = hum end
+	-- [V94] AimLock deliberately LEAVES AutoRotate alone: the whole point is that the game keeps
+	-- turning the character toward the camera, so killing it would freeze us facing the wrong way.
+	-- LookAt still disables it, because there we own the character's rotation.
+	if (Config.RotationMethod or "LookAt") ~= "AimLock" then
+		if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceHum = hum end
+	elseif State.faceHum then
+		pcall(function() State.faceHum.AutoRotate = true end); State.faceHum = nil
+	end
 	-- [V97] PING-SCALED предикт позиции цели ВОЗВРАЩЁН. В V95 я убрал velocity-lead (ду��ая, что
 	-- сервер валидирует по факт. позиции) — но это ломало facing на резко движущемся/рывкающем
 	-- враге (в логе face=0.14/-0.58 BACK! на LATE-миссах). Причина: на нашем экране другой игрок
@@ -5967,6 +5992,28 @@ local applyFacing = LPH_NO_VIRTUALIZE(function()
 	end
 	local d = flatDirTo(myHRP.Position, aimPos)
 	if not d then return end
+
+	-- [V94] ROTATION METHOD.
+	--   LookAt  : rotate the character itself (what we always did). The server validates block
+	--             direction off the character, so this is the one that guarantees a legal parry.
+	--   AimLock : DON'T touch the character — point the CAMERA at them instead. With shiftlock (or
+	--             any first/third-person aim-follow) the game turns you toward the camera itself, so
+	--             u still end up facing them, but the model never snaps unnaturally. Looks far more
+	--             legit; if the game is NOT rotating you toward the camera, prefer LookAt.
+	if (Config.RotationMethod or "LookAt") == "AimLock" then
+		local cam = Workspace.CurrentCamera
+		if not cam then return end
+		local cp = cam.CFrame.Position
+		local target = aimPos + Vector3.new(0, 1.2, 0)   -- aim at the upper body, not the feet
+		local goalCam = CFrame.lookAt(cp, target)
+		if State.faceGoalHard then
+			cam.CFrame = goalCam
+		else
+			cam.CFrame = cam.CFrame:Lerp(goalCam, math.clamp(Config.AimLockLerp or 0.35, 0.05, 1))
+		end
+		return
+	end
+
 	local goal = CFrame.lookAt(myHRP.Position, myHRP.Position + d)
 	if State.faceGoalHard then
 		myHRP.CFrame = goal
@@ -6083,7 +6130,9 @@ return function(_Lib, _Core)
 
 		-- Slider WITHOUT any notify (sliders never notify, per request).
 		local function slider(section, o)
-			section:Slider({
+			-- [V94] returns the element so callers can drive :SetVisibility on it (style-specific
+			-- ring options hide themselves when the chosen style doesn't use them).
+			return section:Slider({
 				Name = o.Name, Default = o.Default, Minimum = o.Min, Maximum = o.Max,
 				Precision = o.Precision or 0, Suffix = o.Suffix,
 				Callback = o.Callback,
@@ -6143,6 +6192,26 @@ return function(_Lib, _Core)
 		apMain:Header({ Name = "Rotation" })
 		boolToggle(apMain, "Auto Face", "Auto Face", function() return Config.AutoFace end, function(v) Config.AutoFace = v end)
 		apMain:SubLabel({ Text = "turn to face the attacker (needed for directional block/parry)" })
+		-- [V94] LookAt rotates the character; AimLock only moves the camera and lets the game turn u
+		-- (needs shiftlock / cam-follow to actually face them, but looks way less snappy).
+		local aimEls = {}
+		local function rotVis()
+			local isAim = (Config.RotationMethod or "LookAt") == "AimLock"
+			for _, el in ipairs(aimEls) do pcall(function() el:SetVisibility(isAim) end) end
+		end
+		apMain:Dropdown({
+			Name = "Method",
+			Options = { "LookAt", "AimLock" },
+			Default = Config.RotationMethod or "LookAt",
+			Callback = function(v)
+				if type(v) == "string" and v ~= "" then Config.RotationMethod = v; rotVis() end
+			end,
+		}, ctx.flag("AP_RotMethod"))
+		apMain:SubLabel({ Text = "LookAt = turns ur model (safest for parry)\nAimLock = aims the camera instead, model isn't forced" })
+		aimEls[#aimEls + 1] = slider(apMain, { Name = "Aim Speed", Flag = "AP_AimLockLerp",
+			Default = math.floor((Config.AimLockLerp or 0.35) * 100), Min = 5, Max = 100, Suffix = "%",
+			Callback = function(v) Config.AimLockLerp = v / 100 end })
+		rotVis()
 		boolToggle(apMain, "Instant Multi-Target Snap", "Multi Snap",
 			function() return Config.MultiFaceHard end, function(v) Config.MultiFaceHard = v end)
 		apMain:SubLabel({ Text = "in a group fight snap instantly to the next attacker" })
@@ -6355,64 +6424,77 @@ return function(_Lib, _Core)
 		})
 
 		apVis:Divider()
-		apVis:Header({ Name = "Elements" })
-		boolToggle(apVis, "Rotating Ring", "Rotating Ring",
+		apVis:Header({ Name = "What To Draw" })
+		boolToggle(apVis, "Target Ring", "Target Ring",
 			function() return Config.VizRing end,
 			function(v) Config.VizRing = v; if not v then pcall(vizHideAll) end end)
-		boolToggle(apVis, "Target Hitbox", "Target Hitbox",
+		boolToggle(apVis, "Attack Cone", "Attack Cone",
 			function() return Config.VizHitbox end,
 			function(v) Config.VizHitbox = v; if not v then pcall(vizHideAll) end end)
-		boolToggle(apVis, "Restrict Zone", "Restrict Zone",
+		apVis:SubLabel({ Text = "their reach — green = ur safe, red = ur in it" })
+		boolToggle(apVis, "Keep-Out Zone", "Keep-Out Zone",
 			function() return Config.VizRestrict end,
 			function(v) Config.VizRestrict = v; if not v then pcall(vizHideAll) end end)
 
+		-- [V94] Ring options are grouped and the style-specific ones HIDE unless that style is
+		-- picked, so the panel doesn't show u knobs that currently do nothing.
 		apVis:Divider()
-		apVis:Header({ Name = "Ring & Range" })
+		apVis:Header({ Name = "Ring" })
+		local ringOrbitEls, ringSwirlEls = {}, {}
+		local function ringVis()
+			local st = Config.VizRingStyle or "Flat"
+			local isOrbit = (st == "Orbit" or st == "OrbitSwirl")
+			for _, el in ipairs(ringOrbitEls) do pcall(function() el:SetVisibility(isOrbit) end) end
+			for _, el in ipairs(ringSwirlEls) do pcall(function() el:SetVisibility(st == "OrbitSwirl") end) end
+		end
 		apVis:Dropdown({
-			Name = "Ring Style",
+			Name = "Style",
 			Options = { "Flat", "Orbit", "OrbitSwirl" },
 			Default = Config.VizRingStyle or "Flat",
-			Callback = function(v) if type(v) == "string" and v ~= "" then Config.VizRingStyle = v end end,
+			Callback = function(v)
+				if type(v) == "string" and v ~= "" then Config.VizRingStyle = v; ringVis() end
+			end,
 		}, ctx.flag("AP_VizRingStyle"))
-		apVis:SubLabel({ Text = "Flat = classic ring at their feet\nOrbit = tilts through depth (3d band) · OrbitSwirl = same but spinning" })
-		slider(apVis, { Name = "Ring Segments", Flag = "AP_VizRingSeg",
-			Default = Config.VizRingSeg or 30, Min = 8, Max = 48, Suffix = "",
-			Callback = function(v) Config.VizRingSeg = v end })
-		apVis:SubLabel({ Text = "more = smoother ring, each one costs 2 projections tho" })
-		slider(apVis, { Name = "Orbit Tilt", Flag = "AP_VizRingTilt",
-			Default = math.floor((Config.VizRingTilt or 0.7) * 100), Min = 10, Max = 200, Suffix = "%",
-			Callback = function(v) Config.VizRingTilt = v / 100 end })
-		apVis:SubLabel({ Text = "how hard orbit pushes the band thru depth (orbit styles only)" })
-		boolToggle(apVis, "Mirror Ring", "Mirror Ring",
-			function() return Config.VizRingMirror ~= false end,
-			function(v) Config.VizRingMirror = v end)
-		apVis:SubLabel({ Text = "second crossing band — this is what makes orbit look 3d" })
-		slider(apVis, { Name = "Ring Speed", Flag = "AP_VizRingSpeed",
-			Default = math.floor((Config.VizRingSpeed or 1) * 100), Min = 10, Max = 300, Suffix = "%",
-			Callback = function(v) Config.VizRingSpeed = v / 100 end })
-		slider(apVis, { Name = "Ring Size", Flag = "AP_VizRingScale",
+		apVis:SubLabel({ Text = "Flat = ring at their feet · Orbit = 3d band · OrbitSwirl = woven chains" })
+		slider(apVis, { Name = "Size", Flag = "AP_VizRingScale",
 			Default = math.floor((Config.VizRingScale or 1) * 100), Min = 40, Max = 250, Suffix = "%",
 			Callback = function(v) Config.VizRingScale = v / 100 end })
-		slider(apVis, { Name = "Render Distance", Flag = "AP_VizRange",
-			Default = Config.VizRange or 100, Min = 20, Max = 250, Suffix = " studs",
-			Callback = function(v) Config.VizRange = v end })
-		slider(apVis, { Name = "Visual FPS Cap", Flag = "AP_VizMaxFPS",
-			Default = Config.VizMaxFPS or 60, Min = 15, Max = 240, Suffix = " fps",
-			Callback = function(v) Config.VizMaxFPS = v end })
-		apVis:SubLabel({ Text = "caps how often the ESP redraws (not ur game fps)\nlower = more fps headroom; 60 looks perfectly smooth" })
+		slider(apVis, { Name = "Speed", Flag = "AP_VizRingSpeed",
+			Default = math.floor((Config.VizRingSpeed or 1) * 100), Min = 10, Max = 300, Suffix = "%",
+			Callback = function(v) Config.VizRingSpeed = v / 100 end })
+		slider(apVis, { Name = "Smoothness", Flag = "AP_VizRingSeg",
+			Default = Config.VizRingSeg or 30, Min = 8, Max = 48, Suffix = "",
+			Callback = function(v) Config.VizRingSeg = v end })
+		ringOrbitEls[#ringOrbitEls + 1] = slider(apVis, { Name = "Depth", Flag = "AP_VizRingTilt",
+			Default = math.floor((Config.VizRingTilt or 0.7) * 100), Min = 10, Max = 200, Suffix = "%",
+			Callback = function(v) Config.VizRingTilt = v / 100 end })
+		ringSwirlEls[#ringSwirlEls + 1] = slider(apVis, { Name = "Chains", Flag = "AP_VizRingBands",
+			Default = Config.VizRingBands or 4, Min = 1, Max = 8, Suffix = "",
+			Callback = function(v) Config.VizRingBands = v end })
+		ringVis()
+		apVis:Colorpicker({ Name = "Color A", Default = Config.RingA,
+			Callback = function(c) Config.RingA = c end }, ctx.flag("AP_RingA"))
+		apVis:Colorpicker({ Name = "Color B", Default = Config.RingB,
+			Callback = function(c) Config.RingB = c end }, ctx.flag("AP_RingB"))
 
 		apVis:Divider()
-		apVis:Header({ Name = "Colors" })
-		apVis:Colorpicker({ Name = "Ring Gradient A", Default = Config.RingA,
-			Callback = function(c) Config.RingA = c end }, ctx.flag("AP_RingA"))
-		apVis:Colorpicker({ Name = "Ring Gradient B", Default = Config.RingB,
-			Callback = function(c) Config.RingB = c end }, ctx.flag("AP_RingB"))
-		apVis:Colorpicker({ Name = "Safe Cone", Default = Config.ConeSafe,
+		apVis:Header({ Name = "Cone & Zone Colors" })
+		apVis:Colorpicker({ Name = "Cone (safe)", Default = Config.ConeSafe,
 			Callback = function(c) Config.ConeSafe = c end }, ctx.flag("AP_ConeSafe"))
-		apVis:Colorpicker({ Name = "Hit Cone", Default = Config.ConeHit,
+		apVis:Colorpicker({ Name = "Cone (in range)", Default = Config.ConeHit,
 			Callback = function(c) Config.ConeHit = c end }, ctx.flag("AP_ConeHit"))
-		apVis:Colorpicker({ Name = "Restrict Ring", Default = Config.RestrictCol,
+		apVis:Colorpicker({ Name = "Keep-Out", Default = Config.RestrictCol,
 			Callback = function(c) Config.RestrictCol = c end }, ctx.flag("AP_Restrict"))
+
+		apVis:Divider()
+		apVis:Header({ Name = "Performance" })
+		slider(apVis, { Name = "Draw Distance", Flag = "AP_VizRange",
+			Default = Config.VizRange or 100, Min = 20, Max = 250, Suffix = " st",
+			Callback = function(v) Config.VizRange = v end })
+		slider(apVis, { Name = "Redraw Cap", Flag = "AP_VizMaxFPS",
+			Default = Config.VizMaxFPS or 60, Min = 15, Max = 240, Suffix = " fps",
+			Callback = function(v) Config.VizMaxFPS = v end })
+		apVis:SubLabel({ Text = "how often the overlay redraws, not ur game fps. lower = more headroom" })
 
 		-- ═══════════════════ TAB: Desync ══════════════════��
 		local DS = ctx.tabs.Desync
