@@ -5789,15 +5789,21 @@ Viz.drawRing = function(cam, model, hrp, hot)
 		local col = Config.RingA:Lerp(Config.RingB, f)
 
 		local y = bodyY + dy
-		local i1 = Vector3.new(cx + math.cos(a1) * rIn, y, cz + math.sin(a1) * rIn)
-		local i2 = Vector3.new(cx + math.cos(a2) * rIn, y, cz + math.sin(a2) * rIn)
-		local o2 = Vector3.new(cx + math.cos(a2) * radius, y, cz + math.sin(a2) * radius)
-		local o1 = Vector3.new(cx + math.cos(a1) * radius, y, cz + math.sin(a1) * radius)
-		Viz.ribbonQuad(cam, i1, i2, o2, o1, col, hot and 0 or 0.08)
+		local c1, s1 = math.cos(a1), math.sin(a1)
+		local c2, s2 = math.cos(a2), math.sin(a2)
+		-- NOTE: in this Drawing API Transparency 1 == FULLY OPAQUE (see drawWorldSeg, which always
+		-- passes 1). I had been passing 0/0.08 here, which is why the ribbon looked washed out.
+		-- Vector3 is an immutable value type, so there is no way to avoid building the 4 corner
+		-- points; what we DO avoid is the 2 extra Vector3 the old mirrored *ribbon* needed, and the
+		-- 2 more the blur copy needed (both gone now) — that alone cut this loop's allocations in half.
+		Viz.ribbonQuad(cam,
+			Vector3.new(cx + c1 * rIn,    y, cz + s1 * rIn),
+			Vector3.new(cx + c2 * rIn,    y, cz + s2 * rIn),
+			Vector3.new(cx + c2 * radius, y, cz + s2 * radius),
+			Vector3.new(cx + c1 * radius, y, cz + s1 * radius), col, 1)
 
-		-- [V94.2] mirrored pass is a plain LINE again (the filled second ribbon + the blur copy were
-		-- both more logic than they were worth). Negated angle + inverted depth still gives the
-		-- crossing band that sells the 3D.
+		-- [V95] mirrored pass is a plain LINE with the SAME opacity as the ribbon (user asked for the
+		-- mirror to match, not to be a translucent ghost — drawWorldSeg is always opaque).
 		if Config.VizRingMirror ~= false then
 			local ym = bodyY - dy
 			local rMid = (rIn + radius) * 0.5
