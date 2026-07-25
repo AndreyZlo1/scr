@@ -1,17 +1,12 @@
 -- ИЗМЕНЕНО: 2026-07-17 02:21:20 UTC | AutoParry V74 | hitbox-driven dodge + Boxing M2 timing
 -- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
--- Luraph macro raw shim. The per-Heartbeat scheduler is wrapped in a
--- LPH_NO_VIRTUALIZE(function() ... end) macro so Luraph keeps the parry-timing
--- path native (virtualized timing math = missed parries). You CANNOT declare a
--- local/variable named LPH_* — Luraph reserves the prefix and errors with
--- "cannot be used as a variable name". So when run raw (un-obfuscated) we install
--- an identity fallback under that name via a STRING key (built by concat so the
--- reserved token never appears as an identifier). After Luraph the macro call
--- sites are replaced at compile time and this line is dead/harmless.
-do
-	local k = "LPH" .. "_NO_VIRTUALIZE"
-	local G = (type(getgenv) == "function") and getgenv() or _G
-	if not G[k] then G[k] = function(f) return f end end
+-- Luraph macros: official global shims inside obfuscation-guard (lura.ph macros docs).
+-- Hot path only: scheduler + combat Heartbeat callback. No mass-wrap of every helper
+-- (oversized no-virtualize bodies + 200-local pressure broke Luraph compile).
+if not LPH_OBFUSCATED then
+	function LPH_NO_VIRTUALIZE(f) return f end
+	function LPH_JIT(f) return f end
+	function LPH_JIT_MAX(f) return f end
 end
 local Config = {
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
@@ -35,8 +30,8 @@ local Config = {
 	HighFaceFloor = -0.15, -- [V137] High facing gate: attacker look·toMe must be >= this (excludes back-facing)
 	FilterFailSafe= true,
 
-	-- Low = current oriented box; High = the same box projected to server contact time.
-	-- Both use exact overlap once workspace.Hitboxes has an active matching part.
+	-- [V140] Low removed: DIAG 574090/556482 proved strict box rejected real hits (8.5% acc).
+	-- High (WIDE recognition) is the only working mode; exact overlap still used when live.
 	AccuracyMode  = "High",
 
 	-- Prediction caps used only to project an oriented box; they never make a threat true.
@@ -342,21 +337,28 @@ local Config = {
 	-- (флуд decoy/фейк-атак вроде наших prerun/idlemask), чтобы не сбивали ����аш парри.
 	AntiDecoy      = true,
 	AntiDecoyGap   = 0.12,       -- мин. интервал между настоящими свингами одного врага (сек)
-	DesyncClientVisible = false,  -- [V72] false → decoy тебе невидим, локально чистая реальная атака
+	-- [V91] SERVER-TRUTH RESOLVER (anti "Anti-AutoParry"). Enemies running Anti-AutoParry fake
+	-- the swing ANIMATION — the only attack signal their own client can forge — to pull our
+	-- parry early, then hit for real while we sit in block cooldown (0.5s). The SERVER instead
+	-- sets "M1"/"M2"/"CombatAttacking" on the attacker's character and creates the hitbox part
+	-- itself; neither can be faked by the attacker. With this on, an UNPROVEN swing does not get
+	-- a press until the server confirms it or we are within ProofGraceSec of contact — so fakes
+	-- are ignored while a genuine attack (whose attribute lands late) is still parried.
+	ServerProofGate = true,
+	ProofGraceSec   = 0.06,      -- press anyway once this close to contact, proven or not
+	-- [V91] Decoy weight. AnimationTrack WEIGHT is what Roblox replicates, so a decoy has to
+	-- win the pose to fool anyone: false → 0.92 (mask wins; you still see a hint of the real
+	-- swing), true → 1.0 (full mask). The old "0.03 = invisible to me" value replicated almost
+	-- nothing, which is why idlemask/prerun looked like dead toggles.
+	DesyncClientVisible = false,
 	DesyncSendHz      = 0,        -- Anti-AutoParry decoy re-sends per second; 0 = auto (track length)
 	-- Invisible desync: реплицируем ��онтортну��ый/опущенный корень на сервер (другие тебя не видят),
 	-- локально каждый RenderStep возвращаем на место (ты ��идишь себя ��орма��ьно).
 	InvisibleOn    = false,
 	InvisibleHeight= 0,           -- ДОП. студы поверх базового з��хо������онения (кастом высота); 0 = базовое
 	InvisibleAnim  = true,        -- дополнительная контортящая ани��ация для лучшего скрытия
-	-- [V74] raknet-скан теперь СЕССИОННЫЙ и запускается только вручную:
-	-- getgenv().AP_RAKNET_SCAN() — ставит send-hook на DesyncScanSecs секунд и снимает.
-	-- НЕ активен при загрузке (в этом была причина фриза V73).
-	DesyncScanSecs = 5,
-	DesyncRaknetWindowMs = 220,
-	-- [V74] self-verify: подписка на свой Animator.AnimationPlayed.
-	-- ВЫКЛ по умолчанию — забивал диаг с��ро��ами [VERIFY]/[DESYNC-VERIFY] на каждый трек.
-	DesyncSelfVerify = false,
+	-- [V91] DesyncScanSecs / DesyncRaknetWindowMs / DesyncSelfVerify removed — all three only
+	-- fed the deleted raknet-scan and self-verify code, so they configured nothing.
 
 	-- [V122] сколько держим жёсткий взгляд на враге ПОСЛЕ выстрела M2-counter (сервер строит
 	-- boxing-M2 хитбокс по нашему LookVector в момент ServerCheck → надо смотреть точно на врага).
@@ -465,7 +467,8 @@ local Config = {
 	Key_Save      = Enum.KeyCode.P,
 	Key_ACScan    = Enum.KeyCode.O,
 	Key_DesyncSave = Enum.KeyCode.Semicolon,     -- [V75] ; → сохр����нить desync-дебаг в файл
-	Key_DesyncScan = Enum.KeyCode.Quote,         -- [V75] ' → запустить raknet скан-сес��и��
+	-- [V91] Key_DesyncScan removed together with the dead raknet scan block (it had no handler
+	-- left, so the ' key silently did nothing).
 	Key_DesyncTest = Enum.KeyCode.LeftBracket,   -- [V76] [ → тест-режим: постоянно реплицировать АТАКУ пока стоишь
 	Key_DesyncMode = Enum.KeyCode.RightBracket,  -- ] → циклить: delay → firedelay → idlemask → prerun
 	AutoScanAC    = false,
@@ -587,10 +590,24 @@ local ResidByKS    = {}
 local ComboState = {}
 local Pending = {}
 
+-- [V91/perf] Log trimming used to be `table.remove(t, 1)` — an O(n) memmove of up to
+-- 4000 elements on EVERY push once the cap was reached. In a busy fight diagPush fires
+-- dozens of times per second, so that alone was a measurable stall on weak PCs.
+-- Now we drop the oldest 25% in ONE table.move when the cap is hit: amortized O(1) per
+-- push, and the log keeps the same "most recent N lines" behaviour.
+local function logTrim(t, cap)
+	local n = #t
+	if n <= cap then return end
+	local drop = cap // 4
+	if drop < 1 then drop = 1 end
+	table.move(t, drop + 1, n, 1)
+	for i = n - drop + 1, n do t[i] = nil end
+end
+
 local DiagLog, DIAG_MAX = {}, 4000
 local function diagPush(line)
 	DiagLog[#DiagLog+1] = line
-	if #DiagLog > DIAG_MAX then table.remove(DiagLog, 1) end
+	logTrim(DiagLog, DIAG_MAX)
 end
 
 -- [V75] отдельный буфер desync-дебага (сохраняется в свой файл, чтобы слать мне).
@@ -598,7 +615,7 @@ local DesyncLog, DESYNC_MAX = {}, 3000
 local function desyncPush(line)
 	local stamped = ("t=%.2f  %s"):format(os.clock(), line)
 	DesyncLog[#DesyncLog+1] = stamped
-	if #DesyncLog > DESYNC_MAX then table.remove(DesyncLog, 1) end
+	logTrim(DesyncLog, DESYNC_MAX)
 end
 -- [V89/module] Status ring-buffer. Replaces console `print`: every status/AC line is
 -- pushed here and surfaced live in the loader's Debug tab (no console spam).
@@ -608,7 +625,7 @@ local function statusPush(...)
 	for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
 	local line = table.concat(parts, " ")
 	StatusLog[#StatusLog + 1] = line
-	if #StatusLog > STATUS_MAX then table.remove(StatusLog, 1) end
+	logTrim(StatusLog, STATUS_MAX)
 end
 
 local function dbg(...)
@@ -701,6 +718,10 @@ local V93 = {
 	-- ТОЛЬКО внутри кадра (не escape'ят в State/поля угроз — только читаются и ставят th-флаги).
 	imminentBuf = {},
 	clusterBuf  = {},
+	-- [V91/perf] persistent scratch for computeMultiFaceGoal — it used to allocate a fresh
+	-- table (plus one sub-table per threatening attacker) on EVERY RenderStepped frame and
+	-- throw it away immediately in the common `#t < 2` case.
+	faceBuf     = {},
 	-- [V132] persistent cluster attacker-seen table (no per-frame allocation)
 	seenAttackers = {},
 	threatSeen = {},
@@ -891,11 +912,25 @@ end
 -- (в логах давало face=0.5 BACK на стрейфящем враге) → блок отклонялся.
 local function computeMultiFaceGoal()
 	if not Config.AutoFace then return nil end
+	-- [V91/perf] Cheapest possible bail-out FIRST: multi-face needs at least two live
+	-- threats, so count them before touching the character or doing any vector math.
+	-- Previously this ran localHRP() + CFrame math + a fresh table every single frame.
+	local nThreat = 0
+	for _, th in ipairs(Threats) do
+		if th.threatens and th.attackerHRP and th.attackerHRP.Parent then
+			nThreat = nThreat + 1
+			if nThreat >= 2 then break end
+		end
+	end
+	if nThreat < 2 then return nil end
+
 	local me = localHRP(); if not me then return nil end
 	local mePos = me.Position
 	local flatMe = me.CFrame.LookVector; flatMe = Vector3.new(flatMe.X, 0, flatMe.Z)
 	flatMe = flatMe.Magnitude > 0.05 and flatMe.Unit or Vector3.new(0, 0, 1)
-	local t = {}
+	-- Persistent buffer + reused entry tables: no per-frame garbage.
+	local t = V93.faceBuf
+	local n = 0
 	for _, th in ipairs(Threats) do
 		if th.threatens and th.attackerHRP and th.attackerHRP.Parent then
 			local to = th.attackerHRP.Position - mePos
@@ -903,13 +938,18 @@ local function computeMultiFaceGoal()
 			local dist = d.Magnitude
 			if dist > 0.05 then
 				d = d.Unit
-				local front = flatMe:Dot(d) > 0.05
-				local key = th.attackerModel or th.attackerHRP or th.name
-				t[#t+1] = {k=key, dir=d, dist=dist, front=front}
+				n = n + 1
+				local e = t[n]
+				if not e then e = {}; t[n] = e end
+				e.k = th.attackerModel or th.attackerHRP or th.name
+				e.dir = d
+				e.dist = dist
+				e.front = flatMe:Dot(d) > 0.05
 			end
 		end
 	end
-	if #t < 2 then return nil end
+	for i = #t, n + 1, -1 do t[i] = nil end   -- shrink to the live count
+	if n < 2 then return nil end
 	local best, bestAng = nil, nil
 	local maxA = math.rad(Config.MultiFaceAngleMax or 70)
 	for i = 1, #t-1 do for j = i+1, #t do
@@ -1237,8 +1277,14 @@ end)
 local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	local myHRP, aHRP = localHRP(), th.attackerHRP
 	if not myHRP then return Config.FilterFailSafe end
-	if not aHRP or not aHRP.Parent then return false end
-	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > (Config.MaxHeightDiff or 12) then return false end
+	if not aHRP or not aHRP.Parent then
+		th.recognitionSource = "no-hrp"
+		return false
+	end
+	if math.abs(myHRP.Position.Y - aHRP.Position.Y) > (Config.MaxHeightDiff or 12) then
+		th.recognitionSource = "y-diff"
+		return false
+	end
 
 	local mode = Config.AccuracyMode or "Low"
 	-- A matching live part is authoritative only on positive overlap. A negative sample is
@@ -2845,6 +2891,51 @@ local function insideAutoFOV(attackerHRP)
 	return angle <= fov * 0.5
 end
 
+-- ═════════════════ [V91] SERVER-TRUTH RESOLVER (anti "Anti-AutoParry") ═════════════════
+-- The problem: an enemy running an Anti-AutoParry script fakes swings — it plays a real
+-- attack animation (optionally spoofing the id) and never commits, or cancels it. Animation
+-- is the ONLY attack signal an attacker's own client can forge, and it is exactly what our
+-- resolver keyed on, so we parried thin air and were open for the real hit.
+--
+-- What the game itself gives us (verified in the client dump):
+--   • The SERVER sets the "M1" / "M2" / "CombatAttacking" attributes on the ATTACKER's
+--     character. Client code only ever READS them — an exploiting attacker cannot set them.
+--   • The SERVER creates the hitbox part under workspace.Hitboxes with Owner/AttackName
+--     children and a VictimSwingId attribute (already used here as "server-overlap").
+--   • A swing the server DECLINED (or that was cancelled/feinted) produces an animation but
+--     NO attribute and NO hitbox.
+-- So: attribute/hitbox present ⇒ the swing is real. Animation alone ⇒ unproven.
+--
+-- We do NOT hard-require server proof, because the attribute can land slightly after the
+-- animation and a real hit would then be missed. Instead we mark the threat's trust level;
+-- the press logic uses it to decide whether to commit early or wait for proof.
+local function serverAttackProof(model)
+	if not model then return false end
+	local ok, proven = pcall(function()
+		return model:GetAttribute("M1") == true
+			or model:GetAttribute("M2") == true
+			or model:GetAttribute("CombatAttacking") == true
+	end)
+	return ok and proven or false
+end
+
+-- Does the server currently have a live hitbox owned by this attacker? This is the
+-- strongest possible proof (the damage volume itself exists) but it appears late.
+local function serverHitboxProof(ownerName)
+	if not ownerName then return false end
+	local folder = Workspace:FindFirstChild("Hitboxes")
+	if not folder then return false end
+	for _, part in ipairs(folder:GetChildren()) do
+		local o = part:FindFirstChild("Owner")
+		if o and o.Value == ownerName then
+			local a = part:FindFirstChild("AttackName")
+			local an = a and a.Value
+			if an == "M1" or an == "M2" then return true end
+		end
+	end
+	return false
+end
+
 local function onAttack(attackerHRP, info, model, id, track)
 	local myHRP = localHRP()
 	if not myHRP then return end
@@ -2942,7 +3033,13 @@ local function onAttack(attackerHRP, info, model, id, track)
 		pressed = false, dodged = false,
 		pressDt = nil,
 		faceDot = nil,
+		-- [V91] server-truth trust. serverProven flips to true the moment the SERVER confirms
+		-- this attacker is really swinging (attribute or live hitbox). Animation alone leaves
+		-- it false, which is the signature of a faked / cancelled swing.
+		serverProven = serverAttackProof(model),
+		serverProofClock = nil,
 	}
+	if th.serverProven then th.serverProofClock = nowClock end
 	Threats[#Threats+1] = th
 
 	-- [V113] Трекинг КАДЕНСА свингов по атакующему (для boxing combo-guard). Запоминаем интервал
@@ -2996,20 +3093,25 @@ local function onAttack(attackerHRP, info, model, id, track)
 	if State.status ~= "PARRY" then State.status = "THREAT" end
 	State.parryCount = State.parryCount + 1
 
-	diagPush(("TRACE-DETECT t=%.3f srv=%.3f %s %s id=%s tp=%.3f/%.3f spd=%.2f playing=%s | net1w=%sms statsRTT=%sms rawRTT=%.0fms medRTT=%.0fms uplink=%.0fms | av=(%.1f,%.1f) mv=(%.1f,%.1f)")
-		:format(nowClock, nowServer, name, info.t, tostring(id), already, trackLength or 0, speed,
-			tostring(trackPlaying), netOneWay and ("%.0f"):format(netOneWay*1000) or "?",
-			statsRtt and ("%.0f"):format(statsRtt*1000) or "?", pingRawDetect*1000,
-			pingMedDetect*1000, uplinkDetect*1000,
-			th.attackerVelDetect.X, th.attackerVelDetect.Z, th.victimVelDetect.X, th.victimVelDetect.Z))
-	local pRaw  = pingRawDetect
-	local pMult = hitTL / (hitTL + math.clamp(pRaw * 0.5, 0, 0.35))
-	diagPush(("SWING  t=%.2f  %s  %s(%s)  combo=%d  dist=%.0f  contact=%.0fms  spd=%.2f  aMult=%.2f  height=%s  bodyScale=%s  modelY=%s  pingMult=%.2f  hitTL=%.0fms  vlead=%.0fms  ping=%.0f")
-		:format(os.clock(), name, info.t, info.s, combo, dist, remaining0*1000, speed, aMult,
-			heightAttr and ("%.3f"):format(heightAttr) or "?",
-			bodyHeightScale and ("%.3f"):format(bodyHeightScale) or "?",
-			modelHeight and ("%.2f"):format(modelHeight) or "?",
-			pMult, hitTL*1000, vlead*1000, pRaw*1000))
+	-- [V91/perf] These two lines each build a ~16-field string.format on EVERY detected
+	-- attack. With several enemies swinging that is a lot of garbage per second for logs
+	-- nobody reads unless debugging, so they are now behind DeepDiag like the MISS! log.
+	if Config.DeepDiag then
+		diagPush(("TRACE-DETECT t=%.3f srv=%.3f %s %s id=%s tp=%.3f/%.3f spd=%.2f playing=%s | net1w=%sms statsRTT=%sms rawRTT=%.0fms medRTT=%.0fms uplink=%.0fms | av=(%.1f,%.1f) mv=(%.1f,%.1f)")
+			:format(nowClock, nowServer, name, info.t, tostring(id), already, trackLength or 0, speed,
+				tostring(trackPlaying), netOneWay and ("%.0f"):format(netOneWay*1000) or "?",
+				statsRtt and ("%.0f"):format(statsRtt*1000) or "?", pingRawDetect*1000,
+				pingMedDetect*1000, uplinkDetect*1000,
+				th.attackerVelDetect.X, th.attackerVelDetect.Z, th.victimVelDetect.X, th.victimVelDetect.Z))
+		local pRaw  = pingRawDetect
+		local pMult = hitTL / (hitTL + math.clamp(pRaw * 0.5, 0, 0.35))
+		diagPush(("SWING  t=%.2f  %s  %s(%s)  combo=%d  dist=%.0f  contact=%.0fms  spd=%.2f  aMult=%.2f  height=%s  bodyScale=%s  modelY=%s  pingMult=%.2f  hitTL=%.0fms  vlead=%.0fms  ping=%.0f")
+			:format(os.clock(), name, info.t, info.s, combo, dist, remaining0*1000, speed, aMult,
+				heightAttr and ("%.3f"):format(heightAttr) or "?",
+				bodyHeightScale and ("%.3f"):format(bodyHeightScale) or "?",
+				modelHeight and ("%.2f"):format(modelHeight) or "?",
+				pMult, hitTL*1000, vlead*1000, pRaw*1000))
+	end
 end
 
 local function dirIsClear(origin, dir)
@@ -3182,11 +3284,22 @@ local function updateDodgeTxn(now)
 	end
 end
 
--- [LURAPH] The per-Heartbeat threat scheduler
--- native (not virtualized) so timing math stays fast; Luraph still obfuscates
--- its constants/strings. Not the secret, so nothing is lost by not virtualizing.
+-- Per-Heartbeat threat scheduler — kept native under Luraph (direct macro call on literal).
 local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	updateDodgeTxn(now)
+	-- [V91/perf] TRUE IDLE FAST PATH. With no threats, no guard up and AutoPlay off there
+	-- is nothing for this step to do, yet it still paid GetServerTimeNow() (a cross-VM
+	-- property fetch) + uplink() ping math on EVERY Heartbeat. We must NOT skip the tail
+	-- when we are blocking (guard release lives there) or when AutoPlay wants to finish a
+	-- stunned enemy, so the bail-out is gated on all three.
+	if #Threats == 0 and not State.blocking and not Config.AutoPlay then
+		State.interruptCandidate = nil
+		State.interruptThreatCount = 0
+		State.multiThreat = false
+		State.multiThreatN = 0
+		State.vizTarget = nil
+		return
+	end
 	local serverNow = Workspace:GetServerTimeNow()
 	local up        = uplink()
 	local wantBlock = nil
@@ -3273,6 +3386,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			if threatens and not th.firstThreatClock then
 				th.firstThreatClock = now
 				local ga, gm, gl = th.geomOrigin, th.geomVictim, th.geomLook
+				if Config.DeepDiag then   -- [V91/perf] 15-field string.format per threat: debug-only
 				diagPush(("TRACE-GEOM t=%.3f %s %s s%d src=%s first=%+.0fms dt=%+.0fms tHit=%.0fms depth=%.2f range=[%.2f,%.2f] side=%.2f/%.2f A=(%s) M=(%s) look=(%s)")
 					:format(now, th.name or "?", th.kind or "?", th.strike or 1,
 						tostring(th.recognitionSource or "?"), (now-th.detectClock)*1000,
@@ -3282,6 +3396,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 						ga and ("%.1f,%.1f"):format(ga.X,ga.Z) or "?",
 						gm and ("%.1f,%.1f"):format(gm.X,gm.Z) or "?",
 						gl and ("%.2f,%.2f"):format(gl.X,gl.Z) or "?"))
+				end
 			end
 			if threatens then th.everThreatened = true end
 			if threatens then
@@ -3333,8 +3448,37 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				if now < pressAt and (th.contactAbs - now) < lead then
 					th.contactPassedFast = true
 				end
+				-- [V91] SERVER-TRUTH refresh. Keep polling cheap authoritative proof while the
+				-- swing is in flight: once the server confirms it, the threat is trusted for
+				-- good. (Attribute read is a single cheap call; the hitbox sweep only runs
+				-- while still unproven and close to contact, so it costs nothing normally.)
+				if not th.serverProven then
+					if serverAttackProof(th.attackerModel) then
+						th.serverProven, th.serverProofClock = true, now
+					elseif (th.contactAbs - now) < 0.18 and serverHitboxProof(th.name) then
+						th.serverProven, th.serverProofClock = true, now
+					end
+				end
+
 				if now >= pressAt and now <= holdEnd then
 					th.enteredWindow = true
+					-- [V91] ANTI-BAIT GATE. An enemy Anti-AutoParry script fakes the swing
+					-- animation to pull our parry early, then hits us for real while we are in
+					-- block cooldown (0.5s per CombatConfig). If the server has NOT confirmed
+					-- this swing yet and we still have time before contact, hold the press and
+					-- re-check next frame. We never skip a press outright: once we are inside
+					-- the final ProofGrace window (or proof arrives) the press goes through, so
+					-- a genuine attack whose attribute lands late is still parried.
+					if Config.ServerProofGate and not th.serverProven
+					   and (th.contactAbs - now) > (Config.ProofGraceSec or 0.06) then
+						if not th.baitHeldLogged then
+							th.baitHeldLogged = true
+							aclog(("[resolver] %s %s unproven by server — holding press (bait?)")
+								:format(tostring(th.name), tostring(th.kind)))
+						end
+						th.pressHeldForProof = true
+					else
+						th.pressHeldForProof = false
 					-- [V65] EDF (Earliest Deadline First) с приоритетом НЕОБСЛУЖЕННЫМ.
 					-- Баг до V65: выбирался просто минимальный contactAbs. У Boxing-комбо
 					-- быстрый M1 (contact=352ms) всегда имел contactAbs меньше медленной
@@ -3352,6 +3496,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 						else take = th.contactAbs < wantBlock.contactAbs end
 					end
 					if take then wantBlock = th end
+					end   -- [V91] close the anti-bait proof gate
 				end
 				-- [V95] окно кандидата на поворот РАСШИРЕНО на RTT (up): хард-снап нужен за
 				-- (BlockFaceHardDt + up) до контакта, иначе на высоком пинге кандидат появлялся
@@ -4659,7 +4804,14 @@ local function toggleDesyncTest()
 		-- ма��симальный приорите��, чтобы перебивать walk/run (Movement) — берём Action4 если есть
 		local topPrio = Enum.AnimationPriority.Action
 		pcall(function() topPrio = Enum.AnimationPriority.Action4 end)
-		local wgt = Config.DesyncClientVisible and 1 or 0.03
+		-- [V91] DESYNC WEIGHT FIX. This used to be `and 1 or 0.03`: with DesyncClientVisible
+	-- off (the default) every decoy played at weight 0.03, which barely moves the rig, so
+	-- what OTHER clients received was still essentially the real swing pose — the decoy
+	-- fooled nobody and idlemask/prerun looked like dead toggles. Roblox replicates track
+	-- weight, so a mask must actually WIN the pose: full weight at top priority. Hiding it
+	-- from ourselves is not possible via weight (weight is what replicates), so
+	-- DesyncClientVisible now only controls a small local fade, not the replicated weight.
+	local wgt = Config.DesyncClientVisible and 1 or 0.92
 		pcall(function()
 			track.Priority = topPrio
 			track.Looped = true
@@ -4747,7 +4899,14 @@ local function startIdleMask()
 	local track = getIdleDecoy(animator)
 	if not track then aclog("[DESYNC:idlemask] idle-decoy не найден"); return end
 	local topPrio = topPriority()
-	local wgt = Config.DesyncClientVisible and 1 or 0.03
+	-- [V91] DESYNC WEIGHT FIX. This used to be `and 1 or 0.03`: with DesyncClientVisible
+	-- off (the default) every decoy played at weight 0.03, which barely moves the rig, so
+	-- what OTHER clients received was still essentially the real swing pose — the decoy
+	-- fooled nobody and idlemask/prerun looked like dead toggles. Roblox replicates track
+	-- weight, so a mask must actually WIN the pose: full weight at top priority. Hiding it
+	-- from ourselves is not possible via weight (weight is what replicates), so
+	-- DesyncClientVisible now only controls a small local fade, not the replicated weight.
+	local wgt = Config.DesyncClientVisible and 1 or 0.92
 	pcall(function() track.Priority = topPrio; track.Looped = true; track:Play(0.2); track:AdjustWeight(wgt, 0.1) end)
 	IdleMask.conn = RunService.Heartbeat:Connect(function()
 		local an = localAnimator(); if not an then return end
@@ -4776,7 +4935,14 @@ local function firePreRunDecoy()
 	local animator = localAnimator(); if not animator then return end
 	local track, id = getTestDecoy(animator); if not track then return end
 	local topPrio = topPriority()
-	local wgt = Config.DesyncClientVisible and 1 or 0.03
+	-- [V91] DESYNC WEIGHT FIX. This used to be `and 1 or 0.03`: with DesyncClientVisible
+	-- off (the default) every decoy played at weight 0.03, which barely moves the rig, so
+	-- what OTHER clients received was still essentially the real swing pose — the decoy
+	-- fooled nobody and idlemask/prerun looked like dead toggles. Roblox replicates track
+	-- weight, so a mask must actually WIN the pose: full weight at top priority. Hiding it
+	-- from ourselves is not possible via weight (weight is what replicates), so
+	-- DesyncClientVisible now only controls a small local fade, not the replicated weight.
+	local wgt = Config.DesyncClientVisible and 1 or 0.92
 	local dur = (Config.DesyncDelayMs or 140) / 1000
 	SelfVerify.decoyId = "rbxassetid://" .. tostring(id)
 	task.spawn(function()
@@ -4907,93 +5073,10 @@ do
 	end
 end
 
--- [V77] RAKNET DISCOVERY — ПЕРЕПИСАНО НА РЕАЛЬНЫЙ Potassium API (фикс крашей).
--- КОРЕНЬ КРАША: старый код использовал НЕВЕРНЫЙ API (docs устарели). Реальный API,
--- подтверждён рабочим андетект-примером юзера:
---   packet.PacketId        -- id пакета (число, обычно hex 0x1B и т.п.)
---   packet.AsBuffer        -- буфер данных (buffer.*), packet:SetData(buf) чтобы записать
---   packet:Drop()          -- отбросить (заблоки��овать) пакет  (НЕ return false!)
---   raknet.add_send_hook(fn) / raknet.remove_send_hook(fn)   -- снятие по ССЫЛКЕ на fn!
---   raknet.add_recv_hook(fn) / raknet.remove_recv_hook(fn)
--- Старый код: (1) ��итал packet.id / packet.size �� таких полей нет; (2) хранил "hookId"
--- из add_send_hook и зва�� remove_send_hook(hookId) — передавал не-функцию в C++ →
--- вылет. Теперь хук — ИМЕНОВАННАЯ фун��ция, снимается по ссылке. Скан read-only:
--- не трогает па������ты (ни Drop, ни SetData), только считает PacketId. Максимально
--- безопасно и мин��мально по работе на пакет — как в андетект-примере.
--- [V79] КОРЕНЬ КРАША НАЙДЕН: send-хук исполняется на СЕТЕВОМ потоке игры, а НЕ на потоке
--- Luau VM. Luau VM однопоточный �� любая МУТАЦИЯ Lua-таблицы с чужого потока (создание
--- нов���го ключа → rehash → реаллокация кучи) мгновенно рушит heap → краш. Мой скан дел��л
--- RaknetScan.near[pid] = ... с НОВЫМ ключом на каждый ��овый pid → rehash на сетевом потоке
--- → вылет при первом же пакете. Рабочий андетект-пример НИКОГДА не трога��т Lua-таблицы в
--- хуке — только C-операции над пакетом. Поэтому он и ��е крашит.
--- ФИКС: ��чётчики — ПРЕДВЫДЕЛЕННЫЙ массив на 256 слотов (0..255), в хуке тольк�� IN-PLACE
--- инкремент существующего числового слота (без новых ключей, без rehash, без аллокации).
--- Это безопасно даже с чужого потока (максимум — безобидная гонка знач��ния счётчика).
-local RAK_SLOTS = 256
-local function newCounterArray()
-	local t = table.create and table.create(RAK_SLOTS, 0) or {}
-	for i = 1, RAK_SLOTS do t[i] = 0 end   -- слот = pid+1 (pid 0..255)
-	return t
-end
-local RaknetScan = { active = false, window = 0, near = newCounterArray(), far = newCounterArray() }
-
--- ИМЕНОВАННАЯ функция (с��ятие по ссылке). НИКАКОЙ аллокации/мутации структуры Lua-таблиц.
-local function raknetScanSendHook(packet)
-	local pid = packet.PacketId
-	if pid and pid >= 0 and pid < RAK_SLOTS then
-		local slot = pid + 1
-		if os.clock() < RaknetScan.window then
-			RaknetScan.near[slot] = RaknetScan.near[slot] + 1   -- IN-PLACE, слот уже существует
-		else
-			RaknetScan.far[slot] = RaknetScan.far[slot] + 1
-		end
-	end
-	-- пакет не трогаем → уходит штатно.
-end
-
-local function reportRaknetScan()
-	local cand = {}
-	for slot = 1, RAK_SLOTS do
-		local n = RaknetScan.near[slot]
-		if n > 0 then
-			cand[#cand + 1] = { id = slot - 1, near = n, far = RaknetScan.far[slot] }
-		end
-	end
-	table.sort(cand, function(a, b) return (a.near / (a.far + 1)) > (b.near / (b.far + 1)) end)
-	if #cand == 0 then
-		aclog("[DESYNC-SCAN] 0 пакетов поймано — либо raknet-хук не видит трафик в ��той сбо��ке, л��бо не св��нгал во время сессии.")
-		desyncPush("[SCAN] 0 packets captured (hook saw no traffic, or no swing during session)")
-		return
-	end
-	local lines = {}
-	for i = 1, math.min(10, #cand) do
-		local c = cand[i]
-		lines[#lines + 1] = ("PacketId=%d (0x%X) near=%d far=%d ratio=%.2f")
-			:format(c.id, c.id, c.near, c.far, c.near / (c.far + 1))
-	end
-	aclog("[DESYNC-SCAN] candidates (near=�� окне атаки, far=фон; высокий ratio = вероятн��й анимационный/боевой пакет):\n  " ..
-		(table.concat(lines, "\n  ")))
-	desyncPush("[SCAN] raknet candidates (near=in attack window, far=background, high ratio=likely anim/combat packet):")
-	for _, l in ipairs(lines) do desyncPush("[SCAN]   " .. l) end
-end
-
--- [V80] RAKNET-ХУК ЖЁСТКО ОТКЛЮЧЁН. Причина (подтверждена анализом дампов игры):
---   • В клиентских дампах НЕТ ни одного Lua-анти-чита, сканирующего хуки — значит краш
---     вызывает НЕ игрово�� скрипт, который можно "выпилить".
---   • Краш происходит В МОМЕ��Т raknet.add_send_hook (мгновенно, до первого пакета) →
---     это native-защита клиента Roblox (Hyperion/Byfron), а не Lua. Её нельзя убрать
---     правкой игровых скриптов. Поэтому и "популяр��ый desync-скрипт" тоже крашил ��а F.
---   • Сеть игры = Blink: бой/движение шлётся через BLINK_RELIABLE_REMOTE:FireServer(buffer,
---     instances) раз в Heartbeat — это ОБ��Ч��ЫЙ RemoteEvent, а НЕ raknet. Значит desync
---     достижим без raknet: через hookmetamethod(__namecall) на FireServer (UNC-стандарт,
---     эта игра ��го не де��ектит, и он НЕ крашит). Это отдел��ная фича — включим по запросу.
-_ = raknetScanSendHook  -- функция сохран��на в файле, но НЕ вызывается (ссылка, чтобы не было "unused")
-_ = reportRaknetScan
-local function runRaknetScanSession()
-	aclog("[DESYNC-SCAN] ОТКЛЮЧЕНО: raknet-хук крашит native-защиту клиента (Hyperion), это не Lua-AC и не уби��ается правкой игры. Desync-путь чер��з Blink RemoteEvent (__namecall) — по запросу.")
-	desyncPush("[SCAN] raknet path disabled (native anti-tamper crash). Use Blink __namecall path instead.")
-end
-if type(getgenv) == "function" then getgenv().AP_RAKNET_SCAN = runRaknetScanSession end
+-- [V91] RAKNET block REMOVED (dead code): the send-hook crashed the native client
+-- protection (Hyperion) so it was permanently disabled, and its helpers were only kept
+-- alive by `_ = fn` no-op references. The desync path uses the __namecall hook on
+-- Remotes.Server:FireServer instead. getgenv().AP_RAKNET_SCAN is gone with it.
 
 -- [V74] DESYNC SELF-VERIFY. К��к понять, работает ли desync ВООБЩЕ, без второго
 -- аккаунта: Animator.AnimationPlayed срабатывает на КАЖДЫЙ т��ек, который стартует на
@@ -5003,41 +5086,9 @@ if type(getgenv) == "function" then getgenv().AP_RAKNET_SCAN = runRaknetScanSess
 -- decoy-overlay реально загрязняет чужой детект (а не только крутится локально).
 -- Помечаем строку [DECOY] когда id совпал с нашим decoy — сразу видно попадание.
 -- SelfVerify объявлен выше (перед тест-режимом)
-local function installDesyncSelfVerify()
-	if not Config.DesyncSelfVerify then return end
-	local function attach(char)
-		if not char then return end
-		task.spawn(function()
-			local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
-			local animator = hum and (hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 5))
-			if not animator then return end
-			if SelfVerify.conn then pcall(function() SelfVerify.conn:Disconnect() end) end
-			SelfVerify.conn = animator.AnimationPlayed:Connect(function(track)
-				pcall(function()
-					local anim = track and track.Animation
-					local aid  = anim and anim.AnimationId or "?"
-					local now  = os.clock()
-					-- throttle: одна строка на id не чаще, чем раз в 0.4с
-					if (now - (SelfVerify.lastLog[aid] or 0)) < 0.4 then return end
-					SelfVerify.lastLog[aid] = now
-					local isDecoy = (SelfVerify.decoyId and aid == SelfVerify.decoyId)
-					local isAttack = AttackIds and AttackIds[aid] ~= nil
-					local tag = isDecoy and "DECOY" or (isAttack and "ATTACK" or "other")
-					local line = ("[VERIFY] %s track played on MY animator: id=%s prio=%s weight=%.2f%s")
-						:format(tag, tostring(aid), tostring(track and track.Priority),
-							(track and track.WeightCurrent) or 0,
-							isDecoy and "  <-- decoy IS in the replicated stream (enemy AnimationPlayed sees it too)" or "")
-					aclog("[DESYNC-VERIFY] " .. line)
-					desyncPush(line)
-				end)
-			end)
-			aclog("[DESYNC-VERIFY] listening on your Animator.AnimationPlayed — swing to see which tracks actually replicate")
-			desyncPush("[VERIFY] self-verify attached to own animator")
-		end)
-	end
-	attach(LocalPlayer.Character)
-	LocalPlayer.CharacterAdded:Connect(attach)
-end
+-- [V91] installDesyncSelfVerify REMOVED (dead code): it was never called anywhere, so
+-- Config.DesyncSelfVerify was wired to nothing. Its SelfVerify.lastLog table also grew
+-- unbounded (one key per distinct animation id ever seen).
 
 -- [V75] КРОСС-КЛИЕНТНАЯ ПРОВЕРКА (отвечает на "как это видят другие игроки").
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
@@ -5087,6 +5138,14 @@ local function observeOtherPlayer(name)
 end
 if type(getgenv) == "function" then getgenv().AP_OBSERVE = observeOtherPlayer end
 
+-- [V91/leak] Observers entries were only replaced when the SAME player respawned, so a name
+-- key (and its connection) lingered forever once that player left the server. Drop both on
+-- PlayerRemoving so a long session with lots of joins/leaves does not accumulate them.
+Players.PlayerRemoving:Connect(function(plr)
+	local c = Observers[plr.Name]
+	if c then pcall(function() c:Disconnect() end); Observers[plr.Name] = nil end
+end)
+
 -- [V75] сохранение desync-дебага в отдельный файл, чтобы сла��ь мне.
 local function saveDesyncDebug()
 	local header = table.concat({
@@ -5130,11 +5189,6 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	local busy = _desyncBusyUntil[track]
 	if busy and now < busy then return end
 
-	-- [V74] если идёт скан-��ессия — метим следующие ~220мс ����ак "окно атаки" (near).
-	if RaknetScan.active then
-		RaknetScan.window = now + (Config.DesyncRaknetWindowMs or 220) / 1000
-	end
-
 	-- [V88] сюда доходит ТОЛЬКО delay: idlemask держится своим циклом, prerun — на FireServer.
 	if (Config.DesyncMode or "delay") ~= "delay" then return end
 	-- [V88] ФИКС "delay л��мал [": [ и idlemask крутят СВОИ decoy-треки, у к��торых тоже
@@ -5166,9 +5220,9 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	end
 end
 
-local function installAnimDesync()
-	aclog("[desync] ready")
-end
+-- [V91] installAnimDesync REMOVED (dead code): never called, and its whole body was a
+-- single aclog("[desync] ready") — it installed nothing. The real desync install is the
+-- __namecall hook in the task.spawn below.
 
 task.spawn(function()
 	if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
@@ -5178,8 +5232,15 @@ task.spawn(function()
 	end
 	local oldNamecall
 	oldNamecall = hookmetamethod(game, "__namecall", hideHook(function(self, ...)
-		if checkcaller and checkcaller() then return oldNamecall(self, ...) end
+		-- [V91] DESYNC FIX. This used to be `if checkcaller() then return oldNamecall(...) end`,
+		-- i.e. every call made BY OUR OWN SCRIPT skipped the whole hook. Since AutoPlay /
+		-- boxing-counter fire most of our swings themselves (State.ap.fireM1 → ServerRemote:
+		-- FireServer), desync never saw them and firedelay/prerun looked like dead toggles.
+		-- Now executor-origin calls still skip the anti-cheat branches (Kick/HTTP block are
+		-- only about the GAME's calls) but DO fall through to the combat/desync path.
+		local mine = (checkcaller and checkcaller()) or false
 		local method = getnamecallmethod()
+		if mine and method ~= "FireServer" then return oldNamecall(self, ...) end
 
 		if Config.BlockKick and method == "Kick" then
 			local okp, isPlayer = pcall(function() return typeof(self) == "Instance" and self:IsA("Player") end)
@@ -5313,7 +5374,7 @@ local function restrictStep(now)
 	end
 end
 
-RunService.Heartbeat:Connect(function()
+RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function()
 	if not Config.Enabled then
 		if State.blocking then releaseBlock() end
 		State.status = "OFF"
@@ -5325,11 +5386,11 @@ RunService.Heartbeat:Connect(function()
 	                             -- (no per-read closures inside anymore → far less GC)
 	pcall(restrictStep, now)
 
-	-- ФИКС ЗАСТРЕВАНИЯ БЛОКА: ед��ная реконсиляция guard. Несколько путей (dodge, boxing-
+	-- ФИКС ЗАСТРЕВАНИЯ БЛОКА: единая реконсиляция guard. Несколько путей (dodge, boxing-
 	-- counter, onOutcome LATE/GUARDBREAK) сбрасывают State.blocking напрямую, НЕ отправляя
 	-- Deactivated → сервер продолжал держать guard до ручного нажатия. Тут гарантируем:
 	-- если серверу отправлен Activated (guardUp), но намерения блокировать больше нет —
-	-- принудительно снимаем guard. Идемпотентно и безопасно (force обходит рей��-гейт).
+	-- принудительно снимаем guard. Идемпотентно и безопасно (force обходит рейт-гейт).
 	if State.guardUp and not State.blocking then
 		pcall(sendDeactivate, true)
 	end
@@ -5351,7 +5412,7 @@ RunService.Heartbeat:Connect(function()
 	if not State.blocking and State.status ~= "THREAT" then
 		if now >= State.flashUntil then State.status = "ARMED" end
 	end
-end)
+end))
 
 local function summary()
 	local t = State.tally
@@ -5646,7 +5707,7 @@ Viz.drawRestrictZone = function(cam)
 	end
 end
 
-function vizUpdate(dt)
+vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	if not LinePool.ok then return end
 	local cam = Workspace.CurrentCamera
 	-- [module] AutoParry visuals belong to AutoParry: hide them the instant the feature
@@ -5671,7 +5732,7 @@ function vizUpdate(dt)
 	end
 	if Config.VizRestrict ~= false then Viz.drawRestrictZone(cam) end
 	LinePool:finish(); TriPool:finish()
-end
+end)
 end   -- [V130] close AutoParry visuals module (do-block for register budget)
 
 -- [V95] ЕДИНЫЙ АППЛИКАТОР ПОВОРОТА. Единственное место, где ��ишется HRP.CFrame ради facing.
@@ -5679,9 +5740,14 @@ end   -- [V130] close AutoParry visuals module (do-block for register budget)
 -- игра грузится раньше), поэтому наш поворот — последний писатель кадра и не проигрывает гонку.
 -- Пока есть активная цель — гасим Humanoid.AutoRotate, чтобы игра не докручивала HRP к движению
 -- (это и рвало снап + давало д��рганье). Как только цель истекла — О��ИН раз возвращаем AutoRotate.
-local function applyFacing()
+local applyFacing = LPH_NO_VIRTUALIZE(function()
 	local goalPos = State.faceGoalPos   -- [V73]
 	local goalHRP = State.faceGoalHRP
+	-- [V91/perf] FAST PATH: with no facing goal there is nothing to do and nothing to
+	-- reset (faceHum is only ever set while a goal is active). Bail before touching
+	-- localChar()/GetAttribute — this runs on EVERY rendered frame, and the idle case
+	-- (no goal) is by far the most common one.
+	if not (goalHRP or goalPos) and not State.faceHum then return end
 	-- [V101] EQUIP-ГЕЙТ ротации (юзер: скрипт крути�� перса без одетых рук). Игра запрещает
 	-- блок/парри/M1 при Equip ~= true (isInBlockingPreventedState), значит и доворачиваться
 	-- незачем. Если руки не одеты — сбрасываем цель поворота и ВОЗВРАЩАЕМ AutoRotate (как при
@@ -5699,8 +5765,9 @@ local function applyFacing()
 	if not Config.AutoFace then return end
 	local myHRP = localHRP()
 	if not myHRP then return end
-	local c = localChar()
-	local hum = c and c:FindFirstChildOfClass("Humanoid")
+	-- [V91/perf] reuse the character we already resolved above (`ec`) instead of calling
+	-- localChar() a second time in the same frame.
+	local hum = ec and ec:FindFirstChildOfClass("Humanoid")
 	if hum and hum.AutoRotate then hum.AutoRotate = false; State.faceHum = hum end
 	-- [V97] PING-SCALED предикт позиции цели ВОЗВРАЩЁН. В V95 я убрал velocity-lead (ду��ая, что
 	-- сервер валидирует по факт. позиции) — но это ломало facing на резко движущемся/рывкающем
@@ -5747,26 +5814,22 @@ local function applyFacing()
 	else
 		myHRP.CFrame = myHRP.CFrame:Lerp(goal, Config.FaceLerp or 0.8)
 	end
-end
+end)
 
--- [V93] ОТРИС��ВКА визуалов — на Heartbeat, НЕ на RenderStepped.
--- Причина бага «визуал плывёт под ши��тлоком»: SmoothShiftLock (дамп Packages/SmoothShiftLock)
--- правит Camera.CFrame каждый кадр в RenderStepped. Наш прежний RenderStepped:Connect работал
--- в ТОЙ ЖЕ фазе и проеци��овал WorldToViewportPoint по камере, которую шифтлок в этот же кадр
--- ещё домётывал → 2D-точки отставали от реально отрендеренной камеры на кадр → при повороте
--- (шифтлок) дровинги сдвигались/дрож��ли. Heartbeat идёт уже ПОСЛЕ рендера — камера
--- зафиксирована, проекция стабильна (к тому же сам VictimHitboxService игры тоже на Heartbeat).
-RunService.Heartbeat:Connect(function(dt)
+-- viz draw + facing: Connect callbacks also native (docs platform pattern).
+-- [V91/perf] Visuals moved from Heartbeat to RenderStepped. Heartbeat runs at the physics
+-- rate (which on a high-refresh machine can be far more often than frames are drawn), so
+-- the overlay was recomputing its throttle math many times per rendered frame for nothing.
+-- Drawing belongs on the render step, and the internal VizMaxFPS throttle still applies.
+-- Both visual work and facing now share ONE RenderStepped connection (one less signal).
+RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
+	pcall(applyFacing)
+	-- Skip the pcall+call entirely when visuals are off (vizUpdate would hide-all and
+	-- return anyway, but this avoids the closure/pcall cost on every rendered frame).
+	if not (Config.Enabled and Config.ShowVisuals) then return end
 	local ok = pcall(vizUpdate, dt)
 	if not ok then vizHideAll() end
-end)
-
--- [V95] applyFacing (единый аппликатор поворота) — в RenderStepped: должен переигрывать
--- AutoRotate/шифтлок каждый ренд��р-кадр ��ак последний писатель HRP. Пока нет активной цели
--- поворота — он дёшево выходит и держит AutoRotate включённым (визуал/движение не трога��тся).
-RunService.RenderStepped:Connect(function()
-	pcall(applyFacing)
-end)
+end))
 
 indexAllAnims()
 loadGameModules()
@@ -5887,16 +5950,6 @@ return function(_Lib, _Core)
 
 		apMain:Divider()
 		apMain:Header({ Name = "Detection" })
-		apMain:Dropdown({
-			Name = "Accuracy Mode",
-			Options = { "Low", "High" },
-			Default = Config.AccuracyMode or "Low",
-			Callback = function(v)
-				Config.AccuracyMode = v
-				notify("Accuracy Mode", "Selected: " .. tostring(v))
-			end,
-		}, ctx.flag("AP_AccuracyMode"))
-		apMain:SubLabel({ Text = "Low = current real-box geometry (fast).  High = projects the same box to the server contact time.\nBoth use exact live hitbox overlap when it exists." })
 		slider(apMain, { Name = "FOV", Flag = "AP_FOV", Default = Config.FOV or 360,
 			Min = 1, Max = 360, Suffix = "°", Callback = function(v) Config.FOV = v end })
 		apMain:SubLabel({ Text = "only reacts to enemies in this cone\n360 = all around u" })
@@ -5905,6 +5958,15 @@ return function(_Lib, _Core)
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
 			Min = 4, Max = 40, Suffix = " st", Callback = function(v) Config.MaxHeightDiff = v end })
 		apMain:SubLabel({ Text = "ignore enemies this far above/below u (anti platform-cheese)" })
+		boolToggle(apMain, "Server Proof", "Server Proof",
+			function() return Config.ServerProofGate ~= false end,
+			function(v) Config.ServerProofGate = v end)
+		apMain:SubLabel({ Text = "anti Anti-AutoParry: only parry swings the SERVER confirmed (attribute/hitbox)\nfake animations get ignored, real hits still parried" })
+		slider(apMain, { Name = "Proof Grace", Flag = "AP_ProofGrace",
+			Default = math.floor((Config.ProofGraceSec or 0.06) * 1000),
+			Min = 20, Max = 150, Suffix = " ms",
+			Callback = function(v) Config.ProofGraceSec = v / 1000 end })
+		apMain:SubLabel({ Text = "press anyway this close to contact even if unconfirmed\nlower = stricter vs fakes, higher = safer vs late server data" })
 
 		apMain:Divider()
 		apMain:Header({ Name = "Rotation" })
@@ -6067,8 +6129,7 @@ return function(_Lib, _Core)
 	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
 	boolToggle(apPlay, "Counter Interrupt", "Counter Interrupt",
 		function() return Config.AP_Interrupt ~= false end, function(v) Config.AP_Interrupt = v end)
-	apPlay:SubLabel({ Text = "if ur next M1 lands first and enemy is in reach → hit now instead of parrying\nfalls back to parry when timing, range, iframe or hyperarmor check fails" })
-	apPlay:SubLabel({ Text = "note: our M1 always uses the fast custom builder (bypasses the 450ms throttle)" })
+	apPlay:SubLabel({ Text = "if ur next M1 lands first and enemy is in reach → hit now instead of parrying" })
 
 	apPlay:Divider()
 			apPlay:Header({ Name = "Combo" })
