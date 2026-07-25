@@ -139,7 +139,11 @@ local Config = {
 
 	MaxWait       = 1.6,
 
-	MinActGap     = 0.030,
+	-- [V91.1] Block throttle. The 0.06 "ServerMinInterval" in CombatRemoteLimits is DATA ONLY —
+	-- nothing on the client reads it, and Block doesn't even go through CombatRemoteClient.Fire
+	-- (Block fires Remotes.Server directly), so the client throttle is ours alone. Dropped to a
+	-- token 4ms just to kill exact-same-frame double sends; no reason to sit on a parry for 30ms.
+	MinActGap     = 0.004,
 	MinDeactGap   = 0.050,
 
 	MatchWindow   = 1.30,
@@ -346,6 +350,11 @@ local Config = {
 	-- are ignored while a genuine attack (whose attribute lands late) is still parried.
 	ServerProofGate = true,
 	ProofGraceSec   = 0.06,      -- press anyway once this close to contact, proven or not
+	-- [V91.1] Parry timestamp spoof. Block.Activated carries a CLIENT-chosen server-time stamp
+	-- and nothing clamps it client-side, so a late parry can be back-dated into the 0.125s
+	-- perfect window. Off by default — flip it on and creep TimeShiftMs up.
+	TimeSpoof    = false,
+	TimeShiftMs  = 40,
 	-- [V91] Decoy weight. AnimationTrack WEIGHT is what Roblox replicates, so a decoy has to
 	-- win the pose to fool anyone: false → 0.92 (mask wins; you still see a hint of the real
 	-- swing), true → 1.0 (full mask). The old "0.03 = invisible to me" value replicated almost
@@ -1739,7 +1748,10 @@ local function looksLikeHandler(t)
 end
 
 AnimLib.handlers    = {}
-AnimLib._handlerSet = {}
+-- [V91.1/leak] weak keys: this is only a dedupe guard, so it must not PIN handler tables that
+-- the game itself has dropped (module reload / respawn). Strong refs here kept every handler
+-- object we ever saw alive for the whole session.
+AnimLib._handlerSet = setmetatable({}, { __mode = "k" })
 
 local function addHandler(t)
 	if not t or AnimLib._handlerSet[t] then return false end
@@ -2025,6 +2037,24 @@ local function playDodgeMotion(dirOverride)
 	end)
 end
 
+-- ════════════ [V91.1] PARRY TIMESTAMP SPOOF ════════════
+-- Block.Activated is the ONE combat packet whose timing the client gets to decide: the game
+-- sends Server:FireServer({...Block/Activated}, Workspace:GetServerTimeNow()) and that stamp
+-- is never clamped or re-read on the client (verified in the dump — Block fires the remote
+-- directly, it doesn't even go through CombatRemoteClient). PerfectBlockWindow is 0.125s, so
+-- if the server trusts the stamp, a parry sent late can be back-dated INTO the window.
+--
+-- TimeShiftMs is applied as a negative offset (we claim we pressed earlier than we did). Keep
+-- it small: nudging by more than the window is pointless and an obvious outlier if the server
+-- ever sanity-checks against its own clock. There is no skew constant anywhere in the client
+-- dump, so how much the server tolerates is unknown — start low, raise until it stops helping.
+local function spoofStamp(tsServer)
+	if not Config.TimeSpoof then return tsServer end
+	local shift = (Config.TimeShiftMs or 0) / 1000
+	if shift <= 0 then return tsServer end
+	return tsServer - shift
+end
+
 local function sendActivate(tsServer)
 	local now = os.clock()
 	if now - State.lastAct < Config.MinActGap then return false end
@@ -2033,7 +2063,7 @@ local function sendActivate(tsServer)
 	if c then c:SetAttribute("Blocking", true) end
 	ServerRemote:FireServer(
 		{ Type = "Combat", Action = "Block", Func = "Activated" },
-		tsServer
+		spoofStamp(tsServer)
 	)
 	State.guardUp = true          -- сервер теперь держит guard
 	playBlockAnim()
@@ -5142,8 +5172,21 @@ if type(getgenv) == "function" then getgenv().AP_OBSERVE = observeOtherPlayer en
 -- key (and its connection) lingered forever once that player left the server. Drop both on
 -- PlayerRemoving so a long session with lots of joins/leaves does not accumulate them.
 Players.PlayerRemoving:Connect(function(plr)
-	local c = Observers[plr.Name]
-	if c then pcall(function() c:Disconnect() end); Observers[plr.Name] = nil end
+	local n = plr.Name
+	local c = Observers[n]
+	if c then pcall(function() c:Disconnect() end); Observers[n] = nil end
+	-- [V91.1/leak] Everything else we key by PLAYER NAME. String keys are never GC'd, so each
+	-- of these kept a dead player's entry for the whole session. Instance-keyed caches
+	-- (State.lastSwingBy, _ownerCache, _animIdCache, _desyncBusyUntil, hooked, V93.hbFirstSeen)
+	-- are all __mode="k" weak tables and clean themselves — these string ones can't.
+	if State.antiDecoySig then State.antiDecoySig[n] = nil end   -- grew per unique attacker, no eviction at all
+	if Pending then Pending[n] = nil end
+	-- ComboState is LRU-capped at 64 but keeps its own _count, so decrement it when we drop a key
+	-- by hand, otherwise the counter drifts up and the LRU starts evicting live attackers.
+	if ComboState[n] ~= nil then
+		ComboState[n] = nil
+		ComboState._count = math.max((ComboState._count or 1) - 1, 0)
+	end
 end)
 
 -- [V75] сохранение desync-дебага в отдельный файл, чтобы сла��ь мне.
@@ -5272,7 +5315,7 @@ task.spawn(function()
 		end
 		-- наш собственный отложенный re-fire (firedelay/prerun) — пропускаем без обраб��тки,
 		-- иначе ��н снова отложится (бесконечный цикл) или потеряется.
-		if State.desyncPassthrough then return oldNamecall(self, ...) end
+		if (State.desyncPass or 0) > 0 then return oldNamecall(self, ...) end
 
 		local a1 = (select(1, ...))
 		local ok, kind = pcall(classifyCombat, a1)
@@ -5300,9 +5343,9 @@ task.spawn(function()
 					if Config.DesyncMode == "prerun" then pcall(DZ.firePreRunDecoy) end
 					local remote, packed, d = self, table.pack(...), desyncMag()
 					task.delay(d, function()
-						State.desyncPassthrough = true
+						State.desyncPass = (State.desyncPass or 0) + 1
 						pcall(function() remote:FireServer(table.unpack(packed, 1, packed.n)) end)
-						State.desyncPassthrough = false
+						State.desyncPass = State.desyncPass - 1
 					end)
 					if (now - (State.lastSwingLog or 0)) > 0.15 then
 						State.lastSwingLog = now
@@ -5817,18 +5860,19 @@ local applyFacing = LPH_NO_VIRTUALIZE(function()
 end)
 
 -- viz draw + facing: Connect callbacks also native (docs platform pattern).
--- [V91/perf] Visuals moved from Heartbeat to RenderStepped. Heartbeat runs at the physics
--- rate (which on a high-refresh machine can be far more often than frames are drawn), so
--- the overlay was recomputing its throttle math many times per rendered frame for nothing.
--- Drawing belongs on the render step, and the internal VizMaxFPS throttle still applies.
--- Both visual work and facing now share ONE RenderStepped connection (one less signal).
-RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(dt)
-	pcall(applyFacing)
-	-- Skip the pcall+call entirely when visuals are off (vizUpdate would hide-all and
-	-- return anyway, but this avoids the closure/pcall cost on every rendered frame).
+-- [V91.1] Viz stays on HEARTBEAT — do NOT move it to RenderStepped. Heartbeat runs AFTER the
+-- camera has been updated for the frame, so world→viewport projection matches what u see. On
+-- RenderStepped the cam isn't settled yet, so shiftlock / any cam offset makes the whole
+-- overlay drift. The only thing kept from the RenderStepped experiment is the cheap gate:
+-- when visuals are off we skip the call entirely instead of entering vizUpdate to hide-all.
+RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function(dt)
 	if not (Config.Enabled and Config.ShowVisuals) then return end
 	local ok = pcall(vizUpdate, dt)
 	if not ok then vizHideAll() end
+end))
+
+RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function()
+	pcall(applyFacing)
 end))
 
 indexAllAnims()
@@ -5961,12 +6005,23 @@ return function(_Lib, _Core)
 		boolToggle(apMain, "Server Proof", "Server Proof",
 			function() return Config.ServerProofGate ~= false end,
 			function(v) Config.ServerProofGate = v end)
-		apMain:SubLabel({ Text = "anti Anti-AutoParry: only parry swings the SERVER confirmed (attribute/hitbox)\nfake animations get ignored, real hits still parried" })
+		apMain:SubLabel({ Text = "counters ppl running anti-autoparry\nonly parries swings the server actually confirmed, fake anims get ignored" })
 		slider(apMain, { Name = "Proof Grace", Flag = "AP_ProofGrace",
 			Default = math.floor((Config.ProofGraceSec or 0.06) * 1000),
 			Min = 20, Max = 150, Suffix = " ms",
 			Callback = function(v) Config.ProofGraceSec = v / 1000 end })
-		apMain:SubLabel({ Text = "press anyway this close to contact even if unconfirmed\nlower = stricter vs fakes, higher = safer vs late server data" })
+		apMain:SubLabel({ Text = "this close to the hit we press anyway even if unconfirmed\nlower = harsher on fakes, higher = safer if server data is late" })
+		apMain:Divider()
+		apMain:Header({ Name = "Time Spoof" })
+		boolToggle(apMain, "Time Spoof", "Time Spoof",
+			function() return Config.TimeSpoof == true end,
+			function(v) Config.TimeSpoof = v end)
+		apMain:SubLabel({ Text = "parry sends its own timestamp, so we back-date it\nlate parries still land as perfect. tbh idk how much the server checks — test it" })
+		slider(apMain, { Name = "Back-date", Flag = "AP_TimeShift",
+			Default = Config.TimeShiftMs or 40,
+			Min = 0, Max = 120, Suffix = " ms",
+			Callback = function(v) Config.TimeShiftMs = v end })
+		apMain:SubLabel({ Text = "how far back we claim u pressed. perfect window is 125ms\nstart ~40, creep up til it stops helping" })
 
 		apMain:Divider()
 		apMain:Header({ Name = "Rotation" })
