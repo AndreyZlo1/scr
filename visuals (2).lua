@@ -92,9 +92,17 @@ return function(Lib, Core)
         -- files and don't share state directly), so this panel simply stays hidden if AutoParry
         -- isn't running or has no target.
         THud_On      = false,
-        THud_Anchor  = "Free",    -- "Enemy" (follows them on screen) | "Left" | "Right" | "Bottom" | "Free" (draggable)
+        -- Anchor mirrors the Indicators HUD: "Free" = draggable anywhere, "Player" = pinned to the
+        -- tracked enemy on screen. Side only applies to Player (same as Ind_PlayerSide).
+        THud_Anchor  = "Free",    -- "Free" | "Player"
+        THud_Side    = "Right",   -- "Left" | "Right" | "Top" | "Bottom"  (Anchor = Player only)
+        THud_InsetX  = 16,        -- horizontal gap from the enemy (px, Player anchor)
+        THud_InsetY  = 0,         -- vertical nudge (px, Player anchor)
         THud_Drag    = true,      -- allow dragging (Anchor = Free)
         THud_Scale   = 1.0,
+        THud_Opacity = 100,       -- panel opacity %
+        THud_Bars    = true,      -- show the bar block at all
+        THud_Corner  = 10,        -- corner rounding px
         THud_Avatar  = true,      -- live 3D clone of the target (real pose, moves with them)
         THud_Health  = true,
         THud_Stamina = true,
@@ -103,6 +111,31 @@ return function(Lib, Core)
         THud_Dist    = true,
         THud_Accent  = Color3.fromRGB(255, 96, 96),
         THud_HitFlash= true,      -- flash + kick the panel when we land a hit on them
+
+        -- [V93] Self cosmetics (ported from the ChinaHat reference): drawn on YOUR character.
+        -- All three are Drawing-based rings/cones projected from world space, so they need the
+        -- camera to be settled → they run on the same HEARTBEAT tick as the ESP, not RenderStepped.
+        Cos_Gradient   = true,                              -- shared: cycle between the two colours
+        Cos_ColorA     = Color3.fromRGB(90, 150, 255),
+        Cos_ColorB     = Color3.fromRGB(170, 110, 255),
+        Cos_GradSpeed   = 4,
+        -- China hat (cone of lines over your head)
+        Hat_On        = false,
+        Hat_Scale     = 0.85,
+        Hat_Parts     = 50,
+        Hat_YOffset   = 1.6,
+        Hat_Rim       = false,   -- outline circle around the brim
+        -- Flat circle at your feet
+        Circle_On     = false,
+        Circle_Radius = 1.7,
+        Circle_Parts  = 30,
+        Circle_YOffset= -3,
+        Circle_Jump   = false,   -- bob the circle when you jump
+        -- Halo above your head
+        Nimb_On       = false,
+        Nimb_Radius   = 1.7,
+        Nimb_Parts    = 30,
+        Nimb_YOffset  = 2.7,
 
         -- Hit direction
         HitDir_On    = false,
@@ -2031,6 +2064,144 @@ return function(Lib, Core)
 	end)
 
     -- ═══════════════════════════════════════════════════════════════════════
+    -- [V93] SELF COSMETICS — China hat / circle / halo, ported from the reference
+    -- ═══════════════════════════════════════════════════════════════════════
+    -- Same geometry idea as the reference: build a ring of world points around the character and
+    -- draw each neighbouring pair as a Drawing "Quad" degenerate line (Quads read smoother than
+    -- Lines for rings), with the colour cycling per segment for the gradient. The hat is a cone of
+    -- Lines from an apex above the head out to a brim ring.
+    --
+    -- Differences from the reference, on purpose:
+    --   • objects are POOLED and reused (the reference destroyed + recreated every time a slider
+    --     changed, which spikes when you drag a slider)
+    --   • everything is driven from the existing HEARTBEAT tick (user's requirement) instead of a
+    --     second RenderStepped connection — one less signal and the camera is already settled
+    local Cos = { quads = {}, lines = {}, qUsed = 0, lUsed = 0 }
+
+    local function cosQuad()
+        Cos.qUsed = Cos.qUsed + 1
+        local q = Cos.quads[Cos.qUsed]
+        if not q then
+            q = newDrawing("Quad", { Filled = false, Thickness = 1, Visible = false, ZIndex = 40 })
+            Cos.quads[Cos.qUsed] = q
+        end
+        return q
+    end
+    local function cosLine()
+        Cos.lUsed = Cos.lUsed + 1
+        local l = Cos.lines[Cos.lUsed]
+        if not l then
+            l = newDrawing("Line", { Thickness = 1, Visible = false, ZIndex = 40 })
+            Cos.lines[Cos.lUsed] = l
+        end
+        return l
+    end
+    local function cosBegin() Cos.qUsed, Cos.lUsed = 0, 0 end
+    local function cosFinish()
+        for i = Cos.qUsed + 1, #Cos.quads do local q = Cos.quads[i]; if q.Visible then q.Visible = false end end
+        for i = Cos.lUsed + 1, #Cos.lines do local l = Cos.lines[i]; if l.Visible then l.Visible = false end end
+    end
+    local function cosHideAll()
+        for _, q in ipairs(Cos.quads) do if q.Visible then q.Visible = false end end
+        for _, l in ipairs(Cos.lines) do if l.Visible then l.Visible = false end end
+        Cos.qUsed, Cos.lUsed = 0, 0
+    end
+    local function cosDestroy()
+        for _, q in ipairs(Cos.quads) do pcall(function() q:Remove() end) end
+        for _, l in ipairs(Cos.lines) do pcall(function() l:Remove() end) end
+        Cos.quads, Cos.lines, Cos.qUsed, Cos.lUsed = {}, {}, 0, 0
+    end
+
+    -- per-segment colour: gradient cycles, otherwise flat colour A
+    local function cosColor(i, n, t)
+        if Config.Cos_Gradient == false then return Config.Cos_ColorA end
+        local f = (math.sin(t * (Config.Cos_GradSpeed or 4) + (i / n) * math.pi * 2) + 1) * 0.5
+        return lerpColor(Config.Cos_ColorA, Config.Cos_ColorB, f)
+    end
+
+    -- Draw a horizontal ring of `n` segments at world height `y` around (cx,cz).
+    local function cosRing(cx, y, cz, radius, n, t)
+        local prev, prevOn
+        local first, firstOn
+        for i = 0, n do
+            local a = (i / n) * math.pi * 2
+            local wp = Vector3.new(cx + math.cos(a) * radius, y, cz + math.sin(a) * radius)
+            local sp, on = Camera:WorldToViewportPoint(wp)
+            local p2, vis = Vector2.new(sp.X, sp.Y), (on and sp.Z > 0)
+            if i == 0 then first, firstOn = p2, vis end
+            if i > 0 and prevOn and vis then
+                local q = cosQuad()
+                q.PointA, q.PointB, q.PointC, q.PointD = prev, p2, p2, prev
+                q.Color = cosColor(i, n, t)
+                q.Visible = true
+            end
+            prev, prevOn = p2, vis
+        end
+    end
+
+    local function cosUpdate(t)
+        local char = getChar(LocalPlayer)
+        if not char then cosHideAll(); return end
+        local root = getRoot(char)
+        local head = char:FindFirstChild("Head") or root
+        if not root then cosHideAll(); return end
+
+        cosBegin()
+
+        -- ── flat circle at the feet ─────────────────────────────────────────
+        if Config.Circle_On then
+            local yOff = Config.Circle_YOffset or -3
+            if Config.Circle_Jump then
+                -- bob it when we're off the ground (reads as the circle "chasing" you)
+                local hum = getHum(char)
+                local airborne = hum and (hum.FloorMaterial == Enum.Material.Air)
+                if airborne then yOff = yOff + math.sin(t * 6) * 0.5 + 0.6 end
+            end
+            local n = math.clamp(math.floor(Config.Circle_Parts or 30), 6, 60)
+            cosRing(root.Position.X, root.Position.Y + yOff, root.Position.Z,
+                    Config.Circle_Radius or 1.7, n, t)
+        end
+
+        -- ── halo above the head ─────────────────────────────────────────────
+        if Config.Nimb_On and head then
+            local n = math.clamp(math.floor(Config.Nimb_Parts or 30), 6, 60)
+            cosRing(head.Position.X, head.Position.Y + (Config.Nimb_YOffset or 2.7), head.Position.Z,
+                    Config.Nimb_Radius or 1.7, n, t)
+        end
+
+        -- ── china hat (cone of lines from an apex down to a brim ring) ───────
+        if Config.Hat_On and head then
+            local scale = Config.Hat_Scale or 0.85
+            local n = math.clamp(math.floor(Config.Hat_Parts or 50), 6, 80)
+            local hatH, hatR = 2.15 * scale, 1.95 * scale
+            local apexY = head.Position.Y + (Config.Hat_YOffset or 1.6)
+            local apex = Vector3.new(head.Position.X, apexY, head.Position.Z)
+            local ap2d, apOn = Camera:WorldToViewportPoint(apex)
+            local brimY = apexY - hatH / 3
+            if apOn and ap2d.Z > 0 then
+                local apV = Vector2.new(ap2d.X, ap2d.Y)
+                for i = 1, n do
+                    local a = (i / n) * math.pi * 2
+                    local wp = Vector3.new(head.Position.X + math.cos(a) * hatR, brimY,
+                                           head.Position.Z + math.sin(a) * hatR)
+                    local sp, on = Camera:WorldToViewportPoint(wp)
+                    if on and sp.Z > 0 then
+                        local ln = cosLine()
+                        ln.From, ln.To = apV, Vector2.new(sp.X, sp.Y)
+                        ln.Color = cosColor(i, n, t)
+                        ln.Visible = true
+                    end
+                end
+                if Config.Hat_Rim then
+                    cosRing(head.Position.X, brimY, head.Position.Z, hatR, math.min(n, 40), t)
+                end
+            end
+        end
+
+        cosFinish()
+    end
+
+    -- ═══════════════════════════════════════════════════════════════════════
     -- [V92] TARGET HUD — live panel for whoever AutoParry is tracking
     -- ═══════════════════════════════════════════════════════════════════════
     -- Left side is a REAL 3D view of the enemy: we clone their character into a ViewportFrame
@@ -2117,6 +2288,48 @@ return function(Lib, Core)
         return { fill = fill, val = val, holder = holder }
     end
 
+    -- [V93] GROUP FADE. Only the root's BackgroundTransparency was animated before, so the panel's
+    -- background dissolved while every child (text, bars, stroke, viewport) stayed fully opaque and
+    -- then snapped away with Visible=false — exactly the ugly pop the user reported. Roblox has no
+    -- "group transparency" for a plain Frame, so we walk the descendants once, remember each one's
+    -- BASE transparency, and drive them all from a single alpha. Cached in TH.fadeList so the walk
+    -- happens once per build, not per frame.
+    local function thCollectFade()
+        local list = {}
+        local function add(inst, prop)
+            local ok, base = pcall(function() return inst[prop] end)
+            if ok and type(base) == "number" then list[#list + 1] = { inst = inst, prop = prop, base = base } end
+        end
+        if not TH.root then return end
+        add(TH.root, "BackgroundTransparency")
+        for _, d in ipairs(TH.root:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                add(d, "TextTransparency"); add(d, "TextStrokeTransparency"); add(d, "BackgroundTransparency")
+            elseif d:IsA("UIStroke") then
+                add(d, "Transparency")
+            elseif d:IsA("ViewportFrame") then
+                add(d, "BackgroundTransparency"); add(d, "ImageTransparency")
+            elseif d:IsA("Frame") then
+                add(d, "BackgroundTransparency")
+            end
+        end
+        TH.fadeList = list
+    end
+
+    -- alpha 1 = fully visible (base values), alpha 0 = fully faded out
+    local function thApplyFade(alpha)
+        local list = TH.fadeList
+        if not list then return end
+        if math.abs((TH.fadeApplied or -1) - alpha) < 0.004 then return end   -- skip redundant writes
+        TH.fadeApplied = alpha
+        for i = 1, #list do
+            local e = list[i]
+            if e.inst.Parent then
+                e.inst[e.prop] = e.base + (1 - e.base) * (1 - alpha)
+            end
+        end
+    end
+
     local function thBuild()
         if TH.gui then return end
         local gui = Instance.new("ScreenGui")
@@ -2139,6 +2352,7 @@ return function(Lib, Core)
         root.Parent = gui
         TH.root = root
         local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 10); rc.Parent = root
+        TH.corner = rc
         local rs = Instance.new("UIStroke")
         rs.Thickness = 1; rs.Color = WM.stroke; rs.Transparency = 0.35
         rs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; rs.Parent = root
@@ -2212,7 +2426,7 @@ return function(Lib, Core)
 
         -- drag: reuse the same global pointer handlers pattern as the indicator HUD
         root.InputBegan:Connect(function(input)
-            if not (Config.THud_Drag and (Config.THud_Anchor or "Free") == "Free") then return end
+            if not (Config.THud_Drag and (Config.THud_Anchor or "Free") ~= "Player") then return end
             if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
                 TH.drag.active = true
@@ -2240,6 +2454,8 @@ return function(Lib, Core)
         local vpz = Camera.ViewportSize
         TH.drag.target = Vector2.new(24, vpz.Y * 0.5)
         TH.drag.disp = TH.drag.target
+
+        thCollectFade()   -- [V93] snapshot base transparencies for the group fade
     end
 
     -- Drop the current 3D clone and its part pairing.
@@ -2251,6 +2467,11 @@ return function(Lib, Core)
     -- Build the live avatar: clone the character, strip everything that costs us nothing visually
     -- (scripts, sounds, particles), and pre-pair source→clone parts so the per-tick pose copy is a
     -- flat array walk with zero lookups.
+    -- NOTE on which avatar this is: we clone the LIVE character model out of the world, so the
+    -- panel shows the in-GAME rig (its real body scale, clothing, accessories and whatever the game
+    -- put on it) — NOT the player's Roblox profile avatar / headshot thumbnail, which in this game
+    -- looks different. Everything visual is kept; only live behaviour (scripts, sounds, emitters,
+    -- Humanoid/Animator) is stripped since the pose is driven by copying CFrames.
     local function thBuildClone(char)
         thClearClone()
         if not (Config.THud_Avatar and char) then return end
@@ -2304,34 +2525,53 @@ return function(Lib, Core)
         end
     end
 
-    -- Where the panel sits this frame (anchor modes).
+    -- Where the panel sits this frame. Two modes, same as the Indicators HUD:
+    --   Free   → wherever you dragged it (smoothed, clamped on screen)
+    --   Player → pinned to the tracked enemy, on the chosen Side, offset by the inset sliders
     local function thPlace(dt, targetChar)
         local vpz = Camera.ViewportSize
-        local w, h = TH_W * (TH.scale and TH.scale.Scale or 1), TH_H * (TH.scale and TH.scale.Scale or 1)
+        local sc = (TH.scale and TH.scale.Scale) or 1
+        local w, h = TH_W * sc, TH_H * sc
         local anchor = Config.THud_Anchor or "Free"
-        if anchor == "Free" then
+
+        if anchor ~= "Player" then
             local nx = math.clamp(TH.drag.target.X, 0, math.max(vpz.X - w, 0))
             local ny = math.clamp(TH.drag.target.Y, 0, math.max(vpz.Y - h, 0))
             TH.drag.target = Vector2.new(nx, ny)
             TH.drag.disp = TH.drag.disp:Lerp(TH.drag.target, math.clamp(dt * 16, 0, 1))
             return TH.drag.disp.X, TH.drag.disp.Y
-        elseif anchor == "Left" then
-            return 24, vpz.Y * 0.5 - h * 0.5
-        elseif anchor == "Right" then
-            return vpz.X - w - 24, vpz.Y * 0.5 - h * 0.5
-        elseif anchor == "Bottom" then
-            return vpz.X * 0.5 - w * 0.5, vpz.Y - h - 90
-        else -- "Enemy": follow them on screen
-            local root = targetChar and getRoot(targetChar)
-            if root and Camera then
-                local sp, on = Camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3.4, 0))
-                if on and sp.Z > 0 then
-                    return math.clamp(sp.X - w * 0.5, 0, math.max(vpz.X - w, 0)),
-                           math.clamp(sp.Y - h - 12, 0, math.max(vpz.Y - h, 0))
-                end
-            end
-            return vpz.X * 0.5 - w * 0.5, vpz.Y * 0.28
         end
+
+        -- Player anchor: project the enemy's root and place the panel beside/above/below them.
+        local root = targetChar and getRoot(targetChar)
+        local ex, ey
+        if root and Camera then
+            local sp, on = Camera:WorldToViewportPoint(root.Position)
+            if on and sp.Z > 0 then ex, ey = sp.X, sp.Y end
+        end
+        if not ex then   -- offscreen → park it centre-top so it doesn't jump to a stale spot
+            return vpz.X * 0.5 - w * 0.5, vpz.Y * 0.22
+        end
+        local ix = tonumber(Config.THud_InsetX) or 16
+        local iy = tonumber(Config.THud_InsetY) or 0
+        local side = Config.THud_Side or "Right"
+        local px, py
+        if side == "Left" then
+            px, py = ex - w - ix, ey - h * 0.5 + iy
+        elseif side == "Top" then
+            px, py = ex - w * 0.5 + ix, ey - h - math.abs(iy) - 40
+        elseif side == "Bottom" then
+            px, py = ex - w * 0.5 + ix, ey + math.abs(iy) + 40
+        else -- Right
+            px, py = ex + ix, ey - h * 0.5 + iy
+        end
+        -- keep it fully on screen
+        px = math.clamp(px, 0, math.max(vpz.X - w, 0))
+        py = math.clamp(py, 0, math.max(vpz.Y - h, 0))
+        -- smooth the follow so it glides with them instead of jittering per frame
+        TH.follow = TH.follow or Vector2.new(px, py)
+        TH.follow = TH.follow:Lerp(Vector2.new(px, py), math.clamp(dt * 18, 0, 1))
+        return TH.follow.X, TH.follow.Y
     end
 
     -- Called by the existing hit pipeline (CombatBroadcastURE M1Hit/M2Hit) when WE land a hit.
@@ -2382,7 +2622,7 @@ return function(Lib, Core)
             local ax, ay = thPlace(dt, nil)
             local ease = TH.anim * TH.anim
             TH.root.Position = UDim2.fromOffset(math.floor(ax + 0.5), math.floor(ay + (1 - ease) * 18 + 0.5))
-            TH.root.BackgroundTransparency = 1 - (1 - WM.bgTransp) * ease
+            thApplyFade(ease)   -- [V93] fade the WHOLE panel out, not just its background
             return
         end
 
@@ -2414,7 +2654,8 @@ return function(Lib, Core)
         TH.m2   = TH.m2 + ((m2R or 0) - TH.m2) * k
 
         local b = TH.bars
-        if Config.THud_Health then
+        local barsOn = Config.THud_Bars ~= false   -- master gate for the whole bar block
+        if barsOn and Config.THud_Health then
             b.hp.holder.Visible = true
             b.hp.fill.Size = UDim2.new(TH.hp, 0, 1, 0)
             b.hp.fill.BackgroundColor3 = lerpColor(HP_LOW, HP_HIGH, TH.hp)
@@ -2422,14 +2663,14 @@ return function(Lib, Core)
             if b.hp.val.Text ~= txt then b.hp.val.Text = txt end
         else b.hp.holder.Visible = false end
 
-        if Config.THud_Stamina then
+        if barsOn and Config.THud_Stamina then
             b.stam.holder.Visible = true
             b.stam.fill.Size = UDim2.new(TH.stam, 0, 1, 0)
             local txt = (type(stamA) == "number") and string.format("%d", math.floor(stamA + 0.5)) or "—"
             if b.stam.val.Text ~= txt then b.stam.val.Text = txt end
         else b.stam.holder.Visible = false end
 
-        if Config.THud_M2 then
+        if barsOn and Config.THud_M2 then
             b.m2.holder.Visible = true
             b.m2.fill.Size = UDim2.new(TH.m2, 0, 1, 0)
             local txt = (m2R and m2left > 0.05) and string.format("%.1fs", m2left) or "ready"
@@ -2464,19 +2705,35 @@ return function(Lib, Core)
         TH.flash = TH.flash * (1 - math.clamp(dt * 6, 0, 1))
         TH.kick  = TH.kick  * (1 - math.clamp(dt * 9, 0, 1))
         local acc = Config.THud_Accent
+        -- NOTE: don't touch UIStroke.Transparency here — thApplyFade owns every transparency on
+        -- the panel, and fighting it would make the flash flicker during the fade. Colour + size
+        -- carry the hit feedback instead.
         if TH.flash > 0.02 then
             TH.accent.BackgroundColor3 = acc:Lerp(Color3.new(1, 1, 1), TH.flash)
             TH.accent.Size = UDim2.new(1, 0, 0, 2 + TH.flash * 3)
-            TH.stroke.Transparency = 0.35 - TH.flash * 0.3
         else
             if TH.accent.BackgroundColor3 ~= acc then TH.accent.BackgroundColor3 = acc end
             if TH.accent.Size.Y.Offset ~= 2 then TH.accent.Size = UDim2.new(1, 0, 0, 2) end
-            if TH.stroke.Transparency ~= 0.35 then TH.stroke.Transparency = 0.35 end
         end
 
         -- ── place + scale + entrance ease ────────────────────────────────────
         local sc = math.clamp(Config.THud_Scale or 1, 0.5, 2) * (0.94 + 0.06 * TH.anim)
         if math.abs((TH.scale.Scale or 1) - sc) > 0.001 then TH.scale.Scale = sc end
+        -- [V93] user customisation applied here (cheap change-guarded writes)
+        local op = math.clamp((tonumber(Config.THud_Opacity) or 100) / 100, 0.05, 1)
+        if TH._op ~= op then
+            TH._op = op
+            -- feed opacity into the fade base so thApplyFade keeps respecting it
+            for _, e in ipairs(TH.fadeList or {}) do
+                if e.prop == "BackgroundTransparency" and e.inst == TH.root then
+                    e.base = 1 - (1 - WM.bgTransp) * op
+                end
+            end
+            TH.fadeApplied = nil
+        end
+        local cr = math.clamp(math.floor(tonumber(Config.THud_Corner) or 10), 0, 20)
+        if TH._cr ~= cr and TH.corner then TH._cr = cr; TH.corner.CornerRadius = UDim.new(0, cr) end
+
         local ax, ay = thPlace(dt, char)
         local ease = TH.anim * TH.anim * (3 - 2 * TH.anim)     -- smoothstep
         local px = math.floor(ax + 0.5)
@@ -2485,10 +2742,7 @@ return function(Lib, Core)
             TH.root.Position = UDim2.fromOffset(px, py)
             TH._lx, TH._ly = px, py
         end
-        local bgT = 1 - (1 - WM.bgTransp) * ease
-        if math.abs((TH.root.BackgroundTransparency or 0) - bgT) > 0.01 then
-            TH.root.BackgroundTransparency = bgT
-        end
+        thApplyFade(ease)   -- [V93] whole-panel fade (text/bars/stroke/viewport included)
     end)
 
     -- ═══════════════════════════════════════════════════════════════════════
@@ -2534,7 +2788,7 @@ return function(Lib, Core)
         -- Camera.CFrame is fully current and the shiftlock offset is baked in. This is
         -- exactly how the working BRM5 ESP avoids the shift. The one-frame draw latency
         -- is imperceptible and is the correct trade-off here.
-        local _acc, _espWasOn, indicatorsWereOn = 0, false, false
+        local _acc, _espWasOn, indicatorsWereOn, _cosWasOn = 0, false, false, false
         track(RunService.Heartbeat, LPH_NO_VIRTUALIZE(function(dt)
             -- [PERF] Throttle the heavy redraw to MaxFPS. We accumulate real time and only run the
             -- pipeline once per frame-budget, passing the ACCUMULATED dt so every lerp/animation
@@ -2576,6 +2830,15 @@ return function(Lib, Core)
 			if #HitFX.systems>0 then renderHitFX(fdt) end
 			-- [V92] TargetHUD: cheap no-op when disabled (first line of thUpdate bails out)
 			thUpdate(fdt)
+			-- [V93] Self cosmetics on the SAME Heartbeat tick (camera already settled → no drift)
+			if hasDrawing then
+				if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
+					cosUpdate(tick())
+					_cosWasOn = true
+				elseif _cosWasOn then
+					cosHideAll(); _cosWasOn = false     -- one hide pass, then stop touching them
+				end
+			end
             end))
     end
 
@@ -2855,6 +3118,62 @@ return function(Lib, Core)
         applyParticleTypeVis()
 
         -- ─────────────── Section 2: Indicators (Right) ───────────────
+        -- ─────────────── [V93] Cosmetics (self) ───────────────
+        local sCos = V:Section({ Side = "Left" })
+        sCos:Header({ Name = "Cosmetics" })
+        sCos:SubLabel({ Text = "drawn on urself. runs on the same tick as esp so it never drifts with shiftlock" })
+        sCos:Toggle({ Name = "China Hat", Default = Config.Hat_On,
+            Callback = function(v) Config.Hat_On = v and true or false end }, ctx.flag("VIS_Hat_On"))
+        slider(sCos, { Name = "Hat Scale", Flag = "VIS_Hat_Scale",
+            Default = math.floor((Config.Hat_Scale or 0.85) * 100), Min = 30, Max = 200, Suffix = "%",
+            Callback = function(v) Config.Hat_Scale = v / 100 end })
+        slider(sCos, { Name = "Hat Height", Flag = "VIS_Hat_Y",
+            Default = math.floor((Config.Hat_YOffset or 1.6) * 10), Min = 0, Max = 50, Suffix = "",
+            Callback = function(v) Config.Hat_YOffset = v / 10 end })
+        slider(sCos, { Name = "Hat Lines", Flag = "VIS_Hat_Parts",
+            Default = Config.Hat_Parts or 50, Min = 8, Max = 80, Suffix = "",
+            Callback = function(v) Config.Hat_Parts = v end })
+        sCos:Toggle({ Name = "Hat Rim", Default = Config.Hat_Rim,
+            Callback = function(v) Config.Hat_Rim = v and true or false end }, ctx.flag("VIS_Hat_Rim"))
+        sCos:Divider()
+        sCos:Toggle({ Name = "Circle", Default = Config.Circle_On,
+            Callback = function(v) Config.Circle_On = v and true or false end }, ctx.flag("VIS_Cir_On"))
+        slider(sCos, { Name = "Circle Radius", Flag = "VIS_Cir_R",
+            Default = math.floor((Config.Circle_Radius or 1.7) * 10), Min = 5, Max = 60, Suffix = "",
+            Callback = function(v) Config.Circle_Radius = v / 10 end })
+        slider(sCos, { Name = "Circle Height", Flag = "VIS_Cir_Y",
+            Default = math.floor((Config.Circle_YOffset or -3) * 10), Min = -60, Max = 30, Suffix = "",
+            Callback = function(v) Config.Circle_YOffset = v / 10 end })
+        slider(sCos, { Name = "Circle Segments", Flag = "VIS_Cir_P",
+            Default = Config.Circle_Parts or 30, Min = 6, Max = 60, Suffix = "",
+            Callback = function(v) Config.Circle_Parts = v end })
+        sCos:Toggle({ Name = "Jump Animate", Default = Config.Circle_Jump,
+            Callback = function(v) Config.Circle_Jump = v and true or false end }, ctx.flag("VIS_Cir_J"))
+        sCos:SubLabel({ Text = "circle bobs while ur airborne" })
+        sCos:Divider()
+        sCos:Toggle({ Name = "Halo", Default = Config.Nimb_On,
+            Callback = function(v) Config.Nimb_On = v and true or false end }, ctx.flag("VIS_Nimb_On"))
+        slider(sCos, { Name = "Halo Radius", Flag = "VIS_Nimb_R",
+            Default = math.floor((Config.Nimb_Radius or 1.7) * 10), Min = 5, Max = 60, Suffix = "",
+            Callback = function(v) Config.Nimb_Radius = v / 10 end })
+        slider(sCos, { Name = "Halo Height", Flag = "VIS_Nimb_Y",
+            Default = math.floor((Config.Nimb_YOffset or 2.7) * 10), Min = 0, Max = 60, Suffix = "",
+            Callback = function(v) Config.Nimb_YOffset = v / 10 end })
+        slider(sCos, { Name = "Halo Segments", Flag = "VIS_Nimb_P",
+            Default = Config.Nimb_Parts or 30, Min = 6, Max = 60, Suffix = "",
+            Callback = function(v) Config.Nimb_Parts = v end })
+        sCos:Divider()
+        sCos:Header({ Name = "Colors" })
+        sCos:Toggle({ Name = "Gradient", Default = Config.Cos_Gradient ~= false,
+            Callback = function(v) Config.Cos_Gradient = v and true or false end }, ctx.flag("VIS_Cos_Grad"))
+        colorpick(sCos, "Color A", "VIS_Cos_A", Config.Cos_ColorA,
+            function(c) if typeof(c) == "Color3" then Config.Cos_ColorA = c end end)
+        colorpick(sCos, "Color B", "VIS_Cos_B", Config.Cos_ColorB,
+            function(c) if typeof(c) == "Color3" then Config.Cos_ColorB = c end end)
+        slider(sCos, { Name = "Gradient Speed", Flag = "VIS_Cos_GS",
+            Default = Config.Cos_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
+            Callback = function(v) Config.Cos_GradSpeed = v end })
+
         -- ─────────────── [V92] TargetHUD ───────────────
         local sTH = V:Section({ Side = "Right" })
         sTH:Header({ Name = "TargetHUD" })
@@ -2886,19 +3205,54 @@ return function(Lib, Core)
         sTH:SubLabel({ Text = "panel flashes + kicks when u land a hit on them" })
         sTH:Divider()
         sTH:Header({ Name = "Placement" })
+        -- Anchor works like the Indicators HUD: Player-only settings are HIDDEN unless the anchor
+        -- is Player (MacLib exposes :SetVisibility on every element, same trick the Ind section uses).
+        local thPlayerEls = {}
+        local thDragEl                      -- assigned below; hidden while Anchor == Player
+        local function thApplyAnchorVis()
+            local isPlayer = (Config.THud_Anchor or "Free") == "Player"
+            for _, el in ipairs(thPlayerEls) do pcall(function() el:SetVisibility(isPlayer) end) end
+            if thDragEl then pcall(function() thDragEl:SetVisibility(not isPlayer) end) end
+        end
         sTH:Dropdown({
             Name = "Anchor",
-            Options = { "Free", "Enemy", "Left", "Right", "Bottom" },
+            Options = { "Free", "Player" },
             Default = Config.THud_Anchor or "Free",
-            Callback = function(v) if type(v) == "string" and v ~= "" then Config.THud_Anchor = v end end,
+            Callback = function(v)
+                if type(v) == "string" and v ~= "" then Config.THud_Anchor = v; thApplyAnchorVis() end
+            end,
         }, ctx.flag("VIS_THUD_Anchor"))
-        sTH:SubLabel({ Text = "Free = drag it anywhere · Enemy = floats above them · or pin to a screen edge" })
-        sTH:Toggle({ Name = "Drag", Default = Config.THud_Drag,
+        sTH:SubLabel({ Text = "Free = drag it wherever u want · Player = sticks to the enemy on screen" })
+        thDragEl = sTH:Toggle({ Name = "Drag", Default = Config.THud_Drag,
             Callback = function(v) Config.THud_Drag = v and true or false end }, ctx.flag("VIS_THUD_Drag"))
-        sTH:SubLabel({ Text = "grab the panel to move it (Free anchor only)" })
+        thPlayerEls[#thPlayerEls + 1] = sTH:Dropdown({
+            Name = "Side",
+            Options = { "Right", "Left", "Top", "Bottom" },
+            Default = Config.THud_Side or "Right",
+            Callback = function(v) if type(v) == "string" and v ~= "" then Config.THud_Side = v end end,
+        }, ctx.flag("VIS_THUD_Side"))
+        thPlayerEls[#thPlayerEls + 1] = slider(sTH, { Name = "Inset X", Flag = "VIS_THUD_InsetX",
+            Default = Config.THud_InsetX or 16, Min = -200, Max = 200, Suffix = " px",
+            Callback = function(v) Config.THud_InsetX = v end })
+        thPlayerEls[#thPlayerEls + 1] = slider(sTH, { Name = "Inset Y", Flag = "VIS_THUD_InsetY",
+            Default = Config.THud_InsetY or 0, Min = -200, Max = 200, Suffix = " px",
+            Callback = function(v) Config.THud_InsetY = v end })
+        thApplyAnchorVis()
+
+        sTH:Divider()
+        sTH:Header({ Name = "Look" })
         slider(sTH, { Name = "Scale", Flag = "VIS_THUD_Scale",
             Default = math.floor((Config.THud_Scale or 1) * 100), Min = 50, Max = 200, Suffix = "%",
             Callback = function(v) Config.THud_Scale = v / 100 end })
+        slider(sTH, { Name = "Opacity", Flag = "VIS_THUD_Opacity",
+            Default = Config.THud_Opacity or 100, Min = 10, Max = 100, Suffix = "%",
+            Callback = function(v) Config.THud_Opacity = v end })
+        slider(sTH, { Name = "Corner Radius", Flag = "VIS_THUD_Corner",
+            Default = Config.THud_Corner or 10, Min = 0, Max = 20, Suffix = " px",
+            Callback = function(v) Config.THud_Corner = v end })
+        sTH:Toggle({ Name = "Bars", Default = Config.THud_Bars ~= false,
+            Callback = function(v) Config.THud_Bars = v and true or false end }, ctx.flag("VIS_THUD_Bars"))
+        sTH:SubLabel({ Text = "master switch for the hp/stam/heavy block" })
         colorpick(sTH, "Accent", "VIS_THUD_Accent", Config.THud_Accent,
             function(c) if typeof(c) == "Color3" then Config.THud_Accent = c end end)
 
@@ -3031,6 +3385,7 @@ return function(Lib, Core)
         hitArrows = {}
 		for _,sys in ipairs(HitFX.systems) do destroySystem(sys) end
 		HitFX.systems={}
+        cosDestroy()   -- [V93] remove the cosmetic Drawing pools
         -- [V92] tear down the TargetHUD (its 3D clone lives in a ViewportFrame we own)
         thClearClone()
         if TH.gui then pcall(function() TH.gui:Destroy() end) end
