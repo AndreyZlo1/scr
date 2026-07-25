@@ -179,6 +179,8 @@ return function(Lib, Core)
         -- we were doing 2.4–4x more WorldToViewportPoint + attribute reads than the eye can see.
         -- Capping the heavy redraw at MaxFPS (default 60) cuts that cost proportionally while
         -- animations stay smooth (we pass the REAL accumulated dt, so lerps are framerate-correct).
+        FastFPS = 90,   -- [V95] tick rate for cosmetics + TargetHUD (they follow YOU, so they need
+                        -- more than the ESP rate, but not raw monitor rate)
         MaxFPS = 60,
     }
 
@@ -706,7 +708,9 @@ return function(Lib, Core)
         local belowY = by + bh + 2
         if Config.ESP_Distance then
             if o._cInfo ~= Config.ESP_Text_Color then o.info.Color = Config.ESP_Text_Color; o._cInfo = Config.ESP_Text_Color end
-            o.info.Text = string.format("%dm", math.floor(dist))
+            -- [V95/perf] only rebuild the string when the whole-number distance actually changes
+            local di = math.floor(dist)
+            if o._dist ~= di then o._dist = di; o.info.Text = string.format("%dm", di) end
             o.info.Position = Vector2.new(bx + bw / 2, belowY); o.info.Visible = true
             belowY = belowY + 13
         else
@@ -2278,9 +2282,20 @@ return function(Lib, Core)
     -- [V94.1] RESTORED: this got wiped when the HUD build block was rewritten, which is why
     -- thUpdate blew up with "attempt to call a nil value" and the panel never appeared.
     -- Reads the target AutoParry publishes (see publishVizTarget in the AutoParry module).
+    -- [V95/perf] getgenv() crosses the executor VM boundary, and this used to run on every tick.
+    -- The published table is REUSED by the AutoParry side (it mutates fields in place instead of
+    -- rebuilding), so we can hold the reference and only re-fetch a few times a second to notice
+    -- when it is swapped for a new target or cleared.
+    local _tgtRef, _tgtNext = nil, 0
     local function thGetTarget()
         if type(getgenv) ~= "function" then return nil end
-        local t = getgenv().AP_TARGET
+        local nowc = os.clock()
+        local t = _tgtRef
+        if t == nil or nowc >= _tgtNext then
+            _tgtNext = nowc + 0.25
+            t = getgenv().AP_TARGET
+            _tgtRef = t
+        end
         if type(t) ~= "table" then return nil end
         local m = t.model
         if typeof(m) ~= "Instance" or not m.Parent then return nil end
@@ -2305,6 +2320,11 @@ return function(Lib, Core)
         fill.Size = UDim2.new(0, 0, 1, 0)
         fill.Parent = track
         local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(1, 0); fc.Parent = fill
+        -- [V95] same subtle sheen the Glass indicators use: the fill fades from slightly
+        -- translucent on the left to solid on the right, which gives the bar depth at 5px tall.
+        local fgrad = Instance.new("UIGradient")
+        fgrad.Transparency = NumberSequence.new(0.35, 0)
+        fgrad.Parent = fill
         -- HP pulse overlay: a brighter ghost that flashes when the value drops (see thUpdate)
         local pulse = Instance.new("Frame")
         pulse.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -2357,7 +2377,9 @@ return function(Lib, Core)
     -- sprays small gradient "orbs" out of the avatar which drift, fade and shrink. They are plain
     -- Frames with a full UICorner (perfect circles), pooled and reused: a burst never allocates
     -- after the first one. Each orb keeps its own velocity/life so the spray looks organic.
+    local TH_M2_FALLBACK = Color3.fromRGB(170, 110, 255)   -- [V95] hoisted out of the hot path
     local ORB_POOL = {}
+    local ORB_ALIVE = 0   -- [V95/perf] lets thOrbStep skip its whole loop when nothing is flying
     local function thOrb()
         for i = 1, #ORB_POOL do
             local o = ORB_POOL[i]
@@ -2389,7 +2411,9 @@ return function(Lib, Core)
             o.pos = Vector2.new(ox, oy)
             o.vel = Vector2.new(math.cos(a) * spd, math.sin(a) * spd)
             o.size = 3 + math.random() * 4
+            if not o.alive then ORB_ALIVE = ORB_ALIVE + 1 end
             o.max, o.life, o.alive = life * (0.7 + math.random() * 0.6), 0, true
+            o._sz, o._px, o._py = nil, nil, nil   -- reset the write guards for the new flight
             -- gradient across the two cosmetic-ish colours: accent -> heavy colour
             local f = math.random()
             o.inst.BackgroundColor3 = Config.THud_Accent:Lerp(
@@ -2402,6 +2426,7 @@ return function(Lib, Core)
     end
 
     local function thOrbStep(dt)
+        if ORB_ALIVE <= 0 then return end
         for i = 1, #ORB_POOL do
             local o = ORB_POOL[i]
             if o.alive then
@@ -2409,13 +2434,20 @@ return function(Lib, Core)
                 local k = o.life / o.max
                 if k >= 1 then
                     o.alive = false
+                    ORB_ALIVE = math.max(ORB_ALIVE - 1, 0)
                     if o.inst.Visible then o.inst.Visible = false end
                 else
                     o.vel = o.vel * (1 - math.min(dt * 2.6, 0.9))       -- drag
                     o.pos = o.pos + o.vel * dt
-                    local sz = math.max(1, o.size * (1 - k * 0.7))       -- shrink
-                    o.inst.Size = UDim2.fromOffset(sz, sz)
-                    o.inst.Position = UDim2.fromOffset(math.floor(o.pos.X + 0.5), math.floor(o.pos.Y + 0.5))
+                    -- [V95/perf] change-guarded writes: UDim2.fromOffset allocates, and a burst of 14
+                    -- orbs was building ~2k UDim2 per second for sub-pixel moves.
+                    local sz = math.max(1, math.floor(o.size * (1 - k * 0.7) + 0.5))
+                    if o._sz ~= sz then o._sz = sz; o.inst.Size = UDim2.fromOffset(sz, sz) end
+                    local px, py = math.floor(o.pos.X + 0.5), math.floor(o.pos.Y + 0.5)
+                    if o._px ~= px or o._py ~= py then
+                        o._px, o._py = px, py
+                        o.inst.Position = UDim2.fromOffset(px, py)
+                    end
                     o.inst.BackgroundTransparency = k * k                -- ease-out fade
                 end
             end
@@ -2508,7 +2540,8 @@ return function(Lib, Core)
         TH.stam = thMkThinBar(col, y, Color3.fromRGB(255, 205, 90));           y = y + TH_BAR_H + TH_BAR_GAP
         TH.m2   = thMkThinBar(col, y, Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255))
 
-        root.InputBegan:Connect(function(input)
+        -- [V95/leak] tracked in dragConns like the other two (was untracked)
+        dragConns[#dragConns + 1] = root.InputBegan:Connect(function(input)
             if not (Config.THud_Drag and (Config.THud_Anchor or "Free") ~= "Player") then return end
             if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
@@ -2684,6 +2717,7 @@ return function(Lib, Core)
                     local o = ORB_POOL[i]
                     if o.alive then o.alive = false; o.inst.Visible = false end
                 end
+                ORB_ALIVE = 0
                 thClearClone(); TH.model = nil
             end
             return
@@ -2788,7 +2822,7 @@ return function(Lib, Core)
         end
         if TH.numLbl.Text ~= numTxt then TH.numLbl.Text = numTxt end
         local numCol = (m2R and Config.THud_M2 ~= false)
-            and (Config.ESP_M2_Color or Color3.fromRGB(170, 110, 255)) or Config.THud_Accent
+            and (Config.ESP_M2_Color or TH_M2_FALLBACK) or Config.THud_Accent
         if TH.numLbl.TextColor3 ~= numCol then TH.numLbl.TextColor3 = numCol end
 
         -- [V94.2] hit feedback: orbs + a smooth decaying shake. No colour flashing.
@@ -2912,18 +2946,26 @@ return function(Lib, Core)
         -- exactly how the working BRM5 ESP avoids the shift. The one-frame draw latency
         -- is imperceptible and is the correct trade-off here.
         local _acc, _espWasOn, indicatorsWereOn = 0, false, false
+        local _fast = 0   -- [V95] separate accumulator for cosmetics + TargetHUD
         track(RunService.Heartbeat, LPH_NO_VIRTUALIZE(function(dt)
             -- [PERF] Throttle the heavy redraw to MaxFPS. We accumulate real time and only run the
             -- pipeline once per frame-budget, passing the ACCUMULATED dt so every lerp/animation
             -- advances by true elapsed time (smooth even though we tick fewer times/sec).
-            -- [V94.2] Cosmetics tick EVERY Heartbeat (before the ESP throttle). They are cheap and
-            -- they follow YOUR character, which moves every frame — throttling them is what made
-            -- them look choppy. Smoothing lives inside cosUpdate.
-            cosTick()
-            -- [V94.2] TargetHUD also ticks EVERY Heartbeat. It follows an on-screen point that moves
-            -- with the camera, so running it at the throttled ESP rate is what made it stutter while
-            -- looking around. It bails out on its first line when disabled.
-            thUpdate(dt)
+            -- [V95/perf] Cosmetics + TargetHUD get their OWN light throttle instead of running at raw
+            -- monitor rate. Before this they ran every Heartbeat: with a hat+circle+halo that is ~111
+            -- WorldToViewportPoint plus ~111 Vector3 EVERY tick — about 15k projections/sec on a
+            -- 144Hz client, entirely outside the ESP budget. That was the FPS regression.
+            -- They still tick far more often than the ESP (default 90/s vs 60/s) so movement stays
+            -- smooth, and both use os.clock()-based smoothing internally, so a variable gap between
+            -- ticks does NOT reintroduce the stutter.
+            _fast = _fast + dt
+            local fastBudget = 1 / math.clamp(Config.FastFPS or 90, 30, 240)
+            if _fast >= fastBudget then
+                local fdt2 = _fast
+                _fast = 0
+                cosTick()
+                thUpdate(fdt2)
+            end
 
             _acc = _acc + dt
             local budget = (Config.MaxFPS and Config.MaxFPS > 0) and (1 / Config.MaxFPS) or 0
@@ -3122,6 +3164,9 @@ return function(Lib, Core)
         slider(sEsp, { Name = "Render FPS Cap", Flag = "VIS_MaxFPS", Default = Config.MaxFPS,
             Min = 30, Max = 240, Suffix = " fps", Callback = function(v) Config.MaxFPS = v end })
         sEsp:SubLabel({ Text = "Caps how often visuals redraw. Lower = less CPU/GPU (60 is smooth)" })
+        slider(sEsp, { Name = "HUD / Cosmetics FPS", Flag = "VIS_FastFPS", Default = Config.FastFPS or 90,
+            Min = 30, Max = 240, Suffix = " fps", Callback = function(v) Config.FastFPS = v end })
+        sEsp:SubLabel({ Text = "targethud + hat/circle/halo tick at this rate — they follow U so they need\nmore than the esp cap. drop it if ur pc struggles" })
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
@@ -3541,6 +3586,10 @@ return function(Lib, Core)
         hitArrows = {}
 		for _,sys in ipairs(HitFX.systems) do destroySystem(sys) end
 		HitFX.systems={}
+        -- [V95/leak] the orb Frames die with TH.gui, but the pool records kept references to the
+        -- destroyed Instances, so a reload would iterate stale entries and pin the old closures.
+        for i = 1, #ORB_POOL do ORB_POOL[i].inst = nil; ORB_POOL[i].alive = false end
+        table.clear(ORB_POOL); ORB_ALIVE = 0
         cosDestroy()   -- [V93] remove the cosmetic Drawing pools
         -- [V92] tear down the TargetHUD (its 3D clone lives in a ViewportFrame we own)
         thClearClone()
