@@ -454,7 +454,13 @@ local Config = {
 	-- [V90] Настраиваемые визуалы. Каждый элемент можно включить/выключить отдельно, а у
 	-- вращающегося кольца настраиваются скорос��ь анимации, размер и дальность прорисов��и.
 	VizRing       = true,   -- ��ращающееся кольцо под целью
-	VizRingStyle  = "Flat", -- [V92] "Flat" = classic ring at the feet | "Jello" = springy ring that travels head<->feet
+	-- [V93] Ring style, ported from the TargetESP reference: "Flat" = classic ring at the feet,
+	-- "Orbit" = ring tilts through depth so it reads as a 3D band, "OrbitSwirl" = same but the
+	-- whole band also spins. Orbit modes additionally draw a mirrored ring for the 3D look.
+	VizRingStyle  = "Flat",
+	VizRingSeg    = 30,     -- segments in the ring (more = smoother, costs 2 projections each)
+	VizRingMirror = true,   -- draw the mirrored/opposite ring (the thing that sells the 3D)
+	VizRingTilt   = 0.7,    -- how far Orbit/OrbitSwirl push the band through depth (studs)
 	VizHitbox     = true,   -- бокс хитбокса цели
 	VizRestrict   = true,   -- зона ограничения (keep-out)
 	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
@@ -3320,35 +3326,48 @@ end
 -- current target through getgenv() — the same channel the AP_* debug commands already use. The
 -- HUD over there just reads this table; if AutoParry isn't running the field is simply nil and
 -- the HUD stays hidden. Written only when it CHANGES so we don't touch getgenv every frame.
-local _pubTargetModel = nil
+local _pubTargetModel, _pubThreat = nil, nil
+
+-- Called by the threat scheduler: remembers combat detail (kind/contact) for whoever it is
+-- currently servicing, so the HUD can show "M2 in 340ms" when that data exists.
 local function publishTarget(th)
-	local model = th and th.attackerModel or nil
-	if model == _pubTargetModel then
-		-- same target: refresh the live fields (kind/contact) without rebuilding the table
-		if model and type(getgenv) == "function" then
-			local t = getgenv().AP_TARGET
-			if t then
-				t.kind = th.kind
-				t.contactIn = math.max((th.contactAbs or 0) - os.clock(), 0)
-				t.threatens = th.threatens == true
-				t.t = os.clock()
-			end
-		end
+	_pubThreat = th
+end
+
+-- Called from the visuals step with the model the ring/hitbox is actually drawn on. THIS is the
+-- authoritative target for the Visuals TargetHUD — it matches what the player sees on screen even
+-- when nobody is mid-swing (the scheduler alone would leave the HUD empty in that case).
+local function publishVizTarget(model, hrp)
+	if type(getgenv) ~= "function" then return end
+	if not model then
+		if _pubTargetModel ~= nil then _pubTargetModel = nil; getgenv().AP_TARGET = nil end
 		return
 	end
-	_pubTargetModel = model
-	if type(getgenv) ~= "function" then return end
-	if not model then getgenv().AP_TARGET = nil; return end
-	getgenv().AP_TARGET = {
-		model = model,
-		hrp = th.attackerHRP,
-		name = th.name,
-		kind = th.kind,
-		style = th.style,
-		contactIn = math.max((th.contactAbs or 0) - os.clock(), 0),
-		threatens = th.threatens == true,
-		t = os.clock(),
-	}
+	local th = _pubThreat
+	if th and th.attackerModel ~= model then th = nil end   -- threat detail belongs to someone else
+	local plr = Players:GetPlayerFromCharacter(model)
+	if model ~= _pubTargetModel then
+		_pubTargetModel = model
+		getgenv().AP_TARGET = {
+			model = model, hrp = hrp,
+			name = plr and plr.Name or model.Name,
+			style = th and th.style or nil,
+			kind = th and th.kind or nil,
+			contactIn = th and math.max((th.contactAbs or 0) - os.clock(), 0) or nil,
+			threatens = th and th.threatens == true or false,
+			t = os.clock(),
+		}
+		return
+	end
+	-- same target: refresh the live fields in place (no table churn)
+	local t = getgenv().AP_TARGET
+	if not t then _pubTargetModel = nil; return end
+	t.hrp = hrp
+	t.style = th and th.style or t.style
+	t.kind = th and th.kind or nil
+	t.contactIn = th and math.max((th.contactAbs or 0) - os.clock(), 0) or nil
+	t.threatens = th and th.threatens == true or false
+	t.t = os.clock()
 end
 
 -- Per-Heartbeat threat scheduler — kept native under Luraph (direct macro call on literal).
@@ -5682,7 +5701,15 @@ Viz.bboxOf = function(model)
 	return nil
 end
 
-Viz.drawFlatRing = function(cam, model, hrp, hot)
+-- [V93] TARGET RING — styles ported from the TargetESP reference the user supplied.
+--   Flat       : classic ring on the floor under them (what we always had)
+--   Orbit      : the ring is pushed through DEPTH per segment (cos wave), so instead of lying flat
+--                it reads as a 3D band tilted around the target
+--   OrbitSwirl : same band, but the whole thing also spins around them
+-- Orbit styles also draw a MIRRORED ring (the segment angles negated and the depth inverted) —
+-- that second pass is what actually sells the 3D effect in the reference.
+-- Segment count is user-controlled; each segment costs 2 viewport projections, so it is clamped.
+Viz.drawRing = function(cam, model, hrp, hot)
 	local footY = hrp.Position.Y - 2.8
 	local radius = 3.2
 	local bc, bs = Viz.bboxOf(model)
@@ -5690,109 +5717,53 @@ Viz.drawFlatRing = function(cam, model, hrp, hot)
 		footY  = bc.Y - bs.Y * 0.5 + 0.08
 		radius = math.clamp(math.max(bs.X, bs.Z) * 0.75, 2.4, 6)
 	end
-	radius = radius * (Config.VizRingScale or 1.0)   -- [V90] пользо��ательский размер кольца
-	local spd = Config.VizRingSpeed or 1.0           -- [V90] пользовательская скорость анимации
-	local t = Viz.t * spd
+	radius = radius * (Config.VizRingScale or 1.0)
+	local spd   = Config.VizRingSpeed or 1.0
+	local style = Config.VizRingStyle or "Flat"
+	local orbit = (style == "Orbit" or style == "OrbitSwirl")
+	local seg   = math.clamp(math.floor(Config.VizRingSeg or RING_SEG), 8, 48)
+	local t     = Viz.t * spd
 	local cx, cz = hrp.Position.X, hrp.Position.Z
+
+	-- Orbit rides at body height (a band around them); Flat stays on the ground.
+	local y = footY
+	if orbit then
+		local h = (bs and bs.Y or 5) * 0.5
+		y = footY + h + math.sin(t * 1.6) * 0.35      -- gentle bob so it isn't static
+	end
+	-- OrbitSwirl spins the whole band; Orbit keeps the segment phase fixed.
+	local swirl = (style == "OrbitSwirl") and (t * 0.75) or 0
+	local tilt  = orbit and (Config.VizRingTilt or 0.7) or 0
 	local pulse = 1 + math.sin(t * 3.0) * 0.05
-	local wpts = Viz.ringPts   -- [V112] переиспользуемы�� буфер, без аллокации таблицы/кадр
-	for i = 0, RING_SEG - 1 do
-		local a = i / RING_SEG * math.pi * 2
-		local r = radius * pulse * (1 + math.sin(a * 4 + t * 5) * 0.03)
-		wpts[i] = Vector3.new(cx + math.cos(a) * r, footY, cz + math.sin(a) * r)
+	local thick = (hot and 4 or 2.5) + (orbit and 0.5 or 0)
+
+	local wpts = Viz.ringPts   -- persistent buffer: no per-frame table alloc
+	for i = 0, seg - 1 do
+		local a = i / seg * math.pi * 2 + swirl
+		local r = radius * pulse * (orbit and 1 or (1 + math.sin(a * 4 + t * 5) * 0.03))
+		-- depth wave: this is the bit that turns a flat circle into a tilted 3D band
+		local dy = orbit and (math.cos(t * spd + i / seg * math.pi * 2) * tilt) or 0
+		wpts[i] = Vector3.new(cx + math.cos(a) * r, y + dy, cz + math.sin(a) * r)
 	end
-	local thick = hot and 4 or 2.5
-	for i = 0, RING_SEG - 1 do
-		local j = (i + 1) % RING_SEG
-		local f = 0.5 + 0.5 * math.sin(i / RING_SEG * math.pi * 2 + t * 2.2)
+	for i = 0, seg - 1 do
+		local j = (i + 1) % seg
+		local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 + t * 2.2)
 		Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
 	end
-end
 
--- ════════════════ [V92] JELLO RING ════════════════
--- A ring that travels the enemy head→feet→head instead of sitting flat at the feet, and
--- behaves like a blob of jelly while it does: it SQUASHES when it slams into the floor or the
--- head (radius bulges as the vertical motion is arrested — volume preserved, like a real soft
--- body), WOBBLES around its rim with a decaying ripple after each impact, and TILTS into the
--- direction it's travelling. State is per-attacker so two tracked enemies bounce independently.
-Viz.jello = setmetatable({}, { __mode = "k" })   -- [model] = { y, vel, ripple, rippleT, dir }
-Viz.drawJelloRing = function(cam, model, hrp, hot)
-	local bc, bs = Viz.bboxOf(model)
-	local cx, cz = hrp.Position.X, hrp.Position.Z
-	local footY, topY, baseR
-	if bc and bs then
-		footY = bc.Y - bs.Y * 0.5 + 0.08
-		topY  = bc.Y + bs.Y * 0.5 - 0.10
-		baseR = math.clamp(math.max(bs.X, bs.Z) * 0.75, 2.4, 6)
-	else
-		footY = hrp.Position.Y - 2.8
-		topY  = hrp.Position.Y + 2.2
-		baseR = 3.2
-	end
-	baseR = baseR * (Config.VizRingScale or 1.0)
-	local spd  = Config.VizRingSpeed or 1.0
-	local span = math.max(topY - footY, 0.6)
-
-	-- ── spring integrator (per attacker) ─────────────────────────────────────
-	local st = Viz.jello[model]
-	if not st then
-		st = { y = topY, vel = -0.4, ripple = 0, dir = -1, lastT = Viz.t }
-		Viz.jello[model] = st
-	end
-	-- dt comes from the animation CLOCK (Viz.t, which advances every frame), NOT from a single
-	-- frame delta: the redraw itself is throttled to VizMaxFPS, so a per-frame dt would make the
-	-- bounce run in slow motion on every skipped frame.
-	local dt = math.clamp(Viz.t - (st.lastT or Viz.t), 1 / 240, 1 / 15)
-	st.lastT = Viz.t
-	-- Gravity-ish travel: constant pull toward the end it is heading for, so the pass reads as a
-	-- falling/rising blob rather than a linear sweep. Speed scales with the model's own height so
-	-- tall and short characters take the same time per pass.
-	local accel = span * 5.2 * spd * spd
-	st.vel = st.vel + (st.dir < 0 and -accel or accel) * dt
-	st.y = st.y + st.vel * span * 0.16 * dt * 6
-
-	local impact = 0
-	if st.y <= footY then                     -- slammed into the floor
-		st.y = footY
-		impact = math.abs(st.vel)
-		st.vel = math.abs(st.vel) * 0.62      -- bounce, losing energy
-		st.dir = 1
-	elseif st.y >= topY then                  -- capped out at the head
-		st.y = topY
-		impact = math.abs(st.vel)
-		st.vel = -math.abs(st.vel) * 0.62
-		st.dir = -1
-	end
-	if impact > 0 then
-		st.ripple = math.min(st.ripple + impact * 0.06 + 0.55, 1.6)   -- kick the wobble
-	end
-	st.ripple = st.ripple * (1 - math.min(dt * 3.4, 0.9))              -- and let it decay
-
-	-- ── squash & stretch ────────────────────────────────────────────────────
-	-- Near an end the ring flattens vertically and bulges outward; mid-flight it thins.
-	local nearEnd = math.max(0, 1 - math.min(st.y - footY, topY - st.y) / (span * 0.22))
-	local squash  = 1 + nearEnd * 0.30 + st.ripple * 0.10
-	local rimY    = span * 0.05 * (1 - nearEnd) * (st.vel < 0 and 1 or -1)   -- trailing rim lag
-
-	local wpts = Viz.ringPts
-	local t = Viz.t * spd
-	for i = 0, RING_SEG - 1 do
-		local a = i / RING_SEG * math.pi * 2
-		-- two ripple harmonics so the wobble looks organic instead of a clean sine
-		local wob = st.ripple * (math.sin(a * 3 + t * 9) * 0.075 + math.sin(a * 5 - t * 6) * 0.045)
-		local r = baseR * squash * (1 + wob)
-		-- rim sags opposite to travel → the classic jelly "pancake" tilt
-		local y = st.y + rimY * math.cos(a + t * 0.6)
-		wpts[i] = Vector3.new(cx + math.cos(a) * r, y, cz + math.sin(a) * r)
-	end
-
-	-- Brighter + thicker on impact frames so the bounce actually reads on screen.
-	local thick = (hot and 4 or 2.5) + math.min(st.ripple, 1) * 1.6
-	local prog = (st.y - footY) / span      -- 0 at feet, 1 at head → colour follows height
-	for i = 0, RING_SEG - 1 do
-		local j = (i + 1) % RING_SEG
-		local f = 0.5 + 0.5 * math.sin(i / RING_SEG * math.pi * 2 + t * 2.2 + prog * 3)
-		Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingA:Lerp(Config.RingB, f), thick)
+	-- mirrored pass (orbit only): negated angle + inverted depth = the crossing second band
+	if orbit and Config.VizRingMirror ~= false then
+		for i = 0, seg - 1 do
+			local a = -(i / seg * math.pi * 2 + swirl)
+			local r = radius * pulse
+			local dy = -(math.cos(t * spd + i / seg * math.pi * 2) * tilt)
+			wpts[i] = Vector3.new(cx + math.cos(a) * r, y + dy, cz + math.sin(a) * r)
+		end
+		for i = 0, seg - 1 do
+			local j = (i + 1) % seg
+			local f = 0.5 + 0.5 * math.sin(i / seg * math.pi * 2 - t * 2.2)
+			Viz.drawWorldSeg(cam, wpts[i], wpts[j], Config.RingB:Lerp(Config.RingA, f), thick)
+		end
 	end
 end
 
@@ -5897,7 +5868,6 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	-- is disabled, not just when ShowVisuals is off.
 	if not (Config.Enabled and Config.ShowVisuals and cam) then vizHideAll(); return end
 	Viz.t += dt   -- анимационные часы идут КАЖДЫЙ кадр (дёшево) → фаза кольца плавная даже при троттле
-	Viz.dt = dt   -- [V92] real frame delta for the Jello ring spring integrator
 
 	-- [V111] PERF-ТРОТТЛ: тяжёлую перерисовку (пулы + ~280 операций проекции/Drawing) делаем не
 	-- чаще VizMaxFPS. Между апдейтами НЕ трогаем пулы (begin/finish не зовём) → дровинги остаются
@@ -5909,16 +5879,15 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 
 	LinePool:begin(); TriPool:begin()
 	local model, hrp = Viz.pickTarget()
+	-- [V93] Publish EXACTLY the target the visuals are drawing on, so the Visuals TargetHUD shows
+	-- the same enemy as the ring/hitbox. Previously the HUD was fed only from the threat scheduler,
+	-- so with no live threat the ring picked the nearest enemy while the HUD had nobody → the
+	-- "TargetHUD works weirdly" report. publishVizTarget is a no-op when nothing changed.
+	publishVizTarget(model, hrp)
 	if model and hrp then
 		local hot = (State.status == "PARRY" or State.status == "DODGE")
 		if Config.VizHitbox ~= false then Viz.drawTargetHitbox(cam, model, hrp) end
-		if Config.VizRing ~= false then
-			if (Config.VizRingStyle or "Flat") == "Jello" then
-				Viz.drawJelloRing(cam, model, hrp, hot)
-			else
-				Viz.drawFlatRing(cam, model, hrp, hot)
-			end
-		end
+		if Config.VizRing ~= false then Viz.drawRing(cam, model, hrp, hot) end
 	end
 	if Config.VizRestrict ~= false then Viz.drawRestrictZone(cam) end
 	LinePool:finish(); TriPool:finish()
@@ -6401,11 +6370,23 @@ return function(_Lib, _Core)
 		apVis:Header({ Name = "Ring & Range" })
 		apVis:Dropdown({
 			Name = "Ring Style",
-			Options = { "Flat", "Jello" },
+			Options = { "Flat", "Orbit", "OrbitSwirl" },
 			Default = Config.VizRingStyle or "Flat",
 			Callback = function(v) if type(v) == "string" and v ~= "" then Config.VizRingStyle = v end end,
 		}, ctx.flag("AP_VizRingStyle"))
-		apVis:SubLabel({ Text = "Flat = classic ring at their feet\nJello = bounces head to feet like jelly, squashes on impact" })
+		apVis:SubLabel({ Text = "Flat = classic ring at their feet\nOrbit = tilts through depth (3d band) · OrbitSwirl = same but spinning" })
+		slider(apVis, { Name = "Ring Segments", Flag = "AP_VizRingSeg",
+			Default = Config.VizRingSeg or 30, Min = 8, Max = 48, Suffix = "",
+			Callback = function(v) Config.VizRingSeg = v end })
+		apVis:SubLabel({ Text = "more = smoother ring, each one costs 2 projections tho" })
+		slider(apVis, { Name = "Orbit Tilt", Flag = "AP_VizRingTilt",
+			Default = math.floor((Config.VizRingTilt or 0.7) * 100), Min = 10, Max = 200, Suffix = "%",
+			Callback = function(v) Config.VizRingTilt = v / 100 end })
+		apVis:SubLabel({ Text = "how hard orbit pushes the band thru depth (orbit styles only)" })
+		boolToggle(apVis, "Mirror Ring", "Mirror Ring",
+			function() return Config.VizRingMirror ~= false end,
+			function(v) Config.VizRingMirror = v end)
+		apVis:SubLabel({ Text = "second crossing band — this is what makes orbit look 3d" })
 		slider(apVis, { Name = "Ring Speed", Flag = "AP_VizRingSpeed",
 			Default = math.floor((Config.VizRingSpeed or 1) * 100), Min = 10, Max = 300, Suffix = "%",
 			Callback = function(v) Config.VizRingSpeed = v / 100 end })
