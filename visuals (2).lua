@@ -110,10 +110,19 @@ return function(Lib, Core)
         -- [V93] Self cosmetics (ported from the ChinaHat reference): drawn on YOUR character.
         -- All three are Drawing-based rings/cones projected from world space, so they need the
         -- camera to be settled → they run on the same HEARTBEAT tick as the ESP, not RenderStepped.
-        Cos_Gradient   = true,                              -- shared: cycle between the two colours
-        Cos_ColorA     = Color3.fromRGB(90, 150, 255),
-        Cos_ColorB     = Color3.fromRGB(170, 110, 255),
-        Cos_GradSpeed   = 4,
+        -- [V94.1] every feature owns its OWN colours + gradient speed (they used to share one set)
+        Hat_Gradient   = true,
+        Hat_ColorA     = Color3.fromRGB(90, 150, 255),
+        Hat_ColorB     = Color3.fromRGB(170, 110, 255),
+        Hat_GradSpeed  = 4,
+        Circle_Gradient = true,
+        Circle_ColorA  = Color3.fromRGB(90, 220, 140),
+        Circle_ColorB  = Color3.fromRGB(90, 150, 255),
+        Circle_GradSpeed = 4,
+        Nimb_Gradient  = true,
+        Nimb_ColorA    = Color3.fromRGB(255, 210, 90),
+        Nimb_ColorB    = Color3.fromRGB(255, 120, 200),
+        Nimb_GradSpeed = 4,
         -- China hat (cone of lines over your head)
         Hat_On        = false,
         Hat_Scale     = 0.85,
@@ -2107,15 +2116,15 @@ return function(Lib, Core)
         Cos.quads, Cos.lines, Cos.qUsed, Cos.lUsed = {}, {}, 0, 0
     end
 
-    -- per-segment colour: gradient cycles, otherwise flat colour A
-    local function cosColor(i, n, t)
-        if Config.Cos_Gradient == false then return Config.Cos_ColorA end
-        local f = (math.sin(t * (Config.Cos_GradSpeed or 4) + (i / n) * math.pi * 2) + 1) * 0.5
-        return lerpColor(Config.Cos_ColorA, Config.Cos_ColorB, f)
+    -- per-segment colour for a given feature's palette (each feature passes its own)
+    local function cosColor(i, n, t, grad, ca, cb, spd)
+        if grad == false then return ca end
+        local f = (math.sin(t * (spd or 4) + (i / n) * math.pi * 2) + 1) * 0.5
+        return lerpColor(ca, cb, f)
     end
 
     -- Draw a horizontal ring of `n` segments at world height `y` around (cx,cz).
-    local function cosRing(cx, y, cz, radius, n, t)
+    local function cosRing(cx, y, cz, radius, n, t, grad, ca, cb, spd)
         local prev, prevOn
         local first, firstOn
         for i = 0, n do
@@ -2127,7 +2136,7 @@ return function(Lib, Core)
             if i > 0 and prevOn and vis then
                 local q = cosQuad()
                 q.PointA, q.PointB, q.PointC, q.PointD = prev, p2, p2, prev
-                q.Color = cosColor(i, n, t)
+                q.Color = cosColor(i, n, t, grad, ca, cb, spd)
                 q.Visible = true
             end
             prev, prevOn = p2, vis
@@ -2154,14 +2163,16 @@ return function(Lib, Core)
             end
             local n = math.clamp(math.floor(Config.Circle_Parts or 30), 6, 60)
             cosRing(root.Position.X, root.Position.Y + yOff, root.Position.Z,
-                    Config.Circle_Radius or 1.7, n, t)
+                    Config.Circle_Radius or 1.7, n, t,
+                    Config.Circle_Gradient, Config.Circle_ColorA, Config.Circle_ColorB, Config.Circle_GradSpeed)
         end
 
         -- ── halo above the head ─────────────────────────────────────────────
         if Config.Nimb_On and head then
             local n = math.clamp(math.floor(Config.Nimb_Parts or 30), 6, 60)
             cosRing(head.Position.X, head.Position.Y + (Config.Nimb_YOffset or 2.7), head.Position.Z,
-                    Config.Nimb_Radius or 1.7, n, t)
+                    Config.Nimb_Radius or 1.7, n, t,
+                    Config.Nimb_Gradient, Config.Nimb_ColorA, Config.Nimb_ColorB, Config.Nimb_GradSpeed)
         end
 
         -- ── china hat (cone of lines from an apex down to a brim ring) ───────
@@ -2183,12 +2194,13 @@ return function(Lib, Core)
                     if on and sp.Z > 0 then
                         local ln = cosLine()
                         ln.From, ln.To = apV, Vector2.new(sp.X, sp.Y)
-                        ln.Color = cosColor(i, n, t)
+                        ln.Color = cosColor(i, n, t, Config.Hat_Gradient, Config.Hat_ColorA, Config.Hat_ColorB, Config.Hat_GradSpeed)
                         ln.Visible = true
                     end
                 end
                 if Config.Hat_Rim then
-                    cosRing(head.Position.X, brimY, head.Position.Z, hatR, math.min(n, 40), t)
+                    cosRing(head.Position.X, brimY, head.Position.Z, hatR, math.min(n, 40), t,
+                            Config.Hat_Gradient, Config.Hat_ColorA, Config.Hat_ColorB, Config.Hat_GradSpeed)
                 end
             end
         end
@@ -2229,6 +2241,20 @@ return function(Lib, Core)
     local TH_W, TH_H = 176, 46
     local TH_PAD, TH_AV = 5, 36          -- padding, avatar side
     local TH_BAR_H, TH_BAR_GAP = 3, 3
+
+    -- [V94.1] RESTORED: this got wiped when the HUD build block was rewritten, which is why
+    -- thUpdate blew up with "attempt to call a nil value" and the panel never appeared.
+    -- Reads the target AutoParry publishes (see publishVizTarget in the AutoParry module).
+    local function thGetTarget()
+        if type(getgenv) ~= "function" then return nil end
+        local t = getgenv().AP_TARGET
+        if type(t) ~= "table" then return nil end
+        local m = t.model
+        if typeof(m) ~= "Instance" or not m.Parent then return nil end
+        -- stale guard: if AutoParry stopped publishing (unloaded/crashed) drop the panel
+        if type(t.t) == "number" and (os.clock() - t.t) > 3 then return nil end
+        return t
+    end
 
     local function thMkThinBar(parent, y, col)
         local track = Instance.new("Frame")
@@ -2664,6 +2690,37 @@ return function(Lib, Core)
     local conns = {}
     local function track(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
 
+    -- [V94.1] COSMETICS DRIVER — BindToRenderStep at Camera+1.
+    -- Why not Heartbeat: Heartbeat fires during the physics step, BEFORE the frame is rendered, so
+    -- the positions we read there are one frame behind what the player is about to see. On your own
+    -- character (which moves every single frame) that reads as constant jitter — the ESP doesn't
+    -- suffer because it tracks OTHER players, whose replicated positions only update a few times a
+    -- second anyway. BindToRenderStep with a priority just AFTER Camera means: camera already
+    -- solved for this frame (no shiftlock drift) AND we draw into the very frame being rendered
+    -- (no one-frame lag). This is the standard place for world-space Drawing overlays.
+    local COS_BIND = "\0SylCos"
+    local cosBound, cosWasOn = false, false
+    local function cosBind()
+        if cosBound then return end
+        local ok = pcall(function()
+            RunService:BindToRenderStep(COS_BIND, Enum.RenderPriority.Camera.Value + 1, function()
+                if not hasDrawing then return end
+                if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
+                    cosUpdate(tick())
+                    cosWasOn = true
+                elseif cosWasOn then
+                    cosHideAll(); cosWasOn = false      -- one hide pass, then stop touching them
+                end
+            end)
+        end)
+        cosBound = ok
+    end
+    local function cosUnbind()
+        if not cosBound then return end
+        pcall(function() RunService:UnbindFromRenderStep(COS_BIND) end)
+        cosBound = false
+    end
+
     local function hookLocalHumanoid()
         local hum = getHum(getChar(LocalPlayer))
         lastHealth = hum and hum.Health or nil
@@ -2676,6 +2733,7 @@ return function(Lib, Core)
 
         buildIndicatorGui()
         hookLocalHumanoid()
+        cosBind()   -- [V94.1] cosmetics render on the render step, not Heartbeat (see cosBind)
 
         track(LocalPlayer.CharacterAdded, function()
             task.wait(0.4)
@@ -2701,24 +2759,11 @@ return function(Lib, Core)
         -- Camera.CFrame is fully current and the shiftlock offset is baked in. This is
         -- exactly how the working BRM5 ESP avoids the shift. The one-frame draw latency
         -- is imperceptible and is the correct trade-off here.
-        local _acc, _espWasOn, indicatorsWereOn, _cosWasOn = 0, false, false, false
+        local _acc, _espWasOn, indicatorsWereOn = 0, false, false
         track(RunService.Heartbeat, LPH_NO_VIRTUALIZE(function(dt)
             -- [PERF] Throttle the heavy redraw to MaxFPS. We accumulate real time and only run the
             -- pipeline once per frame-budget, passing the ACCUMULATED dt so every lerp/animation
             -- advances by true elapsed time (smooth even though we tick fewer times/sec).
-            -- [V94] SELF COSMETICS RUN FIRST, OUTSIDE THE THROTTLE. They were inside it, so with
-            -- MaxFPS at 60 on a 144Hz client the hat/circle/halo were redrawn ~2.4x less often than
-            -- the character actually moved → the jitter the user reported. They are cheap (a handful
-            -- of projections) so they get a full-rate tick; the heavy ESP pipeline stays throttled.
-            if hasDrawing then
-                if Config.Hat_On or Config.Circle_On or Config.Nimb_On then
-                    cosUpdate(tick())
-                    _cosWasOn = true
-                elseif _cosWasOn then
-                    cosHideAll(); _cosWasOn = false     -- one hide pass, then stop touching them
-                end
-            end
-
             _acc = _acc + dt
             local budget = (Config.MaxFPS and Config.MaxFPS > 0) and (1 / Config.MaxFPS) or 0
             if _acc < budget then return end
@@ -3055,6 +3100,15 @@ return function(Lib, Core)
             Callback = function(v) Config.Hat_Parts = v end })
         sHat:Toggle({ Name = "Brim", Default = Config.Hat_Rim,
             Callback = function(v) Config.Hat_Rim = v and true or false end }, ctx.flag("VIS_Hat_Rim"))
+        sHat:Toggle({ Name = "Gradient", Default = Config.Hat_Gradient ~= false,
+            Callback = function(v) Config.Hat_Gradient = v and true or false end }, ctx.flag("VIS_Hat_Grad"))
+        colorpick(sHat, "Color A", "VIS_Hat_A", Config.Hat_ColorA,
+            function(c) if typeof(c) == "Color3" then Config.Hat_ColorA = c end end)
+        colorpick(sHat, "Color B", "VIS_Hat_B", Config.Hat_ColorB,
+            function(c) if typeof(c) == "Color3" then Config.Hat_ColorB = c end end)
+        slider(sHat, { Name = "Cycle Speed", Flag = "VIS_Hat_GS",
+            Default = Config.Hat_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
+            Callback = function(v) Config.Hat_GradSpeed = v end })
 
         local sCir = V:Section({ Side = "Left" })
         sCir:Header({ Name = "Circle" })
@@ -3072,6 +3126,15 @@ return function(Lib, Core)
             Callback = function(v) Config.Circle_Parts = v end })
         sCir:Toggle({ Name = "Bob On Jump", Default = Config.Circle_Jump,
             Callback = function(v) Config.Circle_Jump = v and true or false end }, ctx.flag("VIS_Cir_J"))
+        sCir:Toggle({ Name = "Gradient", Default = Config.Circle_Gradient ~= false,
+            Callback = function(v) Config.Circle_Gradient = v and true or false end }, ctx.flag("VIS_Cir_Grad"))
+        colorpick(sCir, "Color A", "VIS_Cir_A", Config.Circle_ColorA,
+            function(c) if typeof(c) == "Color3" then Config.Circle_ColorA = c end end)
+        colorpick(sCir, "Color B", "VIS_Cir_B", Config.Circle_ColorB,
+            function(c) if typeof(c) == "Color3" then Config.Circle_ColorB = c end end)
+        slider(sCir, { Name = "Cycle Speed", Flag = "VIS_Cir_GS",
+            Default = Config.Circle_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
+            Callback = function(v) Config.Circle_GradSpeed = v end })
 
         local sNimb = V:Section({ Side = "Left" })
         sNimb:Header({ Name = "Halo" })
@@ -3087,20 +3150,15 @@ return function(Lib, Core)
         slider(sNimb, { Name = "Density", Flag = "VIS_Nimb_P",
             Default = Config.Nimb_Parts or 30, Min = 6, Max = 60, Suffix = "",
             Callback = function(v) Config.Nimb_Parts = v end })
-
-        local sCosCol = V:Section({ Side = "Left" })
-        sCosCol:Header({ Name = "Cosmetic Colors" })
-        sCosCol:SubLabel({ Text = "shared by hat / circle / halo" })
-        sCosCol:Toggle({ Name = "Gradient", Default = Config.Cos_Gradient ~= false,
-            Callback = function(v) Config.Cos_Gradient = v and true or false end }, ctx.flag("VIS_Cos_Grad"))
-        colorpick(sCosCol, "Color A", "VIS_Cos_A", Config.Cos_ColorA,
-            function(c) if typeof(c) == "Color3" then Config.Cos_ColorA = c end end)
-        colorpick(sCosCol, "Color B", "VIS_Cos_B", Config.Cos_ColorB,
-            function(c) if typeof(c) == "Color3" then Config.Cos_ColorB = c end end)
-        slider(sCosCol, { Name = "Cycle Speed", Flag = "VIS_Cos_GS",
-            Default = Config.Cos_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
-            Callback = function(v) Config.Cos_GradSpeed = v end })
-
+        sNimb:Toggle({ Name = "Gradient", Default = Config.Nimb_Gradient ~= false,
+            Callback = function(v) Config.Nimb_Gradient = v and true or false end }, ctx.flag("VIS_Nimb_Grad"))
+        colorpick(sNimb, "Color A", "VIS_Nimb_A", Config.Nimb_ColorA,
+            function(c) if typeof(c) == "Color3" then Config.Nimb_ColorA = c end end)
+        colorpick(sNimb, "Color B", "VIS_Nimb_B", Config.Nimb_ColorB,
+            function(c) if typeof(c) == "Color3" then Config.Nimb_ColorB = c end end)
+        slider(sNimb, { Name = "Cycle Speed", Flag = "VIS_Nimb_GS",
+            Default = Config.Nimb_GradSpeed or 4, Min = 1, Max = 20, Suffix = "",
+            Callback = function(v) Config.Nimb_GradSpeed = v end })
 
         -- ─────────────── [V92] TargetHUD ───────────────
         local sTH = V:Section({ Side = "Right" })
@@ -3301,6 +3359,7 @@ return function(Lib, Core)
         hitArrows = {}
 		for _,sys in ipairs(HitFX.systems) do destroySystem(sys) end
 		HitFX.systems={}
+        cosUnbind()    -- [V94.1] drop the render-step binding first
         cosDestroy()   -- [V93] remove the cosmetic Drawing pools
         -- [V92] tear down the TargetHUD (its 3D clone lives in a ViewportFrame we own)
         thClearClone()
