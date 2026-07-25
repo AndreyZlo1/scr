@@ -19,19 +19,15 @@
 --     source of incoming damage (nearest attacker on a health drop).
 -- ═══════════════════════════════════════════════════════════════════════════
 
-return function(Lib, Core)
-    -- Luraph macro raw shim. Hot per-frame paths are wrapped in
-    -- LPH_NO_VIRTUALIZE(function() ... end) so Luraph keeps them native-fast. You
-    -- CANNOT declare a local/variable named LPH_* — Luraph reserves the prefix and
-    -- errors ("cannot be used as a variable name"). So when run raw we install an
-    -- identity fallback under that name via a STRING key (concat so the reserved
-    -- token never appears as an identifier). After Luraph this line is dead.
-    do
-        local k = "LPH" .. "_NO_VIRTUALIZE"
-        local G = (type(getgenv) == "function") and getgenv() or _G
-        if not G[k] then G[k] = function(f) return f end end
-    end
+-- Luraph macro shims: GLOBALS at chunk top-level, behind obfuscation-guard.
+-- Nested inside return-function they become locals and break Luraph output.
+if not LPH_OBFUSCATED then
+	function LPH_NO_VIRTUALIZE(f) return f end
+	function LPH_JIT(f) return f end
+	function LPH_JIT_MAX(f) return f end
+end
 
+return function(Lib, Core)
     local Players           = game:GetService("Players")
     local RunService        = game:GetService("RunService")
     local Workspace         = game:GetService("Workspace")
@@ -226,10 +222,20 @@ return function(Lib, Core)
         local m = ReplicatedStorage:FindFirstChild("CombatConfig", true)
         if m and m:IsA("ModuleScript") then CombatConfig = require(m) end
     end)
+    -- [PERF] styleKeyOf was called up to 3x per player per frame (M2 bar, evasive cd, style
+    -- text), each time doing FindFirstChild("PlayerData") + GetAttribute. Cached per character
+    -- with a short TTL so a mid-fight style swap still shows up. Weak keys → dies with the char.
+    local _styleCache = setmetatable({}, { __mode = "k" })
     local function styleKeyOf(char)
-        local pd = char and char:FindFirstChild("PlayerData")
+        if not char then return "default" end
+        local e = _styleCache[char]
+        local nowc = os.clock()
+        if e and nowc < e.t then return e.k end
+        local pd = char:FindFirstChild("PlayerData")
         local s = pd and pd:GetAttribute("CombatStyle")
-        return (type(s) == "string" and s ~= "") and s or "default"
+        local k = (type(s) == "string" and s ~= "") and s or "default"
+        if e then e.k, e.t = k, nowc + 0.5 else _styleCache[char] = { k = k, t = nowc + 0.5 } end
+        return k
     end
     -- [PERF] Cooldown durations are per-STYLE constants, but these were re-fetched (with a pcall
     -- into the game module) on EVERY frame the bar was visible. Cache the result per style key so
@@ -297,15 +303,28 @@ return function(Lib, Core)
     end
 
     -- combat State read (replicated attributes on the character), by priority
+    -- [PERF] Two things were costing us here every player every frame:
+    --   1) `local function a(n)` allocated a fresh closure capturing `char` on EVERY call.
+    --   2) every Color3.fromRGB(...) built a new value on the matched branch.
+    -- Colors are constants now (hoisted below) and the attribute reads are direct.
+    -- [PERF] health-bar gradient endpoints: were rebuilt per player per frame (2 allocs each)
+    local HP_LOW  = Color3.fromRGB(255, 70, 70)
+    local HP_HIGH = Color3.fromRGB(90, 220, 90)
+    local ST_DEAD   = Color3.fromRGB(120, 120, 120)
+    local ST_DOWNED = Color3.fromRGB(255, 90,  90)
+    local ST_GRAPPLE= Color3.fromRGB(255, 150, 60)
+    local ST_STUN   = Color3.fromRGB(255, 210, 70)
+    local ST_PARRY  = Color3.fromRGB(120, 220, 255)
+    local ST_BLOCK  = Color3.fromRGB(90,  180, 255)
+    local ST_ATTACK = Color3.fromRGB(255, 120, 120)
     local function readState(char)
-        local function a(n) return char:GetAttribute(n) end
-        if a("Dead") == true                            then return "Dead",       Color3.fromRGB(120, 120, 120) end
-        if a("Downed") == true or a("Ragdoll") == true  then return "Downed",     Color3.fromRGB(255, 90,  90) end
-        if a("Grappling") == true                       then return "Grappling",  Color3.fromRGB(255, 150, 60) end
-        if a("Stunned") == true or a("GuardBroken") == true then return "Stunned", Color3.fromRGB(255, 210, 70) end
-        if a("PerfectBlocking") == true or a("Parried") == true then return "Parry", Color3.fromRGB(120, 220, 255) end
-        if a("Blocking") == true                        then return "Blocking",   Color3.fromRGB(90,  180, 255) end
-        if a("CombatAttacking") == true                 then return "Attacking",  Color3.fromRGB(255, 120, 120) end
+        if char:GetAttribute("Dead") == true then return "Dead", ST_DEAD end
+        if char:GetAttribute("Downed") == true or char:GetAttribute("Ragdoll") == true then return "Downed", ST_DOWNED end
+        if char:GetAttribute("Grappling") == true then return "Grappling", ST_GRAPPLE end
+        if char:GetAttribute("Stunned") == true or char:GetAttribute("GuardBroken") == true then return "Stunned", ST_STUN end
+        if char:GetAttribute("PerfectBlocking") == true or char:GetAttribute("Parried") == true then return "Parry", ST_PARRY end
+        if char:GetAttribute("Blocking") == true then return "Blocking", ST_BLOCK end
+        if char:GetAttribute("CombatAttacking") == true then return "Attacking", ST_ATTACK end
         return nil
     end
 
@@ -339,10 +358,35 @@ return function(Lib, Core)
         { "HipL", "Left Leg" }, { "HipR", "Right Leg" },
     }
 
+    -- [PERF] Limb-name lists hoisted out of skeletonPoints. They were inline table constructors
+    -- inside the function, so every player every frame allocated a fresh 12-element (R15) or
+    -- 4-element (R6) array just to loop over constant strings.
+    local LIMBS_R15 = { "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand",
+                        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }
+    local LIMBS_R6  = { "Left Arm", "Right Arm", "Left Leg", "Right Leg" }
+
+    -- [PERF] Per-character BasePart cache. skeletonPoints did ~15 FindFirstChild calls per
+    -- player per frame (head + torsos + 12 limbs) — with 10 players that's 150 linear child
+    -- scans a frame. Limb parts don't change for a given character, so resolve once and then
+    -- only read .Position. Weak keys → entries die with the character, no manual eviction.
+    local _boneCache = setmetatable({}, { __mode = "k" })
+    local function bonePart(char, name)
+        local c = _boneCache[char]
+        if not c then c = {}; _boneCache[char] = c end
+        local p = c[name]
+        if p ~= nil then
+            if p == false then return nil end          -- known-missing (R6 rig asked for R15 limb)
+            if p.Parent then return p end               -- still valid
+        end
+        local found = char:FindFirstChild(name)
+        c[name] = found or false
+        return found
+    end
+
     -- Resolve world-space joint points for the character. Returns (points, bones, headPart).
     local skeletonPoints = LPH_NO_VIRTUALIZE(function(char, pts)
-        local head = char:FindFirstChild("Head")
-        local uT   = char:FindFirstChild("UpperTorso")
+        local head = bonePart(char, "Head")
+        local uT   = bonePart(char, "UpperTorso")
 		pts = pts or {}
         if uT then
             -- R15
@@ -350,7 +394,7 @@ return function(Lib, Core)
             local up, rt = cf.UpVector, cf.RightVector
             local hy, hx = uT.Size.Y * 0.5, uT.Size.X * 0.5
             local neck = uT.Position + up * hy
-            local lT = char:FindFirstChild("LowerTorso")
+            local lT = bonePart(char, "LowerTorso")
             -- pelvis: bottom face of the LowerTorso (where the legs actually attach), and
             -- hip width from the LowerTorso's OWN size — using the UpperTorso size put the
             -- hips too high and too wide, so the thighs splayed out incorrectly.
@@ -370,12 +414,12 @@ return function(Lib, Core)
             pts.ShoulderR = neck + rt * hx
             pts.HipL      = pelvis - lrt * (lhx * 0.5)
             pts.HipR      = pelvis + lrt * (lhx * 0.5)
-            for _, n in ipairs({ "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }) do
-				local p = char:FindFirstChild(n); pts[n] = p and p.Position or nil
+            for _, n in ipairs(LIMBS_R15) do
+				local p = bonePart(char, n); pts[n] = p and p.Position or nil
             end
             return pts, BONES_R15, head
         end
-        local torso = char:FindFirstChild("Torso")
+        local torso = bonePart(char, "Torso")
         if torso then
             -- R6
             local cf = torso.CFrame
@@ -390,8 +434,8 @@ return function(Lib, Core)
             pts.ShoulderR = neck + rt * hx
             pts.HipL      = hip - rt * (hx * 0.6)
             pts.HipR      = hip + rt * (hx * 0.6)
-            for _, n in ipairs({ "Left Arm", "Right Arm", "Left Leg", "Right Leg" }) do
-				local p = char:FindFirstChild(n); pts[n] = p and p.Position or nil
+            for _, n in ipairs(LIMBS_R6) do
+				local p = bonePart(char, n); pts[n] = p and p.Position or nil
             end
             return pts, BONES_R6, head
         end
@@ -498,16 +542,21 @@ return function(Lib, Core)
 	end
 	rebuildEspPlayers()
 
-    -- [LURAPH] Per-player ESP update — the hottest per-frame path (runs for every
-    -- tracked player each tick). LPH_NO_VIRTUALIZE keeps it native under Luraph.
+    -- Per-player ESP update — hottest per-frame path (every tracked player/tick).
+    -- Kept native under Luraph via direct no-virtualize macro call below.
     local updateEspFor = LPH_NO_VIRTUALIZE(function(plr)
         local o = espPool[plr] or createEsp(plr)
         local char = getChar(plr)
-        if not (Config.ESP_On and char and isAlive(char)) then hideEsp(o); return end
+        if not (Config.ESP_On and char) then hideEsp(o); return end
 
+        -- [PERF] isAlive(char) internally did its own getHum(char), then we called getHum again
+        -- right after — two FindFirstChildOfClass("Humanoid") scans per player per frame (that
+        -- call can't short-circuit, it has to class-check every child). Resolve the humanoid
+        -- once and do the alive test on it.
         local hum  = getHum(char)
+        if not (hum and hum.Health > 0) then hideEsp(o); return end
         local root = getRoot(char)
-        if not (hum and root) then hideEsp(o); return end
+        if not root then hideEsp(o); return end
 
         local lpRoot = _frLpRoot
         local dist = lpRoot and (root.Position - lpRoot.Position).Magnitude or 0
@@ -541,7 +590,9 @@ return function(Lib, Core)
 
         -- Box
         if Config.ESP_Box then
-            o.box.Color = Config.ESP_Box_Color
+            -- [PERF] Drawing property writes cross into the executor's native layer, so skip
+            -- them when the colour hasn't changed (the common case — config colours are stable).
+            if o._cBox ~= Config.ESP_Box_Color then o.box.Color = Config.ESP_Box_Color; o._cBox = Config.ESP_Box_Color end
             o.box.Position = Vector2.new(bx, by); o.box.Size = Vector2.new(bw, bh); o.box.Visible = true
             o.boxOutline.Position = Vector2.new(bx, by); o.boxOutline.Size = Vector2.new(bw, bh); o.boxOutline.Visible = true
         else
@@ -555,7 +606,7 @@ return function(Lib, Core)
             o.hpBg.Position = Vector2.new(hbx - 1, by - 1); o.hpBg.Size = Vector2.new(4, bh + 2); o.hpBg.Visible = true
             local fillH = bh * ratio
             o.hp.Position = Vector2.new(hbx, by + (bh - fillH)); o.hp.Size = Vector2.new(2, fillH)
-            o.hp.Color = lerpColor(Color3.fromRGB(255, 70, 70), Color3.fromRGB(90, 220, 90), ratio)
+            o.hp.Color = lerpColor(HP_LOW, HP_HIGH, ratio)
             o.hp.Visible = true
         else
             o.hpBg.Visible = false; o.hp.Visible = false
@@ -570,7 +621,7 @@ return function(Lib, Core)
                 o.m2Bg.Position = Vector2.new(mbx - 1, by - 1); o.m2Bg.Size = Vector2.new(4, bh + 2); o.m2Bg.Visible = true
                 local fillH = bh * ratio
                 o.m2.Position = Vector2.new(mbx, by + (bh - fillH)); o.m2.Size = Vector2.new(2, fillH)
-                o.m2.Color = Config.ESP_M2_Color
+                if o._cM2 ~= Config.ESP_M2_Color then o.m2.Color = Config.ESP_M2_Color; o._cM2 = Config.ESP_M2_Color end
                 o.m2.Visible = true
             else
                 o.m2Bg.Visible = false; o.m2.Visible = false
@@ -581,7 +632,7 @@ return function(Lib, Core)
 
         -- Name (above box)
         if Config.ESP_Name then
-            o.name.Color = Config.ESP_Text_Color
+            if o._cName ~= Config.ESP_Text_Color then o.name.Color = Config.ESP_Text_Color; o._cName = Config.ESP_Text_Color end
             o.name.Text = plr.DisplayName or plr.Name
             o.name.Position = Vector2.new(bx + bw / 2, by - 16); o.name.Visible = true
         else
@@ -591,7 +642,7 @@ return function(Lib, Core)
         -- Distance + style stacked under the box; state just below the box
         local belowY = by + bh + 2
         if Config.ESP_Distance then
-            o.info.Color = Config.ESP_Text_Color
+            if o._cInfo ~= Config.ESP_Text_Color then o.info.Color = Config.ESP_Text_Color; o._cInfo = Config.ESP_Text_Color end
             o.info.Text = string.format("%dm", math.floor(dist))
             o.info.Position = Vector2.new(bx + bw / 2, belowY); o.info.Visible = true
             belowY = belowY + 13
@@ -625,7 +676,7 @@ return function(Lib, Core)
         -- Tracer (from bottom-center of screen to box bottom)
         if Config.ESP_Tracer then
             local vp = _frVP or Camera.ViewportSize   -- [PERF] frame-cached viewport
-            o.tracer.Color = Config.ESP_Box_Color
+            if o._cTr ~= Config.ESP_Box_Color then o.tracer.Color = Config.ESP_Box_Color; o._cTr = Config.ESP_Box_Color end
             o.tracer.From = Vector2.new(vp.X / 2, vp.Y)
             o.tracer.To = Vector2.new(bx + bw / 2, by + bh)
             o.tracer.Visible = true
@@ -1263,7 +1314,7 @@ return function(Lib, Core)
         if key == "Health" then
             if not Config.Ind_Health or not hum then return false end
             local r = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-            local col = lerpColor(Color3.fromRGB(255, 70, 70), Color3.fromRGB(90, 220, 90), r)
+            local col = lerpColor(HP_LOW, HP_HIGH, r)
             return true, r, string.format("%d", math.floor(hum.Health + 0.5)), col
 
         elseif key == "Stamina" then
@@ -1790,8 +1841,34 @@ return function(Lib, Core)
 		if Config.HitSound_On then playHitSound() end
 		if Config.HitParticles_On and hasDrawing then local root=victimRoot(victim); if root then spawnParticles(root.Position) end end
 	end
+	-- [PERF] Persistent raycast params + exclude list for particle bounce. This used to be
+	-- rebuilt PER PARTICLE inside the loop below: with 20 particles x up to 5 systems that was
+	-- ~100 RaycastParams.new() + 100 Players:GetPlayers() + 100 throwaway tables EVERY frame
+	-- while sparks were alive. The filter is identical for every particle, so it is built once
+	-- here and refreshed at most a few times a second.
+	local _rcParams, _rcChars, _rcNext = nil, {}, 0
+	local function particleRaycastParams()
+		if not _rcParams then
+			_rcParams = RaycastParams.new()
+			_rcParams.FilterType = Enum.RaycastFilterType.Exclude
+		end
+		local nowc = os.clock()
+		if nowc >= _rcNext then           -- refresh the character list ~4x/sec, not per particle
+			_rcNext = nowc + 0.25
+			table.clear(_rcChars)
+			for _, pl in ipairs(Players:GetPlayers()) do
+				local c = pl.Character
+				if c then _rcChars[#_rcChars + 1] = c end
+			end
+			_rcParams.FilterDescendantsInstances = _rcChars
+		end
+		return _rcParams
+	end
+
 	local renderHitFX=LPH_NO_VIRTUALIZE(function(dt)
 		local cam=Camera
+		-- resolved once per tick (nil when physics is off → zero cost)
+		local rp = Config.HitParticlePhysics and particleRaycastParams() or nil
 		for si=#HitFX.systems,1,-1 do
 			local sys=HitFX.systems[si]; sys.age=sys.age+dt; local age=sys.age
 			if age>=sys.duration then
@@ -1807,18 +1884,10 @@ return function(Lib, Core)
 					p.vel = p.vel * (1 - step * 0.35)
 					local newPos = p.pos + p.vel * step
 					-- [Physics] bounce off geometry: raycast from old pos toward new pos
-					if Config.HitParticlePhysics then
+					if rp then
 						local dir = newPos - p.pos
 						local dist = dir.Magnitude
 						if dist > 0.001 then
-							local rp = RaycastParams.new()
-							rp.FilterType = Enum.RaycastFilterType.Exclude
-							-- exclude characters so sparks bounce off world geometry only
-							local chars = {}
-							for _, pl in ipairs(Players:GetPlayers()) do
-								if pl.Character then chars[#chars+1] = pl.Character end
-							end
-							rp.FilterDescendantsInstances = chars
 							local hit = Workspace:Raycast(p.pos, dir.Unit * (dist + 0.05), rp)
 							if hit then
 								-- Ricochet: mirror-reflect around the surface normal, then fan the
@@ -2182,7 +2251,7 @@ return function(Lib, Core)
         sEsp:SubLabel({ Text = "Max render distance. Players farther than this are skipped entirely." })
         slider(sEsp, { Name = "Render FPS Cap", Flag = "VIS_MaxFPS", Default = Config.MaxFPS,
             Min = 30, Max = 240, Suffix = " fps", Callback = function(v) Config.MaxFPS = v end })
-        sEsp:SubLabel({ Text = "Caps how often visuals redraw. Lower = less CPU/GPU (60 is smooth). Raise only if you have a high-refresh monitor and spare frames." })
+        sEsp:SubLabel({ Text = "Caps how often visuals redraw. Lower = less CPU/GPU (60 is smooth)" })
         if not hasDrawing then
             sEsp:SubLabel({ Text = "Drawing API not available in this executor - ESP/Hit Direction disabled." })
         end
@@ -2191,7 +2260,7 @@ return function(Lib, Core)
         sEnv:Header({ Name = "Environment" })
         sEnv:Toggle({ Name = "Enabled", Default = Config.Env_On,
             Callback = function(v) EnvCtl.set(v) end }, ctx.flag("VIS_ENV_On"))
-        sEnv:SubLabel({ Text = "Local lighting override. Restores the game's original values when disabled." })
+        sEnv:SubLabel({ Text = "Local lighting override" })
 
         sEnv:Divider()
         sEnv:Header({ Name = "Colors" })
@@ -2216,7 +2285,7 @@ return function(Lib, Core)
         local sFX = V:Section({ Side = "Left" })
         sFX:Header({ Name = "Hit Effects" })
         boolToggle(sFX, "Enabled", "Hit Effects", function() return Config.HitFX_On end, function(v) Config.HitFX_On=v end)
-        sFX:SubLabel({ Text = "Plays on a server-confirmed hit YOU landed (M1Hit/M2Hit broadcast)." })
+        sFX:SubLabel({ Text = "cool tuff stuff yk" })
 
         sFX:Divider()
         sFX:Header({ Name = "Sound" })
@@ -2266,7 +2335,7 @@ return function(Lib, Core)
                 end,
             }, ctx.flag("VIS_HITFX_PType"))
         end)
-        sFX:SubLabel({ Text = "Sparks = small chaotic flashes | Orbs = glowing spheres | Wireframe = spinning 3D tetra shards" })
+        sFX:SubLabel({ Text = "Sparks = small chaotic flashes | Orbs = glowing spheres | Wireframe = skibidi toilet" })
 
         colorpick(sFX, "Primary Color",   "VIS_HITFX_C",  Config.HitFX_Color,         function(c) Config.HitFX_Color=c end)
         colorpick(sFX, "Secondary Color", "VIS_HITFX_C2", Config.HitParticleColorB,    function(c) Config.HitParticleColorB=c end)
@@ -2296,7 +2365,7 @@ return function(Lib, Core)
         boolToggle(sFX, "Physics Bounce", "Particle Physics",
             function() return Config.HitParticlePhysics end,
             function(v) Config.HitParticlePhysics = v and true or false end)
-        sFX:SubLabel({ Text = "Particles bounce off world geometry (Raycast). More realistic but heavier on CPU." })
+        sFX:SubLabel({ Text = "Particles bounce off world geometry. heavier on CPU." })
 
         applyParticleTypeVis()
 
@@ -2331,7 +2400,7 @@ return function(Lib, Core)
                 end,
             }, ctx.flag("VIS_IND_Style"))
         end)
-        sInd:SubLabel({ Text = "Panel = chip HUD | Simple = clean neon text-stack | Glass = liquid-glass HUD (Nursultan/Neverlose)." })
+        sInd:SubLabel({ Text = "Panel = chip HUD | Simple = clean neon | Glass - Glass" })
 
         -- Anchor = placement, shared by ALL three styles.
         --   Player = pinned beside/under your character (pick a side)
