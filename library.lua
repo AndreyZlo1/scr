@@ -215,7 +215,6 @@ local CONFIG = {
 	EspSmoothAlpha = 1.0,
 	EspHpBar = true,
 	EspWeaponInfo = true,
-	EspUpdateInterval = 0.0167,  -- FIX v8: 60fps
 	EspMaxDistance = 1800,       -- глобальный лимит ESP (studs), дальше не рендерится
 	EspRenderInterval = 0.0167,  -- FIX v8: 60fps рендер
 	EspFullRescanInterval = 60.0,  -- FIX v10: полный скан каждые 60s (было 30s) — снижает фризы на NPC картах
@@ -228,7 +227,6 @@ local CONFIG = {
 	EspChamsMaxActors = 24,          -- FIX v9: больше акторов
 	EspSkeletonMaxActors = 24,       -- FIX v9
 	EspSkeletonMaxDist = 800,        -- FIX v9: скелет только до 800 studs
-	EspBoxMaxActors = 64,            -- FIX v9: ESP box для 64 акторов
 	EspWeaponPlayersOnly = true,
 	EspIgnoreTeam = true,
 	EspVisibleBones = { "Head", "UpperTorso", "LowerTorso" },
@@ -3205,7 +3203,6 @@ function Bridge.setMultiPointMode(mode)
 	elseif mode == "off" or mode == false or mode == nil then
 		CONFIG.LiteMultiPoint = false
 	end
-	CONFIG.MultiPoint = false
 end
 
 function Bridge.loadSharedModules()
@@ -5101,68 +5098,14 @@ function Bridge.logVizHide(tag, reason, detail)
 	log("VIZ", tostring(tag), "hide", tostring(reason), extra)
 end
 
-function Bridge.beginShotBurst(muzzleOrigin)
-	if typeof(muzzleOrigin) ~= "Vector3" then return nil end
-	Bridge.zeroClientWeaponSpread(Bridge.peekWeaponContext() or ctx)
-	State.shotBurstActive = true
-	State.shotBurstT = os.clock()
-	State.lastDischargeAimTime = os.clock()
-	State.localDischargePending = true
-	State.awaitingServerDischarge = CONFIG.ServerFirstBullet == true
-	State.pendingBulletSpawns = {}
-	State.inShotPrep = false
-	Bridge.refreshAimTarget(muzzleOrigin, true)
-	if not State.shotAimTarget or not State.shotAimTarget.Parent then
-		Bridge.refreshAimTarget(muzzleOrigin, true)
-	end
-	local target = State.shotAimTarget
-	if target and target.Parent then
-		Bridge.refreshShotAimAtMuzzle(muzzleOrigin, target)
-	end
-	State.shotBurstAimPoint = State.forceHitPoint or State.aimAimPoint
-	if typeof(State.shotBurstAimPoint) == "Vector3" then
-		State.aimAimPoint = State.shotBurstAimPoint
-		State.forceHitPoint = State.shotBurstAimPoint
-	end
-	return State.shotBurstAimPoint
-end
 
-function Bridge.queueClientBulletSpawn(ref, self, uid, payload)
-	if type(State.pendingBulletSpawns) ~= "table" then
-		State.pendingBulletSpawns = {}
-	end
-	State.pendingBulletSpawns[#State.pendingBulletSpawns + 1] = {
-		ref = ref,
-		self = self,
-		uid = uid,
-		payload = payload,
-	}
-	return uid
-end
 
-function Bridge.flushPendingClientBullets()
-	local pending = State.pendingBulletSpawns
-	State.awaitingServerDischarge = false
-	State.pendingBulletSpawns = nil
-	if type(pending) ~= "table" then return end
-	for _, job in ipairs(pending) do
-		if type(job) == "table" and job.ref and job.payload then
-			local ok, err = pcall(job.ref, job.self, 1, job.uid, job.payload)
-			if not ok then
-				Bridge.reportError("flushBullet", err)
-			end
-		end
-	end
-end
 
 function Bridge.isShotBurstLocked()
 	return State.shotBurstActive == true
 		and os.clock() - (State.shotBurstT or 0) < 0.12
 end
 
-function Bridge.endShotBurst()
-	State.shotBurstActive = false
-end
 
 function Bridge.getLockedShotAimPoint()
 	if typeof(State.shotBurstAimPoint) == "Vector3"
@@ -6819,9 +6762,16 @@ function Bridge.interceptForceHitRaycast(old, workspaceInst, origin, direction, 
 end
 
 function Bridge.shouldForceMeleeKaRaycast()
+	-- FIX (ПРИЧИНА «Hook в KillAura не попадает по врагу»):
+	-- условие требовало State.kaMeleeForceRaycast, который НИКТО никогда не
+	-- выставлял — переименование применили наполовину. Из-за этого функция
+	-- всегда возвращала false, перехват рейкаста ближнего боя не работал
+	-- вообще, и удар улетал туда, куда смотрит настоящий рейкаст игры, а не
+	-- в цель. Живой флаг ставит сам killaura: kaImpactSteer = true на замахе,
+	-- false по завершении (beginSwingState/endSwingState).
 	return CONFIG.KillAura == true
 		and CONFIG.KillAuraForceHit ~= false
-		and State.kaMeleeForceRaycast == true
+		and State.kaImpactSteer == true
 end
 
 function Bridge.resolveMeleeKaForceHitPart()
@@ -9870,9 +9820,10 @@ function Bridge.isMuzzleOriginValid(candidate, realOrigin)
 		return false
 	end
 	local maxOff = CONFIG.MuzzlePeekMaxOffset or 2.6
-	if CONFIG.MultiPoint then
-		maxOff = math.max(maxOff, CONFIG.MultiPointMaxMuzzleDist or 10)
-	elseif CONFIG.LiteMultiPoint then
+	-- CONFIG.MultiPoint удалён: единственное присваивание в проекте было
+	-- `= false` (setMultiPointMode), т.е. ветка недостижима. Рабочий режим —
+	-- только LiteMultiPoint.
+	if CONFIG.LiteMultiPoint then
 		maxOff = math.max(maxOff, CONFIG.LiteMultiPointMaxDist or 6)
 	end
 	return (candidate - realOrigin).Magnitude <= maxOff + 0.05
@@ -10032,15 +9983,6 @@ function Bridge.pruneAllCaches(now)
 		if now - State.resolverCache.t > 0.12 then
 			State.resolverCache = nil
 		end
-	end
-	-- tbMuzzleCache
-	if State.tbMuzzleCache then
-		for k, e in pairs(State.tbMuzzleCache) do
-			if now - (e.t or 0) > 0.25 then State.tbMuzzleCache[k] = nil end
-		end
-		local tbCount = 0
-		for _ in pairs(State.tbMuzzleCache) do tbCount += 1 end
-		if tbCount > 48 then table.clear(State.tbMuzzleCache) end
 	end
 	-- mpAimCache
 	if State.mpAimCache and now - (State.mpAimCache.t or 0) > 0.15 then
@@ -10350,12 +10292,6 @@ function Bridge.patchV138ServerAim(v138)
 	if not target or not target.Parent then
 		if CONFIG.LogV138Patch then
 			log("AIM", "v138 not patched: no target")
-		end
-		return false
-	end
-	if CONFIG.MultiPoint and not State.mpShotReady then
-		if CONFIG.LogV138Patch then
-			log("AIM", "v138 not patched: multipoint no shot")
 		end
 		return false
 	end
@@ -11219,7 +11155,11 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 
 	-- Опциональная ping-компенсация (доля RTT сверху), по умолчанию выключена.
 	if CONFIG.PingCompensation == true then
-		local pingMs = (type(Bridge.getLocalPingMs) == "function" and Bridge.getLocalPingMs()) or 0
+		-- FIX: вызывался Bridge.getLocalPingMs, которого НЕ СУЩЕСТВУЕТ —
+		-- реальная функция называется getNetworkPingMs. Проверка типа гасила
+		-- ошибку, pingMs всегда был 0, и тумблер «Ping Compensation» вместе с
+		-- PingCompensationScale не делали ровным счётом ничего.
+		local pingMs = (type(Bridge.getNetworkPingMs) == "function" and Bridge.getNetworkPingMs()) or 0
 		local pingLead = math.clamp(pingMs / 1000, 0, 0.2) * (CONFIG.PingCompensationScale or 0.5)
 		predicted = predicted + velScaled * pingLead
 		tTotal = tTotal + pingLead
