@@ -391,6 +391,9 @@ local State = {
 	espLosParams = nil,
 	lastEspRescanTick = 0,
 	modifyAppliedUid = nil,
+	modifyLastPass = 0,        -- троттл полного прохода Gun Mods
+	modifyAppliedCount = 0,    -- сколько компонентов промодили в последний проход
+	invSvcCache = nil,         -- кэш синглтона InventoryService
 	mouseFireHeld = false,
 	lastMouseFireTime = 0,
 	bulletEventInst = nil,
@@ -519,7 +522,7 @@ local function ensurePerfHudRows(rowCount)
 	if hud and hud.rows and #hud.rows >= rowCount then return hud end
 	if hud and hud.rows then
 		for _, row in ipairs(hud.rows) do
-			pcall(function() row:Remove() end)
+			Bridge.destroyDrawing(row)
 		end
 	end
 	hud = { rows = {} }
@@ -540,7 +543,7 @@ function Bridge.clearPerfHud()
 	local hud = State.perfHud
 	if not hud or not hud.rows then return end
 	for _, row in ipairs(hud.rows) do
-		pcall(function() row:Remove() end)
+		Bridge.destroyDrawing(row)
 	end
 	State.perfHud = nil
 end
@@ -3831,6 +3834,55 @@ function Bridge.tuneFromHandler(handler)
 	return tableField(handler, "Tune")
 end
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- InventoryService — синглтон Flux (модуль возвращает уже созданный экземпляр).
+-- Flux уничтожает свои ModuleScript'ы после загрузки, но они остаются в nil-
+-- parent, а require-кэш Roblox держит результат — поэтому require() по такому
+-- инстансу мгновенно отдаёт живой синглтон.
+--
+-- Кэшируем результат: getnilinstances — дорогой вызов, дёргать его каждый
+-- проход модов нельзя. Валидность проверяем по наличию _inventories.
+-- ─────────────────────────────────────────────────────────────────────────
+function Bridge.resolveInventoryService(force)
+	local cached = State.invSvcCache
+	if not force and type(cached) == "table" and rawget(cached, "_inventories") ~= nil then
+		return cached
+	end
+	-- 1) основной путь — nil-instances + require
+	if type(getnilinstances) == "function" then
+		local ok, nils = pcall(getnilinstances)
+		if ok and type(nils) == "table" then
+			for _, inst in ipairs(nils) do
+				local okC, cls = pcall(function() return inst.ClassName end)
+				if okC and cls == "ModuleScript" then
+					local okN, nm = pcall(function() return inst.Name end)
+					if okN and nm == "InventoryService" then
+						local okR, svc = pcall(require, inst)
+						if okR and type(svc) == "table" and rawget(svc, "_inventories") ~= nil then
+							State.invSvcCache = svc
+							return svc
+						end
+					end
+				end
+			end
+		end
+	end
+	-- 2) фолбэк — точечный поиск таблицы по характерным ключам
+	if type(filtergc) == "function" then
+		local ok, res = pcall(filtergc, "table",
+			{ Keys = { "_inventories", "_inventory", "Equipped" } })
+		if ok and type(res) == "table" then
+			for _, tbl in ipairs(res) do
+				if type(rawget(tbl, "_inventories")) == "table" then
+					State.invSvcCache = tbl
+					return tbl
+				end
+			end
+		end
+	end
+	return nil
+end
+
 function Bridge.caliberFromHandler(handler)
 	if type(handler) ~= "table" then return nil end
 	local direct = tableField(handler, "_caliber")
@@ -4827,7 +4879,7 @@ end
 function Bridge.clearWeaponHud()
 	for i, row in ipairs(State.hudRows) do
 		pcall(function()
-			row:Remove()
+			Bridge.destroyDrawing(row)
 		end)
 		State.hudRows[i] = nil
 	end
@@ -5997,6 +6049,32 @@ function Bridge.showDrawing(obj, visibleAmount)
 	-- Potassium Drawing: как HUD — Transparency=1 это видимо
 	obj.Transparency = visibleAmount
 	obj.Visible = visibleAmount > 0.01
+end
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- Единый безопасный деструктор Drawing-объектов.
+--
+-- Почему он нужен: по докам Potassium деструктор — :Destroy(). По всей
+-- кодовой базе исторически звался :Remove(), всегда внутри pcall — то есть
+-- если метода нет, ошибка молча глоталась и объект ТЕК. Здесь пробуем
+-- Destroy, затем Remove, и только в самом конце прячем объект, чтобы
+-- недобитый Drawing хотя бы не висел на экране.
+-- ─────────────────────────────────────────────────────────────────────────
+function Bridge.destroyDrawing(obj)
+	if not obj then return false end
+	if pcall(function() obj:Destroy() end) then return true end
+	if pcall(function() obj:Remove() end) then return true end
+	pcall(function() obj.Visible = false end)
+	return false
+end
+
+-- Уничтожает массив Drawing-объектов и очищает саму таблицу (in-place).
+function Bridge.destroyDrawingList(list)
+	if type(list) ~= "table" then return end
+	for i = #list, 1, -1 do
+		Bridge.destroyDrawing(list[i])
+		list[i] = nil
+	end
 end
 
 function Bridge.resolveAimBonePart(model, fallbackPart)
@@ -11017,6 +11095,190 @@ Bridge._Players               = Players
 Bridge._resolveLocalClient    = resolveLocalClient
 Bridge._resolveLocalPlayer    = resolveLocalPlayer
 
+
+-- ============================================================
+-- UI KIT — единый стиль интерфейса для всех модулей
+-- ============================================================
+--
+-- Раньше каждый модуль звал MacLib напрямую и городил своё: где-то тоггл
+-- назывался "Enabled", где-то дублировал имя фичи; кейбинды жили то рядом,
+-- то в отдельной секции; часть слайдеров сыпала уведомлениями, часть нет;
+-- сублейблы были длинными техническими предложениями. Отсюда ощущение
+-- «тяп-ляп» — интерфейс не выглядел сделанным одной рукой.
+--
+-- Здесь собран паттерн, по которому построен autoparry v89:
+--
+--   Header("Имя фичи")          ← заголовок несёт имя
+--     Toggle "Enabled"          ← тоггл ВСЕГДА называется просто Enabled
+--     SubLabel "..."            ← короткое пояснение слэнгом
+--     Keybind "Keybind"         ← сразу под фичей, которую включает
+--   Divider
+--   Header("Подгруппа")
+--     ...контролы...
+--
+-- Правила, зашитые в хелперы:
+--   • toggle уведомляет РОВНО один раз (есть guard от эха UpdateState);
+--   • keybind дёргает ТУ ЖЕ функцию, что и тоггл → ПК и мобильный FAB
+--     всегда в синхроне с галочкой на экране;
+--   • слайдеры не уведомляют никогда;
+--   • во время сборки UI уведомления подавлены (uiReady).
+--
+-- Копирайтинг — два регистра, не смешивать:
+--   • Имена элементов: чистый Title Case, ≤3 слов, без слэнга.
+--   • SubLabel: строчными, слэнг (u, ur, n, dont), ≤2 строк.
+--     Если имя + единица измерения и так всё говорят — сублейбла нет.
+-- ============================================================
+
+function Bridge.makeUiKit(ui)
+	local kit = {}
+	local flag = ui.flag or function(s) return "BRM5_" .. tostring(s) end
+	local ML   = ui.MacLib
+
+	-- Уведомления подавлены, пока строится интерфейс: иначе создание
+	-- элементов и автозагрузка конфига выдают пачку тостов на старте.
+	local uiReady = false
+	local function notify(title, body)
+		if uiReady and ui.notify then pcall(ui.notify, title, body) end
+	end
+	kit.notify = notify
+	function kit.ready()
+		task.defer(function() uiReady = true end)
+	end
+
+	-- Программно синхронизировать тоггл (например, когда фичу выключил
+	-- хоткей или сам модуль).
+	function kit.syncToggle(f, val)
+		if ML and ML.Options and ML.Options[f] then
+			pcall(function() ML.Options[f]:UpdateState(val) end)
+		end
+	end
+
+	-- ── МАСТЕР-ФИЧА: Header + "Enabled" + SubLabel + "Keybind" ──────────
+	-- o = { Title, Flag, get, set, Desc?, NoKeybind?, Header? }
+	function kit.feature(section, o)
+		if o.Header ~= false then
+			section:Header({ Name = o.Header or o.Title })
+		end
+		local guard, togEl = false, nil
+		local function commit(val)
+			val = val and true or false
+			o.set(val)
+			notify(o.Title, val and "Enabled" or "Disabled")
+			guard = true
+			if togEl then pcall(function() togEl:UpdateState(val) end) end
+			guard = false
+		end
+		togEl = section:Toggle({
+			Name    = "Enabled",
+			Default = o.get(),
+			Callback = function(v)
+				if guard then return end   -- игнорируем эхо от UpdateState
+				commit(v)
+			end,
+		}, flag(o.Flag))
+		if o.Desc then section:SubLabel({ Text = o.Desc }) end
+		-- Кейбинд идёт сразу под фичей, которую включает, и без дефолтной
+		-- клавиши. MacLib сам рисует мобильный FAB для каждого Keybind —
+		-- своя кнопка не нужна.
+		if o.NoKeybind ~= true and ui.keybind then
+			ui.keybind(section, {
+				Name   = "Keybind",
+				Flag   = flag(o.Flag .. "_KB"),
+				ForceAutoLoad = true,
+				Toggle = function() commit(not o.get()) end,
+			})
+		end
+		return { commit = commit, element = togEl, flag = flag(o.Flag) }
+	end
+
+	-- ── Вторичный тоггл: своё имя, одно уведомление ────────────────────
+	function kit.toggle(section, o)
+		local guard = false
+		local el = section:Toggle({
+			Name = o.Name, Default = o.get(),
+			Callback = function(v)
+				if guard then return end
+				o.set(v and true or false)
+				notify(o.Title or o.Name, v and "Enabled" or "Disabled")
+				if o.after then pcall(o.after, v) end
+			end,
+		}, flag(o.Flag or (o.Name:gsub("%s+", "") .. "_T")))
+		if o.Desc then section:SubLabel({ Text = o.Desc }) end
+		return el
+	end
+
+	-- ── Слайдер: НИКОГДА не уведомляет ─────────────────────────────────
+	-- Возвращает элемент, чтобы вызывающий мог дёргать :SetVisibility.
+	function kit.slider(section, o)
+		local el = section:Slider({
+			Name = o.Name, Default = o.Default,
+			Minimum = o.Min, Maximum = o.Max,
+			Precision = o.Precision or 0, Suffix = o.Suffix, Prefix = o.Prefix,
+			Callback = o.Callback,
+		}, flag(o.Flag))
+		if o.Desc then section:SubLabel({ Text = o.Desc }) end
+		return el
+	end
+
+	-- ── Дропдаун: уведомляет "Selected: X" ─────────────────────────────
+	function kit.dropdown(section, o)
+		local el = section:Dropdown({
+			Name = o.Name, Options = o.Options, Default = o.Default,
+			Multi = o.Multi, Search = o.Search, Required = o.Required,
+			Callback = function(v)
+				o.Callback(v)
+				if not o.Multi and type(v) == "string" and v ~= "" then
+					notify(o.Title or o.Name, "Selected: " .. v)
+				end
+				if o.after then pcall(o.after, v) end
+			end,
+		}, flag(o.Flag))
+		if o.Desc then section:SubLabel({ Text = o.Desc }) end
+		return el
+	end
+
+	-- ── Colorpicker: не уведомляет (как и слайдер) ─────────────────────
+	function kit.color(section, o)
+		return section:Colorpicker({
+			Name = o.Name, Default = o.Default, Alpha = o.Alpha,
+			Callback = o.Callback,
+		}, flag(o.Flag))
+	end
+
+	-- ── Кнопка: сообщает РЕЗУЛЬТАТ, включая причину неудачи ────────────
+	function kit.button(section, o)
+		return section:Button({
+			Name = o.Name,
+			Callback = function()
+				local ok, res = pcall(o.Callback)
+				if o.Title then
+					if ok and type(res) == "string" then
+						notify(o.Title, res)
+					elseif not ok then
+						notify(o.Title, "failed")
+					end
+				end
+			end,
+		}, flag(o.Flag or (o.Name:gsub("%s+", "") .. "_B")))
+	end
+
+	-- ── Группа: Divider + Header. Единственный способ разбивать секцию ──
+	-- Divider никогда не идёт без Header после него.
+	function kit.group(section, name)
+		section:Divider()
+		section:Header({ Name = name })
+	end
+
+	-- ── Показ/скрытие зависимых контролов ──────────────────────────────
+	-- «не показываем ручки, которые сейчас ничего не делают»
+	function kit.setVisible(els, state)
+		for _, el in ipairs(els) do
+			if el then pcall(function() el:SetVisibility(state and true or false) end) end
+		end
+	end
+
+	return kit
+end
 
 -- ============================================================
 -- Return
