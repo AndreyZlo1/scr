@@ -198,7 +198,6 @@ local SA_CONFIG = {
 	TracerThickness = 0.9,
 	TracerColor = Color3.fromRGB(255, 90, 35),
 	TracerTransparency = 0,
-	AimLineEnabled = false,
 	AimVisualStyle = "Swastika",
 	AimVisualScale = 0.5,
 	HitSound = true,
@@ -1995,7 +1994,6 @@ function Bridge.hideAimViz(reason, detail)
 		if viz.btPast then viz.btPast.Visible = false end
 		if viz.btLine then viz.btLine.Visible = false end
 		if viz.btText then viz.btText.Visible = false end
-		if viz.aimLine then viz.aimLine.Visible = false end
 		if viz.boxLines then
 			for _, l in ipairs(viz.boxLines) do l.Visible = false end
 		end
@@ -2187,25 +2185,6 @@ function Bridge.updateAimVisuals()
 	if viz.btText then viz.btText.Visible = false end
 
 	drawAimReticle(viz, cx, cy, tierColor, reticleAlpha, now)
-
-	-- AimLine: линия от центра экрана (прицел) до точки aim
-	if CONFIG.AimLineEnabled then
-		local vp = cam.ViewportSize
-		local screenCx, screenCy = vp.X / 2, vp.Y / 2
-		local al = viz.aimLine
-		if not al then
-			al = Drawing.new("Line")
-			al.Thickness = 1.5
-			al.ZIndex = 43
-			viz.aimLine = al
-		end
-		al.From = Vector2.new(screenCx, screenCy)
-		al.To = Vector2.new(cx, cy)
-		al.Color = tierColor
-		Bridge.showDrawing(al, reticleAlpha * 0.7)
-	elseif viz.aimLine then
-		viz.aimLine.Visible = false
-	end
 
 	-- Клиентская линия: muzzle → aim (predict)
 	if CONFIG.MuzzleVisual then
@@ -3253,7 +3232,7 @@ function Bridge.clearAimVisuals()
 		-- глотал ошибку на ПЕРВОЙ же строке, поэтому НИ ОДИН Drawing ниже
 		-- не удалялся. Теперь чистим строго через State.aimViz.
 		local av = State.aimViz
-		for _, key in ipairs({ "crossH", "crossV", "dot", "line", "label", "aimLine" }) do
+		for _, key in ipairs({ "crossH", "crossV", "dot", "line", "label" }) do
 			Bridge.destroyDrawing(av[key])
 			av[key] = nil
 		end
@@ -4449,15 +4428,14 @@ function SilentAim.buildUI(ui)
 		K.group(R, "MultiPoint")
 		local mpEls = {}
 		local function mpVis() K.setVisible(mpEls, CONFIG.LiteMultiPoint ~= false) end
-		K.toggle(R, { Name = "MultiPoint", Flag = "MultiPoint", Title = "MultiPoint",
-			get = function() return CONFIG.MultiPoint end,
-			set = function(v) CONFIG.MultiPoint = v end,
-			Desc = "tries several bones til one is hittable" })
+		-- Старый тумблер "MultiPoint" удалён: Bridge.setMultiPointMode всегда
+		-- выставляет CONFIG.MultiPoint = false, так что галочка ничего не
+		-- делала. Рабочий режим — только Lite MultiPoint.
 		K.toggle(R, { Name = "Lite MultiPoint", Flag = "LiteMP", Title = "Lite MultiPoint",
 			get = function() return CONFIG.LiteMultiPoint end,
 			set = function(v) CONFIG.LiteMultiPoint = v end,
 			after = mpVis,
-			Desc = "cheaper version, only for close targets" })
+			Desc = "tries several bones til one is hittable\nonly for close targets" })
 		mpEls[#mpEls + 1] = K.slider(R, { Name = "Lite Max Distance", Flag = "LiteMPDist",
 			Default = CONFIG.LiteMultiPointMaxDist, Min = 2, Max = 30, Suffix = " st",
 			Callback = function(v) CONFIG.LiteMultiPointMaxDist = v end })
@@ -4561,14 +4539,43 @@ function SilentAim.buildUI(ui)
 		mkVis()
 
 		K.group(V, "Lines")
-		K.toggle(V, { Name = "Aim Line", Flag = "AimLine", Title = "Aim Line",
-			get = function() return CONFIG.AimLineEnabled end,
-			set = function(v) CONFIG.AimLineEnabled = v end,
-			Desc = "line from ur crosshair to the target" })
 		K.toggle(V, { Name = "Muzzle Visual", Flag = "MuzzleVisual", Title = "Muzzle Visual",
 			get = function() return CONFIG.MuzzleVisual end,
 			set = function(v) CONFIG.MuzzleVisual = v end,
 			Desc = "shows where the shot really leaves the barrel" })
+
+		-- Трейсеры живут здесь, в Visuals — раньше были закопаны в Feedback
+		-- рядом со звуком попадания, где их никто не искал.
+		K.group(V, "Bullet Tracers")
+		local trEls = {}
+		local function trVis() K.setVisible(trEls, CONFIG.ShotTracers ~= false) end
+		K.toggle(V, { Name = "Enabled", Flag = "ShotTracers", Title = "Bullet Tracers",
+			get = function() return CONFIG.ShotTracers end,
+			set = function(v) CONFIG.ShotTracers = v end,
+			after = trVis,
+			Desc = "draws the path of ur own shots" })
+		trEls[#trEls + 1] = K.color(V, { Name = "Color", Flag = "TracerColor",
+			Default = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35),
+			Callback = function(c) CONFIG.TracerColor = c end })
+		trEls[#trEls + 1] = K.slider(V, { Name = "Thickness", Flag = "TracerThick",
+			Default = math.floor((CONFIG.TracerThickness or 0.9) * 10),
+			Min = 5, Max = 40,
+			Callback = function(v) CONFIG.TracerThickness = v / 10 end,
+			Desc = "10 = thin hairline, 40 = fat beam" })
+		trEls[#trEls + 1] = K.slider(V, { Name = "Duration", Flag = "TracerDur",
+			Default = math.floor((CONFIG.TracerDuration or 1.4) * 1000),
+			Min = 200, Max = 4000, Suffix = " ms",
+			Callback = function(v) CONFIG.TracerDuration = v / 1000 end,
+			Desc = "how long the line stays before it fades" })
+		trEls[#trEls + 1] = K.slider(V, { Name = "Transparency", Flag = "TracerTransp",
+			Default = math.floor((CONFIG.TracerTransparency or 0) * 100),
+			Min = 0, Max = 100, Suffix = "%",
+			Callback = function(v) CONFIG.TracerTransparency = v / 100 end })
+		trEls[#trEls + 1] = K.slider(V, { Name = "Fade In", Flag = "TracerFadeIn",
+			Default = math.floor((CONFIG.TracerFadeIn or 0.12) * 1000),
+			Min = 0, Max = 500, Suffix = " ms",
+			Callback = function(v) CONFIG.TracerFadeIn = v / 1000 end })
+		trVis()
 
 		-- ═══ RIGHT #2: фидбэк ══════════════════════════════════════════
 		local F = tabSA:Section({ Side = "Right" })
@@ -4594,29 +4601,6 @@ function SilentAim.buildUI(ui)
 			set = function(v) CONFIG.HitParticleWireframe = v end })
 		hpVis()
 
-		K.group(F, "Tracers")
-		local trEls = {}
-		local function trVis() K.setVisible(trEls, CONFIG.ShotTracers ~= false) end
-		K.toggle(F, { Name = "Enabled", Flag = "ShotTracers", Title = "Shot Tracers",
-			get = function() return CONFIG.ShotTracers end,
-			set = function(v) CONFIG.ShotTracers = v end,
-			after = trVis,
-			Desc = "draws the path of ur own shots" })
-		trEls[#trEls + 1] = K.color(F, { Name = "Color", Flag = "TracerColor",
-			Default = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35),
-			Callback = function(c) CONFIG.TracerColor = c end })
-		trEls[#trEls + 1] = K.slider(F, { Name = "Transparency", Flag = "TracerTransp",
-			Default = math.floor((CONFIG.TracerTransparency or 0) * 100),
-			Min = 0, Max = 100, Suffix = "%",
-			Callback = function(v) CONFIG.TracerTransparency = v / 100 end })
-		trEls[#trEls + 1] = K.slider(F, { Name = "Duration", Flag = "TracerDur",
-			Default = math.floor((CONFIG.TracerDuration or 1.4) * 1000),
-			Min = 200, Max = 4000, Suffix = " ms",
-			Callback = function(v) CONFIG.TracerDuration = v / 1000 end })
-		trEls[#trEls + 1] = K.slider(F, { Name = "Thickness", Flag = "TracerThick",
-			Default = CONFIG.TracerThickness, Min = 0.5, Max = 4, Precision = 1,
-			Callback = function(v) CONFIG.TracerThickness = v end })
-		trVis()
 	end
 
 	-- ═══ TAB: Gun Mods ═════════════════════════════════════════════════
