@@ -87,38 +87,10 @@ local function markCombatDischarge()
 	S.localDischargePending = true
 end
 
--- Совместимость: SA v2 ожидает хелперы из BRM5Lib_v2.
-	if type(Bridge.isLocalPlayerShot) ~= "function" then
-	function Bridge.isLocalPlayerShot(isLocal)
-		if isLocal == true then return true end
-		if isLocal == false then return false end
-		return os.clock() - (State.lastDischargeAimTime or 0) < 0.45
-	end
-end
-if type(Bridge.isOurBulletEvent) ~= "function" then
-	function Bridge.isOurBulletEvent(op, args)
-		if type(args) ~= "table" then return false end
-		if op == 2 then
-			if args[7] == true then return true end
-			if args[7] == false then return false end
-			return os.clock() - (State.lastDischargeAimTime or 0) < 0.45
-		end
-		if op == 1 then
-			return os.clock() - (State.lastDischargeAimTime or 0) < 0.35
-		end
-		return false
-	end
-end
-if type(Bridge.logBulletHit) ~= "function" then
-	function Bridge.logBulletHit(op, part, isLocal, stage)
-		log("BULLET", "hit", "op=" .. tostring(op), "part=" .. tostring(part and part.Name), "stage=" .. tostring(stage))
-	end
-end
-if type(Bridge._getGcCached) ~= "function" then
-	Bridge._getGcCached = function()
-		return {}
-	end
-end
+-- Compat-шимы удалены: library.lua безусловно определяет isLocalPlayerShot,
+-- isOurBulletEvent, logBulletHit и экспортирует _getGcCached ДО загрузки
+-- модулей, поэтому все четыре проверки `if type(...) ~= "function"` были
+-- заведомо ложными, а их тела — недостижимы.
 
 -- SA-specific configuration
 local SA_CONFIG = {
@@ -300,13 +272,9 @@ function Bridge.getSilentAimPart(data)
 	return data.root
 end
 
-function Bridge.angleFromCameraLook(cam, worldPos)
-	local look = cam.CFrame.LookVector
-	local toTarget = worldPos - cam.CFrame.Position
-	if toTarget.Magnitude < 0.05 then return 0 end
-	return math.deg(math.acos(math.clamp(look:Dot(toTarget.Unit), -1, 1)))
-end
-
+-- Дубль удалён: та же математика, что в library.lua, но БЕЗ проверки cam
+-- на nil. Загружаясь, silentaim затирал библиотечную версию — и терял
+-- защиту от отсутствующей камеры. Используется библиотечная.
 function Bridge.getSilentAimTarget(originForLos, forceRefresh)
 	return Bridge.refreshAimTarget(originForLos, forceRefresh == true)
 end
@@ -4018,43 +3986,10 @@ end
 -- ESP
 -- ============================================================
 
-function Bridge.extractWeaponMagFromItem(item)
-	if type(item) ~= "table" then return nil, nil, nil end
-	local meta = rawget(item, "MetaData")
-	if type(meta) ~= "table" then
-		meta = item
-	end
-	local name = meta.Name or meta.Receiver
-	if type(name) == "table" then
-		name = name.Name
-	end
-	local display = (Bridge.firearmDisplayName and Bridge.firearmDisplayName(item)) or name
-	local mag = meta.Mag or rawget(item, "Mag")
-	local cur, maxMag = nil, nil
-	if type(mag) == "table" then
-		maxMag = mag.Max or mag.MaxCapacity or mag.Ammo
-	end
-	local firearm = rawget(item, "File")
-	if type(firearm) == "table" then
-		local tune = rawget(firearm, "Tune")
-		if type(tune) == "table" and type(tune.Ammo) == "number" then
-			maxMag = maxMag or tune.Ammo
-		end
-	end
-	return display, cur, maxMag
-end
-
-function Bridge.isAnyFirearmItem(item, mods)
-	if type(item) ~= "table" then return false end
-	local name = rawget(item, "Name")
-	if type(name) == "string" then
-		if string.match(name, "^Firearm") or string.match(name, "^Melee") then
-			return true
-		end
-	end
-	return Bridge.isPlayerFirearmItem(item, mods)
-end
-
+-- Дубль удалён: байт-в-байт копия Bridge.extractWeaponMagFromItem из
+-- library.lua. Дублирование только создавало риск, что версии разъедутся.
+-- Дубль удалён: копия из library.lua, причём обе версии не вызывались
+-- ниоткуда. Оставлена одна, библиотечная.
 local function tickFullAutoAssist()
 	if not CONFIG.ModifyEnabled or not CONFIG.ModifyPresets.FullAuto then return end
 	local ctx = Bridge.getCachedWeaponContext()
@@ -4337,8 +4272,6 @@ local SilentAim = {
 				task.wait(0.5)
 			end
 		end)
-		-- mouseFireHeld удалён: beginShotBurst теперь вызывается напрямую из
-		-- GetMuzzleCFrame hook (p2==nil → вызов из FirearmInventory.Discharge)
 		startAimThread()
 	end,
 	stop   = stopAimThread,
