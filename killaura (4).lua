@@ -119,6 +119,7 @@ local KA_CONFIG = {
     KillAuraVizBreathFq  = 0.9,   -- частота пульсации (Гц)
     KillAuraVizSpin      = true,  -- плавное вращение искривления
     KillAuraVizSpinSpeed = 1.2,   -- скорость вращения Spin (rad/s)
+    KillAuraVizTransparency = 0,  -- 0 = полностью видимое кольцо
     KillAuraVizColorA    = Color3.fromRGB(200, 140, 255),  -- фиолетовый
     KillAuraVizColorB    = Color3.fromRGB(90,  205, 255),  -- голубой
     -- ── Визу����лизация PacketAuto (НЕ кольцо) ──────────────────────────────────
@@ -1487,6 +1488,10 @@ local function ensureViz()
     if have < segN then
         for i = have + 1, segN do
             local seg = Drawing.new("Line")
+            -- В Potassium Transparency=1 значит НЕПРОЗРАЧНО. Свежий Drawing
+            -- приходит с 0 (= полностью прозрачный), а код отрисовки кольца
+            -- это поле не трогал вообще — поэтому кольцо не появлялось.
+            seg.Transparency = 1
             seg.Visible = false
             kaVizLines[i] = seg
         end
@@ -1842,6 +1847,8 @@ local function updateViz(actor)
 
     local thickness = (thickMin + (thickMax - thickMin) * (0.5 + 0.5 * math.sin(breathPh)))
                       * (1 + kaVizFlash * 1.05)
+    -- Прозрачность кольца (Potassium: 1 = непрозрачно). Настраивается конфигом.
+    local ringAlpha = 1 - math.clamp(CONFIG.KillAuraVizTransparency or 0, 0, 0.95)
 
     -- ── Предвычисление вершин (без аллокации таблиц) ─────────────────────
     -- Используем кэш cos/sin — без вызова math.cos/sin в горячем цикле
@@ -1905,6 +1912,7 @@ local function updateViz(actor)
             seg.From    = Vector2.new(kaVizScrX[i], kaVizScrY[i])
             seg.To      = Vector2.new(kaVizScrX[j], kaVizScrY[j])
             seg.Color   = Color3.new(kaVizColR[i], kaVizColG[i], kaVizColB[i])
+            seg.Transparency = ringAlpha   -- иначе сегмент остаётся невидимым
             seg.Visible = true
             anyVis      = true
         else
@@ -2164,6 +2172,9 @@ function _M.buildUI(ui)
     local flag = ui.flag or function(s) return "KA_" .. s end
     local tab = ui.tabs and ui.tabs.KillAura
     if not tab then return end
+    -- Melee Mods — это МОДИФИКАЦИЯ ОРУЖИЯ, её место в Gun Mods рядом с
+    -- Weapon Mods и Free Gun, а не в табе автоатаки.
+    local gmtab = ui.tabs and ui.tabs.GunMods
     local dtab = ui.tabs and ui.tabs.Debug
 
     local K = Bridge.makeUiKit(ui)
@@ -2226,8 +2237,8 @@ function _M.buildUI(ui)
     K.button(L, { Name = "Swing Once", Flag = "SwingOnce", Title = "Kill Aura",
         Callback = function() _M.swingOnce(); return "swung" end })
 
-    -- ═══ RIGHT: модификаторы ближнего боя ═══════════════════════════════
-    local R = tab:Section({ Side = "Right" })
+    -- ═══ Melee Mods → таб Gun Mods (фолбэк в KillAura, если таба нет) ═══
+    local R = (gmtab or tab):Section({ Side = "Right" })
     R:Header({ Name = "Melee Mods" })
     R:SubLabel({ Text = "client only — server packets stay untouched" })
     K.slider(R, { Name = "Anim Speed", Flag = "AnimSpeed", Default = CONFIG.MeleeAnimSpeed,
@@ -2288,6 +2299,10 @@ function _M.buildUI(ui)
     ringEls[#ringEls + 1] = K.slider(V, { Name = "Spin Speed", Flag = "VizSpinSpeed",
         Default = CONFIG.KillAuraVizSpinSpeed, Min = 0, Max = 6, Precision = 1,
         Callback = function(v) CONFIG.KillAuraVizSpinSpeed = v end })
+    ringEls[#ringEls + 1] = K.slider(V, { Name = "Transparency", Flag = "VizTransp",
+        Default = math.floor((CONFIG.KillAuraVizTransparency or 0) * 100),
+        Min = 0, Max = 95, Suffix = "%",
+        Callback = function(v) CONFIG.KillAuraVizTransparency = v / 100 end })
     ringVis()
 
     K.group(V, "Lock-on HUD")
