@@ -1570,7 +1570,12 @@ function Bridge.clearAllEspDrawings()
 	-- multi-ms freeze spike when clearing 50+ Drawing objects synchronously.
 	local oldDrawings = State.drawings
 	State.drawings     = {}
+	-- Здесь обнуление ranked ОПРАВДАНО: Drawing-объекты реально уничтожаются,
+	-- рисовать по старому списку нечем. Но сбрасываем и счётчик акторов, чтобы
+	-- пересборка стартовала на следующем же кадре, а не через 1.5с таймера.
 	State.espRanked    = nil
+	State.espLastActorCount = -1
+	State.espRankedTime = 0
 	State.espVisibleCache = {}
 	State.espVisibleBatchIndex = 0
 	task.defer(function()
@@ -1749,6 +1754,17 @@ function Bridge.updateESP(dt)
 		State.espLastActorCount = actorCount
 		local capturedActors = State.actors
 		local capturedCamPos = camPos
+		-- Защита: если предыдущая пересборка ещё не финишировала (или упала),
+		-- не запускаем вторую поверх — иначе они дублируют работу и мешают
+		-- друг другу публиковать результат.
+		if State.espRankBusy then return end
+		State.espRankBusy = true
+		-- Страховка от залипания флага: если пересборка почему-то не дошла до
+		-- конца (исключение внутри defer), через 3с разрешаем новую попытку —
+		-- иначе ranked навсегда остался бы старым.
+		task.delay(3, function()
+			if State.espRankBusy then State.espRankBusy = false end
+		end)
 		task.defer(function()
 			local rankT = Bridge.perfBegin and Bridge.perfBegin() or nil
 			local players = {}
@@ -1786,6 +1802,7 @@ function Bridge.updateESP(dt)
 			-- мёртвые строки. Публикуем всегда — цикл отрисовки сам умеет
 			-- пропускать строки с уничтоженными моделями.
 			State.espRanked = ranked
+			State.espRankBusy = false
 			if Bridge.perfEnd then
 				Bridge.perfEnd("esp.rank", rankT, "p=" .. #players .. " n=" .. #npcs)
 			end
