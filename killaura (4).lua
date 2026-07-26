@@ -1475,16 +1475,26 @@ local function countEnemies()
     return n, e
 end
 
+-- FIX: раньше пул полностью пересоздавался на КАЖДОЕ изменение Ring Segments,
+-- а удаление шло через seg:Remove() в pcall — по докам Potassium деструктор
+-- :Destroy(), поэтому ошибка молча глоталась и сегменты текли. Теперь растём
+-- инкрементально, лишнее корректно уничтожаем через общий деструктор.
 local function ensureViz()
     if type(Drawing) ~= "table" or type(Drawing.new) ~= "function" then return end
     local segN = CONFIG.KillAuraVizSegments or 24
-    if #kaVizLines == segN then return end
-    for _, seg in ipairs(kaVizLines) do pcall(function() seg:Remove() end) end
-    kaVizLines = {}
-    for i = 1, segN do
-        local seg = Drawing.new("Line")
-        seg.Visible = false
-        kaVizLines[i] = seg
+    local have = #kaVizLines
+    if have == segN then return end
+    if have < segN then
+        for i = have + 1, segN do
+            local seg = Drawing.new("Line")
+            seg.Visible = false
+            kaVizLines[i] = seg
+        end
+    else
+        for i = have, segN + 1, -1 do
+            Bridge.destroyDrawing(kaVizLines[i])
+            kaVizLines[i] = nil
+        end
     end
     -- Пересобираем кэш углов при смене segN
     kaVizAngleCacheN = 0
@@ -1497,14 +1507,21 @@ local function ensureAngleCache(segN)
         local a = (i / segN) * pi2
         kaVizCosCache[i] = math.cos(a)
         kaVizSinCache[i] = math.sin(a)
-    end
-    kaVizAngleCacheN = segN
-    -- Растягиваем переиспользуемые таблицы
-    for i = 0, segN - 1 do
+        -- Инициализируем переиспользуемые слоты в этом же проходе
         kaVizScrX[i] = 0; kaVizScrY[i] = 0
         kaVizVis[i]  = false
         kaVizColR[i] = 0; kaVizColG[i] = 0; kaVizColB[i] = 0
     end
+    -- FIX: раньше хвост кэшей не подрезался при уменьшении segN — старые
+    -- индексы оставались жить в таблицах навсегда.
+    local i = segN
+    while kaVizCosCache[i] ~= nil do
+        kaVizCosCache[i] = nil; kaVizSinCache[i] = nil
+        kaVizScrX[i] = nil; kaVizScrY[i] = nil; kaVizVis[i] = nil
+        kaVizColR[i] = nil; kaVizColG[i] = nil; kaVizColB[i] = nil
+        i = i + 1
+    end
+    kaVizAngleCacheN = segN
 end
 
 local function hideViz()
@@ -2071,10 +2088,13 @@ function _M.start()
         acc = 0
         pcall(tick)
     end)
-    kaVizConn = RunService.RenderStepped:Connect(function()
+    -- FIX: было RenderStepped — он идёт ДО апдейта камеры, поэтому кольцо
+    -- отставало на кадр и «ползло» при шифтлоке/резком повороте. Heartbeat
+    -- выполняется ПОСЛЕ камеры — проекция совпадает с тем, что видит игрок.
+    kaVizConn = RunService.Heartbeat:Connect(function()
         if not State.running or not CONFIG.KillAura then hideViz(); hidePacketViz() return end
         -- [FIX] Валидируем что equipped не изменился с момента последнего ctx.
-        -- resolveMeleeContext кэ��ируется по kaCtxEq — если _equipped сменился,
+        -- resolveMeleeContext кэшируется по kaCtxEq — если _equipped сменился,
         -- ctx немедленно становится nil (не ждём 1.5s cache expiry).
         local ctx = State.kaCtx
         local actor = ctx and resolveActor(ctx) or nil   -- резолвим 1 раз за кадр
@@ -2146,109 +2166,184 @@ function _M.buildUI(ui)
     if not tab then return end
     local dtab = ui.tabs and ui.tabs.Debug
 
-    local ML = ui.MacLib
-    local function syncToggle(f, val)
-        if ML and ML.Options and ML.Options[f] then
-            pcall(function() ML.Options[f]:UpdateState(val) end)
-        end
-    end
+    local K = Bridge.makeUiKit(ui)
 
-    -- ── Left: targeting ────────────────────────────────────────────────────
-    local L = tab:Section({ Name = "Kill Aura", Side = "Left" })
-    L:Header({ Name = "Kill Aura" })
-    L:Toggle({ Name = "Enabled", Default = CONFIG.KillAura,
-        Callback = function(v) CONFIG.KillAura = v end }, flag("KillAura"))
-    if ui.keybind then
-        ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("KillAura_KB"),
-            Toggle = function()
-                CONFIG.KillAura = not CONFIG.KillAura
-                syncToggle(flag("KillAura"), CONFIG.KillAura)
+    -- ═══ LEFT: сама фича и как она выбирает цель ═══════════════════════
+    local L = tab:Section({ Side = "Left" })
+
+    K.feature(L, {
+        Title = "Kill Aura", Flag = "KillAura",
+        get = function() return CONFIG.KillAura end,
+        set = function(v) CONFIG.KillAura = v end,
+        Desc = "hits whoever is in range for u\nbind works on PC + mobile",
+    })
+    K.dropdown(L, {
+        Name = "Mode", Flag = "Mode",
+        Options = { "Hook", "PacketAuto", "LegitAuto" },
+        Default = CONFIG.KillAuraMode or "Hook",
+        Callback = function(v) CONFIG.KillAuraMode = v end,
+        Desc = "Hook = redirects ur own swings, quietest\nPacketAuto = swings by itself, fastest n most obvious",
+    })
+
+    K.group(L, "Targeting")
+    K.slider(L, { Name = "Distance", Flag = "Distance", Default = CONFIG.KillAuraDistance,
+        Min = 5, Max = 60, Suffix = " st",
+        Callback = function(v) CONFIG.KillAuraDistance = v end,
+        Desc = "how far we look for someone to hit" })
+    K.slider(L, { Name = "FOV", Flag = "FOV", Default = CONFIG.KillAuraFOV,
+        Min = 30, Max = 360, Suffix = "°",
+        Callback = function(v) CONFIG.KillAuraFOV = v end,
+        Desc = "360 = all around u" })
+    K.dropdown(L, {
+        Name = "Force Bone", Flag = "ForceBone",
+        Options = { "Auto", "Head", "UpperTorso", "LowerTorso" },
+        Default = CONFIG.KillAuraForceBone or "Head",
+        Callback = function(v) CONFIG.KillAuraForceBone = (v == "Auto") and nil or v end,
+    })
+    K.slider(L, { Name = "Switch Margin", Flag = "SwitchMargin", Default = CONFIG.KillAuraSwitchMargin,
+        Min = 0, Max = 10, Precision = 1, Suffix = " st",
+        Callback = function(v) CONFIG.KillAuraSwitchMargin = v end,
+        Desc = "how much closer a new guy must be before we ditch the current one\n0 = swaps constantly in a crowd" })
+    K.toggle(L, { Name = "No Wall Check", Flag = "NoWall", Title = "No Wall Check",
+        get = function() return CONFIG.KillAuraNoWallCheck end,
+        set = function(v) CONFIG.KillAuraNoWallCheck = v end,
+        Desc = "hits thru walls (client sided, obvious)" })
+
+    K.group(L, "Timing")
+    K.slider(L, { Name = "Prediction", Flag = "PredictMs", Default = CONFIG.KillAuraPredictMs,
+        Min = 0, Max = 600, Suffix = " ms",
+        Callback = function(v) CONFIG.KillAuraPredictMs = v end,
+        Desc = "leads moving targets\nstart ~120 n tune from there" })
+    K.slider(L, { Name = "Swing Cooldown", Flag = "SwingCd", Default = CONFIG.KillAuraSwingCd,
+        Min = 0.1, Max = 1.5, Precision = 2, Suffix = " s",
+        Callback = function(v) CONFIG.KillAuraSwingCd = v end,
+        Desc = "lower = faster swings but way easier to spot" })
+    K.slider(L, { Name = "Reach", Flag = "Reach", Default = CONFIG.KillAuraReach,
+        Min = 5, Max = 999, Suffix = " st",
+        Callback = function(v) CONFIG.KillAuraReach = v end })
+
+    K.group(L, "Manual")
+    K.button(L, { Name = "Swing Once", Flag = "SwingOnce", Title = "Kill Aura",
+        Callback = function() _M.swingOnce(); return "swung" end })
+
+    -- ═══ RIGHT: модификаторы ближнего боя ═══════════════════════════════
+    local R = tab:Section({ Side = "Right" })
+    R:Header({ Name = "Melee Mods" })
+    R:SubLabel({ Text = "client only — server packets stay untouched" })
+    K.slider(R, { Name = "Anim Speed", Flag = "AnimSpeed", Default = CONFIG.MeleeAnimSpeed,
+        Min = 1, Max = 5, Precision = 1, Suffix = "x",
+        Callback = function(v) CONFIG.MeleeAnimSpeed = v end })
+    K.slider(R, { Name = "Reach Boost", Flag = "ReachBoost", Default = CONFIG.MeleeReachBoost,
+        Min = 0, Max = 15, Precision = 1, Suffix = " st",
+        Callback = function(v) CONFIG.MeleeReachBoost = v end })
+
+    -- Множитель и масштаб задержки имеют смысл только при ручной скорости —
+    -- прячем их, пока тумблер выключен.
+    local swingEls = {}
+    local function swingVis()
+        K.setVisible(swingEls, CONFIG.MeleeSwingSpeed == true)
+    end
+    K.toggle(R, { Name = "Manual Swing Speed", Flag = "SwingSpeedOn", Title = "Manual Swing Speed",
+        get = function() return CONFIG.MeleeSwingSpeed end,
+        set = function(v) CONFIG.MeleeSwingSpeed = v end,
+        after = swingVis })
+    swingEls[#swingEls + 1] = K.slider(R, { Name = "Swing Speed", Flag = "SwingSpeedMult",
+        Default = CONFIG.MeleeSwingSpeedMult, Min = 1, Max = 5, Precision = 1, Suffix = "x",
+        Callback = function(v) CONFIG.MeleeSwingSpeedMult = v end })
+    swingEls[#swingEls + 1] = K.toggle(R, { Name = "Scale Hit Delay", Flag = "SwingScaleDelay",
+        Title = "Scale Hit Delay",
+        get = function() return CONFIG.MeleeSwingScaleDelay end,
+        set = function(v) CONFIG.MeleeSwingScaleDelay = v end,
+        Desc = "shrinks the slash→impact gap along with the anim" })
+    swingVis()
+
+    -- ═══ RIGHT #2: визуал ═══════════════════════════════════════════════
+    local V = tab:Section({ Side = "Right" })
+
+    -- Настройки кольца бессмысленны при выключенном кольце — прячем их.
+    local ringEls = {}
+    local function ringVis() K.setVisible(ringEls, CONFIG.KillAuraViz ~= false) end
+    K.feature(V, {
+        Title = "Target Ring", Flag = "Viz", NoKeybind = true,
+        get = function() return CONFIG.KillAuraViz end,
+        set = function(v) CONFIG.KillAuraViz = v; ringVis() end,
+        Desc = "ring that orbits whoever ur locked on",
+    })
+    ringEls[#ringEls + 1] = K.color(V, { Name = "Color A", Flag = "VizColorA",
+        Default = CONFIG.KillAuraVizColorA,
+        Callback = function(c) CONFIG.KillAuraVizColorA = c end })
+    ringEls[#ringEls + 1] = K.color(V, { Name = "Color B", Flag = "VizColorB",
+        Default = CONFIG.KillAuraVizColorB,
+        Callback = function(c) CONFIG.KillAuraVizColorB = c end })
+    ringEls[#ringEls + 1] = K.slider(V, { Name = "Radius", Flag = "VizRadius",
+        Default = CONFIG.KillAuraVizRadius, Min = 0.5, Max = 5, Precision = 1,
+        Callback = function(v) CONFIG.KillAuraVizRadius = v end })
+    ringEls[#ringEls + 1] = K.slider(V, { Name = "Segments", Flag = "VizSeg",
+        Default = CONFIG.KillAuraVizSegments, Min = 8, Max = 48,
+        Callback = function(v) CONFIG.KillAuraVizSegments = v end,
+        Desc = "more = smoother ring, costs a bit of fps" })
+    ringEls[#ringEls + 1] = K.toggle(V, { Name = "Spin", Flag = "VizSpin", Title = "Ring Spin",
+        get = function() return CONFIG.KillAuraVizSpin end,
+        set = function(v) CONFIG.KillAuraVizSpin = v end })
+    ringEls[#ringEls + 1] = K.slider(V, { Name = "Spin Speed", Flag = "VizSpinSpeed",
+        Default = CONFIG.KillAuraVizSpinSpeed, Min = 0, Max = 6, Precision = 1,
+        Callback = function(v) CONFIG.KillAuraVizSpinSpeed = v end })
+    ringVis()
+
+    K.group(V, "Lock-on HUD")
+    local hudEls = {}
+    local function hudVis() K.setVisible(hudEls, CONFIG.KillAuraPacketViz ~= false) end
+    K.toggle(V, { Name = "Enabled", Flag = "PacketViz", Title = "Lock-on HUD",
+        get = function() return CONFIG.KillAuraPacketViz end,
+        set = function(v) CONFIG.KillAuraPacketViz = v; hudVis() end,
+        Desc = "brackets on ur target, only in PacketAuto" })
+    hudEls[#hudEls + 1] = K.color(V, { Name = "HUD Color", Flag = "PVizColor",
+        Default = CONFIG.KillAuraPacketVizColor,
+        Callback = function(c) CONFIG.KillAuraPacketVizColor = c end })
+    hudEls[#hudEls + 1] = K.color(V, { Name = "Hit Flash", Flag = "PVizFlash",
+        Default = CONFIG.KillAuraPacketVizFlash,
+        Callback = function(c) CONFIG.KillAuraPacketVizFlash = c end })
+    hudEls[#hudEls + 1] = K.slider(V, { Name = "Thickness", Flag = "PVizThick",
+        Default = CONFIG.KillAuraPacketVizThick, Min = 1, Max = 5, Precision = 1,
+        Callback = function(v) CONFIG.KillAuraPacketVizThick = v end })
+    hudEls[#hudEls + 1] = K.toggle(V, { Name = "Shockwave on Hit", Flag = "PVizShock",
+        Title = "Shockwave",
+        get = function() return CONFIG.KillAuraPacketVizShock end,
+        set = function(v) CONFIG.KillAuraPacketVizShock = v end })
+    hudVis()
+
+    -- ═══ DEBUG ══════════════════════════════════════════════════════════
+    if dtab then
+        local D = dtab:Section({ Side = "Left" })
+        D:Header({ Name = "Kill Aura" })
+        K.slider(D, { Name = "Tick Interval", Flag = "DbgTick",
+            Default = math.floor((CONFIG.KillAuraTickInterval or 0.2) * 1000),
+            Min = 50, Max = 1000, Suffix = " ms",
+            Callback = function(v) CONFIG.KillAuraTickInterval = v / 1000 end,
+            Desc = "how often we look for a target" })
+        K.slider(D, { Name = "Pick Interval", Flag = "DbgPick",
+            Default = math.floor((CONFIG.KillAuraPickInterval or 0.25) * 1000),
+            Min = 50, Max = 1000, Suffix = " ms",
+            Callback = function(v) CONFIG.KillAuraPickInterval = v / 1000 end })
+        K.slider(D, { Name = "Context Cache", Flag = "DbgCtx",
+            Default = math.floor((CONFIG.KillAuraCtxCacheSec or 1.5) * 1000),
+            Min = 500, Max = 5000, Suffix = " ms",
+            Callback = function(v) CONFIG.KillAuraCtxCacheSec = v / 1000 end })
+
+        K.group(D, "Diagnostics")
+        K.button(D, { Name = "Dump State", Flag = "DbgDump", Title = "Kill Aura",
+            Callback = function()
+                task.spawn(function() dumpDebug(false) end)
+                return "dumped to console"
+            end })
+        K.button(D, { Name = "Dump + Test Swing", Flag = "DbgDumpSwing", Title = "Kill Aura",
+            Callback = function()
+                task.spawn(function() dumpDebug(true) end)
+                return "dumped to console"
             end })
     end
-    L:Dropdown({ Name = "Mode", Options = { "Hook", "PacketAuto", "LegitAuto" },
-        Default = CONFIG.KillAuraMode or "Hook",
-        Callback = function(v) CONFIG.KillAuraMode = v end }, flag("Mode"))
-    L:SubLabel({ Text = "Hook = redirect your own swings; PacketAuto/LegitAuto = auto swing." })
-    L:Slider({ Name = "Distance", Default = CONFIG.KillAuraDistance, Minimum = 5, Maximum = 60,
-        Precision = 0, Suffix = " studs", Callback = function(v) CONFIG.KillAuraDistance = v end }, flag("Distance"))
-    L:Slider({ Name = "FOV", Default = CONFIG.KillAuraFOV, Minimum = 30, Maximum = 360,
-        Precision = 0, Suffix = "°", Callback = function(v) CONFIG.KillAuraFOV = v end }, flag("FOV"))
-    L:Slider({ Name = "Prediction", Default = CONFIG.KillAuraPredictMs, Minimum = 0, Maximum = 600,
-        Precision = 0, Suffix = " ms", Callback = function(v) CONFIG.KillAuraPredictMs = v end }, flag("PredictMs"))
-    L:Slider({ Name = "Swing Cooldown", Default = CONFIG.KillAuraSwingCd, Minimum = 0.1, Maximum = 1.5,
-        Precision = 2, Suffix = " s", Callback = function(v) CONFIG.KillAuraSwingCd = v end }, flag("SwingCd"))
-    L:Slider({ Name = "Reach", Default = CONFIG.KillAuraReach, Minimum = 5, Maximum = 999,
-        Precision = 0, Suffix = " studs", Callback = function(v) CONFIG.KillAuraReach = v end }, flag("Reach"))
-    L:Slider({ Name = "Switch Margin", Default = CONFIG.KillAuraSwitchMargin, Minimum = 0, Maximum = 10,
-        Precision = 1, Suffix = " studs", Callback = function(v) CONFIG.KillAuraSwitchMargin = v end }, flag("SwitchMargin"))
-    L:Dropdown({ Name = "Force Bone", Options = { "Auto", "Head", "UpperTorso", "LowerTorso" },
-        Default = CONFIG.KillAuraForceBone or "Head",
-        Callback = function(v) CONFIG.KillAuraForceBone = (v == "Auto") and nil or v end }, flag("ForceBone"))
-    L:Toggle({ Name = "No Wall Check", Default = CONFIG.KillAuraNoWallCheck,
-        Callback = function(v) CONFIG.KillAuraNoWallCheck = v end }, flag("NoWall"))
-    L:Button({ Name = "Swing Once", Callback = function() pcall(_M.swingOnce) end }, flag("SwingOnce"))
 
-    -- ── Right: melee mods ──────────────────────────────────────────────────
-    local R = tab:Section({ Name = "Melee Mods", Side = "Right" })
-    R:Header({ Name = "Melee Mods (client)" })
-    R:Slider({ Name = "Anim Speed", Default = CONFIG.MeleeAnimSpeed, Minimum = 1, Maximum = 5,
-        Precision = 1, Suffix = "x", Callback = function(v) CONFIG.MeleeAnimSpeed = v end }, flag("AnimSpeed"))
-    R:Slider({ Name = "Reach Boost", Default = CONFIG.MeleeReachBoost, Minimum = 0, Maximum = 15,
-        Precision = 1, Suffix = " studs", Callback = function(v) CONFIG.MeleeReachBoost = v end }, flag("ReachBoost"))
-    R:Toggle({ Name = "Manual Swing Speed", Default = CONFIG.MeleeSwingSpeed,
-        Callback = function(v) CONFIG.MeleeSwingSpeed = v end }, flag("SwingSpeedOn"))
-    R:Slider({ Name = "Swing Speed Mult", Default = CONFIG.MeleeSwingSpeedMult, Minimum = 1, Maximum = 5,
-        Precision = 1, Suffix = "x", Callback = function(v) CONFIG.MeleeSwingSpeedMult = v end }, flag("SwingSpeedMult"))
-    R:Toggle({ Name = "Scale Slash→Impact Delay", Default = CONFIG.MeleeSwingScaleDelay,
-        Callback = function(v) CONFIG.MeleeSwingScaleDelay = v end }, flag("SwingScaleDelay"))
-    R:SubLabel({ Text = "Client-only. Server packets are unchanged." })
-
-    -- ── Right #2: visuals ──────────────────────────────────────────────────
-    local V = tab:Section({ Name = "Visuals", Side = "Right" })
-    V:Header({ Name = "Target Ring" })
-    V:Toggle({ Name = "Target Ring", Default = CONFIG.KillAuraViz,
-        Callback = function(v) CONFIG.KillAuraViz = v end }, flag("Viz"))
-    V:Colorpicker({ Name = "Ring Color A", Default = CONFIG.KillAuraVizColorA,
-        Callback = function(c) CONFIG.KillAuraVizColorA = c end }, flag("VizColorA"))
-    V:Colorpicker({ Name = "Ring Color B", Default = CONFIG.KillAuraVizColorB,
-        Callback = function(c) CONFIG.KillAuraVizColorB = c end }, flag("VizColorB"))
-    V:Slider({ Name = "Ring Radius", Default = CONFIG.KillAuraVizRadius, Minimum = 0.5, Maximum = 5,
-        Precision = 1, Callback = function(v) CONFIG.KillAuraVizRadius = v end }, flag("VizRadius"))
-    V:Slider({ Name = "Ring Segments", Default = CONFIG.KillAuraVizSegments, Minimum = 8, Maximum = 48,
-        Precision = 0, Callback = function(v) CONFIG.KillAuraVizSegments = v end }, flag("VizSeg"))
-    V:Toggle({ Name = "Ring Spin", Default = CONFIG.KillAuraVizSpin,
-        Callback = function(v) CONFIG.KillAuraVizSpin = v end }, flag("VizSpin"))
-    V:Slider({ Name = "Spin Speed", Default = CONFIG.KillAuraVizSpinSpeed, Minimum = 0, Maximum = 6,
-        Precision = 1, Callback = function(v) CONFIG.KillAuraVizSpinSpeed = v end }, flag("VizSpinSpeed"))
-    V:Divider()
-    V:Header({ Name = "Lock-on HUD" })
-    V:Toggle({ Name = "Packet Lock-on HUD", Default = CONFIG.KillAuraPacketViz,
-        Callback = function(v) CONFIG.KillAuraPacketViz = v end }, flag("PacketViz"))
-    V:Colorpicker({ Name = "HUD Color", Default = CONFIG.KillAuraPacketVizColor,
-        Callback = function(c) CONFIG.KillAuraPacketVizColor = c end }, flag("PVizColor"))
-    V:Colorpicker({ Name = "Hit Flash Color", Default = CONFIG.KillAuraPacketVizFlash,
-        Callback = function(c) CONFIG.KillAuraPacketVizFlash = c end }, flag("PVizFlash"))
-    V:Slider({ Name = "HUD Thickness", Default = CONFIG.KillAuraPacketVizThick, Minimum = 1, Maximum = 5,
-        Precision = 1, Callback = function(v) CONFIG.KillAuraPacketVizThick = v end }, flag("PVizThick"))
-    V:Toggle({ Name = "Shockwave on Hit", Default = CONFIG.KillAuraPacketVizShock,
-        Callback = function(v) CONFIG.KillAuraPacketVizShock = v end }, flag("PVizShock"))
-
-    -- ── Debug subsection ───────────────────────────────────────────────────
-    if dtab then
-        local D = dtab:Section({ Name = "Kill Aura", Side = "Left" })
-        D:Header({ Name = "Kill Aura — Timing" })
-        D:Slider({ Name = "Tick Interval", Default = CONFIG.KillAuraTickInterval, Minimum = 0.05, Maximum = 1,
-            Precision = 2, Suffix = " s", Callback = function(v) CONFIG.KillAuraTickInterval = v end }, flag("DbgTick"))
-        D:Slider({ Name = "Pick Interval", Default = CONFIG.KillAuraPickInterval, Minimum = 0.05, Maximum = 1,
-            Precision = 2, Suffix = " s", Callback = function(v) CONFIG.KillAuraPickInterval = v end }, flag("DbgPick"))
-        D:Slider({ Name = "Context Cache", Default = CONFIG.KillAuraCtxCacheSec, Minimum = 0.5, Maximum = 5,
-            Precision = 1, Suffix = " s", Callback = function(v) CONFIG.KillAuraCtxCacheSec = v end }, flag("DbgCtx"))
-        D:Divider()
-        D:Header({ Name = "Kill Aura — Diagnostics" })
-        D:SubLabel({ Text = "Prints target/context state to the console." })
-        D:Button({ Name = "Dump State (console)", Callback = function() task.spawn(function() dumpDebug(false) end) end }, flag("DbgDump"))
-        D:Button({ Name = "Dump + Test Swing", Callback = function() task.spawn(function() dumpDebug(true) end) end }, flag("DbgDumpSwing"))
-    end
+    K.ready()   -- со следующего кадра уведомления разрешены
 end
 
 _M.Bridge            = Bridge
