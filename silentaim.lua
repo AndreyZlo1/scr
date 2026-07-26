@@ -713,7 +713,7 @@ local function ensureFovCircle()
 	local c = Drawing.new("Circle")
 	c.NumSides    = 64
 	c.Thickness   = CONFIG.FovCircleThickness or 1
-	c.Filled      = false
+	c.Filled      = CONFIG.FovCircleFilled == true
 	c.Color       = CONFIG.FovCircleColor or Color3.fromRGB(255, 255, 255)
 	c.Transparency = CONFIG.FovCircleTransparency or 0.5
 	c.Visible     = false
@@ -4341,8 +4341,16 @@ local function startAimThread()
 						fc.Position    = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
 						fc.Radius      = math.max(radiusPx, 1)
 						fc.Color       = CONFIG.FovCircleColor or Color3.fromRGB(255, 255, 255)
-						fc.Transparency = CONFIG.FovCircleTransparency or 0.5
-						fc.Visible     = true
+						-- FIX: Thickness и Filled выставлялись ТОЛЬКО при создании
+						-- круга (ensureFovCircle) и потом не обновлялись — ползунок
+						-- толщины и тумблер Filled в UI не делали ничего.
+						fc.Thickness   = CONFIG.FovCircleThickness or 1
+						fc.Filled      = CONFIG.FovCircleFilled == true
+						-- FIX: у Potassium Transparency ИНВЕРТИРОВАН (1 = видимо).
+						-- Тут писалось сырое значение конфига, поэтому ползунок
+						-- «Transparency» работал наоборот: 0% давал невидимый круг,
+						-- 100% — полностью непрозрачный. Идём через showDrawing.
+						Bridge.showDrawing(fc, 1 - (CONFIG.FovCircleTransparency or 0.5))
 					else
 						fc.Visible = false
 					end
