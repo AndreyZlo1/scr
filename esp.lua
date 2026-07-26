@@ -1468,7 +1468,13 @@ function Bridge.cleanupEspCache()
 	-- FIX v12: собираем к удалению акторов которых нет в State.actors
 	local toRemove = {}
 	for uid in pairs(State.drawings) do
-		if not actors or not actors[uid] then
+		-- FIX: кластеров зомби НЕТ в State.actors по определению — раньше их
+		-- записи сносило каждые 5 секунд и пересоздавало на следующем кадре
+		-- (36 Drawing.new за раз). Кластерные ключи пропускаем, их жизненный
+		-- цикл ведёт сам построитель кластеров.
+		local isCluster = type(uid) == "string"
+			and (uid:sub(1, 3) == "zc:" or uid:sub(1, 9) == "zcluster_")
+		if not isCluster and (not actors or not actors[uid]) then
 			toRemove[#toRemove + 1] = uid
 		end
 	end
@@ -1613,10 +1619,18 @@ function Bridge.buildZombieCluster(ranked, cam, now)
 			local center = Vector3.new(cx/n, cy/n + 1.5, cz/n)  -- чуть выше головы
 			local sp, on = cam:WorldToViewportPoint(center)
 			if on and sp.Z > 0.01 then
+				-- FIX: uid был "zcluster_"..i, где i — индекс в массиве,
+				-- отсортированном по дистанции. Массив пересортировывался
+				-- каждые ~1.5с, поэтому ОДИН И ТОТ ЖЕ кластер получал НОВЫЙ uid,
+				-- под него аллоцировалась новая пачка Drawing, а старая
+				-- висела сиротой. Ключ по квантованной позиции стабилен.
+				-- center уже усреднён (cx/cz — это СУММЫ, не центр!)
+				local cw = "zc:" .. math.floor(center.X / 16)
+					.. "_" .. math.floor(center.Z / 16)
 				clusters[#clusters + 1] = {
 					sp    = sp,
 					count = n,
-					uid   = "zcluster_" .. i,
+					uid   = cw,
 				}
 			end
 		end
@@ -2142,21 +2156,24 @@ local _M = {
 				tGc = t
 				Bridge.cleanupEspCache()
 			end
-			-- FIX: full rescan timer — triggers Bridge.clearAllEspDrawings + full actor
-			-- re-discover so stale Drawing objects don't freeze the screen.
-			if t - tFull >= (CONFIG.EspFullRescanInterval or 30) then
+			-- FIX (ESP «зависал» на пару секунд): раньше здесь по таймеру
+			-- вызывался clearESP() — он сносил ВСЕ Drawing-объекты сразу.
+			-- Экран на кадр пустел, а потом заново создавались десятки
+			-- Drawing в одном кадре → видимый ступор, и всё это ради сборки
+			-- мусора, которую и так делает cleanupEspCache каждые 5 сек.
+			-- Теперь полный рескан только инвалидирует КЭШИ, не трогая
+			-- отрисовку: мёртвые записи уберёт cleanupEspCache, живые
+			-- просто перерисуются на следующем кадре — без моргания.
+			if t - tFull >= (CONFIG.EspFullRescanInterval or 60) then
 				tFull = t
-				if type(Bridge.clearESP) == "function" then
-					task.defer(function() Bridge.clearESP() end)
-				else
-					Bridge.clearAllEspDrawings()
-				end
 				State.espRanked = nil
 				State.espLastActorCount = -1
 				Bridge.invalidateReplicatorCache()
+				Bridge.cleanupEspCache()
 			end
-			-- FIX: periodically refresh squad assignments so teammates are never treated as enemies long-term
-			if t - tSquad >= 2 then
+			-- Состав команд: держим синхронно с library (там же дефолт 3с),
+			-- чтобы после нового матча союзники не висели красными.
+			if t - tSquad >= (CONFIG.SquadRefreshInterval or 3) then
 				tSquad = t
 				if type(Bridge.refreshActorSquads) == "function" then
 					pcall(Bridge.refreshActorSquads)
@@ -2166,11 +2183,14 @@ local _M = {
 	end,
 	stop = function()
 		if espConn then espConn:Disconnect(); espConn = nil end
-		Bridge.clearESP()
+		-- FIX: clearESP сносит все Drawing СИНХРОННО — на 3-4к объектов это
+		-- заметный фриз при выключении. clearAllEspDrawings сразу подменяет
+		-- таблицу (кадр уже чистый), а уничтожает в task.defer.
+		Bridge.clearAllEspDrawings()
 	end,
 	toggle = function()
 		if espConn then
-			espConn:Disconnect(); espConn = nil; Bridge.clearESP()
+			espConn:Disconnect(); espConn = nil; Bridge.clearAllEspDrawings()
 		else _M.start() end
 	end,
 	isRunning = function() return espConn ~= nil end,
@@ -2338,10 +2358,14 @@ function _M.buildUI(ui)
 			Min = 8, Max = 200, Suffix = " ms",
 			Callback = function(v) CONFIG.EspRenderInterval = v / 1000 end,
 			Desc = "higher = less cpu, choppier boxes" })
-		K.slider(D, { Name = "Rescan Interval", Flag = "DbgRescan",
-			Default = math.floor((CONFIG.EspRescanInterval or 4) * 1000),
-			Min = 1000, Max = 20000, Suffix = " ms",
-			Callback = function(v) CONFIG.EspRescanInterval = v / 1000 end })
+		-- Слайдер "Rescan Interval" удалён: CONFIG.EspRescanInterval не читает
+		-- ни один цикл, ручка ничего не делала. Вместо неё — реально
+		-- работающий интервал пересчёта состава команд.
+		K.slider(D, { Name = "Squad Refresh", Flag = "DbgSquad",
+			Default = math.floor((CONFIG.SquadRefreshInterval or 3) * 1000),
+			Min = 500, Max = 15000, Suffix = " ms",
+			Callback = function(v) CONFIG.SquadRefreshInterval = v / 1000 end,
+			Desc = "how fast we re-check whos on ur team\nlower = teammates stop showing red sooner" })
 		K.slider(D, { Name = "Full Rescan", Flag = "DbgFullRescan",
 			Default = CONFIG.EspFullRescanInterval or 30,
 			Min = 5, Max = 120, Suffix = " s",
