@@ -1418,67 +1418,47 @@ function Bridge.drawEspSkeleton(entry, cam, model, color, vpCache)
 	end
 end
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- Единственная точка удаления ESP-entry.
+--
+-- Раньше было ДВЕ независимые реализации (clearESP и destroyEspEntry), и они
+-- разъехались: clearESP не удалял extraTexts (3 Drawing.Text на актора,
+-- аллоцируются лениво в ensureEspExtraTexts). А clearESP вызывается по
+-- таймеру каждые EspFullRescanInterval секунд и следом делает
+-- table.clear(State.drawings) — ссылки терялись, объекты навсегда оставались
+-- висеть на экране. Это и был баг «элементы ESP не пропадают».
+--
+-- Теперь список полей ОДИН. Добавляешь новый Drawing в entry — дописываешь
+-- сюда, и он гарантированно чистится на всех путях.
+-- ─────────────────────────────────────────────────────────────────────────
+local ESP_ENTRY_SINGLE = {
+	"skelShoulderLine", "skelHeadCircle", "circle", "text",
+	"statusText", "weaponText", "weaponBg", "statusBg",
+	"hpBg", "hpFill", "hpOutline",
+}
+local ESP_ENTRY_LISTS = {
+	"boxLines", "skelLines", "statusChips", "extraTexts",
+}
+
+function Bridge.destroyEspEntry(entry)
+	if not entry then return end
+	for _, key in ipairs(ESP_ENTRY_SINGLE) do
+		Bridge.destroyDrawing(entry[key])
+		entry[key] = nil
+	end
+	for _, key in ipairs(ESP_ENTRY_LISTS) do
+		Bridge.destroyDrawingList(entry[key])
+		entry[key] = nil
+	end
+end
+
 function Bridge.clearESP()
 	for _, entry in pairs(State.drawings) do
-		if entry.boxLines then
-			for _, line in ipairs(entry.boxLines) do
-				pcall(function() line:Remove() end)
-			end
-		end
-		if entry.skelLines then
-			for _, line in ipairs(entry.skelLines) do
-				pcall(function() line:Remove() end)
-			end
-		end
-		if entry.skelHeadCircle then pcall(function() entry.skelHeadCircle:Remove() end) end
-		if entry.skelShoulderLine then pcall(function() entry.skelShoulderLine:Remove() end) end
-		if entry.circle then pcall(function() entry.circle:Remove() end) end
-		if entry.text then pcall(function() entry.text:Remove() end) end
-		if entry.weaponText then pcall(function() entry.weaponText:Remove() end) end
-		if entry.weaponBg then pcall(function() entry.weaponBg:Remove() end) end
-		if entry.statusText then pcall(function() entry.statusText:Remove() end) end
-		if entry.statusBg then pcall(function() entry.statusBg:Remove() end) end
-		if entry.statusChips then
-			for _, chip in ipairs(entry.statusChips) do
-				pcall(function() chip:Remove() end)
-			end
-		end
-		if entry.hpBg then pcall(function() entry.hpBg:Remove() end) end
-		if entry.hpFill then pcall(function() entry.hpFill:Remove() end) end
-		if entry.hpOutline then pcall(function() entry.hpOutline:Remove() end) end
+		Bridge.destroyEspEntry(entry)
 	end
 	table.clear(State.drawings)
 	for uid in pairs(State.espHighlights) do
 		Bridge.removeEspChams(uid)
-	end
-end
-
-function Bridge.destroyEspEntry(entry)
-	if not entry then return end
-	local function rm(obj)
-		if obj then pcall(function() obj:Remove() end) end
-	end
-	if entry.boxLines then
-		for _, line in ipairs(entry.boxLines) do rm(line) end
-	end
-	if entry.skelLines then
-		for _, line in ipairs(entry.skelLines) do rm(line) end
-	end
-	rm(entry.skelShoulderLine)
-	rm(entry.skelHeadCircle)
-	rm(entry.text)
-	rm(entry.statusText)
-	rm(entry.weaponText)
-	rm(entry.weaponBg)
-	rm(entry.statusBg)
-	rm(entry.hpBg)
-	rm(entry.hpFill)
-	rm(entry.hpOutline)
-	if entry.statusChips then
-		for _, chip in ipairs(entry.statusChips) do rm(chip) end
-	end
-	if entry.extraTexts then
-		for _, t in ipairs(entry.extraTexts) do rm(t) end
 	end
 end
 
@@ -2205,70 +2185,98 @@ function _M.buildUI(ui)
 	local tab = ui.tabs and ui.tabs.Visuals
 	if not tab then return end
 
-	-- ── Left: ESP core + elements ──────────────────────────────────────────
-	local L = tab:Section({ Name = "ESP", Side = "Left" })
-	L:Header({ Name = "ESP" })
-	L:Toggle({ Name = "Enabled", Default = CONFIG.ESP,
-		Callback = function(v) CONFIG.ESP = v end }, flag("ESP"))
-	-- Empty keybind (toggle ESP on/off). Works on PC and mobile (FAB).
-	if ui.keybind then
-		ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("ESP_KB"),
-			Toggle = function()
-				CONFIG.ESP = not CONFIG.ESP
-				local ML = ui.MacLib
-				if ML and ML.Options and ML.Options[flag("ESP")] then
-					pcall(function() ML.Options[flag("ESP")]:UpdateState(CONFIG.ESP) end)
-				end
-			end })
+	local K = Bridge.makeUiKit(ui)
+
+	-- ═══ LEFT: сама фича и что она рисует ══════════════════════════════
+	local L = tab:Section({ Side = "Left" })
+
+	K.feature(L, {
+		Title = "ESP", Flag = "ESP",
+		get = function() return CONFIG.ESP end,
+		set = function(v) CONFIG.ESP = v end,
+		Desc = "boxes n info over players n npcs\nbind works on PC + mobile",
+	})
+
+	K.group(L, "Elements")
+	-- Стиль и длина уголков нужны только когда боксы включены.
+	local boxEls = {}
+	local function boxVis() K.setVisible(boxEls, CONFIG.EspBox ~= false) end
+	K.toggle(L, { Name = "Boxes", Flag = "Box", Title = "Boxes",
+		get = function() return CONFIG.EspBox end,
+		set = function(v) CONFIG.EspBox = v end,
+		after = boxVis })
+	local cornerEl
+	boxEls[#boxEls + 1] = K.dropdown(L, {
+		Name = "Box Style", Flag = "BoxMode",
+		Options = { "Box", "Corner" }, Default = CONFIG.EspBoxMode or "Box",
+		Callback = function(v) CONFIG.EspBoxMode = v end,
+		after = function(v)
+			-- Длина уголка бессмысленна для сплошного бокса
+			if cornerEl then pcall(function() cornerEl:SetVisibility(v == "Corner") end) end
+		end,
+	})
+	cornerEl = K.slider(L, { Name = "Corner Length", Flag = "CornerLen",
+		Default = math.floor((CONFIG.EspCornerLen or 0.22) * 100),
+		Min = 5, Max = 50, Suffix = "%",
+		Callback = function(v) CONFIG.EspCornerLen = v / 100 end })
+	boxEls[#boxEls + 1] = cornerEl
+	K.toggle(L, { Name = "Skeleton", Flag = "Skeleton", Title = "Skeleton",
+		get = function() return CONFIG.EspSkeleton end,
+		set = function(v) CONFIG.EspSkeleton = v end })
+	K.toggle(L, { Name = "Chams", Flag = "Chams", Title = "Chams",
+		get = function() return CONFIG.EspChams end,
+		set = function(v) CONFIG.EspChams = v end,
+		Desc = "fills bodies so u see them thru walls" })
+	K.toggle(L, { Name = "HP Bar", Flag = "HpBar", Title = "HP Bar",
+		get = function() return CONFIG.EspHpBar end,
+		set = function(v) CONFIG.EspHpBar = v end })
+	boxVis()
+	if CONFIG.EspBoxMode ~= "Corner" and cornerEl then
+		pcall(function() cornerEl:SetVisibility(false) end)
 	end
-	L:SubLabel({ Text = "Draws boxes, skeletons and info over players and NPCs." })
-	L:Divider()
 
-	L:Header({ Name = "Elements" })
-	L:Toggle({ Name = "Boxes", Default = CONFIG.EspBox,
-		Callback = function(v) CONFIG.EspBox = v end }, flag("Box"))
-	L:Dropdown({ Name = "Box Style", Options = { "Box", "Corner" }, Default = CONFIG.EspBoxMode or "Box",
-		Callback = function(v) CONFIG.EspBoxMode = v end }, flag("BoxMode"))
-	L:Slider({ Name = "Corner Length", Default = math.floor((CONFIG.EspCornerLen or 0.22) * 100),
-		Minimum = 5, Maximum = 50, Precision = 0, Suffix = "%",
-		Callback = function(v) CONFIG.EspCornerLen = v / 100 end }, flag("CornerLen"))
-	L:Toggle({ Name = "Skeleton", Default = CONFIG.EspSkeleton,
-		Callback = function(v) CONFIG.EspSkeleton = v end }, flag("Skeleton"))
-	L:Toggle({ Name = "Chams (highlight)", Default = CONFIG.EspChams,
-		Callback = function(v) CONFIG.EspChams = v end }, flag("Chams"))
-	L:Toggle({ Name = "HP Bar", Default = CONFIG.EspHpBar,
-		Callback = function(v) CONFIG.EspHpBar = v end }, flag("HpBar"))
-	L:Divider()
+	K.group(L, "Text")
+	K.toggle(L, { Name = "Distance", Flag = "Distance", Title = "Distance",
+		get = function() return CONFIG.EspShowDistance end,
+		set = function(v) CONFIG.EspShowDistance = v end })
+	K.toggle(L, { Name = "Weapon Info", Flag = "WeaponInfo", Title = "Weapon Info",
+		get = function() return CONFIG.EspWeaponInfo end,
+		set = function(v) CONFIG.EspWeaponInfo = v end,
+		Desc = "what theyre holding + ammo" })
+	K.toggle(L, { Name = "Secondary Weapon", Flag = "Secondary", Title = "Secondary Weapon",
+		get = function() return CONFIG.EspShowSecondary end,
+		set = function(v) CONFIG.EspShowSecondary = v end })
+	K.toggle(L, { Name = "Inventory", Flag = "Inventory", Title = "Inventory",
+		get = function() return CONFIG.EspShowInventory end,
+		set = function(v) CONFIG.EspShowInventory = v end })
+	K.toggle(L, { Name = "Actor Status", Flag = "Status", Title = "Actor Status",
+		get = function() return CONFIG.EspActorStatus end,
+		set = function(v) CONFIG.EspActorStatus = v end,
+		Desc = "downed, reloading, in a vehicle n so on" })
+	K.toggle(L, { Name = "Stance", Flag = "Stance", Title = "Stance",
+		get = function() return CONFIG.EspShowStance end,
+		set = function(v) CONFIG.EspShowStance = v end })
 
-	L:Header({ Name = "Text" })
-	L:Toggle({ Name = "Distance", Default = CONFIG.EspShowDistance,
-		Callback = function(v) CONFIG.EspShowDistance = v end }, flag("Distance"))
-	L:Toggle({ Name = "Weapon Info", Default = CONFIG.EspWeaponInfo,
-		Callback = function(v) CONFIG.EspWeaponInfo = v end }, flag("WeaponInfo"))
-	L:Toggle({ Name = "Secondary Weapon", Default = CONFIG.EspShowSecondary,
-		Callback = function(v) CONFIG.EspShowSecondary = v end }, flag("Secondary"))
-	L:Toggle({ Name = "Inventory", Default = CONFIG.EspShowInventory,
-		Callback = function(v) CONFIG.EspShowInventory = v end }, flag("Inventory"))
-	L:Toggle({ Name = "Actor Status", Default = CONFIG.EspActorStatus,
-		Callback = function(v) CONFIG.EspActorStatus = v end }, flag("Status"))
-	L:Toggle({ Name = "Stance", Default = CONFIG.EspShowStance,
-		Callback = function(v) CONFIG.EspShowStance = v end }, flag("Stance"))
-	L:Divider()
-	L:Header({ Name = "Smoothing" })
-	L:Toggle({ Name = "Smooth Boxes", Default = CONFIG.EspSmooth,
-		Callback = function(v) CONFIG.EspSmooth = v end }, flag("Smooth"))
-	L:Slider({ Name = "Smooth Amount", Default = math.floor((1 - (CONFIG.EspSmoothAlpha or 1)) * 100),
-		Minimum = 0, Maximum = 90, Precision = 0, Suffix = "%",
-		Callback = function(v) CONFIG.EspSmoothAlpha = 1 - (v / 100) end }, flag("SmoothA"))
-	L:SubLabel({ Text = "Higher = smoother but laggier box movement." })
+	K.group(L, "Smoothing")
+	local smoothEls = {}
+	local function smoothVis() K.setVisible(smoothEls, CONFIG.EspSmooth ~= false) end
+	K.toggle(L, { Name = "Smooth Boxes", Flag = "Smooth", Title = "Smooth Boxes",
+		get = function() return CONFIG.EspSmooth end,
+		set = function(v) CONFIG.EspSmooth = v end,
+		after = smoothVis })
+	smoothEls[#smoothEls + 1] = K.slider(L, { Name = "Smooth Amount", Flag = "SmoothA",
+		Default = math.floor((1 - (CONFIG.EspSmoothAlpha or 1)) * 100),
+		Min = 0, Max = 90, Suffix = "%",
+		Callback = function(v) CONFIG.EspSmoothAlpha = 1 - (v / 100) end,
+		Desc = "higher = smoother but boxes lag behind" })
+	smoothVis()
 
-	-- ── Right: colors + filters ────────────────────────────────────────────
-	local C = tab:Section({ Name = "ESP Colors", Side = "Right" })
+	-- ═══ RIGHT: цвета ══════════════════════════════════════════════════
+	local C = tab:Section({ Side = "Right" })
 	C:Header({ Name = "Colors" })
-	C:SubLabel({ Text = "Box / skeleton / text colors per target type." })
 	local function colorPick(name, key)
-		C:Colorpicker({ Name = name, Default = ESP_COLORS[key],
-			Callback = function(c) ESP_COLORS[key] = c end }, flag("Col_" .. key))
+		K.color(C, { Name = name, Flag = "Col_" .. key, Default = ESP_COLORS[key],
+			Callback = function(c) ESP_COLORS[key] = c end })
 	end
 	colorPick("Visible",   "visible")
 	colorPick("Hidden",    "hidden")
@@ -2280,49 +2288,70 @@ function _M.buildUI(ui)
 	colorPick("Teammate",  "teammate")
 	colorPick("Dead",      "dead")
 
-	local R = tab:Section({ Name = "ESP Filters", Side = "Right" })
+	-- ═══ RIGHT #2: кого показывать ═════════════════════════════════════
+	local R = tab:Section({ Side = "Right" })
 	R:Header({ Name = "Filters" })
-	R:Toggle({ Name = "Players", Default = CONFIG.EspShowPlayers,
-		Callback = function(v) CONFIG.EspShowPlayers = v end }, flag("ShowPlayers"))
-	R:Toggle({ Name = "Hostile NPCs", Default = CONFIG.EspShowHostile,
-		Callback = function(v) CONFIG.EspShowHostile = v end }, flag("ShowHostile"))
-	R:Toggle({ Name = "Friendly NPCs", Default = CONFIG.EspShowFriendly,
-		Callback = function(v) CONFIG.EspShowFriendly = v end }, flag("ShowFriendly"))
-	R:Toggle({ Name = "Zombies", Default = CONFIG.EspShowZombie,
-		Callback = function(v) CONFIG.EspShowZombie = v end }, flag("ShowZombie"))
-	R:Toggle({ Name = "Generic NPCs", Default = CONFIG.EspShowNpc,
-		Callback = function(v) CONFIG.EspShowNpc = v end }, flag("ShowNpc"))
-	R:Toggle({ Name = "Dead Players", Default = CONFIG.EspShowDead,
-		Callback = function(v) CONFIG.EspShowDead = v end }, flag("ShowDead"))
-	R:Toggle({ Name = "Players in PVE zones", Default = CONFIG.EspShowPlayersInPve,
-		Callback = function(v) CONFIG.EspShowPlayersInPve = v end }, flag("ShowPvePlayers"))
-	R:Divider()
-	R:Header({ Name = "Visibility Check" })
-	R:Toggle({ Name = "Visible Check", Default = CONFIG.EspVisibleCheck,
-		Callback = function(v) CONFIG.EspVisibleCheck = v end }, flag("VisibleCheck"))
-	R:Toggle({ Name = "Strict LOS", Default = CONFIG.EspVisibleStrict,
-		Callback = function(v) CONFIG.EspVisibleStrict = v end }, flag("VisibleStrict"))
-	R:SubLabel({ Text = "Colors targets by line of sight (visible vs hidden)." })
+	K.toggle(R, { Name = "Players", Flag = "ShowPlayers", Title = "Players",
+		get = function() return CONFIG.EspShowPlayers end,
+		set = function(v) CONFIG.EspShowPlayers = v end })
+	K.toggle(R, { Name = "Hostile NPCs", Flag = "ShowHostile", Title = "Hostile NPCs",
+		get = function() return CONFIG.EspShowHostile end,
+		set = function(v) CONFIG.EspShowHostile = v end })
+	K.toggle(R, { Name = "Friendly NPCs", Flag = "ShowFriendly", Title = "Friendly NPCs",
+		get = function() return CONFIG.EspShowFriendly end,
+		set = function(v) CONFIG.EspShowFriendly = v end })
+	K.toggle(R, { Name = "Zombies", Flag = "ShowZombie", Title = "Zombies",
+		get = function() return CONFIG.EspShowZombie end,
+		set = function(v) CONFIG.EspShowZombie = v end })
+	K.toggle(R, { Name = "Generic NPCs", Flag = "ShowNpc", Title = "Generic NPCs",
+		get = function() return CONFIG.EspShowNpc end,
+		set = function(v) CONFIG.EspShowNpc = v end })
+	K.toggle(R, { Name = "Dead Players", Flag = "ShowDead", Title = "Dead Players",
+		get = function() return CONFIG.EspShowDead end,
+		set = function(v) CONFIG.EspShowDead = v end })
+	K.toggle(R, { Name = "Players in PVE", Flag = "ShowPvePlayers", Title = "PVE Players",
+		get = function() return CONFIG.EspShowPlayersInPve end,
+		set = function(v) CONFIG.EspShowPlayersInPve = v end })
 
-	-- ── Debug tab subsection: intervals + live stats ───────────────────────
+	K.group(R, "Visibility")
+	local losEls = {}
+	local function losVis() K.setVisible(losEls, CONFIG.EspVisibleCheck ~= false) end
+	K.toggle(R, { Name = "Visible Check", Flag = "VisibleCheck", Title = "Visible Check",
+		get = function() return CONFIG.EspVisibleCheck end,
+		set = function(v) CONFIG.EspVisibleCheck = v end,
+		after = losVis,
+		Desc = "colors targets by line of sight" })
+	losEls[#losEls + 1] = K.toggle(R, { Name = "Strict LOS", Flag = "VisibleStrict",
+		Title = "Strict LOS",
+		get = function() return CONFIG.EspVisibleStrict end,
+		set = function(v) CONFIG.EspVisibleStrict = v end,
+		Desc = "checks more bones — accurate but heavier" })
+	losVis()
+
+	-- ═══ DEBUG ═════════════════════════════════════════════════════════
 	local dtab = ui.tabs and ui.tabs.Debug
 	if dtab then
-		local D = dtab:Section({ Name = "ESP", Side = "Right" })
-		D:Header({ Name = "ESP — Intervals" })
-		D:Slider({ Name = "Render Interval", Default = math.floor((CONFIG.EspRenderInterval or 0.0167) * 1000),
-			Minimum = 8, Maximum = 200, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.EspRenderInterval = v / 1000 end }, flag("DbgRender"))
-		D:Slider({ Name = "Rescan Interval", Default = CONFIG.EspRescanInterval or 4,
-			Minimum = 1, Maximum = 20, Precision = 1, Suffix = " s",
-			Callback = function(v) CONFIG.EspRescanInterval = v end }, flag("DbgRescan"))
-		D:Slider({ Name = "Full Rescan Interval", Default = CONFIG.EspFullRescanInterval or 30,
-			Minimum = 5, Maximum = 120, Precision = 0, Suffix = " s",
-			Callback = function(v) CONFIG.EspFullRescanInterval = v end }, flag("DbgFullRescan"))
-		D:Slider({ Name = "Visible Check Interval", Default = math.floor((CONFIG.EspVisibleInterval or 0.35) * 1000),
-			Minimum = 100, Maximum = 2000, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.EspVisibleInterval = v / 1000 end }, flag("DbgVisIv"))
-		D:Divider()
-		D:Header({ Name = "ESP — Diagnostics" })
+		local D = dtab:Section({ Side = "Right" })
+		D:Header({ Name = "ESP" })
+		K.slider(D, { Name = "Render Interval", Flag = "DbgRender",
+			Default = math.floor((CONFIG.EspRenderInterval or 0.0167) * 1000),
+			Min = 8, Max = 200, Suffix = " ms",
+			Callback = function(v) CONFIG.EspRenderInterval = v / 1000 end,
+			Desc = "higher = less cpu, choppier boxes" })
+		K.slider(D, { Name = "Rescan Interval", Flag = "DbgRescan",
+			Default = math.floor((CONFIG.EspRescanInterval or 4) * 1000),
+			Min = 1000, Max = 20000, Suffix = " ms",
+			Callback = function(v) CONFIG.EspRescanInterval = v / 1000 end })
+		K.slider(D, { Name = "Full Rescan", Flag = "DbgFullRescan",
+			Default = CONFIG.EspFullRescanInterval or 30,
+			Min = 5, Max = 120, Suffix = " s",
+			Callback = function(v) CONFIG.EspFullRescanInterval = v end })
+		K.slider(D, { Name = "Visible Check Interval", Flag = "DbgVisIv",
+			Default = math.floor((CONFIG.EspVisibleInterval or 0.35) * 1000),
+			Min = 100, Max = 2000, Suffix = " ms",
+			Callback = function(v) CONFIG.EspVisibleInterval = v / 1000 end })
+
+		K.group(D, "Diagnostics")
 		local stat = D:Label({ Text = "Tracked actors: -" })
 		task.spawn(function()
 			while stat and stat._frame and stat._frame.Parent do
@@ -2330,12 +2359,14 @@ function _M.buildUI(ui)
 				pcall(function() if type(State.espRanked) == "table" then n = #State.espRanked end end)
 				local drawn = 0
 				pcall(function() for _ in pairs(State.drawings or {}) do drawn += 1 end end)
-				pcall(function() stat:UpdateName(("Ranked actors: %d | Draw entries: %d | Running: %s")
+				pcall(function() stat:UpdateName(("Ranked: %d | Drawings: %d | Running: %s")
 					:format(n, drawn, tostring(espConn ~= nil))) end)
 				task.wait(0.5)
 			end
 		end)
 	end
+
+	K.ready()
 end
 
 Bridge._espModule = _M
