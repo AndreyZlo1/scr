@@ -129,6 +129,7 @@ local CONFIG = {
 	ForceHitDebug = false,  -- OPT: было true → диагностический спам на каждый выстрел
 	QuietLogs = true,
 	GcRescanCooldown = 30,      -- v18: getgc(true) скан клиентов не чаще 30s
+	GcNegCooldown = 45,         -- после НЕудачного GC-скана не повторять чаще (сек)
 	InventoryGcCooldown = 20,   -- v18: getgc(true) скан инвентаря не чаще 20s
 	LogBulletSpeed = false,
 	DumpQuickMode = true,
@@ -233,6 +234,7 @@ local CONFIG = {
 	EspRescanInterval = 4.0,     -- FIX v8: ресканирование каждые 4s
 	EspRenderInterval = 0.0167,  -- FIX v8: 60fps рендер
 	EspFullRescanInterval = 60.0,  -- FIX v10: полный скан каждые 60s (было 30s) — снижает фризы на NPC картах
+	SquadRefreshInterval = 3.0,    -- как часто пересчитывать состав команд (было захардкожено 10s)
 	EspBoxAspect = 0.42,
 	EspVisibleInterval = 0.22,
 	EspVisibleFast = true,
@@ -438,6 +440,17 @@ local function getGcCached()
 	end
 	local ok, result = pcall(getgc, true)
 	if not ok or type(result) ~= "table" then return State.gcCache or {} end
+	-- FIX (утечка памяти, компаундная): старый снапшот просто перезаписывался.
+	-- Но getgc(true) возвращает ЖИВУЮ таблицу — и следующий дамп содержит
+	-- предыдущий снапшот как элемент. Снапшот N держал N-1, тот N-2, и так
+	-- далее: всё, что когда-либо попало в дамп, оставалось достижимым НАВСЕГДА.
+	-- Память росла монотонно, паузы GC удлинялись, а каждый следующий getgc
+	-- становился толще и медленнее — отсюда «чем дольше играешь, тем хуже».
+	-- Чистим старый массив перед заменой: даже если новый дамп его содержит,
+	-- он теперь пустой и ничего не держит.
+	local old = State.gcCache
+	State.gcCache = nil
+	if type(old) == "table" then pcall(table.clear, old) end
 	State.gcCache = result
 	State.gcCacheTime = now
 	return result
@@ -994,7 +1007,19 @@ local function loadClientsModule()
 	end
 
 	if not State.clients then
-		State.clients = require(RS:WaitForChild("Packages"):WaitForChild("clients"))
+		-- FIX: WaitForChild БЕЗ таймаута. Путь достижим из Heartbeat — если игра
+		-- переедет/переименует Packages, каждый вызов навсегда паркует поток,
+		-- и они копятся кадр за кадром. Теперь ждём максимум 5 сек и помечаем
+		-- провал, чтобы не пытаться снова.
+		if State._clientsPathDead then return end
+		local pkgs = RS:FindFirstChild("Packages") or RS:WaitForChild("Packages", 5)
+		local inst = pkgs and (pkgs:FindFirstChild("clients") or pkgs:WaitForChild("clients", 5))
+		if not inst then
+			State._clientsPathDead = true
+			log("MODULE", "clients: RS.Packages.clients не найден за 5с — путь отключён")
+			return
+		end
+		State.clients = require(inst)
 		State.clientsSource = "Packages"
 		if not State.clientsLogged then
 			State.clientsLogged = true
@@ -1303,6 +1328,30 @@ function Bridge.installCharacterLifecycle(onRespawn)
 		State.localModel = nil
 		State.localActorUID = nil
 		State.localLogged = false
+		-- FIX: состав команд кэшировался и обновлялся раз в 10 сек, без сброса
+		-- на респавн. После начала нового матча скрипт ещё несколько секунд
+		-- считал новых союзников врагами. Сбрасываем кэш сразу.
+		State.lastSquadRefresh = 0
+		State.localSquad = nil
+		State.localSquadResolved = false   -- новый матч → разрешаем один пересчёт
+		State._clientSvcGcNegT = nil       -- и один повтор GC-резолва сервиса
+		-- FIX: раньше тут чистились State.actorSquad и State.teamCache —
+		-- таких таблиц в проекте НЕТ, то есть чистка была пустышкой.
+		-- Настоящие кэши команд перечислены ниже.
+		if type(State.squadByPlayer) == "table" then table.clear(State.squadByPlayer) end
+		if type(State.clientByPlayer) == "table" then table.clear(State.clientByPlayer) end
+		if type(State.clientGcNegByPlayer) == "table" then table.clear(State.clientGcNegByPlayer) end
+		State.localClient = nil            -- перерезолвим против svc.LocalClient
+		State._aimEnemyCache = nil
+		State._aimEnemyCacheT = 0
+		State._teammateIgnoreCache = nil
+		task.defer(function()
+			pcall(function()
+				if type(Bridge.refreshActorSquads) == "function" then
+					Bridge.refreshActorSquads()
+				end
+			end)
+		end)
 		task.defer(function()
 			resolveLocalPlayer()
 		end)
@@ -2689,25 +2738,36 @@ local function scanActors()
 	local perfT = Bridge.perfBegin()
 	State.scanBusy = true
 	State.actorScanNoGc = true
-	loadClientsModule()
-	local now_s = os.clock()
-	if now_s - (State.lastUidMapRebuild or 0) > 5 then
-		State.lastUidMapRebuild = now_s
-		rebuildUidMap(false)
-	end
-	resolveLocalPlayer()
-	resolveLocalClient(false)
-	Bridge.refreshLocalTeamKey()
+	-- FIX: тело не было защищено pcall. Любое исключение между установкой
+	-- флагов и их сбросом навсегда оставляло scanBusy/actorScanNoGc в true —
+	-- после этого сканы не выполнялись ВООБЩЕ, а GC-обнаружение сервисов было
+	-- отключено до перезахода. То есть один разовый сбой превращался в
+	-- перманентно сломанное определение своих/чужих.
 	local found = {}
-	-- FIX v20: полн��й O(N) проход по Replicator.Actors убран — NPC подтягиваются батчами.
-	syncReplicatorActorsTable()
-	considerReplicatorPlayersOnly(found)
-	for _, model in ipairs(gatherPlayerMaleModels()) do
-		considerModel(model, found)
-	end
-	finalizeActorScan(found)
+	local ok, err = pcall(function()
+		loadClientsModule()
+		local now_s = os.clock()
+		if now_s - (State.lastUidMapRebuild or 0) > 5 then
+			State.lastUidMapRebuild = now_s
+			rebuildUidMap(false)
+		end
+		resolveLocalPlayer()
+		resolveLocalClient(false)
+		Bridge.refreshLocalTeamKey()
+		-- FIX v20: полный O(N) проход по Replicator.Actors убран — NPC батчами.
+		syncReplicatorActorsTable()
+		considerReplicatorPlayersOnly(found)
+		for _, model in ipairs(gatherPlayerMaleModels()) do
+			considerModel(model, found)
+		end
+		finalizeActorScan(found)
+	end)
+	-- Флаги снимаем ВСЕГДА, даже если тело упало
 	State.actorScanNoGc = false
 	State.scanBusy = false
+	if not ok then
+		log("SCAN", "scanActors error:", tostring(err))
+	end
 	Bridge.perfEnd("scanActors", perfT, "found=" .. tostring(countTableKeys(found)))
 end
 
@@ -2999,7 +3059,9 @@ local function refreshActorsForEsp()
 			tickRepSyncBatch(CONFIG.ActorSyncBatchSize or 12)
 		end
 	end
-	if now - (State.lastSquadRefresh or 0) >= 10.0 then
+	-- FIX: было жёстко 10 сек — слишком редко, союзники после смены состава
+	-- долго висели как враги. Теперь 3 сек и настраивается из Debug.
+	if now - (State.lastSquadRefresh or 0) >= (CONFIG.SquadRefreshInterval or 3.0) then
 		State.lastSquadRefresh = now
 		Bridge.refreshActorSquads()
 	end
@@ -3867,7 +3929,14 @@ function Bridge.resolveInventoryService(force)
 			end
 		end
 	end
-	-- 2) фолбэк — точечный поиск таблицы по характерным ключам
+	-- 2) фолбэк — точечный поиск таблицы по характерным ключам.
+	-- FIX: успех кэшировался, провал — нет. На экзекуторах без getnilinstances
+	-- каждый проход Gun Mods запускал filtergc (полный обход кучи) заново.
+	local nowT = os.clock()
+	local negT = State._invSvcNegT
+	if negT and (nowT - negT) < (CONFIG.GcNegCooldown or 45) then
+		return nil
+	end
 	if type(filtergc) == "function" then
 		local ok, res = pcall(filtergc, "table",
 			{ Keys = { "_inventories", "_inventory", "Equipped" } })
@@ -3875,11 +3944,13 @@ function Bridge.resolveInventoryService(force)
 			for _, tbl in ipairs(res) do
 				if type(rawget(tbl, "_inventories")) == "table" then
 					State.invSvcCache = tbl
+					State._invSvcNegT = nil
 					return tbl
 				end
 			end
 		end
 	end
+	State._invSvcNegT = nowT
 	return nil
 end
 
@@ -5575,6 +5646,16 @@ end
 function Bridge.findClientServiceInGC()
 	if type(getgc) ~= "function" then return nil end
 	if State.actorScanNoGc then return State.clientService end
+	-- FIX (главная причина фризов ESP): успех кэшировался, а ПРОВАЛ — нет.
+	-- Пока сервис не резолвится (соло/PVE, лобби, смена карты), сюда заходили
+	-- до раза в секунду, и каждый заход — полный проход по дампу кучи в
+	-- сотни тысяч элементов = 50-500 мс прямо в кадре. Теперь после неудачи
+	-- не пробуем чаще, чем раз в GcNegCooldown секунд.
+	local nowT = os.clock()
+	local negT = State._clientSvcGcNegT
+	if negT and (nowT - negT) < (CONFIG.GcNegCooldown or 45) then
+		return nil
+	end
 	local best, bestScore = nil, 0
 	for _, v in ipairs(getGcCached()) do
 		local score = Bridge.scoreClientService(v)
@@ -5582,6 +5663,11 @@ function Bridge.findClientServiceInGC()
 			best = v
 			bestScore = score
 		end
+	end
+	if best then
+		State._clientSvcGcNegT = nil
+	else
+		State._clientSvcGcNegT = nowT   -- запомнили провал, не долбим каждый кадр
 	end
 	return best
 end
@@ -5882,7 +5968,51 @@ function Bridge.isSameSquad(mySquad, theirSquad)
 	return tostring(mySquad) == tostring(theirSquad)
 end
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- Подписка на ClientService.SquadChanged — событийная замена опросу.
+--
+-- В дампе (deleted/Flux/Services/ClientService lines 46, 104-106) видно, что
+-- игра держит сигнал SquadChanged и дёргает его РОВНО в момент, когда сервер
+-- меняет Squad игроку: ReplicateClient(player,"Squad",v) → Clients[p][k]=v →
+-- SquadChanged:Fire(). Он же срабатывает при роспуске отряда.
+--
+-- Раньше мы про это не знали и просто опрашивали раз в N секунд — отсюда лаг
+-- «после начала матча союзники ещё числятся врагами». Теперь пересчитываем
+-- мгновенно по факту события, а опрос остаётся только страховкой.
+-- ─────────────────────────────────────────────────────────────────────────
+function Bridge.ensureSquadChangedHook()
+	if State._squadSignalConn then return true end
+	local svc = State.clientService
+	if type(svc) ~= "table" then return false end
+	local sig = rawget(svc, "SquadChanged")
+	if type(sig) ~= "table" or type(rawget(sig, "Connect")) ~= "function" then
+		return false
+	end
+	local ok, conn = pcall(function()
+		return sig:Connect(function()
+			State.lastSquadRefresh = 0
+			State.localSquadResolved = false
+			if type(State.squadByPlayer) == "table" then
+				table.clear(State.squadByPlayer)
+			end
+			pcall(Bridge.refreshActorSquads)
+			-- сбрасываем производные кэши, иначе цвета/цели останутся старыми
+			State._aimEnemyCache = nil
+			State._aimEnemyCacheT = 0
+			State._teammateIgnoreCache = nil
+		end)
+	end)
+	if ok and conn then
+		State._squadSignalConn = conn
+		log("TEAM", "подписались на ClientService.SquadChanged")
+		return true
+	end
+	return false
+end
+
 function Bridge.refreshActorSquads()
+	-- Пытаемся подписаться на событие (дёшево: выходит сразу, если уже висим)
+	pcall(Bridge.ensureSquadChangedHook)
 	-- FIX: throttle reduced 5s→1s so teammate detection updates within one second of joining a squad.
 	local now = os.clock()
 	if (now - (State.lastSquadRefresh or 0)) < 1.0 then return end
@@ -5943,10 +6073,15 @@ function Bridge.isEnemyActor(data)
 		if data.class == "npc_friendly" then return false end
 
 		local mySquad = State.localSquad
-		if mySquad == nil then
-			-- FIX: rebuild full squad table, not just local key, so all squadmates are known
+		if mySquad == nil and not State.localSquadResolved then
+			-- FIX: раньше это дёргалось для КАЖДОГО актора КАЖДЫЙ кадр, если
+			-- сквада нет (обычное дело в соло/PVE) — и тянуло за собой полный
+			-- проход по куче. Теперь: один успешный пересчёт помечает, что
+			-- ответ «сквада нет» — легитимный, и мы перестаём долбить.
+			-- Флаг сбрасывается на респавне (CharacterAdded).
 			Bridge.refreshActorSquads()
 			mySquad = State.localSquad
+			State.localSquadResolved = true
 		end
 
 		local theirSquad = data.squad
@@ -5966,7 +6101,19 @@ function Bridge.isEnemyActor(data)
 			return false
 		end
 
+		-- FIX (главное по «тимейты числятся врагами»): раньше НЕИЗВЕСТНЫЙ отряд
+		-- сразу трактовался как враг. На старте матча состав ещё не приехал —
+		-- и весь свой отряд секунду-другую был красным и в списке целей.
+		-- Игра в такой ситуации максимум не рисует зелёный тег, но НИКОГДА не
+		-- помечает врагом. Делаем так же: пока обе стороны неизвестны —
+		-- не враг. Как только данные приедут (SquadChanged/поллинг), решение
+		-- пересчитается на следующем кадре.
+		if data.class == "player" and (mySquad == nil or theirSquad == nil) then
+			data.teamUnknown = true
+			return false
+		end
 		if data.class == "player" then
+			data.teamUnknown = nil
 			return CONFIG.SilentAimTargetPlayers ~= false
 		end
 		if data.class == "npc_hostile" or data.class == "npc_zombie" then return true end
@@ -9786,6 +9933,41 @@ function Bridge.pruneStaleActors(now)
 			if not actors[uid] then State.actorVelInstant[uid] = nil end
 		end
 	end
+	-- FIX (утечка): эти таблицы не чистились НИГДЕ. uidToActorModel копил по
+	-- записи на каждого когда-либо виденного актора, а ключ/значение — живая
+	-- ссылка на уничтоженную Model, которая тянет за собой всё её дерево в
+	-- памяти движка. modelToPlayer рос на респавн каждого игрока. На картах с
+	-- NPC это тысячи мёртвых ригов за сессию.
+	if State.uidToActorModel then
+		for uid, model in pairs(State.uidToActorModel) do
+			if not actors[uid] or typeof(model) ~= "Instance" or not model.Parent then
+				State.uidToActorModel[uid] = nil
+			end
+		end
+	end
+	if State.modelToPlayer then
+		for model in pairs(State.modelToPlayer) do
+			if typeof(model) ~= "Instance" or not model.Parent then
+				State.modelToPlayer[model] = nil
+			end
+		end
+	end
+	if State.uidToPlayer then
+		for uid, plr in pairs(State.uidToPlayer) do
+			-- игрок вышел с сервера либо актор больше не отслеживается
+			if not actors[uid] or (typeof(plr) == "Instance" and not plr.Parent) then
+				State.uidToPlayer[uid] = nil
+			end
+		end
+	end
+	if State.clientByPlayer then
+		for plr in pairs(State.clientByPlayer) do
+			if typeof(plr) == "Instance" and not plr.Parent then
+				State.clientByPlayer[plr] = nil
+				if State.clientGcNegByPlayer then State.clientGcNegByPlayer[plr] = nil end
+			end
+		end
+	end
 	return removed
 end
 
@@ -10949,7 +11131,24 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 		end
 		local vel = Bridge.getActorRootVelocity(part, uidL)
 		local t = tonumber(CONFIG.PredictionLiteTime) or 0.12
-		local lead = vel * t  -- полная скорость (X,Y,Z), без клампа и гравитации
+		-- FIX: раньше брали СЫРУЮ скорость целиком (X,Y,Z) без клампа. Из-за
+		-- этого точку дёргало туда-сюда:
+		--   1) вертикальный physics-джиттер стоящей цели гулял по Y;
+		--   2) телепорты/рывки реплики давали всплеск скорости в сотни st/s,
+		--      и упреждение улетало в сторону на один кадр.
+		-- Полный предикт от этого защищён (кламп + отдельная обработка Y) —
+		-- теперь и лёгкий тоже.
+		local horiz = Vector3.new(vel.X, 0, vel.Z)
+		local mag = horiz.Magnitude
+		local cap = CONFIG.PredictionMaxVelCap or 35
+		if mag > cap then horiz = horiz * (cap / mag) end
+		-- Вертикаль учитываем, только если цель реально летит (прыжок/падение),
+		-- и тоже с клампом — иначе дрожь по Y попадает в прицел.
+		local vy = 0
+		if CONFIG.PredictionVertical == true and math.abs(vel.Y) > 4 then
+			vy = math.clamp(vel.Y, -cap, cap)
+		end
+		local lead = Vector3.new(horiz.X, vy, horiz.Z) * t
 		return currentPos + lead, lead, t
 	end
 	if CONFIG.Prediction ~= true or typeof(currentPos) ~= "Vector3" then
