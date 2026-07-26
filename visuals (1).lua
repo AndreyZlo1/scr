@@ -260,6 +260,10 @@ return function(Lib)
     --   внутри hook уже перенаправлен на hook → бесконечная рекурсия.
     --   Всегда вызываем возвращённый origRef.
     ---------------------------------------------------------------------------
+    -- Объявлен ЗДЕСЬ, до хука viewmodel: хук читает `running`, и если объявить
+    -- локал ниже (у главного цикла), внутри хука он станет глобалом=nil и
+    -- Viewmodel/GunModel перестанут применяться.
+    local running     = false
     local vmHooked    = false
     local vmOrigRef   = nil   -- ← значение, ВОЗВРАЩЁННОЕ hookfunction (НЕ исходный rawget)
     local vmHookMode  = nil   -- "hookfunction" | "field" — как ставили, так и снимаем
@@ -1208,7 +1212,10 @@ return function(Lib)
     -- ГЛАВНЫЙ ЦИКЛ
     ---------------------------------------------------------------------------
     local hbConn  = nil
-    local running = false
+    -- ВАЖНО: `running` объявлен в самом верху модуля (рядом с vmHooked), а НЕ
+    -- здесь. Хук viewmodel читает его на ~548 — если объявить локал тут, внутри
+    -- хука это будет глобал (=nil), и Viewmodel/GunModel молча перестанут
+    -- работать. Ровно та же ловушка, что была с gunHighlight.
 
     local function heartbeat(dt)
         if not running then return end
@@ -1424,11 +1431,15 @@ return function(Lib)
             local tpEls = {}
             local function tpVis() K.setVisible(tpEls, V.ThirdPersonEnabled ~= false) end
 
+            -- Честное имя: фича НЕ включает камеру от третьего лица (та живёт
+            -- в модуле Movement). Она красит твою собственную модель, которую
+            -- видно, когда камера уже отъехала. Раньше называлась
+            -- "Third Person" и все её искали не там.
             K.feature(S2, {
-                Title = "Third Person", Flag = "TP",
+                Title = "Self Skin", Flag = "TP",
                 get = function() return V.ThirdPersonEnabled end,
                 set = function(v) V.ThirdPersonEnabled = v; tpVis() end,
-                Desc = "styles ur own body, only u see it",
+                Desc = "recolors ur own body\nu only see it in third person cam",
             })
             tpEls[#tpEls + 1] = K.color(S2, { Name = "Body Color", Flag = "TPColor",
                 Default = V.ThirdPersonBodyColor,
@@ -1467,7 +1478,10 @@ return function(Lib)
 
         -- ═══ TAB: Movement ═════════════════════════════════════════════
         if tabMov then
-            local S = tabMov:Section({ Side = "Right" })
+            -- Транспорт кладём в ЛЕВУЮ колонку: модуль Movement занимает правую
+            -- своими фичами, и когда всё валилось направо, левая половина таба
+            -- оставалась пустой.
+            local S = tabMov:Section({ Side = "Left" })
             local flyEls = {}
             local function flyVis() K.setVisible(flyEls, V.VehicleFlyEnabled ~= false) end
 
