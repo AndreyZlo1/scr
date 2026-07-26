@@ -166,7 +166,10 @@ local SA_CONFIG = {
 	AimVisualStyle = "Swastika",
 	AimVisualScale = 0.5,
 	HitSound = true,
-	HitSoundId = "rbxassetid://106586644436584",
+	HitSoundName = "Default",   -- имя из HIT_SOUNDS (см. ниже)
+	HitSoundId = nil,           -- override: числовой id, если нужен свой звук
+	HitSoundVolume = 0.85,
+	HitSoundPitch = 1.0,
 	HitParticles = true,
 	HitParticleCount = 20,
 	HitParticleMaxSystems = 5,
@@ -614,21 +617,59 @@ end
 
 State.lastHitFxAt = State.lastHitFxAt or 0
 
+-- Каталог хитсаундов. Раньше звук был один и захардкожен — теперь выбирается
+-- по имени из UI, плюс регулируется громкость.
+local HIT_SOUNDS = {
+	["Default"]        = 106586644436584,
+	["Fatality"]       = 115982072912004,
+	["Minecraft XP"]   = 15181891182,
+	["Minecraft Hit"]  = 73571339886360,
+	["Minecraft Egg"]  = 134530432300459,
+	["Minecraft Bow"]  = 111481862692779,
+	["Click"]          = 95635059379804,
+	["Bell"]           = 124010691633262,
+	["Neverlose"]      = 139452805868562,
+	["Primordial"]     = 97511223764004,
+}
+local HIT_SOUND_ORDER = {
+	"Default", "Fatality", "Minecraft XP", "Minecraft Hit", "Minecraft Egg",
+	"Minecraft Bow", "Click", "Bell", "Neverlose", "Primordial",
+}
+Bridge.HIT_SOUNDS      = HIT_SOUNDS
+Bridge.HIT_SOUND_ORDER = HIT_SOUND_ORDER
+
+function Bridge.resolveHitSoundId()
+	-- Приоритет: явный числовой/строковый override → выбранное имя → Default
+	local raw = CONFIG.HitSoundId
+	if type(raw) == "number" then return "rbxassetid://" .. tostring(raw) end
+	if type(raw) == "string" and raw ~= "" then
+		if raw:match("^rbxassetid://") then return raw end
+		if raw:match("^%d+$") then return "rbxassetid://" .. raw end
+	end
+	local name = CONFIG.HitSoundName or "Default"
+	local id = HIT_SOUNDS[name] or HIT_SOUNDS.Default
+	return "rbxassetid://" .. tostring(id)
+end
+
 function Bridge.playLocalHitSound()
 	if CONFIG.HitSound == false then return end
-	local sid = CONFIG.HitSoundId or "rbxassetid://106586644436584"
+	local sid = Bridge.resolveHitSoundId()
 	pcall(function()
 		local s = Instance.new("Sound")
 		s.SoundId = sid
-		s.Volume = 0.85
-		s.Parent = workspace
+		s.Volume = math.clamp(CONFIG.HitSoundVolume or 0.85, 0, 1)
+		s.PlaybackSpeed = math.clamp(CONFIG.HitSoundPitch or 1, 0.5, 2)
+		-- SoundService надёжнее workspace: не привязан к 3D-позиции
+		s.Parent = game:GetService("SoundService")
 		s:Play()
-		game:GetService("Debris"):AddItem(s, 2)
+		game:GetService("Debris"):AddItem(s, 4)
 	end)
 end
 
-local HIT_PT_COL_A = Color3.fromRGB(88, 165, 255)
-local HIT_PT_COL_B = Color3.fromRGB(165, 95, 255)
+-- Цвета частиц держим в CONFIG, а не в локалах: так они попадают в систему
+-- конфигов MacLib и сохраняются между сессиями.
+CONFIG.HitParticleColorA = CONFIG.HitParticleColorA or Color3.fromRGB(88, 165, 255)
+CONFIG.HitParticleColorB = CONFIG.HitParticleColorB or Color3.fromRGB(165, 95, 255)
 local HIT_WF_TETRA = {
 	Vector3.new(1, 1, 1),
 	Vector3.new(1, -1, -1),
@@ -640,9 +681,9 @@ local HIT_WF_EDGES = { {1, 2}, {1, 3}, {1, 4}, {2, 3}, {2, 4}, {3, 4} }
 local function hitPtLerpColor(t)
 	t = math.clamp(t, 0, 1)
 	return Color3.new(
-		HIT_PT_COL_A.R + (HIT_PT_COL_B.R - HIT_PT_COL_A.R) * t,
-		HIT_PT_COL_A.G + (HIT_PT_COL_B.G - HIT_PT_COL_A.G) * t,
-		HIT_PT_COL_A.B + (HIT_PT_COL_B.B - HIT_PT_COL_A.B) * t
+		CONFIG.HitParticleColorA.R + (CONFIG.HitParticleColorB.R - CONFIG.HitParticleColorA.R) * t,
+		CONFIG.HitParticleColorA.G + (CONFIG.HitParticleColorB.G - CONFIG.HitParticleColorA.G) * t,
+		CONFIG.HitParticleColorA.B + (CONFIG.HitParticleColorB.B - CONFIG.HitParticleColorA.B) * t
 	)
 end
 
@@ -655,6 +696,7 @@ end
 local function destroyParticleSystem(sys)
 	for _, p in ipairs(sys.pts) do
 		if p.dot then Bridge.destroyDrawing(p.dot) end
+		if p.ring then Bridge.destroyDrawing(p.ring) end
 		for _, e in ipairs(p.edges or {}) do
 			Bridge.destroyDrawing(e.line)
 		end
@@ -796,6 +838,52 @@ local function ensureHitParticleDriver()
 					l.Visible = false
 				end
 			end
+			elseif sys.ptype == "Sparks" then
+				-- Искры: короткий штрих ВДОЛЬ вектора скорости + перпендикулярный
+				-- блик на конце. Читается как настоящая вспышка от попадания.
+				for _, p in ipairs(sys.pts) do
+					p.vel += sys.gravity * step
+					p.vel *= drag
+					p.pos += p.vel * step
+					local spd = p.vel.Magnitude
+					local dirv = spd > 0.01 and (p.vel / spd) or Vector3.new(0, 1, 0)
+					local tailLen = math.clamp(spd * 0.035, 0.05, 0.9) * (p.size or 1)
+					local tail = p.pos - dirv * tailLen
+					local spA, onA = cam:WorldToViewportPoint(p.pos)
+					local spB, onB = cam:WorldToViewportPoint(tail)
+					local opMin = sys.opMin or 0.08
+					local opMax = sys.opMax or 0.55
+					local fallMul = p.vel.Y < -2 and math.clamp(1 + p.vel.Y * 0.025, 0.15, 1) or 1
+					local op = (opMin + p.z * (opMax - opMin)) * alpha * fallMul
+					local vis = onA and onB and spA.Z > 0.05 and spB.Z > 0.05 and op > 0.015
+					local col = hitPtLerpColor((pulseT + p.phase * 0.15) % 1)
+					local e1 = p.edges[1] and p.edges[1].line
+					local e2 = p.edges[2] and p.edges[2].line
+					if vis then
+						if e1 then
+							e1.From = Vector2.new(spA.X, spA.Y)
+							e1.To   = Vector2.new(spB.X, spB.Y)
+							e1.Color = col
+							Bridge.showDrawing(e1, op)
+						end
+						-- перпендикулярный блик на «голове» искры
+						if e2 then
+							local dx, dy = spA.X - spB.X, spA.Y - spB.Y
+							local len = math.max(0.001, math.sqrt(dx * dx + dy * dy))
+							local nx, ny = -dy / len, dx / len
+							local w = math.clamp(len * 0.22, 0.6, 4) * (p.size or 1)
+							e2.From = Vector2.new(spA.X - nx * w, spA.Y - ny * w)
+							e2.To   = Vector2.new(spA.X + nx * w, spA.Y + ny * w)
+							e2.Color = col
+							Bridge.showDrawing(e2, op * 0.8)
+						end
+						p.sx, p.sy, p.onScreen = spA.X, spA.Y, true
+					else
+						if e1 then e1.Visible = false end
+						if e2 then e2.Visible = false end
+						p.onScreen = false
+					end
+				end
 			else
 				for _, p in ipairs(sys.pts) do
 					p.vel += sys.gravity * step
@@ -804,7 +892,7 @@ local function ensureHitParticleDriver()
 					local sp, onScreen = cam:WorldToViewportPoint(p.pos)
 					if onScreen and sp.Z > 0.05 then
 						local depth = sp.Z
-						local r = 0.28 + p.z * 0.62
+						local r = (0.28 + p.z * 0.62) * (p.size or 1)
 						local screenR = math.max(0.45, r * 17 / depth)
 						local fallMul = p.vel.Y < -2 and math.clamp(1 + p.vel.Y * 0.025, 0.15, 1) or 1
 						local opMin = sys.opMin or 0.08
@@ -817,12 +905,21 @@ local function ensureHitParticleDriver()
 							p.dot.Color = hitPtLerpColor((pulseT + p.phase * 0.15) % 1)
 							-- FIX: инвертированная прозрачность Potassium — через showDrawing
 							Bridge.showDrawing(p.dot, op)
+							-- Glow-кольцо вокруг орба (цвет B, чуть больше радиус)
+							if p.ring then
+								p.ring.Position = p.dot.Position
+								p.ring.Radius = screenR * 1.6
+								p.ring.Color = CONFIG.HitParticleColorB
+								Bridge.showDrawing(p.ring, op * 0.45)
+							end
 						else
 							p.dot.Visible = false
+							if p.ring then p.ring.Visible = false end
 						end
 						p.sx, p.sy, p.onScreen = sp.X, sp.Y, true
 					else
 						p.dot.Visible = false
+						if p.ring then p.ring.Visible = false end
 						p.onScreen = false
 					end
 				end
@@ -864,6 +961,7 @@ function Bridge.spawnHitParticles3D(hitPos, normal)
 		if old then
 			for _, p in ipairs(old.pts or {}) do
 				if p.dot then Bridge.destroyDrawing(p.dot) end
+		if p.ring then Bridge.destroyDrawing(p.ring) end
 				for _, e in ipairs(p.edges or {}) do Bridge.destroyDrawing(e.line) end
 			end
 			for _, e in ipairs(old.links or {}) do Bridge.destroyDrawing(e.line) end
@@ -875,7 +973,14 @@ function Bridge.spawnHitParticles3D(hitPos, normal)
 		local spdMin = CONFIG.HitParticleSpeedMin or 8
 		local spdMax = CONFIG.HitParticleSpeedMax or 22
 		local wfScale = CONFIG.HitParticleWireScale or 0.55
-		local useWireframe = CONFIG.HitParticleWireframe ~= false
+		-- Тип частиц: Sparks (искры-штрихи), Orbs (светящиеся шарики),
+		-- Wireframe (вращающиеся каркасные тетраэдры). Раньше был только
+		-- булев Wireframe → либо каркасы, либо точки.
+		local ptype = CONFIG.HitParticleType or "Wireframe"
+		if CONFIG.HitParticleWireframe == false and ptype == "Wireframe" then
+			ptype = "Orbs"   -- обратная совместимость со старым тумблером
+		end
+		local useWireframe = (ptype == "Wireframe")
 		local up = math.abs(normal.Y) < 0.9 and Vector3.new(0, 1, 0) or Vector3.new(1, 0, 0)
 		local right = normal:Cross(up).Unit
 		local fwd = normal:Cross(right).Unit
@@ -910,16 +1015,43 @@ function Bridge.spawnHitParticles3D(hitPos, normal)
 					edges[ei] = { line = l }
 				end
 				pt.edges = edges
+			elseif ptype == "Sparks" then
+				-- Искра: два коротких штриха, летящих по направлению движения
+				local edges = {}
+				for ei = 1, 2 do
+					local l = Drawing.new("Line")
+					l.Thickness = CONFIG.HitParticleSparkThickness or 1.5
+					l.ZIndex = 9
+					l.Transparency = 1
+					l.Visible = false
+					edges[ei] = { line = l }
+				end
+				pt.edges = edges
+				pt.spark = true
+				pt.size = (0.7 + z * 1.3) * (CONFIG.HitParticleSparkSize or 1)
 			else
+				-- Orb: заполненный кружок + тусклое кольцо-подсветка
 				local dot = Drawing.new("Circle")
 				dot.Filled = true
 				dot.Thickness = 1
-				dot.NumSides = 8
+				dot.NumSides = 12
 				dot.ZIndex = 9
 				dot.Radius = 1
 				dot.Transparency = 1
 				dot.Visible = false
 				pt.dot = dot
+				if CONFIG.HitParticleOrbGlow ~= false then
+					local ring = Drawing.new("Circle")
+					ring.Filled = false
+					ring.Thickness = 1.5
+					ring.NumSides = 12
+					ring.ZIndex = 8
+					ring.Radius = 1
+					ring.Transparency = 1
+					ring.Visible = false
+					pt.ring = ring
+				end
+				pt.size = (0.7 + z * 1.3) * (CONFIG.HitParticleOrbSize or 1)
 			end
 			pts[i] = pt
 		end
@@ -938,6 +1070,7 @@ function Bridge.spawnHitParticles3D(hitPos, normal)
 			pts = pts,
 			links = links,
 			wireframe = useWireframe,
+			ptype = ptype,
 			age = 0,
 			acc = 0,
 			duration = CONFIG.HitParticleDuration or 1.1,
@@ -4495,63 +4628,123 @@ function SilentAim.buildUI(ui)
 			Min = 0, Max = 95, Suffix = "%",
 			Callback = function(v) CONFIG.MuzzleLineTransparency = v / 100 end })
 
-		-- Трейсеры живут здесь, в Visuals — раньше были закопаны в Feedback
-		-- рядом со звуком попадания, где их никто не искал.
-		K.group(V, "Bullet Tracers")
+
+
+		-- ═══ RIGHT #2: фидбэк ══════════════════════════════════════════
+		local F = tabSA:Section({ Side = "Right" })
+		F:Header({ Name = "Hit Sound" })
+		K.toggle(F, { Name = "Enabled", Flag = "HitSound", Title = "Hit Sound",
+			get = function() return CONFIG.HitSound end,
+			set = function(v) CONFIG.HitSound = v end,
+			Desc = "plays a sound when u land a hit" })
+		K.dropdown(F, { Name = "Sound", Flag = "HitSoundName",
+			Options = Bridge.HIT_SOUND_ORDER or { "Default" },
+			Default = CONFIG.HitSoundName or "Default",
+			Callback = function(v)
+				CONFIG.HitSoundName = v
+				CONFIG.HitSoundId = nil   -- имя перебивает ручной override
+			end,
+			after = function() pcall(Bridge.playLocalHitSound) end,  -- превью
+		})
+		K.slider(F, { Name = "Volume", Flag = "HitSoundVol",
+			Default = math.floor((CONFIG.HitSoundVolume or 0.85) * 100),
+			Min = 0, Max = 100, Suffix = "%",
+			Callback = function(v) CONFIG.HitSoundVolume = v / 100 end })
+		K.slider(F, { Name = "Pitch", Flag = "HitSoundPitch",
+			Default = math.floor((CONFIG.HitSoundPitch or 1) * 100),
+			Min = 50, Max = 200, Suffix = "%",
+			Callback = function(v) CONFIG.HitSoundPitch = v / 100 end,
+			Desc = "100 = normal speed" })
+		K.button(F, { Name = "Preview", Flag = "HitSoundTest", Title = "Hit Sound",
+			Callback = function()
+				pcall(Bridge.playLocalHitSound)
+				return "played"
+			end })
+
+		K.group(F, "Hit Particles")
+		K.toggle(F, { Name = "Enabled", Flag = "HitParticles", Title = "Hit Particles",
+			get = function() return CONFIG.HitParticles end,
+			set = function(v) CONFIG.HitParticles = v end,
+			Desc = "3d burst at the point u hit" })
+		K.dropdown(F, { Name = "Style", Flag = "HpType",
+			Options = { "Sparks", "Orbs", "Wireframe" },
+			Default = CONFIG.HitParticleType or "Wireframe",
+			Callback = function(v) CONFIG.HitParticleType = v end,
+			Desc = "Sparks = flying streaks\nOrbs = glowing dots\nWireframe = spinning cages" })
+		K.slider(F, { Name = "Count", Flag = "HpCount",
+			Default = CONFIG.HitParticleCount, Min = 8, Max = 48,
+			Callback = function(v) CONFIG.HitParticleCount = v end,
+			Desc = "more = prettier but heavier" })
+		K.slider(F, { Name = "Duration", Flag = "HpDur",
+			Default = math.floor((CONFIG.HitParticleDuration or 1) * 1000),
+			Min = 300, Max = 3000, Suffix = " ms",
+			Callback = function(v) CONFIG.HitParticleDuration = v / 1000 end })
+		K.slider(F, { Name = "Size", Flag = "HpSize",
+			Default = math.floor((CONFIG.HitParticleOrbSize or 1) * 100),
+			Min = 30, Max = 300, Suffix = "%",
+			Callback = function(v)
+				CONFIG.HitParticleOrbSize = v / 100
+				CONFIG.HitParticleSparkSize = v / 100
+			end })
+		K.slider(F, { Name = "Speed", Flag = "HpSpeed",
+			Default = CONFIG.HitParticleSpeedMax or 22, Min = 5, Max = 60,
+			Callback = function(v) CONFIG.HitParticleSpeedMax = v end,
+			Desc = "how hard the burst throws them out" })
+		K.slider(F, { Name = "Gravity", Flag = "HpGrav",
+			Default = math.floor(-(CONFIG.HitParticleGravity or -32)), Min = 0, Max = 90,
+			Callback = function(v) CONFIG.HitParticleGravity = -v end,
+			Desc = "0 = float in place, 90 = drop like rocks" })
+		K.color(F, { Name = "Color A", Flag = "HpColA",
+			Default = CONFIG.HitParticleColorA,
+			Callback = function(c) CONFIG.HitParticleColorA = c end })
+		K.color(F, { Name = "Color B", Flag = "HpColB",
+			Default = CONFIG.HitParticleColorB,
+			Callback = function(c) CONFIG.HitParticleColorB = c end })
+		K.toggle(F, { Name = "Orb Glow", Flag = "HpOrbGlow", Title = "Orb Glow",
+			get = function() return CONFIG.HitParticleOrbGlow ~= false end,
+			set = function(v) CONFIG.HitParticleOrbGlow = v end,
+			Desc = "halo ring around each orb, Orbs style only" })
+
+	end
+
+	-- ═══ RIGHT #3: Bullet Tracers — своя секция ════════════════════════
+	if tabSA then
+		local T = tabSA:Section({ Side = "Right" })
 		local trEls = {}
 		local function trVis() K.setVisible(trEls, CONFIG.ShotTracers ~= false) end
-		K.toggle(V, { Name = "Enabled", Flag = "ShotTracers", Title = "Bullet Tracers",
+		K.feature(T, {
+			Title = "Bullet Tracers", Flag = "ShotTracers", NoKeybind = true,
 			get = function() return CONFIG.ShotTracers end,
-			set = function(v) CONFIG.ShotTracers = v end,
-			after = trVis,
-			Desc = "draws the path of ur own shots" })
-		trEls[#trEls + 1] = K.color(V, { Name = "Color", Flag = "TracerColor",
+			set = function(v) CONFIG.ShotTracers = v; trVis() end,
+			Desc = "draws the path of ur own shots",
+		})
+		K.color(T, { Name = "Color", Flag = "TracerColor",
 			Default = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35),
 			Callback = function(c) CONFIG.TracerColor = c end })
-		trEls[#trEls + 1] = K.slider(V, { Name = "Thickness", Flag = "TracerThick",
+		K.slider(T, { Name = "Thickness", Flag = "TracerThick",
 			Default = math.floor((CONFIG.TracerThickness or 0.9) * 10),
 			Min = 5, Max = 40,
 			Callback = function(v) CONFIG.TracerThickness = v / 10 end,
 			Desc = "10 = thin hairline, 40 = fat beam" })
-		trEls[#trEls + 1] = K.slider(V, { Name = "Duration", Flag = "TracerDur",
+		K.slider(T, { Name = "Duration", Flag = "TracerDur",
 			Default = math.floor((CONFIG.TracerDuration or 1.4) * 1000),
 			Min = 200, Max = 4000, Suffix = " ms",
 			Callback = function(v) CONFIG.TracerDuration = v / 1000 end,
 			Desc = "how long the line stays before it fades" })
-		trEls[#trEls + 1] = K.slider(V, { Name = "Transparency", Flag = "TracerTransp",
+		K.slider(T, { Name = "Transparency", Flag = "TracerTransp",
 			Default = math.floor((CONFIG.TracerTransparency or 0) * 100),
 			Min = 0, Max = 100, Suffix = "%",
 			Callback = function(v) CONFIG.TracerTransparency = v / 100 end })
-		trEls[#trEls + 1] = K.slider(V, { Name = "Fade In", Flag = "TracerFadeIn",
+		K.slider(T, { Name = "Fade In", Flag = "TracerFadeIn",
 			Default = math.floor((CONFIG.TracerFadeIn or 0.12) * 1000),
 			Min = 0, Max = 500, Suffix = " ms",
 			Callback = function(v) CONFIG.TracerFadeIn = v / 1000 end })
+		K.toggle(T, { Name = "Local Only", Flag = "TracerLocalOnly",
+			Title = "Local Only",
+			get = function() return CONFIG.TracerLocalOnly ~= false end,
+			set = function(v) CONFIG.TracerLocalOnly = v end,
+			Desc = "off = also draws other peoples shots" })
 		trVis()
-
-		-- ═══ RIGHT #2: фидбэк ══════════════════════════════════════════
-		local F = tabSA:Section({ Side = "Right" })
-		F:Header({ Name = "Hit Feedback" })
-		K.toggle(F, { Name = "Hit Sound", Flag = "HitSound", Title = "Hit Sound",
-			get = function() return CONFIG.HitSound end,
-			set = function(v) CONFIG.HitSound = v end })
-		local hpEls = {}
-		local function hpVis() K.setVisible(hpEls, CONFIG.HitParticles ~= false) end
-		K.toggle(F, { Name = "Hit Particles", Flag = "HitParticles", Title = "Hit Particles",
-			get = function() return CONFIG.HitParticles end,
-			set = function(v) CONFIG.HitParticles = v end,
-			after = hpVis })
-		hpEls[#hpEls + 1] = K.slider(F, { Name = "Count", Flag = "HpCount",
-			Default = CONFIG.HitParticleCount, Min = 8, Max = 48,
-			Callback = function(v) CONFIG.HitParticleCount = v end })
-		hpEls[#hpEls + 1] = K.slider(F, { Name = "Duration", Flag = "HpDur",
-			Default = math.floor((CONFIG.HitParticleDuration or 1) * 1000),
-			Min = 300, Max = 3000, Suffix = " ms",
-			Callback = function(v) CONFIG.HitParticleDuration = v / 1000 end })
-		hpEls[#hpEls + 1] = K.toggle(F, { Name = "Wireframe", Flag = "HpWire", Title = "Wireframe",
-			get = function() return CONFIG.HitParticleWireframe end,
-			set = function(v) CONFIG.HitParticleWireframe = v end })
-		hpVis()
-
 	end
 
 	-- ═══ TAB: Gun Mods ═════════════════════════════════════════════════
