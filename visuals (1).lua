@@ -601,19 +601,24 @@ return function(Lib)
             if not running then return vmOrigRef(self, dt, ...) end
             local r = table.pack(vmOrigRef(self, dt, ...))   -- ← vmOrigRef, не origFn!
             pcall(function()
-                if V.ViewmodelEnabled then
+                -- ГЕОМЕТРИЯ РУК (offset / tilt / zoom) — ВНЕ гейта
+                -- V.ViewmodelEnabled.
+                -- FIX: раньше этот блок был внутри `if V.ViewmodelEnabled`,
+                -- то есть Hand Zoom и смещение работали только когда включена
+                -- ПЕРЕКРАСКА рук. Это НЕ связанные вещи: человек крутил ползунок
+                -- при выключенном тумблере и не понимал, почему ничего нет.
+                --
+                -- Про сам зум: «Custom FOV» раньше писал в Camera.FieldOfView —
+                -- это мировой FOV (отсюда ощущение смены чувствительности). В
+                -- BRM5 руки рендерятся ОБЩЕЙ камерой (дамп ViewmodelClass:822,
+                -- FOV там только масштабирует отдачу), отдельной камеры для
+                -- viewmodel нет. Честный аналог «зума рук» — двигать сами руки
+                -- по оси Z.
+                do
                     local root = rawget(self, "Root")
                     if root and root.Parent then
                         local o = V.ViewmodelOffset or Vector3.new()
                         local tilt = V.ViewmodelTilt or 0
-                        -- FIX: раньше «Custom FOV» писал в Camera.FieldOfView.
-                        -- Но в BRM5 руки рендерятся ОБЩЕЙ камерой (в дампе
-                        -- ViewmodelClass:822 FOV используется только для
-                        -- масштаба отдачи) — то есть менялся мировой FOV, а
-                        -- вместе с ним и ощущение чувствительности мыши, а
-                        -- никак не «фов рук». Отдельной камеры для viewmodel в
-                        -- игре нет, поэтому честный аналог — придвинуть/отодвинуть
-                        -- сами руки по оси Z. Это и читается как «зум рук».
                         local depth = (V.ViewmodelDepth or 0) / 100   -- studs
                         if o.Magnitude > 0.001 or math.abs(tilt) > 0.001
                         or math.abs(depth) > 0.0001 then
@@ -622,6 +627,8 @@ return function(Lib)
                                 * CFrame.Angles(0, 0, math.rad(tilt))
                         end
                     end
+                end
+                if V.ViewmodelEnabled then
                     -- стилизация рук — только один раз (не каждый кадр)
                     if V.ViewmodelMaterialEnabled or V.ViewmodelColorEnabled
                     or (V.ViewmodelTransparency or 0) > 0 or V.ViewmodelGradientEnabled then
@@ -847,24 +854,35 @@ return function(Lib)
     local function styleSelfBody(char)
         restoreSelfBody()
         local bodyTranp = V.ThirdPersonBodyTransparency or 0
+        local styled = 0
         for _, d in ipairs(char:GetDescendants()) do
             if (d:IsA("BasePart") or d:IsA("MeshPart")) then
                 local origT = d.Transparency
-                -- FIX: skip parts that are already fully hidden by the viewmodel/arms system
-                -- (Transparency == 1 means it was deliberately hidden — don't touch it or
-                -- we record T=1 as "original" and it stays invisible after restore)
-                if origT >= 1 then continue end
-                tpOrig[d] = { M = d.Material, C = d.Color, T = origT }
-                -- Apply each property separately so a failure on one doesn't
-                -- block the others (e.g. some BRM5 mesh parts reject Material changes)
+                -- FIX (Self Skin «вообще не работает»): здесь стоял
+                -- `if origT >= 1 then continue end`. Игра сама выставляет
+                -- Transparency = 1 частям тела (дамп ActorClass:1029 Model,
+                -- :1419 Head; ViewmodelClass:334/366) — особенно в первом
+                -- лице. То есть под условие попадали ПРАКТИЧЕСКИ ВСЕ части, и
+                -- фича молча не делала ничего.
+                --
+                -- Смысл у старой проверки был: не записать T=1 как «оригинал»,
+                -- иначе после restore часть осталась бы невидимой. Решаем
+                -- иначе — часть стилизуем, но в оригинал пишем 0, чтобы
+                -- restore вернул её видимой, а не спрятанной.
+                local restoreT = (origT >= 1) and 0 or origT
+                tpOrig[d] = { M = d.Material, C = d.Color, T = restoreT }
+                -- Каждое свойство отдельно: отказ на одном (некоторые mesh
+                -- в BRM5 не принимают Material) не блокирует остальные.
                 if V.ThirdPersonMaterial then
                     pcall(function() d.Material = V.ThirdPersonMaterial end)
                 end
                 pcall(function() d.Color = V.ThirdPersonBodyColor end)
                 pcall(function() d.Transparency = bodyTranp end)
+                styled += 1
             end
         end
         tpStyledChar = char
+        State._tpStyledCount = styled
     end
 
     local _tpRestyeT = 0
