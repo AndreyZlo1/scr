@@ -71,13 +71,11 @@ local ESP_CONFIG = {
 	EspSmooth             = false,
 	EspSmoothAlpha        = 1.0,
 	EspRenderInterval     = 0.0167,  -- FIX v8: 60 fps (было 0.15 ~7fps)
-	EspRescanInterval     = 4.0,    -- FIX v8: ресканирование каждые 4s (было 8)
 	EspFullRescanInterval = 30.0,   -- FIX v8: полный ресканирование 30s (было 45)
 	EspVisibleCheck       = true,
 	EspVisibleStrict      = true,
 	EspVisibleInterval    = 0.35,
 	EspVisibleCheckNpc    = false,
-	EspScanWorldModels    = false,
 	EspShowDistance       = true,
 	EspNpcNameOnly        = true,
 	EspSkeletonMaxActors  = 24,       -- скелет только для топ-N по дистанции (игроки приоритет)
@@ -87,11 +85,9 @@ local ESP_CONFIG = {
 	ActorSyncBatchSize    = 8,        -- v18 PATCH: синхронизировано с silentaim
 	EspChamsMaxActors     = 10,
 	-- v12: пересборка ranked вынесена в defer, добавляется не более N новых акторов за раз
-	ActorRankBatchSize    = 24,       -- пачка новых акторов за один defer-шаг ranked-пересборки
 	-- v12.2: Box modes: "Box" (default) | "Corner" (уголки).  3D удалён.
 	EspBoxMode            = "Box",
 	EspCornerLen          = 0.22,  -- длина уголка как доля высоты бокса (Corner mode)
-	EspBoundsParts        = 4,
 	-- v12: Zombie cluster — группируем близких зомби в один текстовый лейбл
 	EspZombieCluster      = true,
 	EspZombieClusterDist  = 8,    -- studs: зомби ближе этого расстояния друг к другу = кластер
@@ -108,9 +104,7 @@ local ESP_CONFIG = {
 	EspShowDead           = true,  -- метка 'Dead' на мёртвых ИГРОКАХ (не NPC)
 	EspNpcStatus          = true,
 	EspVisibleBones       = { "Head", "UpperTorso", "LowerTorso" },
-	EspVisibleMinBones    = 1,
 	EspBatchSize          = 6,        -- итоговое значение (было переопределено дважды)
-	ActorScanBatchSize    = 3,
 	ActorEnrichBatchSize  = 4,        -- итоговое значение (было переопределено дважды)
 	DrawingHighTransparencyMeansVisible = true,
 }
@@ -166,6 +160,10 @@ local ESP_BOX_PARTS  = {
 -- кадр. Кэшируем по модели (weak-key): попадания → O(1)+про��ерка Parent, промахи
 -- перепроверяются не чаще раза в секу��ду. Частота ESP и число элементов не тронуты.
 local espPartCache = setmetatable({}, { __mode = "k" })
+-- Константы цвета HP-бара: раньше создавались заново на каждого актора
+-- в каждом кадре (Color3.fromRGB — аллокация).
+local HP_OUTLINE_COL = Color3.fromRGB(8, 8, 8)
+local HP_BG_COL      = Color3.fromRGB(22, 22, 22)
 local function getBodyPart(model, name)
 	if not model then return nil end
 	local bucket = espPartCache[model]
@@ -398,8 +396,17 @@ function Bridge.getSkeletonPairs(model)
 end
 
 function Bridge.hideEspEntry(entry, reason, detail)
-	Bridge.logVizHide("ESP", reason or "entry", detail)
 	if not entry then return end
+	-- FIX (главная оставшаяся причина просадки FPS): эта функция писала
+	-- Visible=false примерно в 45 Drawing-объектов КАЖДЫЙ кадр — для каждого
+	-- актора, которого сейчас не рисуем (тиммейты, мёртвые, за экраном,
+	-- отфильтрованные). Объекты уже были скрыты, запись ничего не меняла, но
+	-- каждая из них — переход через границу экзекутора. На смешанной карте
+	-- набегало 2-4 тысячи бессмысленных записей в кадр.
+	-- Теперь флаг: скрыли один раз — больше не трогаем, пока не отрисуем.
+	if entry._hidden then return end
+	entry._hidden = true
+	Bridge.logVizHide("ESP", reason or "entry", detail)
 	if entry.boxLines then
 		for _, line in ipairs(entry.boxLines) do line.Visible = false end
 	end
@@ -422,7 +429,10 @@ function Bridge.hideEspEntry(entry, reason, detail)
 		end
 	end
 	if entry.text      then entry.text.Visible       = false end
-	entry.smoothRect = nil
+	-- smoothRect НЕ обнуляем: таблица переиспользуется (см. smoothEspRect),
+	-- обнуление заставляло бы аллоцировать её заново на каждом возврате
+	-- актора в кадр. Значения всё равно перезаписываются при отрисовке.
+	entry._boxRect = nil
 end
 
 function Bridge.ensureEspDrawing(uid)
@@ -1013,13 +1023,19 @@ end
 function Bridge.smoothEspRect(entry, rect)
 	if not rect then return nil end
 	if CONFIG.EspSmooth == false or (CONFIG.EspSmoothAlpha or 1) >= 0.99 then
-		entry.smoothRect = {
-			minX = rect.minX, maxX = rect.maxX,
-			minY = rect.minY, maxY = rect.maxY,
-			footY = rect.footY or rect.maxY,
-			centerX = rect.centerX or (rect.minX + rect.maxX) * 0.5,
-		}
-		return entry.smoothRect
+		-- FIX: это ДЕФОЛТНАЯ ветка (сглаживание выключено), и она создавала
+		-- новую таблицу на каждого актора КАЖДЫЙ кадр — чистый мусор для GC.
+		-- Ветка со сглаживанием ниже пишет in-place; делаем так же.
+		local sr = entry.smoothRect
+		if not sr then
+			sr = {}
+			entry.smoothRect = sr
+		end
+		sr.minX = rect.minX; sr.maxX = rect.maxX
+		sr.minY = rect.minY; sr.maxY = rect.maxY
+		sr.footY = rect.footY or rect.maxY
+		sr.centerX = rect.centerX or (rect.minX + rect.maxX) * 0.5
+		return sr
 	end
 	local alpha = CONFIG.EspSmoothAlpha or 0.42
 	local s = entry.smoothRect
@@ -1049,6 +1065,9 @@ end
 -- "Box"    — полный прямоугольник, 4 линии
 -- "Corner" — уголки по 4 углам, длина = EspCornerLen * высоты, 8 линий
 function Bridge.drawEspBox(entry, cam, model, color, vpCache)
+	-- Любая отрисовка бокса означает, что запись снова видима — снимаем
+	-- флаг скрытия, иначе hideEspEntry больше никогда её не погасит.
+	if entry then entry._hidden = false end
 	if not CONFIG.EspBox then
 		for _, line in ipairs(entry.boxLines) do line.Visible = false end
 		return Bridge.ensureEspLayoutRect(entry, cam, model, vpCache)
@@ -1133,12 +1152,20 @@ function Bridge.drawEspHpBar(entry, rect, hp, maxHp, color)
 	if entry.hpOutline then
 		entry.hpOutline.Size = Vector2.new(barW + 2, boxH + 2)
 		entry.hpOutline.Position = Vector2.new(x - 1, y - 1)
-		entry.hpOutline.Color = Color3.fromRGB(8, 8, 8)
+		-- FIX: Color3 создавался на каждого актора каждый кадр. Константа +
+		-- запись только при изменении (цвет тут вообще не меняется).
+		if entry._hpOutlineCol ~= HP_OUTLINE_COL then
+			entry.hpOutline.Color = HP_OUTLINE_COL
+			entry._hpOutlineCol = HP_OUTLINE_COL
+		end
 		Bridge.showDrawing(entry.hpOutline, 0.85)
 	end
 	entry.hpBg.Size = Vector2.new(barW, boxH)
 	entry.hpBg.Position = Vector2.new(x, y)
-	entry.hpBg.Color = Color3.fromRGB(22, 22, 22)
+	if entry._hpBgCol ~= HP_BG_COL then
+		entry.hpBg.Color = HP_BG_COL
+		entry._hpBgCol = HP_BG_COL
+	end
 	Bridge.showDrawing(entry.hpBg, 0.7)
 	local fillH = math.max(boxH * pct, 1)
 	entry.hpFill.Size = Vector2.new(barW, fillH)
@@ -1153,11 +1180,24 @@ end
 
 function Bridge.formatEspWeaponLine(weaponInfo)
 	if not weaponInfo then return nil end
-	local name = espStripFirearmName(weaponInfo.name or "?")
-	if type(weaponInfo.max) == "number" then
-		return string.format("[%s] %d", name, weaponInfo.max)
+	-- FIX: вызывалось на каждого актора КАЖДЫЙ кадр — три string.gsub внутри
+	-- espStripFirearmName плюс string.format. При этом сами данные об оружии
+	-- обновляются раз в 2.5 сек (weaponInfo._t). Кэшируем результат прямо в
+	-- таблице weaponInfo и пересобираем только когда она реально сменилась.
+	local key = tostring(weaponInfo.name) .. "|" .. tostring(weaponInfo.max)
+	if weaponInfo._lineKey == key and weaponInfo._line ~= nil then
+		return weaponInfo._line
 	end
-	return "[" .. name .. "]"
+	local name = espStripFirearmName(weaponInfo.name or "?")
+	local out
+	if type(weaponInfo.max) == "number" then
+		out = string.format("[%s] %d", name, weaponInfo.max)
+	else
+		out = "[" .. name .. "]"
+	end
+	weaponInfo._lineKey = key
+	weaponInfo._line = out
+	return out
 end
 
 function Bridge.ensureEspExtraTexts(entry)
@@ -1960,19 +2000,24 @@ function Bridge.updateESP(dt)
 
 		local npcNameOnly = Bridge.isNpcActorClass(data.class) and CONFIG.EspNpcNameOnly == true
 		if npcNameOnly then
-			-- FIX v12: NPC name-only — один WorldToViewportPoint вместо итерации по 7 частям
-			for _, line in ipairs(entry.boxLines) do line.Visible = false end
-			if entry.skelLines then
-				for _, ln in ipairs(entry.skelLines) do ln.Visible = false end
+			-- FIX FPS: этот блок гасил ~35 объектов на КАЖДОГО NPC КАЖДЫЙ кадр,
+			-- хотя они скрыты с момента создания записи. На карте с 40 NPC это
+			-- ~1400 лишних записей в кадр. Гасим только при ВХОДЕ в режим.
+			if entry._mode ~= "label" then
+				entry._mode = "label"
+				for _, line in ipairs(entry.boxLines) do line.Visible = false end
+				if entry.skelLines then
+					for _, ln in ipairs(entry.skelLines) do ln.Visible = false end
+				end
+				if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
+				if entry.hpBg then entry.hpBg.Visible = false end
+				if entry.hpFill then entry.hpFill.Visible = false end
+				if entry.hpOutline then entry.hpOutline.Visible = false end
+				Bridge.hideEspStatusBar(entry)
+				if entry.weaponText then entry.weaponText.Visible = false end
+				Bridge.hideEspExtraTexts(entry)
+				Bridge.removeEspChams(uid)
 			end
-			if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
-			if entry.hpBg then entry.hpBg.Visible = false end
-			if entry.hpFill then entry.hpFill.Visible = false end
-			if entry.hpOutline then entry.hpOutline.Visible = false end
-			Bridge.hideEspStatusBar(entry)
-			if entry.weaponText then entry.weaponText.Visible = false end
-			Bridge.hideEspExtraTexts(entry)
-			Bridge.removeEspChams(uid)
 			local nPt = Bridge.computeNpcLabelPoint(model, cam, data)
 			if not nPt then
 				Bridge.hideEspEntry(entry, "offscreen")
@@ -1981,6 +2026,7 @@ function Bridge.updateESP(dt)
 				entry._boxRect = nil
 				continue
 			end
+			entry._hidden = false   -- запись снова на экране
 			local boxColor = Bridge.getEspColor(data, Bridge.getEspActorVisible(uid))
 			entry.text.Text = Bridge.formatEspLabelWithDistance(data, camPos)
 			entry.text.Color = boxColor
@@ -1992,6 +2038,11 @@ function Bridge.updateESP(dt)
 		end
 
 		local visible  = Bridge.getEspActorVisible(uid)
+		-- Полная отрисовка: снимаем флаги, чтобы hideEspEntry снова сработал
+		-- когда актор уйдёт с экрана, и чтобы возврат из label-режима вернул
+		-- бокс/скелет/HP.
+		entry._hidden = false
+		entry._mode = "full"
 		local boxColor = Bridge.getEspColor(data, visible)
 
 		-- Box / layout rect
