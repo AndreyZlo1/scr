@@ -2842,7 +2842,15 @@ local function refreshActorsForEsp()
 	if now - (State.lastEspFullRescan or 0) >= fullInterval then
 		State.lastEspFullRescan = now
 		State.espActorList = nil
-		State.espRanked = nil
+		-- FIX (ЭТО и есть «ESP застывает на пару секунд»): здесь стояло
+		-- State.espRanked = nil. Раз в EspFullRescanInterval (esp.lua ставит
+		-- 30с) список целей обнулялся, а в updateESP есть ранний выход при
+		-- пустом ranked — до всей отрисовки. Пересборка идёт в task.defer, и
+		-- всё это время ESP не обновлялся: Drawing висели с прошлыми
+		-- координатами. Обнулять ranked нельзя — достаточно сбросить
+		-- счётчик акторов, чтобы пересборка запустилась, а рисовать можно
+		-- по старому списку (мёртвые строки цикл сам пропускает и гасит).
+		State.espLastActorCount = -1
 		tickRepSyncBatch(math.max(CONFIG.ActorSyncBatchSize or 12, 16))
 	else
 		local repSyncMin = CONFIG.RepSyncMinInterval or 0.35
@@ -9641,7 +9649,9 @@ function Bridge.pruneStaleActors(now)
 		State._aimEnemyCache = nil
 		State._aimEnemyCacheT = 0
 		State.espActorList = nil
-		State.espRanked = nil
+		-- Не обнуляем espRanked (см. коммент в refreshActorsForEsp): иначе
+		-- каждое удаление мёртвого актора роняло ESP на кадры пересборки.
+		State.espLastActorCount = -1
 		State._espNpcCount = nil
 	end
 	if State.actorVelTrack then
