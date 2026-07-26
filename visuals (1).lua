@@ -135,6 +135,7 @@ return function(Lib)
 
         --== 6 · AMBIENT — время суток и яркость (только у тебя). Numpad 6 ==
         AmbientEnabled            = false,
+        AmbientPreset             = "Custom",
         AmbientColor              = Color3.fromRGB(120, 120, 130),
         AmbientOutdoorColor       = Color3.fromRGB(140, 140, 150),
         AmbientTintTop            = Color3.fromRGB(0, 0, 0),
@@ -1190,6 +1191,84 @@ return function(Lib)
 
     -- Константа: раньше два Color3 создавались каждый кадр при Fullbright
     local FULLBRIGHT_COL = Color3.fromRGB(178, 178, 178)
+
+    -- ── Готовые атмосферы ──────────────────────────────────────────────
+    -- Крутить 12 ползунков вручную, чтобы получить нормальный вайб, —
+    -- неудобно. Пресет ставит всё разом, дальше можно доводить руками
+    -- (любая правка ползунка переводит пресет в "Custom").
+    local AMBIENT_PRESETS = {
+        Midnight = {
+            ClockTime = 0, Brightness = 1.2, Exposure = 0.15,
+            Ambient = Color3.fromRGB(38, 44, 70),
+            Outdoor = Color3.fromRGB(48, 56, 88),
+            TintTop = Color3.fromRGB(20, 28, 60), TintBottom = Color3.fromRGB(0, 0, 0),
+            Fog = true, FogColor = Color3.fromRGB(18, 22, 40), FogStart = 0, FogEnd = 420,
+            Shadows = true, Latitude = 20,
+        },
+        Sunset = {
+            ClockTime = 17.6, Brightness = 2.4, Exposure = 0.2,
+            Ambient = Color3.fromRGB(120, 78, 62),
+            Outdoor = Color3.fromRGB(178, 108, 70),
+            TintTop = Color3.fromRGB(255, 150, 70), TintBottom = Color3.fromRGB(40, 20, 30),
+            Fog = true, FogColor = Color3.fromRGB(220, 130, 85), FogStart = 40, FogEnd = 1400,
+            Shadows = true, Latitude = 60,
+        },
+        Overcast = {
+            ClockTime = 11, Brightness = 1.8, Exposure = -0.1,
+            Ambient = Color3.fromRGB(120, 124, 132),
+            Outdoor = Color3.fromRGB(150, 155, 165),
+            TintTop = Color3.fromRGB(180, 190, 200), TintBottom = Color3.fromRGB(0, 0, 0),
+            Fog = true, FogColor = Color3.fromRGB(168, 175, 185), FogStart = 20, FogEnd = 700,
+            Shadows = false, Latitude = 45,
+        },
+        Toxic = {
+            ClockTime = 14, Brightness = 2.2, Exposure = 0.35,
+            Ambient = Color3.fromRGB(70, 105, 55),
+            Outdoor = Color3.fromRGB(120, 165, 70),
+            TintTop = Color3.fromRGB(150, 255, 90), TintBottom = Color3.fromRGB(20, 40, 10),
+            Fog = true, FogColor = Color3.fromRGB(110, 160, 70), FogStart = 0, FogEnd = 520,
+            Shadows = true, Latitude = 45,
+        },
+        Nightvision = {
+            ClockTime = 12, Brightness = 4.5, Exposure = 0.6,
+            Ambient = Color3.fromRGB(90, 190, 90),
+            Outdoor = Color3.fromRGB(110, 220, 110),
+            TintTop = Color3.fromRGB(120, 255, 120), TintBottom = Color3.fromRGB(0, 30, 0),
+            Fog = false, FogColor = Color3.fromRGB(40, 90, 40), FogStart = 0, FogEnd = 2000,
+            Shadows = false, Latitude = 45,
+        },
+        Clear = {
+            ClockTime = 13, Brightness = 2.6, Exposure = 0,
+            Ambient = Color3.fromRGB(130, 135, 145),
+            Outdoor = Color3.fromRGB(160, 168, 180),
+            TintTop = Color3.fromRGB(0, 0, 0), TintBottom = Color3.fromRGB(0, 0, 0),
+            Fog = false, FogColor = Color3.fromRGB(180, 190, 200), FogStart = 0, FogEnd = 5000,
+            Shadows = true, Latitude = 45,
+        },
+    }
+    local AMBIENT_PRESET_ORDER = {
+        "Custom", "Clear", "Midnight", "Sunset", "Overcast", "Toxic", "Nightvision",
+    }
+
+    local function applyAmbientPreset(name)
+        local pr = AMBIENT_PRESETS[name]
+        if not pr then return false end
+        V.AmbientClockTime      = pr.ClockTime
+        V.AmbientBrightness     = pr.Brightness
+        V.AmbientExposure       = pr.Exposure
+        V.AmbientColor          = pr.Ambient
+        V.AmbientOutdoorColor   = pr.Outdoor
+        V.AmbientTintTop        = pr.TintTop
+        V.AmbientTintBottom     = pr.TintBottom
+        V.AmbientFogEnabled     = pr.Fog
+        V.AmbientFogColor       = pr.FogColor
+        V.AmbientFogStart       = pr.FogStart
+        V.AmbientFogEnd         = pr.FogEnd
+        V.AmbientShadows        = pr.Shadows
+        V.AmbientLatitude       = pr.Latitude
+        V.AmbientPreset         = name
+        return true
+    end
     local function lightingStep()
         if V.AmbientEnabled or V.FullbrightEnabled or V.NoFogEnabled then saveLighting() end
         -- Atmosphere: полноценная кастомизация вайба (время суток, оттенки,
@@ -1692,55 +1771,98 @@ return function(Lib)
                 set = function(v) V.AmbientEnabled = v end,
                 Desc = "ur own time of day n mood\noverrides whatever the map sets",
             })
-            K.slider(SA, { Name = "Time", Flag = "ClockTime",
+            -- Пресет ставит всю атмосферу разом. Ползунки ниже остаются
+            -- доступны — любая правка переводит пресет в Custom.
+            local ambRefresh
+            K.dropdown(SA, { Name = "Preset", Flag = "AmbPreset",
+                Options = AMBIENT_PRESET_ORDER,
+                Default = V.AmbientPreset or "Custom",
+                Callback = function(v)
+                    if v ~= "Custom" and applyAmbientPreset(v) then
+                        V.AmbientEnabled = true
+                        if ambRefresh then ambRefresh() end
+                    else
+                        V.AmbientPreset = "Custom"
+                    end
+                end,
+                Desc = "ready-made vibes\ntweak anything below n it flips to Custom" })
+
+            -- Любое ручное изменение сбрасывает пресет в Custom
+            local function manual() V.AmbientPreset = "Custom" end
+
+            local elTime = K.slider(SA, { Name = "Time", Flag = "ClockTime",
                 Default = V.AmbientClockTime, Min = 0, Max = 24, Suffix = "h",
-                Callback = function(v) V.AmbientClockTime = v end,
+                Callback = function(v) V.AmbientClockTime = v; manual() end,
                 Desc = "0 = midnight, 12 = noon, 18 = sunset" })
-            K.slider(SA, { Name = "Brightness", Flag = "AmbBright",
+            local elBright = K.slider(SA, { Name = "Brightness", Flag = "AmbBright",
                 Default = math.floor((V.AmbientBrightness or 2) * 10), Min = 0, Max = 100,
-                Callback = function(v) V.AmbientBrightness = v / 10 end })
-            K.slider(SA, { Name = "Exposure", Flag = "AmbExposure",
+                Callback = function(v) V.AmbientBrightness = v / 10; manual() end })
+            local elExp = K.slider(SA, { Name = "Exposure", Flag = "AmbExposure",
                 Default = math.floor((V.AmbientExposure or 0) * 100) + 200, Min = 0, Max = 400,
-                Callback = function(v) V.AmbientExposure = (v - 200) / 100 end,
+                Callback = function(v) V.AmbientExposure = (v - 200) / 100; manual() end,
                 Desc = "200 = neutral, lower = darker, higher = blown out" })
-            K.slider(SA, { Name = "Sun Angle", Flag = "AmbLat",
+            local elLat = K.slider(SA, { Name = "Sun Angle", Flag = "AmbLat",
                 Default = math.floor(V.AmbientLatitude or 45) + 90, Min = 0, Max = 180,
-                Callback = function(v) V.AmbientLatitude = v - 90 end,
+                Callback = function(v) V.AmbientLatitude = v - 90; manual() end,
                 Desc = "moves where the sun sits in the sky" })
 
             K.group(SA, "Colors")
-            K.color(SA, { Name = "Shadow Tint", Flag = "AmbColor",
+            local elAmb = K.color(SA, { Name = "Shadow Tint", Flag = "AmbColor",
                 Default = V.AmbientColor,
-                Callback = function(c) V.AmbientColor = c end,
+                Callback = function(c) V.AmbientColor = c; manual() end,
                 Desc = "color of everything in shade" })
-            K.color(SA, { Name = "Outdoor Tint", Flag = "AmbOutColor",
+            local elOut = K.color(SA, { Name = "Outdoor Tint", Flag = "AmbOutColor",
                 Default = V.AmbientOutdoorColor,
-                Callback = function(c) V.AmbientOutdoorColor = c end })
-            K.color(SA, { Name = "Highlight Tint", Flag = "AmbTintTop",
+                Callback = function(c) V.AmbientOutdoorColor = c; manual() end })
+            local elTintT = K.color(SA, { Name = "Highlight Tint", Flag = "AmbTintTop",
                 Default = V.AmbientTintTop,
-                Callback = function(c) V.AmbientTintTop = c end,
+                Callback = function(c) V.AmbientTintTop = c; manual() end,
                 Desc = "tints lit surfaces — keep it subtle" })
-            K.color(SA, { Name = "Shade Tint", Flag = "AmbTintBottom",
+            local elTintB = K.color(SA, { Name = "Shade Tint", Flag = "AmbTintBottom",
                 Default = V.AmbientTintBottom,
-                Callback = function(c) V.AmbientTintBottom = c end })
-            K.toggle(SA, { Name = "Shadows", Flag = "AmbShadows", Title = "Shadows",
+                Callback = function(c) V.AmbientTintBottom = c; manual() end })
+            local elShadows = K.toggle(SA, { Name = "Shadows", Flag = "AmbShadows", Title = "Shadows",
                 get = function() return V.AmbientShadows ~= false end,
                 set = function(v) V.AmbientShadows = v end })
 
             K.group(SA, "Fog")
-            K.toggle(SA, { Name = "Custom Fog", Flag = "AmbFogOn", Title = "Custom Fog",
+            local elFogOn = K.toggle(SA, { Name = "Custom Fog", Flag = "AmbFogOn", Title = "Custom Fog",
                 get = function() return V.AmbientFogEnabled end,
                 set = function(v) V.AmbientFogEnabled = v end,
                 Desc = "for haze n distance mood\nuse No Fog instead if u just want it gone" })
-            K.color(SA, { Name = "Fog Color", Flag = "AmbFogColor",
+            local elFogCol = K.color(SA, { Name = "Fog Color", Flag = "AmbFogColor",
                 Default = V.AmbientFogColor,
-                Callback = function(c) V.AmbientFogColor = c end })
-            K.slider(SA, { Name = "Fog Start", Flag = "AmbFogStart",
+                Callback = function(c) V.AmbientFogColor = c; manual() end })
+            local elFogStart = K.slider(SA, { Name = "Fog Start", Flag = "AmbFogStart",
                 Default = V.AmbientFogStart or 0, Min = 0, Max = 2000, Suffix = " st",
-                Callback = function(v) V.AmbientFogStart = v end })
-            K.slider(SA, { Name = "Fog End", Flag = "AmbFogEnd",
+                Callback = function(v) V.AmbientFogStart = v; manual() end })
+            local elFogEnd = K.slider(SA, { Name = "Fog End", Flag = "AmbFogEnd",
                 Default = V.AmbientFogEnd or 800, Min = 50, Max = 5000, Suffix = " st",
-                Callback = function(v) V.AmbientFogEnd = v end })
+                Callback = function(v) V.AmbientFogEnd = v; manual() end })
+
+            -- Пресет меняет V.*, но ползунки/пикеры об этом не знают —
+            -- синхронизируем их отображение, иначе они показывают старые числа.
+            ambRefresh = function()
+                local function setV(el, val)
+                    if el and val then pcall(function() el:UpdateValue(val, true) end) end
+                end
+                local function setC(el, col)
+                    if el and col then pcall(function() el:SetColor(col) end) end
+                end
+                setV(elTime,    V.AmbientClockTime)
+                setV(elBright,  math.floor((V.AmbientBrightness or 2) * 10))
+                setV(elExp,     math.floor((V.AmbientExposure or 0) * 100) + 200)
+                setV(elLat,     math.floor(V.AmbientLatitude or 45) + 90)
+                setV(elFogStart, V.AmbientFogStart or 0)
+                setV(elFogEnd,  V.AmbientFogEnd or 800)
+                setC(elAmb,     V.AmbientColor)
+                setC(elOut,     V.AmbientOutdoorColor)
+                setC(elTintT,   V.AmbientTintTop)
+                setC(elTintB,   V.AmbientTintBottom)
+                setC(elFogCol,  V.AmbientFogColor)
+                if elShadows then pcall(function() elShadows:UpdateState(V.AmbientShadows ~= false) end) end
+                if elFogOn   then pcall(function() elFogOn:UpdateState(V.AmbientFogEnabled == true) end) end
+            end
 
             local SIN = tabMisc:Section({ Side = "Right" })
             SIN:Header({ Name = "Interactions" })
