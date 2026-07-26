@@ -199,12 +199,6 @@ local SA_CONFIG = {
 	TracerColor = Color3.fromRGB(255, 90, 35),
 	TracerTransparency = 0,
 	AimLineEnabled = false,
-	TargetRingEnabled = false,
-	TargetRingColor = Color3.fromRGB(255, 60, 60),
-	TargetRingRadius = 1.2,       -- studs radius around the bone
-	TargetRingSegments = 32,      -- smoothness of the ring
-	TargetRingThickness = 1.5,
-	TargetRingTransparency = 0.2,
 	AimVisualStyle = "Swastika",
 	AimVisualScale = 0.5,
 	HitSound = true,
@@ -255,6 +249,7 @@ local SA_CONFIG = {
 	TracerLocalOnly = true,
 	ModifyEnabled = false,       -- weapon mods OFF by default
 	ModifyReapplyInterval = 0.5, -- как часто (сек) переприменять моды (ловит смену оружия для ВСЕХ пушек)
+	ModifyPassInterval = 0.5,    -- троттл полного прохода по всем стволам инвентаря
 	ModifyRPMValue = 1200,
 	ModifyBulletSpeedValue = 2000,
 	ModifyPresets = {
@@ -398,7 +393,7 @@ function Bridge.spawnShotTracer(origin, targetPos, opts)
 	local maxLines = 20
 	while #State.shotLines > maxLines do
 		local old = table.remove(State.shotLines, 1)
-		if old and old.line then pcall(function() old.line:Remove() end) end
+		if old and old.line then Bridge.destroyDrawing(old.line) end
 	end
 end
 
@@ -423,7 +418,7 @@ function Bridge.updateShotTracers()
 		local e = State.shotLines[i]
 		local age = now - (e.born or now)
 		if age >= life then
-			pcall(function() e.line:Remove() end)
+			Bridge.destroyDrawing(e.line)
 			table.remove(State.shotLines, i)
 		else
 			local sp1, on1 = cam:WorldToViewportPoint(e.a)
@@ -446,7 +441,7 @@ end
 
 function Bridge.clearShotTracers()
 	for _, e in ipairs(State.shotLines) do
-		if e.line then pcall(function() e.line:Remove() end) end
+		if e.line then Bridge.destroyDrawing(e.line) end
 	end
 	table.clear(State.shotLines)
 end
@@ -701,13 +696,13 @@ end
 -- FIX v8: destroy helper — удаляет все Drawing-объекты системы частиц
 local function destroyParticleSystem(sys)
 	for _, p in ipairs(sys.pts) do
-		if p.dot then pcall(function() p.dot:Remove() end) end
+		if p.dot then Bridge.destroyDrawing(p.dot) end
 		for _, e in ipairs(p.edges or {}) do
-			pcall(function() e.line:Remove() end)
+			Bridge.destroyDrawing(e.line)
 		end
 	end
 	for _, e in ipairs(sys.links or {}) do
-		pcall(function() e.line:Remove() end)
+		Bridge.destroyDrawing(e.line)
 	end
 end
 
@@ -910,10 +905,10 @@ function Bridge.spawnHitParticles3D(hitPos, normal)
 		local old = table.remove(State.hitParticleSystems, 1)
 		if old then
 			for _, p in ipairs(old.pts or {}) do
-				if p.dot then pcall(function() p.dot:Remove() end) end
-				for _, e in ipairs(p.edges or {}) do pcall(function() e.line:Remove() end) end
+				if p.dot then Bridge.destroyDrawing(p.dot) end
+				for _, e in ipairs(p.edges or {}) do Bridge.destroyDrawing(e.line) end
 			end
-			for _, e in ipairs(old.links or {}) do pcall(function() e.line:Remove() end) end
+			for _, e in ipairs(old.links or {}) do Bridge.destroyDrawing(e.line) end
 		end
 	end
 	normal = (typeof(normal) == "Vector3" and normal.Magnitude > 0.01) and normal.Unit or Vector3.new(0, 1, 0)
@@ -1791,22 +1786,13 @@ end
 function Bridge.ensureAimViz()
 	if State.aimViz and State.aimViz.crossH then return State.aimViz end
 	if State.aimViz then
-		pcall(function()
-			for _, key in ipairs({ "ring", "ringOuter", "line", "label", "dot", "crossH", "crossV" }) do
-				local d = State.aimViz[key]
-				if d then pcall(function() d:Remove() end) end
-			end
-			if State.aimViz.reticleLines then
-				for _, l in ipairs(State.aimViz.reticleLines) do
-					pcall(function() l:Remove() end)
-				end
-			end
-			if State.aimViz.boxLines then
-				for _, l in ipairs(State.aimViz.boxLines) do
-					pcall(function() l:Remove() end)
-				end
-			end
-		end)
+		local av = State.aimViz
+		for _, key in ipairs({ "line", "label", "dot", "crossH", "crossV" }) do
+			Bridge.destroyDrawing(av[key])
+			av[key] = nil
+		end
+		Bridge.destroyDrawingList(av.reticleLines)
+		Bridge.destroyDrawingList(av.boxLines)
 		State.aimViz = nil
 	end
 	if not Drawing then return nil end
@@ -2010,11 +1996,6 @@ function Bridge.hideAimViz(reason, detail)
 		if viz.btLine then viz.btLine.Visible = false end
 		if viz.btText then viz.btText.Visible = false end
 		if viz.aimLine then viz.aimLine.Visible = false end
-		if viz.ringSegs then
-			for _, seg in ipairs(viz.ringSegs) do
-				if seg then seg.Visible = false end
-			end
-		end
 		if viz.boxLines then
 			for _, l in ipairs(viz.boxLines) do l.Visible = false end
 		end
@@ -2224,55 +2205,6 @@ function Bridge.updateAimVisuals()
 		Bridge.showDrawing(al, reticleAlpha * 0.7)
 	elseif viz.aimLine then
 		viz.aimLine.Visible = false
-	end
-
-	-- TargetRing: 3-D circle drawn around the locked bone projected onto screen
-	if CONFIG.TargetRingEnabled and target and target:IsA("BasePart") then
-		local N = math.clamp(math.floor(CONFIG.TargetRingSegments or 32), 6, 64)
-		local r = CONFIG.TargetRingRadius or 1.2
-		local ringCol = CONFIG.TargetRingColor or Color3.fromRGB(255, 60, 60)
-		local ringAlpha = 1 - (CONFIG.TargetRingTransparency or 0.2)
-		local ringTh = CONFIG.TargetRingThickness or 1.5
-		viz.ringSegs = viz.ringSegs or {}
-		-- ensure N lines exist
-		for i = #viz.ringSegs + 1, N do
-			local l = Drawing.new("Line"); l.Thickness = ringTh; l.ZIndex = 44
-			viz.ringSegs[i] = l
-		end
-		-- hide extra lines if N shrank
-		for i = N + 1, #viz.ringSegs do
-			if viz.ringSegs[i] then viz.ringSegs[i].Visible = false end
-		end
-		-- compute a right/up axis perpendicular to camera→target
-		local toTgt = (target.Position - cam.CFrame.Position)
-		local right = toTgt:Cross(Vector3.yAxis)
-		if right.Magnitude < 0.01 then right = toTgt:Cross(Vector3.xAxis) end
-		right = right.Unit * r
-		local up = toTgt.Unit:Cross(right.Unit) * r
-		local TWO_PI = math.pi * 2
-		for i = 1, N do
-			local a0 = (i - 1) / N * TWO_PI
-			local a1 = i       / N * TWO_PI
-			local p0 = target.Position + right * math.cos(a0) + up * math.sin(a0)
-			local p1 = target.Position + right * math.cos(a1) + up * math.sin(a1)
-			local s0, vis0 = cam:WorldToViewportPoint(p0)
-			local s1, vis1 = cam:WorldToViewportPoint(p1)
-			local seg = viz.ringSegs[i]
-			if seg then
-				if vis0 and vis1 and s0.Z > 0 and s1.Z > 0 then
-					seg.From  = Vector2.new(s0.X, s0.Y)
-					seg.To    = Vector2.new(s1.X, s1.Y)
-					seg.Color = ringCol
-					Bridge.showDrawing(seg, ringAlpha)
-				else
-					seg.Visible = false
-				end
-			end
-		end
-	elseif viz.ringSegs then
-		for _, seg in ipairs(viz.ringSegs) do
-			if seg then seg.Visible = false end
-		end
 	end
 
 	-- Клиентская линия: muzzle → aim (predict)
@@ -3032,7 +2964,7 @@ function Bridge.installNamecallHooks()
 			State._hookDrawingTest = t
 			task.delay(8, function()
 				pcall(function()
-					if State._hookDrawingTest then State._hookDrawingTest:Remove() end
+					if State._hookDrawingTest then Bridge.destroyDrawing(State._hookDrawingTest) end
 					State._hookDrawingTest = nil
 				end)
 			end)
@@ -3317,23 +3249,18 @@ function Bridge.clearAimVisuals()
 	Bridge.hideAimViz()
 	Bridge.clearBulletTracers()
 	if State.aimViz then
-		pcall(function()
-			if viz.ringSegs then
-			for _, seg in ipairs(viz.ringSegs) do
-				if seg then pcall(function() seg:Remove() end) end
-			end
-			viz.ringSegs = nil
+		-- FIX: раньше здесь индексировался несуществующий локал `viz` — pcall
+		-- глотал ошибку на ПЕРВОЙ же строке, поэтому НИ ОДИН Drawing ниже
+		-- не удалялся. Теперь чистим строго через State.aimViz.
+		local av = State.aimViz
+		for _, key in ipairs({ "crossH", "crossV", "dot", "line", "label", "aimLine" }) do
+			Bridge.destroyDrawing(av[key])
+			av[key] = nil
 		end
-		for _, key in ipairs({ "crossH", "crossV", "dot", "ring", "ringOuter", "line", "label", "aimLine" }) do
-				local d = State.aimViz[key]
-				if d then d:Remove() end
-			end
-			if State.aimViz.boxLines then
-				for _, l in ipairs(State.aimViz.boxLines) do
-					l:Remove()
-				end
-			end
-		end)
+		if av.boxLines then
+			for _, l in ipairs(av.boxLines) do Bridge.destroyDrawing(l) end
+			av.boxLines = nil
+		end
 		State.aimViz = nil
 	end
 end
@@ -3861,52 +3788,200 @@ function Bridge.getModifyPresetInfo()
 	}
 end
 
-Bridge.applyWeaponModify = function(force)
-	if not CONFIG.ModifyEnabled then return end
-	local ctx = force and Bridge.getLiveWeaponContext(true)
-		or (Bridge.getAimWeaponContext and Bridge.getAimWeaponContext(true))
-		or Bridge.peekWeaponContext()
-	if not ctx then return end
-	if not ctx or not ctx.tune then return end
-	local uid = Bridge.itemUid(ctx.item)
-	if force or not uid or uid ~= State.modifyAppliedUid then
-		State.modifyHookHandlerKey = nil
+-- ═══════════════════════════════════════════════════════════════════════════
+-- GUN MODS — переписано под реальное устройство игры (по дампу BRM5).
+--
+-- Что было не так раньше:
+--   1. Резолвился РОВНО ОДИН ctx (ствол в руках) → моды не доезжали до
+--      остальных стволов инвентаря. Это и есть баг «работает только на одно».
+--   2. Патчился только handler._firearm.Tune. Но у каждого ствола ДВА
+--      независимых _firearm:
+--        • FirearmInventory handler   → RPM, Firemodes, Barrel_Spread,
+--                                       Equip_Delay, Weight, перезарядка
+--        • FirearmInventoryReplicator → ОТДАЧА (getRecoil), ADS_Speed, bolt
+--      Поэтому NoRecoil «не работал»: отдача живёт во втором объекте.
+--   3. Писали напрямую в Tune. Но Tune — это КЭШ: Calculate() пересобирает
+--      его из конфигов и удаляет чужие ключи. Дёргается на каждом Equip,
+--      Reload, вставке магазина, сошках, магнифере (_updateModel →
+--      _firearm:Remove("Mag")). Отсюда «моды слетают после перезарядки».
+--
+-- Как правильно (так делает сама игра в своих дебаг-слайдерах):
+--   писать в component.OverrideTune — он применяется ПОСЛЕДНИМ в Calculate,
+--   поэтому переживает любой пересчёт. В Tune дублируем для мгновенного
+--   эффекта до ближайшего Calculate.
+--
+-- Опасное, чего не делаем:
+--   • Tune.Firemodes копируется ПО ССЫЛКЕ из общего конфига — мутация задела
+--     бы все стволы этой модели. Всегда кладём НОВУЮ таблицу.
+--   • handler._caliber — общая запись Calibers, одна на весь калибр. Не трогаем.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Собирает все живые firearm-компоненты игрока: и handler-, и replicator-side.
+-- Возвращает массив { uid=, comp=, item=, kind="handler"|"replicator" }.
+function Bridge.collectFirearmComponents()
+	local out = {}
+	local seen = {}
+	local function push(uid, comp, item, kind)
+		if type(comp) ~= "table" then return end
+		local key = tostring(uid) .. "|" .. kind
+		if seen[key] then return end
+		seen[key] = true
+		out[#out + 1] = { uid = uid, comp = comp, item = item, kind = kind }
 	end
-	if not force and uid and uid == State.modifyAppliedUid then
-		return
-	end
-	Bridge.backupModifyState(ctx)
-	for name, enabled in pairs(CONFIG.ModifyPresets) do
-		if enabled then
-			local fn = MODIFY_APPLIERS[name]
-			if fn then
-				Bridge.applyTuneLive(ctx, fn)
+
+	-- 1) handler-side: InventoryService._inventories[1..4]
+	--    Группы 1 и 2 — огнестрел; 4 смешанная, поэтому фильтруем по _firearm.
+	local invSvc = Bridge.resolveInventoryService and Bridge.resolveInventoryService()
+	local invs = type(invSvc) == "table" and rawget(invSvc, "_inventories")
+	if type(invs) == "table" then
+		for _, bucket in pairs(invs) do
+			if type(bucket) == "table" then
+				for _, entry in pairs(bucket) do
+					-- entry.Handler бывает nil в момент удаления предмета
+					local h = type(entry) == "table" and entry.Handler
+					local fa = type(h) == "table" and rawget(h, "_firearm")
+					if type(fa) == "table" then
+						push(entry.UID, fa, rawget(h, "_item"), "handler")
+					end
+				end
 			end
 		end
 	end
-	if uid then
-		State.modifyAppliedUid = uid
+
+	-- 2) replicator-side: LocalActor._inventory[UID] — здесь живёт ОТДАЧА
+	local _, actor = Bridge.resolveLocalActor(false)
+	local rinv = type(actor) == "table" and rawget(actor, "_inventory")
+	if type(rinv) == "table" then
+		for uid, rep in pairs(rinv) do
+			local fa = type(rep) == "table" and rawget(rep, "_firearm")
+			if type(fa) == "table" then
+				push(uid, fa, rawget(rep, "_item"), "replicator")
+			end
+		end
+	end
+	return out
+end
+
+-- Пишем значение так, чтобы оно пережило Calculate().
+function Bridge.setOverrideTune(comp, key, value)
+	if type(comp) ~= "table" then return end
+	local ov = rawget(comp, "OverrideTune")
+	if type(ov) ~= "table" then
+		ov = {}
+		pcall(function() comp.OverrideTune = ov end)
+		if type(rawget(comp, "OverrideTune")) ~= "table" then return end
+		ov = rawget(comp, "OverrideTune")
+	end
+	ov[key] = value
+	local tune = rawget(comp, "Tune")
+	if type(tune) == "table" then tune[key] = value end   -- мгновенный эффект
+end
+
+-- Применяет один пресет к ОДНОМУ компоненту.
+--
+-- Метод: отдаём пресету ПЛОСКУЮ КОПИЮ Tune, он свободно её мутирует (в том
+-- числе через `for k,v in pairs(ctx.tune)` — так делают 6 пресетов), а потом
+-- мы диффим копию с оригиналом и переносим только изменившееся в OverrideTune.
+--
+-- Почему не metatable-прокси: в Luau `pairs()` НЕ уважает __iter/__pairs, так
+-- что пресеты с обходом таблицы молча не срабатывали бы (проверено).
+local function applyPresetToComponent(fn, comp, item)
+	local tune = rawget(comp, "Tune")
+	if type(tune) ~= "table" then return end
+	local copy = {}
+	for k, v in pairs(tune) do copy[k] = v end
+	local ok = pcall(fn, {
+		tune = copy,
+		item = item,
+		meta = type(item) == "table" and rawget(item, "MetaData") or nil,
+		-- cal НЕ отдаём: Calibers — ОБЩАЯ таблица на весь калибр, правка
+		-- задела бы каждый ствол этого калибра у всех, и навсегда.
+		cal  = nil,
+	})
+	if not ok then return end
+	for k, v in pairs(copy) do
+		if tune[k] ~= v then
+			-- Firemodes и прочие таблицы копируются из конфига ПО ССЫЛКЕ —
+			-- кладём свежую таблицу, иначе мутируем общий конфиг модели.
+			if type(v) == "table" then
+				local fresh = {}
+				for i, vv in pairs(v) do fresh[i] = vv end
+				v = fresh
+			end
+			Bridge.setOverrideTune(comp, k, v)
+		end
 	end
 end
 
-function Bridge.restoreWeaponModify()
-	for uid, snap in pairs(State.modifyBackup) do
-		local ctx = Bridge.peekWeaponContext and Bridge.peekWeaponContext() or nil
-		if ctx and Bridge.itemUid(ctx.item) == uid and ctx.tune and snap.tune then
-			for k, v in pairs(snap.tune) do
-				ctx.tune[k] = v
-			end
-			if ctx.cal and snap.cal then
-				for k, v in pairs(snap.cal) do
-					ctx.cal[k] = v
-				end
-			end
-			if ctx.meta and snap.metaMode ~= nil then
-				rawset(ctx.meta, "Mode", snap.metaMode)
+Bridge.applyWeaponModify = function(force)
+	if not CONFIG.ModifyEnabled then return end
+	local comps = Bridge.collectFirearmComponents()
+	if #comps == 0 then return end
+
+	-- Троттлим: полный проход не нужен каждый кадр. force обходит троттл.
+	local t = os.clock()
+	if not force and (t - (State.modifyLastPass or 0)) < (CONFIG.ModifyPassInterval or 0.5) then
+		return
+	end
+	State.modifyLastPass = t
+
+	for _, rec in ipairs(comps) do
+		-- Бэкап один раз на компонент (по uid+kind), до первой правки
+		Bridge.backupModifyComponent(rec)
+		for name, enabled in pairs(CONFIG.ModifyPresets) do
+			if enabled then
+				local fn = MODIFY_APPLIERS[name]
+				if fn then applyPresetToComponent(fn, rec.comp, rec.item) end
 			end
 		end
 	end
+	State.modifyAppliedCount = #comps
+end
+
+-- Бэкап хранится по ключу uid|kind, чтобы handler и replicator не затирали
+-- снапшоты друг друга (у них РАЗНЫЕ значения одних и тех же полей).
+function Bridge.backupModifyComponent(rec)
+	local key = tostring(rec.uid) .. "|" .. rec.kind
+	if State.modifyBackup[key] then return end
+	local tune = rawget(rec.comp, "Tune")
+	if type(tune) ~= "table" then return end
+	local snap = { tune = {}, over = {} }
+	for k, v in pairs(tune) do snap.tune[k] = v end
+	local ov = rawget(rec.comp, "OverrideTune")
+	if type(ov) == "table" then
+		for k, v in pairs(ov) do snap.over[k] = v end
+	end
+	State.modifyBackup[key] = snap
+end
+
+function Bridge.restoreWeaponModify()
+	-- Раньше: брался ОДИН peekWeaponContext и сверялся с каждым uid — совпадал
+	-- максимум один, остальные снапшоты выбрасывались нетронутыми, но
+	-- table.clear всё равно их стирал → откатить было уже нечем.
+	-- Теперь идём по живым компонентам и чистим OverrideTune адресно.
+	local comps = Bridge.collectFirearmComponents()
+	for _, rec in ipairs(comps) do
+		local key = tostring(rec.uid) .. "|" .. rec.kind
+		local snap = State.modifyBackup[key]
+		if snap then
+			local ov = rawget(rec.comp, "OverrideTune")
+			if type(ov) == "table" then
+				-- убираем ТОЛЬКО наши ключи, чужие overrides не трогаем
+				for k in pairs(ov) do
+					if snap.over[k] == nil then ov[k] = nil end
+				end
+				for k, v in pairs(snap.over) do ov[k] = v end
+			end
+			local tune = rawget(rec.comp, "Tune")
+			if type(tune) == "table" then
+				for k, v in pairs(snap.tune) do tune[k] = v end
+			end
+			-- Просим игру пересобрать Tune из конфигов — самый чистый откат
+			pcall(function() rec.comp:Calculate() end)
+		end
+	end
 	table.clear(State.modifyBackup)
+	State.modifyAppliedCount = 0
 end
 
 -- ============================================================
@@ -4028,6 +4103,12 @@ local function resetAfterRespawn()
 	State.handSlot = nil
 	State.cachedHudHandUid = nil
 	State.modifyAppliedUid = nil
+	-- После респавна InventoryService пересоздаёт _inventories/_inventory
+	-- (_cleanInventory), значит все прежние компоненты мертвы: сбрасываем
+	-- троттл и кэш сервиса, чтобы моды сразу легли на новые стволы.
+	State.modifyLastPass = 0
+	State.modifyAppliedCount = 0
+	State.invSvcCache = nil
 	State.handHookTime = 0
 	table.clear(State.modifyBackup)
 	State.localClient = nil
@@ -4232,7 +4313,7 @@ local function stopAimThread()
 	Bridge.clearAimVisuals()
 	-- FIX v11: cleanup FOV circle
 	if State.fovCircle then
-		State.fovCircle:Remove()
+		Bridge.destroyDrawing(State.fovCircle)
 		State.fovCircle = nil
 	end
 end
@@ -4288,311 +4369,404 @@ local SilentAim = {
 -- Каждый колбэк пишет прямо в CONFIG (= Lib.CONFIG), который модуль читает в рантайме.
 -- ─────────────────────────────────────────────────────────────────────────
 function SilentAim.buildUI(ui)
-	local flag = ui.flag or function(s) return "SA_" .. s end
 	local tabSA = ui.tabs and ui.tabs.SilentAim
 	local tabGM = ui.tabs and ui.tabs.GunMods
-	local ntf = ui.notify or function() end
-	-- Sync a MacLib toggle's visual state with its CONFIG value (used by keybinds).
-	-- FIX double-notify: syncToggle re-triggers the MacLib Toggle Callback which
-	-- also calls ntf(). Block Toggle Callbacks during programmatic state sync.
-	local _notifyBlocked = false
-	local function syncToggle(f, v)
-		local ML = ui.MacLib
-		if ML and ML.Options and ML.Options[f] then
-			pcall(function() ML.Options[f]:UpdateState(v) end)
-		end
-	end
+	local K = Bridge.makeUiKit(ui)
 
 	if tabSA then
-		-- ── Left: core + targeting ─────────────────────────────────────────
-		local L = tabSA:Section({ Name = "Silent Aim", Side = "Left" })
-		L:Header({ Name = "Silent Aim" })
-		L:Toggle({ Name = "Enabled", Default = CONFIG.SilentAim,
-			Callback = function(v)
-				CONFIG.SilentAim = v
-				if not _notifyBlocked then
-					ntf("Silent Aim", v and "Enabled" or "Disabled")
-				end
-			end }, flag("SilentAim"))
-		if ui.keybind then
-			ui.keybind(L, { Name = "Toggle Keybind", Flag = flag("SilentAim_KB"),
-				Toggle = function()
-					CONFIG.SilentAim = not CONFIG.SilentAim
-					_notifyBlocked = true
-					syncToggle(flag("SilentAim"), CONFIG.SilentAim)
-					_notifyBlocked = false
-					ntf("Silent Aim", CONFIG.SilentAim and "Enabled" or "Disabled")
-				end })
-		end
-		L:SubLabel({ Text = "Redirects your shots to the best target inside the FOV." })
-		L:Slider({ Name = "FOV", Default = CONFIG.SilentAimFOV, Minimum = 10, Maximum = 360,
-			Precision = 0, Suffix = "°", Callback = function(v) CONFIG.SilentAimFOV = v end }, flag("FOV"))
-		L:Slider({ Name = "Max Distance", Default = CONFIG.SilentAimMaxDistance, Minimum = 50,
-			Maximum = 2000, Precision = 0, Suffix = " studs",
-			Callback = function(v) CONFIG.SilentAimMaxDistance = v end }, flag("MaxDist"))
-		L:Dropdown({ Name = "Target Bone", Options = { "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart" },
+		-- ═══ LEFT: сама фича и выбор цели ══════════════════════════════
+		local L = tabSA:Section({ Side = "Left" })
+
+		K.feature(L, {
+			Title = "Silent Aim", Flag = "SilentAim",
+			get = function() return CONFIG.SilentAim end,
+			set = function(v) CONFIG.SilentAim = v end,
+			Desc = "ur shots land on the best target in the fov\nbind works on PC + mobile",
+		})
+		K.slider(L, { Name = "FOV", Flag = "FOV", Default = CONFIG.SilentAimFOV,
+			Min = 10, Max = 360, Suffix = "°",
+			Callback = function(v) CONFIG.SilentAimFOV = v end,
+			Desc = "360 = anyone on screen" })
+		K.slider(L, { Name = "Max Distance", Flag = "MaxDist", Default = CONFIG.SilentAimMaxDistance,
+			Min = 50, Max = 2000, Suffix = " st",
+			Callback = function(v) CONFIG.SilentAimMaxDistance = v end })
+		K.dropdown(L, {
+			Name = "Target Bone", Flag = "Bone",
+			Options = { "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart" },
 			Default = CONFIG.SilentAimBone or "Head",
-			Callback = function(v)
-				CONFIG.SilentAimBone = v
-				ntf("Target Bone", v)
-			end }, flag("Bone"))
-		L:Toggle({ Name = "Force Zero Spread", Default = CONFIG.ForceZeroSpread,
-			Callback = function(v) CONFIG.ForceZeroSpread = v end }, flag("ZeroSpread"))
-		L:Divider()
-		L:Header({ Name = "Targeting" })
-		L:Toggle({ Name = "Target Players", Default = CONFIG.SilentAimTargetPlayers,
-			Callback = function(v) CONFIG.SilentAimTargetPlayers = v end }, flag("TgtPlayers"))
-		L:Toggle({ Name = "Target Hostiles/NPC", Default = CONFIG.SilentAimTargetHostile,
-			Callback = function(v) CONFIG.SilentAimTargetHostile = v end }, flag("TgtHostile"))
-		L:Toggle({ Name = "Ignore NPCs", Default = CONFIG.SilentAimIgnoreNpc,
-			Callback = function(v) CONFIG.SilentAimIgnoreNpc = v end }, flag("IgnoreNpc"))
-		L:Toggle({ Name = "Ignore Players in PVE", Default = CONFIG.SilentAimIgnorePlayersInPve,
-			Callback = function(v) CONFIG.SilentAimIgnorePlayersInPve = v end }, flag("IgnorePvePlayers"))
-		L:Toggle({ Name = "Prefer Players", Default = CONFIG.SilentAimPreferPlayers,
-			Callback = function(v) CONFIG.SilentAimPreferPlayers = v end }, flag("PreferPlayers"))
-		L:Toggle({ Name = "Team Check", Default = CONFIG.TeamCheck,
-			Callback = function(v) CONFIG.TeamCheck = v end }, flag("TeamCheck"))
-		L:Toggle({ Name = "Ignore Teammates", Default = CONFIG.IgnoreTeammates,
-			Callback = function(v) CONFIG.IgnoreTeammates = v end }, flag("IgnoreTeammates"))
-		L:Toggle({ Name = "Skip Dead (0 HP)", Default = CONFIG.AimSkipDeadHP,
-			Callback = function(v) CONFIG.AimSkipDeadHP = v end }, flag("SkipDead"))
+			Callback = function(v) CONFIG.SilentAimBone = v end,
+		})
+		K.toggle(L, { Name = "Force Zero Spread", Flag = "ZeroSpread", Title = "Zero Spread",
+			get = function() return CONFIG.ForceZeroSpread end,
+			set = function(v) CONFIG.ForceZeroSpread = v end })
 
-		-- ── Right: accuracy (resolver / multipoint / forcehit / prediction) ─
-		local R = tabSA:Section({ Name = "Accuracy", Side = "Right" })
+		K.group(L, "Who To Hit")
+		K.toggle(L, { Name = "Players", Flag = "TgtPlayers", Title = "Target Players",
+			get = function() return CONFIG.SilentAimTargetPlayers end,
+			set = function(v) CONFIG.SilentAimTargetPlayers = v end })
+		K.toggle(L, { Name = "Hostiles / NPCs", Flag = "TgtHostile", Title = "Target Hostiles",
+			get = function() return CONFIG.SilentAimTargetHostile end,
+			set = function(v) CONFIG.SilentAimTargetHostile = v end })
+		K.toggle(L, { Name = "Prefer Players", Flag = "PreferPlayers", Title = "Prefer Players",
+			get = function() return CONFIG.SilentAimPreferPlayers end,
+			set = function(v) CONFIG.SilentAimPreferPlayers = v end,
+			Desc = "picks a real player over an npc at the same range" })
+
+		K.group(L, "Who To Skip")
+		K.toggle(L, { Name = "Ignore NPCs", Flag = "IgnoreNpc", Title = "Ignore NPCs",
+			get = function() return CONFIG.SilentAimIgnoreNpc end,
+			set = function(v) CONFIG.SilentAimIgnoreNpc = v end })
+		K.toggle(L, { Name = "Ignore PVE Players", Flag = "IgnorePvePlayers", Title = "Ignore PVE Players",
+			get = function() return CONFIG.SilentAimIgnorePlayersInPve end,
+			set = function(v) CONFIG.SilentAimIgnorePlayersInPve = v end })
+		K.toggle(L, { Name = "Team Check", Flag = "TeamCheck", Title = "Team Check",
+			get = function() return CONFIG.TeamCheck end,
+			set = function(v) CONFIG.TeamCheck = v end })
+		K.toggle(L, { Name = "Ignore Teammates", Flag = "IgnoreTeammates", Title = "Ignore Teammates",
+			get = function() return CONFIG.IgnoreTeammates end,
+			set = function(v) CONFIG.IgnoreTeammates = v end })
+		K.toggle(L, { Name = "Skip Dead", Flag = "SkipDead", Title = "Skip Dead",
+			get = function() return CONFIG.AimSkipDeadHP end,
+			set = function(v) CONFIG.AimSkipDeadHP = v end })
+
+		-- ═══ RIGHT: точность ═══════════════════════════════════════════
+		local R = tabSA:Section({ Side = "Right" })
 		R:Header({ Name = "Resolver" })
-		R:Toggle({ Name = "Resolver Lite", Default = CONFIG.ResolverLite,
-			Callback = function(v) CONFIG.ResolverLite = v end }, flag("ResolverLite"))
-		R:SubLabel({ Text = "Picks a body part that is actually exposed, reducing wall-blocked misses." })
-		R:Slider({ Name = "Resolver Inset", Default = CONFIG.ResolverLiteInset, Minimum = 0, Maximum = 0.4,
-			Precision = 2, Callback = function(v) CONFIG.ResolverLiteInset = v end }, flag("ResInset"))
-		R:Divider()
-		R:Header({ Name = "MultiPoint" })
-		R:Toggle({ Name = "MultiPoint", Default = CONFIG.MultiPoint,
-			Callback = function(v) CONFIG.MultiPoint = v end }, flag("MultiPoint"))
-		R:Toggle({ Name = "Lite MultiPoint", Default = CONFIG.LiteMultiPoint,
-			Callback = function(v) CONFIG.LiteMultiPoint = v end }, flag("LiteMP"))
-		R:SubLabel({ Text = "Tries several bones per target to find a hittable point." })
-		R:Slider({ Name = "Lite MP Max Distance", Default = CONFIG.LiteMultiPointMaxDist, Minimum = 2,
-			Maximum = 30, Precision = 0, Suffix = " studs",
-			Callback = function(v) CONFIG.LiteMultiPointMaxDist = v end }, flag("LiteMPDist"))
-		R:Slider({ Name = "Lite MP Max Actors", Default = CONFIG.LiteMultiPointMaxActors, Minimum = 1,
-			Maximum = 10, Precision = 0,
-			Callback = function(v) CONFIG.LiteMultiPointMaxActors = v end }, flag("LiteMPActors"))
-		R:Divider()
-		R:Header({ Name = "Force Hit" })
-		R:Toggle({ Name = "Force Hit", Default = CONFIG.ForceHit,
-			Callback = function(v) CONFIG.ForceHit = v end }, flag("ForceHit"))
-		R:Toggle({ Name = "Force Client Hit", Default = CONFIG.ForceClientHit,
-			Callback = function(v) CONFIG.ForceClientHit = v end }, flag("ForceClientHit"))
-		R:SubLabel({ Text = "Marks bullets as hits client-side. Disable if you get kicked." })
-		R:Divider()
-		R:Header({ Name = "Prediction" })
-		R:Toggle({ Name = "Prediction (ballistic)", Default = CONFIG.Prediction,
-			Callback = function(v) CONFIG.Prediction = v end }, flag("Prediction"))
-		R:Toggle({ Name = "Light Prediction", Default = CONFIG.PredictionLite,
-			Callback = function(v) CONFIG.PredictionLite = v end }, flag("PredLite"))
-		R:Slider({ Name = "Light Predict Time", Default = CONFIG.PredictionLiteTime, Minimum = 0,
-			Maximum = 0.5, Precision = 2, Suffix = " s",
-			Callback = function(v) CONFIG.PredictionLiteTime = v end }, flag("PredLiteTime"))
-		R:Toggle({ Name = "Vertical Prediction", Default = CONFIG.PredictionVertical,
-			Callback = function(v) CONFIG.PredictionVertical = v end }, flag("PredVert"))
-		R:Toggle({ Name = "Ping Compensation", Default = CONFIG.PingCompensation,
-			Callback = function(v) CONFIG.PingCompensation = v end }, flag("PingComp"))
+		local resEls = {}
+		local function resVis() K.setVisible(resEls, CONFIG.ResolverLite ~= false) end
+		K.toggle(R, { Name = "Resolver Lite", Flag = "ResolverLite", Title = "Resolver Lite",
+			get = function() return CONFIG.ResolverLite end,
+			set = function(v) CONFIG.ResolverLite = v end,
+			after = resVis,
+			Desc = "aims at a part thats actually exposed\nless shots eaten by walls" })
+		resEls[#resEls + 1] = K.slider(R, { Name = "Inset", Flag = "ResInset",
+			Default = math.floor((CONFIG.ResolverLiteInset or 0.1) * 100),
+			Min = 0, Max = 40, Suffix = "%",
+			Callback = function(v) CONFIG.ResolverLiteInset = v / 100 end,
+			Desc = "pulls the aim point in from the edge of the part" })
+		resVis()
 
-		-- ── Left #2: visuals & feedback ─────────────────────────────────────
-		local V = tabSA:Section({ Name = "Visuals", Side = "Left" })
-		V:Header({ Name = "FOV Circle" })
-		V:Toggle({ Name = "Enabled", Default = CONFIG.FovCircle,
-			Callback = function(v)
-				CONFIG.FovCircle = v
-				ntf("FOV Circle", v and "Enabled" or "Disabled")
-			end }, flag("FovCircle"))
-		V:Colorpicker({ Name = "Color", Default = CONFIG.FovCircleColor,
-			Callback = function(c) CONFIG.FovCircleColor = c end }, flag("FovColor"))
-		V:Toggle({ Name = "Filled", Default = CONFIG.FovCircleFilled,
-			Callback = function(v) CONFIG.FovCircleFilled = v end }, flag("FovFilled"))
-		V:Slider({ Name = "Thickness", Default = CONFIG.FovCircleThickness, Minimum = 1, Maximum = 6,
-			Precision = 0, Callback = function(v) CONFIG.FovCircleThickness = v end }, flag("FovThick"))
-		V:Slider({ Name = "Transparency", Default = math.floor((CONFIG.FovCircleTransparency or 0.6) * 100),
-			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-			Callback = function(v) CONFIG.FovCircleTransparency = v / 100 end }, flag("FovTransp"))
-		V:Divider()
-		V:Header({ Name = "Aim Marker" })
-		V:Toggle({ Name = "Enabled", Default = CONFIG.AimVisuals,
-			Callback = function(v)
-				CONFIG.AimVisuals = v
-				ntf("Aim Marker", v and "Enabled" or "Disabled")
-			end }, flag("AimVisuals"))
-		V:Dropdown({ Name = "Marker Style",
+		K.group(R, "MultiPoint")
+		local mpEls = {}
+		local function mpVis() K.setVisible(mpEls, CONFIG.LiteMultiPoint ~= false) end
+		K.toggle(R, { Name = "MultiPoint", Flag = "MultiPoint", Title = "MultiPoint",
+			get = function() return CONFIG.MultiPoint end,
+			set = function(v) CONFIG.MultiPoint = v end,
+			Desc = "tries several bones til one is hittable" })
+		K.toggle(R, { Name = "Lite MultiPoint", Flag = "LiteMP", Title = "Lite MultiPoint",
+			get = function() return CONFIG.LiteMultiPoint end,
+			set = function(v) CONFIG.LiteMultiPoint = v end,
+			after = mpVis,
+			Desc = "cheaper version, only for close targets" })
+		mpEls[#mpEls + 1] = K.slider(R, { Name = "Lite Max Distance", Flag = "LiteMPDist",
+			Default = CONFIG.LiteMultiPointMaxDist, Min = 2, Max = 30, Suffix = " st",
+			Callback = function(v) CONFIG.LiteMultiPointMaxDist = v end })
+		mpEls[#mpEls + 1] = K.slider(R, { Name = "Lite Max Actors", Flag = "LiteMPActors",
+			Default = CONFIG.LiteMultiPointMaxActors, Min = 1, Max = 10,
+			Callback = function(v) CONFIG.LiteMultiPointMaxActors = v end })
+		mpVis()
+
+		K.group(R, "Force Hit")
+		K.toggle(R, { Name = "Force Hit", Flag = "ForceHit", Title = "Force Hit",
+			get = function() return CONFIG.ForceHit end,
+			set = function(v) CONFIG.ForceHit = v end })
+		K.toggle(R, { Name = "Force Client Hit", Flag = "ForceClientHit", Title = "Force Client Hit",
+			get = function() return CONFIG.ForceClientHit end,
+			set = function(v) CONFIG.ForceClientHit = v end,
+			Desc = "marks bullets as hits on ur side\nturn off if u start getting kicked" })
+
+		K.group(R, "Prediction")
+		K.toggle(R, { Name = "Ballistic", Flag = "Prediction", Title = "Prediction",
+			get = function() return CONFIG.Prediction end,
+			set = function(v) CONFIG.Prediction = v end,
+			Desc = "leads the target using real bullet speed n drop" })
+		local plEls = {}
+		local function plVis() K.setVisible(plEls, CONFIG.PredictionLite ~= false) end
+		K.toggle(R, { Name = "Light Prediction", Flag = "PredLite", Title = "Light Prediction",
+			get = function() return CONFIG.PredictionLite end,
+			set = function(v) CONFIG.PredictionLite = v end,
+			after = plVis,
+			Desc = "flat lead time instead of the full math" })
+		plEls[#plEls + 1] = K.slider(R, { Name = "Lead Time", Flag = "PredLiteTime",
+			Default = math.floor((CONFIG.PredictionLiteTime or 0.1) * 1000),
+			Min = 0, Max = 500, Suffix = " ms",
+			Callback = function(v) CONFIG.PredictionLiteTime = v / 1000 end })
+		plVis()
+		K.toggle(R, { Name = "Vertical", Flag = "PredVert", Title = "Vertical Prediction",
+			get = function() return CONFIG.PredictionVertical end,
+			set = function(v) CONFIG.PredictionVertical = v end })
+		K.toggle(R, { Name = "Ping Compensation", Flag = "PingComp", Title = "Ping Compensation",
+			get = function() return CONFIG.PingCompensation end,
+			set = function(v) CONFIG.PingCompensation = v end })
+
+		-- ═══ LEFT #2: визуал ═══════════════════════════════════════════
+		local V = tabSA:Section({ Side = "Left" })
+
+		local fovEls = {}
+		local function fovVis() K.setVisible(fovEls, CONFIG.FovCircle ~= false) end
+		K.feature(V, {
+			Title = "FOV Circle", Flag = "FovCircle", NoKeybind = true,
+			get = function() return CONFIG.FovCircle end,
+			set = function(v) CONFIG.FovCircle = v; fovVis() end,
+		})
+		fovEls[#fovEls + 1] = K.color(V, { Name = "Color", Flag = "FovColor",
+			Default = CONFIG.FovCircleColor,
+			Callback = function(c) CONFIG.FovCircleColor = c end })
+		fovEls[#fovEls + 1] = K.toggle(V, { Name = "Filled", Flag = "FovFilled", Title = "Filled",
+			get = function() return CONFIG.FovCircleFilled end,
+			set = function(v) CONFIG.FovCircleFilled = v end })
+		fovEls[#fovEls + 1] = K.slider(V, { Name = "Thickness", Flag = "FovThick",
+			Default = CONFIG.FovCircleThickness, Min = 1, Max = 6,
+			Callback = function(v) CONFIG.FovCircleThickness = v end })
+		fovEls[#fovEls + 1] = K.slider(V, { Name = "Transparency", Flag = "FovTransp",
+			Default = math.floor((CONFIG.FovCircleTransparency or 0.6) * 100),
+			Min = 0, Max = 100, Suffix = "%",
+			Callback = function(v) CONFIG.FovCircleTransparency = v / 100 end })
+		fovVis()
+
+		K.group(V, "Aim Marker")
+		local mkEls, swasEls = {}, {}
+		local function mkVis()
+			K.setVisible(mkEls, CONFIG.AimVisuals ~= false)
+			-- RGB-перелив есть только у свастики — прячем для остальных стилей
+			K.setVisible(swasEls, CONFIG.AimVisuals ~= false
+				and (CONFIG.AimVisualStyle == "Swastika"))
+		end
+		K.toggle(V, { Name = "Enabled", Flag = "AimVisuals", Title = "Aim Marker",
+			get = function() return CONFIG.AimVisuals end,
+			set = function(v) CONFIG.AimVisuals = v end,
+			after = mkVis,
+			Desc = "marker on whoever ur locked on" })
+		mkEls[#mkEls + 1] = K.dropdown(V, {
+			Name = "Style", Flag = "AimStyle",
 			Options = { "Default", "DefaultV2", "CrossGap", "Diamond", "Swastika" },
 			Default = CONFIG.AimVisualStyle or "Default",
-			Callback = function(v)
-				CONFIG.AimVisualStyle = v
-				ntf("Aim Marker Style", v)
-			end }, flag("AimStyle"))
-		V:Slider({ Name = "Marker Scale", Default = math.floor((CONFIG.AimVisualScale or 0.5) * 100),
-			Minimum = 20, Maximum = 200, Precision = 0, Suffix = "%",
-			Callback = function(v) CONFIG.AimVisualScale = v / 100 end }, flag("AimScale"))
-		V:Colorpicker({ Name = "Marker Color", Default = CONFIG.AimVisualColor or Color3.fromRGB(255, 60, 60),
-			Callback = function(c) CONFIG.AimVisualColor = c end }, flag("AimColor"))
-		V:Slider({ Name = "Marker Transparency", Default = math.floor((CONFIG.AimVisualTransparency or 0) * 100),
-			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-			Callback = function(v) CONFIG.AimVisualTransparency = v / 100 end }, flag("AimTransp"))
-		V:Toggle({ Name = "Aim Line", Default = CONFIG.AimLineEnabled,
-			Callback = function(v)
-				CONFIG.AimLineEnabled = v
-				ntf("Aim Line", v and "Enabled" or "Disabled")
-			end }, flag("AimLine"))
-		V:Divider()
-		V:Header({ Name = "Target Ring" })
-		V:Toggle({ Name = "Enabled", Default = CONFIG.TargetRingEnabled,
-			Callback = function(v)
-				CONFIG.TargetRingEnabled = v
-				ntf("Target Ring", v and "Enabled" or "Disabled")
-			end }, flag("TargetRing"))
-		V:Colorpicker({ Name = "Ring Color", Default = CONFIG.TargetRingColor or Color3.fromRGB(255, 60, 60),
-			Callback = function(c) CONFIG.TargetRingColor = c end }, flag("RingColor"))
-		V:Slider({ Name = "Ring Radius", Default = math.floor((CONFIG.TargetRingRadius or 1.2) * 10),
-			Minimum = 2, Maximum = 30, Precision = 0,
-			Callback = function(v) CONFIG.TargetRingRadius = v / 10 end }, flag("RingRadius"))
-		V:Slider({ Name = "Ring Thickness", Default = math.floor((CONFIG.TargetRingThickness or 1.5) * 2),
-			Minimum = 1, Maximum = 10, Precision = 0,
-			Callback = function(v) CONFIG.TargetRingThickness = v / 2 end }, flag("RingThick"))
-		V:Slider({ Name = "Ring Transparency", Default = math.floor((CONFIG.TargetRingTransparency or 0.2) * 100),
-			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-			Callback = function(v) CONFIG.TargetRingTransparency = v / 100 end }, flag("RingTransp"))
-		V:Toggle({ Name = "Swastika RGB", Default = CONFIG.SwastikaRGB,
-			Callback = function(v) CONFIG.SwastikaRGB = v end }, flag("SwasRGB"))
-		V:Toggle({ Name = "Muzzle Visual", Default = CONFIG.MuzzleVisual,
-			Callback = function(v) CONFIG.MuzzleVisual = v end }, flag("MuzzleVisual"))
+			Callback = function(v) CONFIG.AimVisualStyle = v end,
+			after = mkVis,
+		})
+		mkEls[#mkEls + 1] = K.slider(V, { Name = "Scale", Flag = "AimScale",
+			Default = math.floor((CONFIG.AimVisualScale or 0.5) * 100),
+			Min = 20, Max = 200, Suffix = "%",
+			Callback = function(v) CONFIG.AimVisualScale = v / 100 end })
+		mkEls[#mkEls + 1] = K.color(V, { Name = "Color", Flag = "AimColor",
+			Default = CONFIG.AimVisualColor or Color3.fromRGB(255, 60, 60),
+			Callback = function(c) CONFIG.AimVisualColor = c end })
+		mkEls[#mkEls + 1] = K.slider(V, { Name = "Transparency", Flag = "AimTransp",
+			Default = math.floor((CONFIG.AimVisualTransparency or 0) * 100),
+			Min = 0, Max = 100, Suffix = "%",
+			Callback = function(v) CONFIG.AimVisualTransparency = v / 100 end })
+		swasEls[#swasEls + 1] = K.toggle(V, { Name = "RGB", Flag = "SwasRGB", Title = "Marker RGB",
+			get = function() return CONFIG.SwastikaRGB end,
+			set = function(v) CONFIG.SwastikaRGB = v end })
+		mkVis()
 
-		-- ── Right #2: feedback (sound / particles / tracers) ────────────────
-		local F = tabSA:Section({ Name = "Feedback", Side = "Right" })
+		K.group(V, "Lines")
+		K.toggle(V, { Name = "Aim Line", Flag = "AimLine", Title = "Aim Line",
+			get = function() return CONFIG.AimLineEnabled end,
+			set = function(v) CONFIG.AimLineEnabled = v end,
+			Desc = "line from ur crosshair to the target" })
+		K.toggle(V, { Name = "Muzzle Visual", Flag = "MuzzleVisual", Title = "Muzzle Visual",
+			get = function() return CONFIG.MuzzleVisual end,
+			set = function(v) CONFIG.MuzzleVisual = v end,
+			Desc = "shows where the shot really leaves the barrel" })
+
+		-- ═══ RIGHT #2: фидбэк ══════════════════════════════════════════
+		local F = tabSA:Section({ Side = "Right" })
 		F:Header({ Name = "Hit Feedback" })
-		F:Toggle({ Name = "Hit Sound", Default = CONFIG.HitSound,
-			Callback = function(v) CONFIG.HitSound = v end }, flag("HitSound"))
-		F:Toggle({ Name = "Hit Particles", Default = CONFIG.HitParticles,
-			Callback = function(v) CONFIG.HitParticles = v end }, flag("HitParticles"))
-		F:Slider({ Name = "Particle Count", Default = CONFIG.HitParticleCount, Minimum = 8, Maximum = 48,
-			Precision = 0, Callback = function(v) CONFIG.HitParticleCount = v end }, flag("HpCount"))
-		F:Slider({ Name = "Particle Duration", Default = CONFIG.HitParticleDuration, Minimum = 0.3, Maximum = 3,
-			Precision = 1, Suffix = " s", Callback = function(v) CONFIG.HitParticleDuration = v end }, flag("HpDur"))
-		F:Toggle({ Name = "Wireframe Particles", Default = CONFIG.HitParticleWireframe,
-			Callback = function(v) CONFIG.HitParticleWireframe = v end }, flag("HpWire"))
-		F:Divider()
-		F:Header({ Name = "Tracers" })
-		F:Toggle({ Name = "Enabled", Default = CONFIG.ShotTracers,
-			Callback = function(v)
-				CONFIG.ShotTracers = v
-				ntf("Shot Tracers", v and "Enabled" or "Disabled")
-			end }, flag("ShotTracers"))
-		F:Colorpicker({ Name = "Tracer Color", Default = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35),
-			Callback = function(c) CONFIG.TracerColor = c end }, flag("TracerColor"))
-		F:Slider({ Name = "Tracer Transparency", Default = math.floor((CONFIG.TracerTransparency or 0) * 100),
-			Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-			Callback = function(v) CONFIG.TracerTransparency = v / 100 end }, flag("TracerTransp"))
-		F:Slider({ Name = "Tracer Duration", Default = CONFIG.TracerDuration, Minimum = 0.2, Maximum = 4,
-			Precision = 1, Suffix = " s", Callback = function(v) CONFIG.TracerDuration = v end }, flag("TracerDur"))
-		F:Slider({ Name = "Tracer Thickness", Default = CONFIG.TracerThickness, Minimum = 0.5, Maximum = 4,
-			Precision = 1, Callback = function(v) CONFIG.TracerThickness = v end }, flag("TracerThick"))
+		K.toggle(F, { Name = "Hit Sound", Flag = "HitSound", Title = "Hit Sound",
+			get = function() return CONFIG.HitSound end,
+			set = function(v) CONFIG.HitSound = v end })
+		local hpEls = {}
+		local function hpVis() K.setVisible(hpEls, CONFIG.HitParticles ~= false) end
+		K.toggle(F, { Name = "Hit Particles", Flag = "HitParticles", Title = "Hit Particles",
+			get = function() return CONFIG.HitParticles end,
+			set = function(v) CONFIG.HitParticles = v end,
+			after = hpVis })
+		hpEls[#hpEls + 1] = K.slider(F, { Name = "Count", Flag = "HpCount",
+			Default = CONFIG.HitParticleCount, Min = 8, Max = 48,
+			Callback = function(v) CONFIG.HitParticleCount = v end })
+		hpEls[#hpEls + 1] = K.slider(F, { Name = "Duration", Flag = "HpDur",
+			Default = math.floor((CONFIG.HitParticleDuration or 1) * 1000),
+			Min = 300, Max = 3000, Suffix = " ms",
+			Callback = function(v) CONFIG.HitParticleDuration = v / 1000 end })
+		hpEls[#hpEls + 1] = K.toggle(F, { Name = "Wireframe", Flag = "HpWire", Title = "Wireframe",
+			get = function() return CONFIG.HitParticleWireframe end,
+			set = function(v) CONFIG.HitParticleWireframe = v end })
+		hpVis()
+
+		K.group(F, "Tracers")
+		local trEls = {}
+		local function trVis() K.setVisible(trEls, CONFIG.ShotTracers ~= false) end
+		K.toggle(F, { Name = "Enabled", Flag = "ShotTracers", Title = "Shot Tracers",
+			get = function() return CONFIG.ShotTracers end,
+			set = function(v) CONFIG.ShotTracers = v end,
+			after = trVis,
+			Desc = "draws the path of ur own shots" })
+		trEls[#trEls + 1] = K.color(F, { Name = "Color", Flag = "TracerColor",
+			Default = CONFIG.TracerColor or Color3.fromRGB(255, 90, 35),
+			Callback = function(c) CONFIG.TracerColor = c end })
+		trEls[#trEls + 1] = K.slider(F, { Name = "Transparency", Flag = "TracerTransp",
+			Default = math.floor((CONFIG.TracerTransparency or 0) * 100),
+			Min = 0, Max = 100, Suffix = "%",
+			Callback = function(v) CONFIG.TracerTransparency = v / 100 end })
+		trEls[#trEls + 1] = K.slider(F, { Name = "Duration", Flag = "TracerDur",
+			Default = math.floor((CONFIG.TracerDuration or 1.4) * 1000),
+			Min = 200, Max = 4000, Suffix = " ms",
+			Callback = function(v) CONFIG.TracerDuration = v / 1000 end })
+		trEls[#trEls + 1] = K.slider(F, { Name = "Thickness", Flag = "TracerThick",
+			Default = CONFIG.TracerThickness, Min = 0.5, Max = 4, Precision = 1,
+			Callback = function(v) CONFIG.TracerThickness = v end })
+		trVis()
 	end
 
+	-- ═══ TAB: Gun Mods ═════════════════════════════════════════════════
 	if tabGM then
-		-- Weapon modifications (SA presets). GunMods tab is shared with FreeGun (visuals).
-		local G = tabGM:Section({ Name = "Weapon Mods", Side = "Left" })
-		-- Force the next heartbeat tick to (re)apply mods to the held weapon even if
-		-- its uid is unchanged (used when a preset/toggle changes mid-hold).
+		local G = tabGM:Section({ Side = "Left" })
+
 		local function forceReapply()
 			State.modifyAppliedUid = nil
 			State.lastFullAutoApply = 0
+			State.modifyLastPass = 0
 			if CONFIG.ModifyEnabled then
 				pcall(function() Bridge.applyWeaponModify(true) end)
 			else
 				pcall(function() Bridge.restoreWeaponModify() end)
 			end
 		end
-		G:Header({ Name = "Weapon Mods" })
-		G:Toggle({ Name = "Enabled", Default = CONFIG.ModifyEnabled,
-			Callback = function(v)
-				CONFIG.ModifyEnabled = v
-				ntf("Weapon Mods", v and "Enabled" or "Disabled")
+
+		K.feature(G, {
+			Title = "Weapon Mods", Flag = "ModifyEnabled",
+			get = function() return CONFIG.ModifyEnabled end,
+			set = function(v) CONFIG.ModifyEnabled = v; forceReapply() end,
+			Desc = "mods every gun in ur inventory, not just the held one\nsurvives reloads n mag swaps",
+		})
+		K.button(G, { Name = "Re-apply Now", Flag = "ModifyForce", Title = "Weapon Mods",
+			Callback = function()
 				forceReapply()
-			end }, flag("ModifyEnabled"))
-		G:SubLabel({ Text = "Applies to the held weapon and auto re-applies on every weapon switch." })
-		G:Button({ Name = "Re-apply Now", Callback = forceReapply }, flag("ModifyForce"))
+				local n = State.modifyAppliedCount or 0
+				return ("applied to %d component%s"):format(n, n == 1 and "" or "s")
+			end })
+
+		K.group(G, "Presets")
 		local P = CONFIG.ModifyPresets or {}
 		CONFIG.ModifyPresets = P
 		local function preset(name, label, desc)
-			G:Toggle({ Name = label, Default = P[name] == true,
-				Callback = function(v) P[name] = v; forceReapply() end }, flag("Preset_" .. name))
-			if desc then G:SubLabel({ Text = desc }) end
+			K.toggle(G, { Name = label, Flag = "Preset_" .. name, Title = label,
+				get = function() return P[name] == true end,
+				set = function(v) P[name] = v end,
+				after = forceReapply,
+				Desc = desc })
 		end
-		preset("NoSpread", "No Spread")
-		preset("NoRecoil", "No Recoil")
-		preset("NoViewKick", "No View Kick")
-		preset("FullAuto", "Full Auto")
+		preset("NoSpread", "No Spread", "kills the bullet cone, every shot goes dead center")
+		preset("NoRecoil", "No Recoil", "zeroes kick on the replicator side, where recoil actually lives")
+		preset("NoViewKick", "No View Kick", "camera stays still but the gun still kicks\nlooks way less sus than full no recoil")
+		preset("FullAuto", "Full Auto", "forces auto firemode on everything")
 		preset("InstantBolt", "Instant Bolt")
-		preset("FastEquip", "Fast Equip")
+		preset("FastEquip", "Fast Equip", "no draw delay after swapping")
 		preset("NoSway", "No Sway")
-		preset("NoSpeedPenalty", "No Speed Penalty")
+		preset("NoSpeedPenalty", "No Speed Penalty", "u dont slow down while shooting")
 		preset("LightWeight", "Light Weight")
-		preset("FlatBallistics", "Flat Ballistics")
+		preset("FlatBallistics", "Flat Ballistics", "less drop n drag, bullet flies straighter")
 
-		local G2 = tabGM:Section({ Name = "Weapon Tuning", Side = "Right" })
+		-- ── Правая колонка: числовые оверрайды ──
+		local G2 = tabGM:Section({ Side = "Right" })
 		G2:Header({ Name = "Fire Rate" })
-		G2:Toggle({ Name = "Override RPM", Default = P.RPM == true,
-			Callback = function(v) P.RPM = v; forceReapply() end }, flag("RPMOn"))
-		G2:Slider({ Name = "RPM", Default = CONFIG.ModifyRPMValue, Minimum = 60, Maximum = 3000,
-			Precision = 0, Callback = function(v) CONFIG.ModifyRPMValue = v; forceReapply() end }, flag("RPM"))
-		G2:Divider()
-		G2:Header({ Name = "Bullet Speed" })
-		G2:Toggle({ Name = "Override Bullet Speed", Default = P.BulletSpeed == true,
-			Callback = function(v) P.BulletSpeed = v; forceReapply() end }, flag("BulletSpeedOn"))
-		G2:Slider({ Name = "Bullet Speed", Default = CONFIG.ModifyBulletSpeedValue, Minimum = 100,
-			Maximum = 5000, Precision = 0, Suffix = " studs/s",
-			Callback = function(v) CONFIG.ModifyBulletSpeedValue = v; forceReapply() end }, flag("BulletSpeed"))
-		G2:Divider()
-		G2:Header({ Name = "Advanced" })
-		G2:Slider({ Name = "Re-apply Interval", Default = math.floor((CONFIG.ModifyReapplyInterval or 1.0) * 1000),
-			Minimum = 250, Maximum = 3000, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.ModifyReapplyInterval = v / 1000 end }, flag("ModifyReapply"))
-		G2:SubLabel({ Text = "How often mods are re-checked/applied to catch weapon switches." })
+		local rpmEls = {}
+		local function rpmVis() K.setVisible(rpmEls, P.RPM == true) end
+		K.toggle(G2, { Name = "Override RPM", Flag = "RPMOn", Title = "Override RPM",
+			get = function() return P.RPM == true end,
+			set = function(v) P.RPM = v end,
+			after = function() rpmVis(); forceReapply() end })
+		rpmEls[#rpmEls + 1] = K.slider(G2, { Name = "RPM", Flag = "RPM",
+			Default = CONFIG.ModifyRPMValue, Min = 60, Max = 3000,
+			Callback = function(v) CONFIG.ModifyRPMValue = v; forceReapply() end,
+			Desc = "rounds per minute, applies to every gun" })
+		rpmVis()
+
+		K.group(G2, "Bullet Speed")
+		local bsEls = {}
+		local function bsVis() K.setVisible(bsEls, P.BulletSpeed == true) end
+		K.toggle(G2, { Name = "Override Speed", Flag = "BulletSpeedOn", Title = "Override Bullet Speed",
+			get = function() return P.BulletSpeed == true end,
+			set = function(v) P.BulletSpeed = v end,
+			after = function() bsVis(); forceReapply() end })
+		bsEls[#bsEls + 1] = K.slider(G2, { Name = "Bullet Speed", Flag = "BulletSpeed",
+			Default = CONFIG.ModifyBulletSpeedValue, Min = 100, Max = 5000, Suffix = " st/s",
+			Callback = function(v) CONFIG.ModifyBulletSpeedValue = v; forceReapply() end,
+			Desc = "faster = less lead needed, but way more obvious" })
+		bsVis()
+
+		K.group(G2, "Advanced")
+		K.slider(G2, { Name = "Re-apply Interval", Flag = "ModifyReapply",
+			Default = math.floor((CONFIG.ModifyReapplyInterval or 1.0) * 1000),
+			Min = 250, Max = 3000, Suffix = " ms",
+			Callback = function(v) CONFIG.ModifyReapplyInterval = v / 1000 end,
+			Desc = "how often we re-check every gun\nhigher = less cpu, slower to catch a fresh pickup" })
 	end
 
-	-- ── Debug tab subsection: intervals, budgets, logs, diagnostics ─────────
+	-- ═══ DEBUG ═════════════════════════════════════════════════════════
 	local dtab = ui.tabs and ui.tabs.Debug
 	if dtab then
-		local D = dtab:Section({ Name = "Silent Aim", Side = "Left" })
-		D:Header({ Name = "Silent Aim — Intervals" })
-		D:Slider({ Name = "Target Refresh", Default = math.floor((CONFIG.AimTargetRefreshInterval or 0.06) * 1000),
-			Minimum = 10, Maximum = 250, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.AimTargetRefreshInterval = v / 1000 end }, flag("DbgTgt"))
-		D:Slider({ Name = "Resolver Scan", Default = math.floor((CONFIG.ResolverScanInterval or 0.18) * 1000),
-			Minimum = 30, Maximum = 500, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.ResolverScanInterval = v / 1000 end }, flag("DbgRes"))
-		D:Slider({ Name = "Lite MP Refresh", Default = math.floor((CONFIG.LiteMultiPointRefreshInterval or 0.09) * 1000),
-			Minimum = 20, Maximum = 400, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.LiteMultiPointRefreshInterval = v / 1000 end }, flag("DbgLiteMP"))
-		D:Slider({ Name = "MultiPoint Cache", Default = math.floor((CONFIG.MultiPointCacheSec or 0.28) * 1000),
-			Minimum = 50, Maximum = 1000, Precision = 0, Suffix = " ms",
-			Callback = function(v) CONFIG.MultiPointCacheSec = v / 1000 end }, flag("DbgMPCache"))
-		D:Slider({ Name = "Resolver Budget / frame", Default = CONFIG.ResolverBudgetPerFrame or 4,
-			Minimum = 1, Maximum = 16, Precision = 0,
-			Callback = function(v) CONFIG.ResolverBudgetPerFrame = v end }, flag("DbgBudget"))
-		D:Divider()
-		D:Header({ Name = "Silent Aim — Logging" })
-		D:SubLabel({ Text = "Console diagnostics. Leave off for normal play." })
-		D:Toggle({ Name = "Server Aim Debug", Default = CONFIG.ServerAimDebug,
-			Callback = function(v) CONFIG.ServerAimDebug = v end }, flag("DbgServerAim"))
-		D:Toggle({ Name = "Force Hit Debug", Default = CONFIG.ForceHitDebug,
-			Callback = function(v) CONFIG.ForceHitDebug = v end }, flag("DbgForceHit"))
-		D:Toggle({ Name = "Log Bullet Payload", Default = CONFIG.LogBulletPayload,
-			Callback = function(v) CONFIG.LogBulletPayload = v end }, flag("DbgBulletPayload"))
-		D:Toggle({ Name = "Log Bullet Event", Default = CONFIG.LogBulletEvent,
-			Callback = function(v) CONFIG.LogBulletEvent = v end }, flag("DbgBulletEvent"))
-		D:Toggle({ Name = "Quiet Logs", Default = CONFIG.QuietLogs,
-			Callback = function(v) CONFIG.QuietLogs = v end }, flag("DbgQuiet"))
+		local D = dtab:Section({ Side = "Left" })
+		D:Header({ Name = "Silent Aim" })
+		K.slider(D, { Name = "Target Refresh", Flag = "DbgTgt",
+			Default = math.floor((CONFIG.AimTargetRefreshInterval or 0.06) * 1000),
+			Min = 10, Max = 250, Suffix = " ms",
+			Callback = function(v) CONFIG.AimTargetRefreshInterval = v / 1000 end })
+		K.slider(D, { Name = "Resolver Scan", Flag = "DbgRes",
+			Default = math.floor((CONFIG.ResolverScanInterval or 0.18) * 1000),
+			Min = 30, Max = 500, Suffix = " ms",
+			Callback = function(v) CONFIG.ResolverScanInterval = v / 1000 end })
+		K.slider(D, { Name = "Lite MP Refresh", Flag = "DbgLiteMP",
+			Default = math.floor((CONFIG.LiteMultiPointRefreshInterval or 0.09) * 1000),
+			Min = 20, Max = 400, Suffix = " ms",
+			Callback = function(v) CONFIG.LiteMultiPointRefreshInterval = v / 1000 end })
+		K.slider(D, { Name = "MultiPoint Cache", Flag = "DbgMPCache",
+			Default = math.floor((CONFIG.MultiPointCacheSec or 0.28) * 1000),
+			Min = 50, Max = 1000, Suffix = " ms",
+			Callback = function(v) CONFIG.MultiPointCacheSec = v / 1000 end })
+		K.slider(D, { Name = "Resolver Budget", Flag = "DbgBudget",
+			Default = CONFIG.ResolverBudgetPerFrame or 4, Min = 1, Max = 16,
+			Callback = function(v) CONFIG.ResolverBudgetPerFrame = v end,
+			Desc = "resolver checks per frame" })
+
+		K.group(D, "Logging")
+		D:SubLabel({ Text = "console spam, keep off for normal play" })
+		K.toggle(D, { Name = "Server Aim", Flag = "DbgServerAim", Title = "Server Aim Debug",
+			get = function() return CONFIG.ServerAimDebug end,
+			set = function(v) CONFIG.ServerAimDebug = v end })
+		K.toggle(D, { Name = "Force Hit", Flag = "DbgForceHit", Title = "Force Hit Debug",
+			get = function() return CONFIG.ForceHitDebug end,
+			set = function(v) CONFIG.ForceHitDebug = v end })
+		K.toggle(D, { Name = "Bullet Payload", Flag = "DbgBulletPayload", Title = "Bullet Payload Log",
+			get = function() return CONFIG.LogBulletPayload end,
+			set = function(v) CONFIG.LogBulletPayload = v end })
+		K.toggle(D, { Name = "Bullet Event", Flag = "DbgBulletEvent", Title = "Bullet Event Log",
+			get = function() return CONFIG.LogBulletEvent end,
+			set = function(v) CONFIG.LogBulletEvent = v end })
+		K.toggle(D, { Name = "Quiet Logs", Flag = "DbgQuiet", Title = "Quiet Logs",
+			get = function() return CONFIG.QuietLogs end,
+			set = function(v) CONFIG.QuietLogs = v end })
+
+		K.group(D, "Gun Mods")
+		local gmStat = D:Label({ Text = "Components: -" })
+		task.spawn(function()
+			while gmStat and gmStat._frame and gmStat._frame.Parent do
+				pcall(function()
+					local comps = Bridge.collectFirearmComponents and Bridge.collectFirearmComponents() or {}
+					local h, r = 0, 0
+					for _, c in ipairs(comps) do
+						if c.kind == "handler" then h += 1 else r += 1 end
+					end
+					gmStat:UpdateName(("Guns: %d handler | %d replicator | modded: %d")
+						:format(h, r, State.modifyAppliedCount or 0))
+				end)
+				task.wait(1)
+			end
+		end)
 	end
+
+	K.ready()
 end
 
 return SilentAim
