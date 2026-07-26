@@ -1468,19 +1468,30 @@ return function(Lib)
             pcall(buildFakeGhost, char)
             if not faGhostModel then return end
         end
-        local base = rawget(la, "Position") or rawget(la, "SimulatedPosition")
-                     or rawget(ctrl, "_correctedPosition") or rawget(ctrl, "_position")
-        if typeof(base) ~= "Vector3" then return end
-
         -- ── Прячем гост от 1-го лица (клон только у нас, скрываем локально) ──
-        -- Надёжный сигнал = собственный игры: LocalActor.Zoom<=0 → первое лицо
-        -- (CharacterCamera:153 v36 = Zoom>0 = третье лицо). Camera-дист — fallback.
+        -- Сигнал самой игры: LocalActor.Zoom <= 0 → первое лицо
+        -- (дамп CharacterCamera:158 `_localActor.Zoom <= 0`). Дистанция до
+        -- головы — fallback, если поля Zoom нет.
+        --
+        -- ВАЖНО: эта проверка идёт ДО резолва base. Раньше она стояла ПОСЛЕ, а
+        -- между ними был `if typeof(base) ~= "Vector3" then return end` —
+        -- выход БЕЗ скрытия. В первом лице игра нередко не отдаёт
+        -- Position/SimulatedPosition (актор не симулируется), поэтому функция
+        -- выходила именно там и гост застывал видимым. Это и был баг.
         if MOV.FakeAnglesGhostFirstPersonHide ~= false then
             local firstPerson = isFirstPersonNow(la, char)
             setGhostHidden(firstPerson)
             if firstPerson then return end   -- в 1-м лице не двигаем/не рисуем
         else
             setGhostHidden(false)
+        end
+
+        local base = rawget(la, "Position") or rawget(la, "SimulatedPosition")
+                     or rawget(ctrl, "_correctedPosition") or rawget(ctrl, "_position")
+        if typeof(base) ~= "Vector3" then
+            -- позиции нет — рисовать негде, прячем вместо тихого выхода
+            setGhostHidden(true)
+            return
         end
 
         -- v19.2 — воспроизводим РОВНО игровую позу (дамп ActorClass):
