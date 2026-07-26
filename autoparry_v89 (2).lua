@@ -1213,8 +1213,17 @@ local syncContactWithHitbox = LPH_NO_VIRTUALIZE(function(th, now)
 end)
 
 local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
+	-- [V97/PERF] PER-FRAME MEMO. This is the single most expensive function in the per-threat hot
+	-- path (~6 Vector3.new, ~7 .Magnitude, ~5 .Unit — every .Magnitude/.Unit is a sqrt — plus dots
+	-- and a styleForward lookup). It was being computed TWICE per frame for the SAME threat:
+	-- once from willHitMe and again from activeRestrictZone (RestrictZone is on by default).
+	-- Same inputs → same outputs within a frame, so cache on FrameId exactly like realHitboxHitsMe
+	-- already does. Pure perf: no behaviour change.
+	if th.geomFrame == FrameId then
+		return th.geomC, th.geomF, th.geomP, th.geomL
+	end
 	local aHRP = th.attackerHRP
-	if not aHRP or not aHRP.Parent then return nil end
+	if not aHRP or not aHRP.Parent then th.geomFrame = FrameId; th.geomC = nil; return nil end
 	local now  = os.clock()
 	local tHit = math.clamp((th.contactAbs or now) - now, 0, 0.6)
 	local aPos = aHRP.Position
@@ -1230,7 +1239,8 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 		local toMeG = Vector3.new(meG.Position.X - aPos.X, 0, meG.Position.Z - aPos.Z)
 		if toMeG.Magnitude > 0.05 then
 			toMeG = toMeG.Unit
-			local closeAmt = lead:Dot(toMeG)               -- >0 = идёт на нас (по velocity)
+			local leadDot  = lead:Dot(toMeG)               -- [V97/PERF] computed ONCE, reused below
+			local closeAmt = leadDot                       -- >0 = идёт на нас (по velocity)
 			-- [V102] ИЗМЕРЕННОЕ сближение (студ/с) кадр-к-кадру. AssemblyLinearVelocity у
 			-- бегающего игрока часто занижен/шумит (Humanoid move, CFrame-твины) → predA не
 			-- доводился до нас и geom-бокс мазал по врагу, который вбегает и бьёт «на возврате».
@@ -1241,12 +1251,18 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 					local pdx   = th.prevPos.X - meG.Position.X
 					local pdz   = th.prevPos.Z - meG.Position.Z
 					local prevD = math.sqrt(pdx * pdx + pdz * pdz)
-					local curD  = toMeG and Vector3.new(aPos.X - meG.Position.X, 0, aPos.Z - meG.Position.Z).Magnitude or 0
+					-- [V97/PERF] plain sqrt on the two components we already have: the old line built
+					-- a throwaway Vector3 just to read .Magnitude (same sqrt, extra allocation).
+					local cdx   = aPos.X - meG.Position.X
+					local cdz   = aPos.Z - meG.Position.Z
+					local curD  = math.sqrt(cdx * cdx + cdz * cdz)
 					local measClose = (prevD - curD) / dtp      -- >0 = приближается
 					if measClose > 0 then closeAmt = math.max(closeAmt, measClose * tHit) end
 				end
 			end
-			local latVec   = lead - toMeG * (lead:Dot(toMeG))  -- боковая составляющая (по velocity)
+			-- [V97/PERF] reuse the dot computed above (closeAmt started as exactly this value);
+			-- `lead` and `toMeG` are unchanged in between, so recomputing it was pure waste.
+			local latVec   = lead - toMeG * leadDot            -- боковая составляющая (по velocity)
 			local latCap   = Config.WillHitLatCap or 1.5
 			if latVec.Magnitude > latCap then latVec = latVec.Unit * latCap end
 			-- [V109] КОРЕНЬ High-бага «враг подходит и бьёт — скрипт не вовремя, как будто вне
@@ -1287,7 +1303,10 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 	th.prevPosT = prevT
 
 
-	return predA + flatLook * forward, forward, predA, flatLook
+	local center = predA + flatLook * forward
+	-- [V97/PERF] fill the per-frame memo (see the guard at the top of this function)
+	th.geomFrame, th.geomC, th.geomF, th.geomP, th.geomL = FrameId, center, forward, predA, flatLook
+	return center, forward, predA, flatLook
 end)
 
 -- [V136] Recognition is one model, not a collection of trust/radius overrides.
@@ -1514,15 +1533,30 @@ local function heightDiag(model)
 	return attrHeight, bodyScale, modelHeight
 end
 
+-- [V97/PERF] styleOf ran two pcalls with INLINE closures on every call, and it is called per
+-- threat per frame (through styleForward/hitboxGeom). Both closures are now persistent helpers,
+-- and the result is cached per character with a short TTL so a mid-fight style swap still lands.
+-- Weak keys: the entry dies with the character model, no manual eviction needed.
+local _styleFn  = function(m) return GameData.cau.GetCombatStyleForCharacter(m) end
+local _styleAttr = function(m) return m:GetAttribute("CombatStyle") end
+local _styleCache = setmetatable({}, { __mode = "k" })
 local function styleOf(model)
+	local e = _styleCache[model]
+	local nowc = os.clock()
+	if e and nowc < e.t then return e.v end
 	loadGameModules()
+	local out
 	if GameData.cau then
-		local ok, s = pcall(function() return GameData.cau.GetCombatStyleForCharacter(model) end)
-		if ok and type(s) == "string" and #s > 0 then return s end
+		local ok, s = pcall(_styleFn, model)
+		if ok and type(s) == "string" and #s > 0 then out = s end
 	end
-	local ok, s = pcall(function() return model:GetAttribute("CombatStyle") end)
-	if ok and type(s) == "string" and #s > 0 then return s end
-	return "Basic"
+	if not out then
+		local ok, s = pcall(_styleAttr, model)
+		if ok and type(s) == "string" and #s > 0 then out = s end
+	end
+	out = out or "Basic"
+	if e then e.v, e.t = out, nowc + 0.5 else _styleCache[model] = { v = out, t = nowc + 0.5 } end
+	return out
 end
 
 local AttackIds = {}
@@ -1728,14 +1762,29 @@ local function hitTimeline(info, combo, mult, contactBase)
 	return base / m
 end
 
+-- [V97/PERF] same treatment: persistent pcall target + a cache keyed by "style|kind". The game's
+-- per-style hitbox offsets are CONFIG CONSTANTS (CombatConfig), so once resolved they never change
+-- for the session — unlike styleOf this needs no TTL.
+local _fwdFn = function(st, k) return GameData.cfg.GetStyleHitboxForwardOffset(st, k) end
+local _fwdCache = {}
 function styleForward(style, kind)
+	local ck = tostring(style) .. "|" .. tostring(kind)
+	local hit = _fwdCache[ck]
+	if type(hit) == "number" then return hit end
+	if hit == false then   -- known-miss: skip straight to the Config fallback, no pcall
+		return (kind == "M2" or kind == "SKILL") and Config.M2Forward or Config.M1Forward
+	end
 	loadGameModules()
 	if GameData.cfg then
-		local ok, f = pcall(function() return GameData.cfg.GetStyleHitboxForwardOffset(style, kind) end)
-		if ok and type(f) == "number" then return f end
+		local ok, f = pcall(_fwdFn, style, kind)
+		if ok and type(f) == "number" then _fwdCache[ck] = f; return f end
+		-- [V97/PERF] the module exists but refused this style/kind → remember that, otherwise we
+		-- would retry the pcall for this key on every single frame.
+		_fwdCache[ck] = false
 	end
 	-- [V109] SKILL/спец-удары (крит, «крутилка ногами» и т.п.) обычно тяжёлые и длиннорукие →
 	-- фолбэк на M2Forward (дальний вылет), а не короткий M1Forward. Меньше риск недооценить диста��цию.
+	-- Config values are user-tunable at runtime, so the fallback itself is intentionally not cached.
 	return (kind == "M2" or kind == "SKILL") and Config.M2Forward or Config.M1Forward
 end
 
@@ -2950,14 +2999,18 @@ end
 -- We do NOT hard-require server proof, because the attribute can land slightly after the
 -- animation and a real hit would then be missed. Instead we mark the threat's trust level;
 -- the press logic uses it to decide whether to commit early or wait for proof.
+-- [V97/PERF] persistent helper: the old body wrapped the three reads in an INLINE closure, so
+-- every call allocated one — and this runs per unproven threat per frame during every windup.
+-- safeGet already exists for exactly this pattern (pcall on a named fn, no allocation).
+local function _attrTrue(m, a) return m:GetAttribute(a) == true end
 local function serverAttackProof(model)
 	if not model then return false end
-	local ok, proven = pcall(function()
-		return model:GetAttribute("M1") == true
-			or model:GetAttribute("M2") == true
-			or model:GetAttribute("CombatAttacking") == true
-	end)
-	return ok and proven or false
+	local ok, v = pcall(_attrTrue, model, "M1")
+	if ok and v then return true end
+	ok, v = pcall(_attrTrue, model, "M2")
+	if ok and v then return true end
+	ok, v = pcall(_attrTrue, model, "CombatAttacking")
+	return (ok and v) and true or false
 end
 
 -- Does the server currently have a live hitbox owned by this attacker? This is the
@@ -5828,7 +5881,9 @@ Viz.drawTargetHitbox = function(cam, model, hrp)
 	flook = flook.Unit
 
 	local style = styleOf(model)
-	local reach = math.max(styleForward(style, "M1"), styleForward(style, "M2")) + VIZ_CONE_PAD
+	-- [V97/PERF] styleForward does a pcall+closure internally; it was called 4x here for 2 values
+	local styleReach = math.max(styleForward(style, "M1"), styleForward(style, "M2"))
+	local reach = styleReach + VIZ_CONE_PAD
 	local half  = VIZ_CONE_HALF
 	local y = Viz.footYOf(model, hrp)
 	local origin = Vector3.new(hrp.Position.X, y, hrp.Position.Z)
@@ -5836,7 +5891,7 @@ Viz.drawTargetHitbox = function(cam, model, hrp)
 		local col = Config.ConeSafe
 		local me  = localHRP()
 		if me then
-			local forward = math.max(styleForward(style, "M1"), styleForward(style, "M2"))
+			local forward = styleReach   -- [V97/PERF] reuse the value computed a few lines above
 			local off  = Vector3.new(me.Position.X - hrp.Position.X, 0, me.Position.Z - hrp.Position.Z)
 			local fwd  = off:Dot(flook)
 			local side = math.abs(off:Dot(Vector3.new(-flook.Z, 0, flook.X)))
