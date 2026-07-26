@@ -126,17 +126,17 @@ local SA_CONFIG = {
 	AimVisualInterval = 0.1,
 	AimVisualDrawInterval = 0.055,
 	CombatAimRefreshInterval = 0.08,
-	MultiPointRaycastCacheSec = 0.1,
 	AimScanMaxActors = 14,
-	MultiPointMaxActors = 5,
 	MultiPointCacheSec = 0.28,
 	MultiPointStickySec = 0.35,
-	MultiPointNegCacheSec = 0.05,
 	MultiPointRequireLos = false,
 	MuzzlePeekMaxOffset = 6,
 	SpoofMuzzleCacheSec = 0.12,
 	LosRaycastCacheSec = 0.1,
 	MuzzleVisual = true,
+	MuzzleLineColor = Color3.fromRGB(80, 220, 255),
+	MuzzleLineThickness = 2.0,
+	MuzzleLineTransparency = 0.15,
 	ClientMuzzleSpoof = true,
 	ServerFirstBullet = false,
 	ServerOnlyAimPatch = false,
@@ -175,12 +175,7 @@ local SA_CONFIG = {
 	LiteMultiPointMaxActors = 3,
 	LiteMultiPointBinarySteps = 2,
 	LiteMultiPointRefreshInterval = 0.09,
-	MultiPointWallSearchStep = 0.8,
-	MultiPointWallSearchMax = 8,
 	MultiPointMaxMuzzleDist = 8,
-	MultiPointBones = {
-		"Head", "UpperTorso", "LowerTorso"
-	},
 	ResolverLite = true,
 	ResolverLiteMode = "Aim",
 	ResolverLiteInset = 0.08,
@@ -188,8 +183,6 @@ local SA_CONFIG = {
 	ForceClientHit = true,
 	ForceHit = true,
 	IgnoreTeammates = true,
-	SaCornerPeekDist = 4.5,
-	SaPeekMaxOffset = 2.5,
 	AimSkipDeadHP = true,
 	AimVisuals = true,
 	ShotTracers = true,
@@ -253,9 +246,7 @@ local SA_CONFIG = {
 	ModifyBulletSpeedValue = 2000,
 	ModifyPresets = {
 		-- NoSpread: обнуляет Barrel_Spread, cal.Spread и все *Spread* в Tune
-		NoSpread = true,
 		-- NoRecoil: обнуляет Recoil_X/Z, RecoilForce, ViewModel Recoil
-		NoRecoil = true,
 		-- NoViewKick: только камера/отдача визуально (Recoil_Camera, KickBack)
 		NoViewKick = true,
 		-- RPM: выставляет tune.RPM = ModifyRPMValue
@@ -2186,12 +2177,14 @@ function Bridge.updateAimVisuals()
 
 	drawAimReticle(viz, cx, cy, tierColor, reticleAlpha, now)
 
-	-- Клиентская линия: muzzle → aim (predict)
+	-- Клиентская линия: muzzle → aim (predict). Цвет/толщина/прозрачность
+	-- настраиваются — раньше были захардкожены и найти их было негде.
 	if CONFIG.MuzzleVisual then
 		drawSeg(
-			ensureLine("muzzleLine", 2.0, 44),
+			ensureLine("muzzleLine", CONFIG.MuzzleLineThickness or 2.0, 44),
 			muzzlePos, aimWorld,
-			Color3.fromRGB(80, 220, 255), 0.85
+			CONFIG.MuzzleLineColor or Color3.fromRGB(80, 220, 255),
+			1 - (CONFIG.MuzzleLineTransparency or 0.15)
 		)
 		if Bridge.shouldClientSpoofMuzzlePosition() then
 			local spoof, serverAim = Bridge.previewServerWallBang(muzzlePos, aimWorld, target)
@@ -3736,8 +3729,6 @@ function Bridge.applyModifyPresetFullAuto(ctx)
 end
 
 local MODIFY_APPLIERS = {
-	NoSpread = Bridge.applyModifyPresetNoSpread,
-	NoRecoil = Bridge.applyModifyPresetNoRecoil,
 	NoViewKick = Bridge.applyModifyPresetNoViewKick,
 	RPM = Bridge.applyModifyPresetRPM,
 	FullAuto = Bridge.applyModifyPresetFullAuto,
@@ -3752,8 +3743,6 @@ local MODIFY_APPLIERS = {
 
 function Bridge.getModifyPresetInfo()
 	return {
-		NoSpread = "Обнуляет разброс (Tune.Barrel_Spread, cal.Spread)",
-		NoRecoil = "Обнуляет отдачу оружия и ViewModel Recoil",
 		NoViewKick = "Только визуальная отдача камеры (Recoil_Camera, KickBack)",
 		RPM = "Выставляет скорострельность = ModifyRPMValue",
 		FullAuto = "Принудительный режим Auto",
@@ -4226,10 +4215,28 @@ local function startAimThread()
 		end
 
 		-- ESP обновляется в BRM5ESP_v2 Heartbeat — не дублируем здесь
-		if CONFIG.AimVisuals and combatActive then
+		-- FIX: единый гейт «в руках огнестрел». combatAimActive уже требует
+		-- firearm-контекст, но он завязан ещё и на CONFIG.SilentAim — поэтому
+		-- при выключенном SilentAim визуалы могли жить своей жизнью, в том
+		-- числе с ножом в руках. Теперь считаем признак один раз за кадр и
+		-- гасим ВСЕ визуалы прицеливания, если ствола нет.
+		local haveFirearm = combatActive
+		if not haveFirearm then
+			local wc = Bridge.peekWeaponContext and Bridge.peekWeaponContext(1.5)
+			if wc and wc.isMelee ~= true and wc.tune ~= nil then
+				local cal = wc.info and wc.info.caliber
+				haveFirearm = type(cal) ~= "string" or (cal ~= "melee" and cal ~= "")
+			end
+		end
+		State.saHaveFirearm = haveFirearm
+		if CONFIG.AimVisuals and combatActive and haveFirearm then
 			Bridge.updateAimVisuals()
 		else
 			Bridge.hideAimViz()
+		end
+		if not haveFirearm then
+			-- ножом трейсеры/маркеры не рисуем вообще
+			if Bridge.clearShotTracers then pcall(Bridge.clearShotTracers) end
 		end
 
 		-- FIX v11: FOV Circle — показывается только при наличии огнестрельного оружия И включённом SilentAim
@@ -4237,6 +4244,7 @@ local function startAimThread()
 			local fc = State.fovCircle
 			if fc then
 				local wantShow = CONFIG.FovCircle == true and CONFIG.SilentAim == true
+					and State.saHaveFirearm ~= false
 				if wantShow then
 					local fovCheckT = State.lastFovWeaponCheck or 0
 					local wCtx = State.fovWeaponCtx
@@ -4508,7 +4516,7 @@ function SilentAim.buildUI(ui)
 			K.setVisible(mkEls, CONFIG.AimVisuals ~= false)
 			-- RGB-перелив есть только у свастики — прячем для остальных стилей
 			K.setVisible(swasEls, CONFIG.AimVisuals ~= false
-				and (CONFIG.AimVisualStyle == "Swastika"))
+				and (CONFIG.AimVisualStyle == "Swastika"), true)  -- режим, скрываем всегда
 		end
 		K.toggle(V, { Name = "Enabled", Flag = "AimVisuals", Title = "Aim Marker",
 			get = function() return CONFIG.AimVisuals end,
@@ -4539,10 +4547,20 @@ function SilentAim.buildUI(ui)
 		mkVis()
 
 		K.group(V, "Lines")
-		K.toggle(V, { Name = "Muzzle Visual", Flag = "MuzzleVisual", Title = "Muzzle Visual",
+		K.toggle(V, { Name = "Muzzle Line", Flag = "MuzzleVisual", Title = "Muzzle Line",
 			get = function() return CONFIG.MuzzleVisual end,
 			set = function(v) CONFIG.MuzzleVisual = v end,
-			Desc = "shows where the shot really leaves the barrel" })
+			Desc = "line from the barrel to where the shot actually goes" })
+		K.color(V, { Name = "Line Color", Flag = "MuzzleColor",
+			Default = CONFIG.MuzzleLineColor or Color3.fromRGB(80, 220, 255),
+			Callback = function(c) CONFIG.MuzzleLineColor = c end })
+		K.slider(V, { Name = "Line Thickness", Flag = "MuzzleThick",
+			Default = math.floor((CONFIG.MuzzleLineThickness or 2) * 10), Min = 5, Max = 60,
+			Callback = function(v) CONFIG.MuzzleLineThickness = v / 10 end })
+		K.slider(V, { Name = "Line Transparency", Flag = "MuzzleTransp",
+			Default = math.floor((CONFIG.MuzzleLineTransparency or 0.15) * 100),
+			Min = 0, Max = 95, Suffix = "%",
+			Callback = function(v) CONFIG.MuzzleLineTransparency = v / 100 end })
 
 		-- Трейсеры живут здесь, в Visuals — раньше были закопаны в Feedback
 		-- рядом со звуком попадания, где их никто не искал.
