@@ -1,2496 +1,1927 @@
 --[[
-	BRM5ESP_v12 — CHANGELOG от v11:
+    BRM5 Visuals / World  v2  (scripts/visuals.lua)
+    Контракт загрузчика: файл возвращает function(Lib) -> { start=fn, stop=fn }
 
-	FIX 1 — Зависание ESP на пару фреймов:
-	  Причина: ranked-пересборка (pairs по всему State.actors) и vpCache-flush
-	  происходили синхронно в том же кадре что и draw-цикл, без yield.
-	  Теперь пересборка ranked вынесена в отдельный task.defer-шаг — draw-кадр
-	  никогда не делает тяжёлый pairs() + sort() синхронно.
+    ── ХОТКЕИ (Numpad) ─────────────────────────────────────────────────────────
+      Num1  Viewmodel      — смещение рук, FOV, материал/цвет рук от 1-го лица
+      Num2  GunModel       — подсветка оружия (как ResolveAngle-виз)
+      Num3  ThirdPersonSkin— стилизация СВОЕЙ модели в 3-м лице (камера в movement)
+      Num4  VehicleFly     — полёт на транспорте (WASD + Space/Ctrl)
+      Num5  VehicleSpeed   — множитель скорости транспорта
+      KpEnter FreeGun      — снять блок экипировки оружия (в транспорте и пр.)
+      Num6  Ambient        — время суток и яркость (только клиент)
+      Num7  NoFWait        — убирает hold-таймер ProximityPrompt
+      Num8  LockpickBypass — авто-успех мини-игры взлома
+      Num9  Fullbright     — максимальное освещение без теней
+      Num0  NoFog          — убирает туман
 
-	FIX 2 — Лимит акторов заменён приоритетом:
-	  EspBoxMaxActors / динамический npcCount-cap убраны. Ranked-список теперь
-	  включает ВСЕХ eligible акторов, сортируется: сначала игроки (ближние),
-	  затем NPC. Лимит остался только для рендер-бюджета скелетона/chams (те же
-	  EspSkeletonMaxActors, EspChamsMaxActors). Кэш-прогрузка регулируется новым
-	  ActorRankBatchSize — каждый кадр сортируется не весь список, а добавляются
-	  только новые акторы пачками.
-
-	FIX 3 — Накопление кэша / нарастающие фризы:
-	  a) State.drawings прибирается каждые 5s (было), но теперь ТАКЖЕ при retire
-	     актора мы немедленно destroyEspEntry чтобы Drawing-объекты не копились.
-	  b) State.espVisibleCache чистится вместе с drawings на каждом gc-тике.
-	  c) _healthCache, _weaponInfoT, _espHotbarCache очищаются при retire.
-	  d) vpCache создаётся новый каждый кадр (уже было) — оставлено.
-	  e) Убраны мусорные алиасы: drawEspStatusChips/drawEspStatusText — дублировали
-	     drawEspStatusBar без добавленной ценности.
-
-	BRM5ESP_v9 — CHANGELOG от v8:
-
-	FIX FPS (мало NPC, 4-15 шт):
-	  Масштабирование enrich/render по npcCount; skeleton/chams только для игроков.
-	  Динамический EspBoxMaxActors при росте числа NPC.
-
-	BRM5ESP_v8 — CHANGELOG от v7:
-
-	FIX FPS (NPC-карты 100+):
-	  Адаптивный enrich/render interval — при большом trackedActorCount снижаем частоту ESP.
-
-	BRM5ESP_v7 — CHANGELOG от v6:
-
-	FIX ZMP PLAYERS NOT VISIBLE (ESP рендер):
-	  FIX #1: computeEspBoundsBox — HRP существовал в InactiveWorld (on=false),
-	    tryPos бралось как hrp.Position → WorldToViewportPoint on=false → return nil.
-	    Теперь: пробуем hrp, если on=false — берём actorData.SimulatedPosition (adPos).
-	  FIX #2: updateESP ranked dist — root.Position=0,0,0 для InactiveWorld акторов
-	    → dist считался от 0,0,0 → неверный rank. Теперь использует data.adPos.
-	  FIX #3: computeEspBoundsBox adPos приоритет SimulatedPosition > ServerPosition > Position.
+    ── ЧТО ИГРА ХРАНИТ (дамп Flux, для справки) ────────────────────────────────
+      _localActor : { UID, Alive, IsLocalPlayer, Character, CFrame, SimulatedPosition,
+                      ForceNextPosition, HeightState, Zoom, CameraZoom, ViewModel,
+                      Controller, CurrentState, Focused, Seat, Vehicle }
+      ViewModel   : { Root(BasePart), Offset(CFrame), ADSOffset, ADSLerp, CQB,
+                      SprintLerp, NVGFOV, Canted, Recoil, Material, :SetModel,
+                      :Update }   ← Update() ставит Root.CFrame каждый кадр
+      Camera      : FieldOfView пересчитывается КАЖДЫЙ кадр → FOV меняем через
+                    BindToRenderStep (приоритет после камеры)
+      Vehicle     : { Throttle, Steering, Seats, VehicleMain, _derivedVelocity }
+      LockPickCtrl: { _picks(0..6), _speed, _expires, _cancelled, _localActor }
+                    при _picks==6 шлёт FireServer("ActivateInteract","Picked")
 ]]
---[[
-	BRM5ESP_v2 — ESP module
-	Использование:
-	  local Lib = loadstring(readfile("BRM5Lib.lua"))()
-	  local ESP = loadstring(readfile("BRM5ESP.lua"))()(Lib)
-	  ESP.start()
---]]
+
 return function(Lib)
-local Bridge = Lib.Bridge
-local CONFIG  = Lib.CONFIG
-local State   = Lib.State
-
-local ESP_CONFIG = {
-	ESP                   = false,   -- master OFF by default
-	EspBox                = true,
-	EspSkeleton           = true,
-	EspChams              = false,
-	EspHpBar              = true,
-	EspWeaponInfo         = true,
-	EspActorStatus        = true,
-	EspShowSecondary      = true,
-	EspShowStance         = true,
-	EspShowInventory      = true,
-	EspSmooth             = false,
-	EspSmoothAlpha        = 1.0,
-	EspRenderInterval     = 0.0167,  -- FIX v8: 60 fps (было 0.15 ~7fps)
-	EspFullRescanInterval = 30.0,   -- FIX v8: полный ресканирование 30s (было 45)
-	EspVisibleCheck       = true,
-	EspVisibleStrict      = true,
-	EspVisibleInterval    = 0.35,
-	EspVisibleCheckNpc    = false,
-	EspShowDistance       = true,
-	EspNpcNameOnly        = true,
-	EspSkeletonMaxActors  = 24,       -- скелет только для топ-N по дистанции (игроки приоритет)
-	EspSkeletonMaxDist    = 800,      -- скелет до 800 studs
-	-- EspBoxMaxActors убран v12: теперь нет жёсткого лимита акторов в ESP.
-	-- Приоритет: игроки первыми, затем NPC. Бюджет скелетона/chams — отдельно.
-	ActorSyncBatchSize    = 8,        -- v18 PATCH: синхронизировано с silentaim
-	EspChamsMaxActors     = 10,
-	-- v12: пересборка ranked вынесена в defer, добавляется не более N новых акторов за раз
-	-- v12.2: Box modes: "Box" (default) | "Corner" (уголки).  3D удалён.
-	EspBoxMode            = "Box",
-	EspCornerLen          = 0.22,  -- длина уголка как доля высоты бокса (Corner mode)
-	-- v12: Zombie cluster — группируем близких зомби в один текстовый лейбл
-	EspZombieCluster      = true,
-	EspZombieClusterDist  = 8,    -- studs: зомби ближе этого расстояния друг к другу = кластер
-	EspZombieClusterMin   = 2,    -- минимальное кол-во зомби для кластера
-	EspWeaponPlayersOnly  = false,
-	EspIgnoreTeam         = true,
-	EspShowPlayers        = true,
-	EspShowPlayersInPve   = true,  -- FIX v8: показывать игроков в PVE-зонах (ZME/CM_/OW_/HQ_)
-	ForceShowAllPlayers   = true,  -- FIX v8: показывать ВСЕХ игроков независимо от режима
-	EspShowFriendly       = true,
-	EspShowHostile        = true,
-	EspShowZombie         = true,
-	EspShowNpc            = true,
-	EspShowDead           = true,  -- метка 'Dead' на мёртвых ИГРОКАХ (не NPC)
-	EspNpcStatus          = true,
-	EspVisibleBones       = { "Head", "UpperTorso", "LowerTorso" },
-	EspBatchSize          = 6,        -- итоговое значение (было переопределено дважды)
-	ActorEnrichBatchSize  = 4,        -- итоговое значение (было переопределено дважды)
-	DrawingHighTransparencyMeansVisible = true,
-}
-for k,v in pairs(ESP_CONFIG) do CONFIG[k] = v end
-
-local SKELETON_R15 = {
-	{"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
-	{"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
-	{"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
-	{"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
-	{"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
-}
-local SKELETON_R6 = {
-	{"Head","Torso"},{"Torso","Right Arm"},{"Torso","Left Arm"},
-	{"Torso","Right Leg"},{"Torso","Left Leg"},
-}
-local ESP_COLORS = {
-	team     = Color3.fromRGB(100, 200, 255),
-	visible  = Color3.fromRGB(70,  255,  90),
-	hidden   = Color3.fromRGB(255,  55,  55),
-	teammate = Color3.fromRGB(170, 255, 170),
-	dead     = Color3.fromRGB(220,  45,  45),
-	self     = Color3.fromRGB(80,  220, 255),
-	npc      = Color3.fromRGB(255, 200,  60),
-	zombie   = Color3.fromRGB(180, 255,  80),
-	-- FIX v4: hostile=красный, friendly=зелёный (логичная цветовая схема)
-	hostile  = Color3.fromRGB(255,  50,  50),
-	friendly = Color3.fromRGB(80,  220,  80),
-	unknown  = Color3.fromRGB(180, 180, 180),
-}
-
-State.drawings        = State.drawings        or {}
-State.espHighlights   = State.espHighlights   or {}
-State.espVisibleCache = State.espVisibleCache or {}
-State.espRanked       = nil
-State.espVisibleBatchIndex = 0
-State.lastEspUpdate   = 0
-State.espRankedTime   = 0
-State.espLastActorCount = -1
-
-local espConn = nil
-local tableField     = Bridge._tableField
-local ESP_BOX_PARTS  = {
-	"Head", "UpperTorso", "LowerTorso",
-	"LeftFoot", "RightFoot",
-	"LeftHand", "RightHand",
-}
-
--- ── Кэш частей тела (главная оптимизация фризов update/batch) ────────────────
--- Раньше draw-кадр вызывал model:FindFirstChild(name) для КАЖДОЙ части КАЖДОГО
--- актора КАЖДЫЙ кадр. FindFirstChild линейно обходит детей — на R6-ригах поиск
--- R15-имён (LeftFoot и т.п.) промахив��лся и обходил всех детей вхолостую каждый
--- кадр. Кэшируем по модели (weak-key): попадания → O(1)+про��ерка Parent, промахи
--- перепроверяются не чаще раза в секу��ду. Частота ESP и число элементов не тронуты.
-local espPartCache = setmetatable({}, { __mode = "k" })
--- Константы цвета HP-бара: раньше создавались заново на каждого актора
--- в каждом кадре (Color3.fromRGB — аллокация).
-local HP_OUTLINE_COL = Color3.fromRGB(8, 8, 8)
-local HP_BG_COL      = Color3.fromRGB(22, 22, 22)
-local function getBodyPart(model, name)
-	if not model then return nil end
-	local bucket = espPartCache[model]
-	if not bucket then
-		bucket = { hit = {}, miss = {}, rig = nil }
-		espPartCache[model] = bucket
-	end
-	local hit = bucket.hit[name]
-	if hit and hit.Parent == model then return hit end
-	local clk = os.clock()
-	local mt = bucket.miss[name]
-	if mt and clk < mt then return nil end   -- недавно промахнулись → не ищем снова
-	local found = model:FindFirstChild(name)
-	if found and found:IsA("BasePart") then
-		bucket.hit[name] = found
-		bucket.miss[name] = nil
-		return found
-	end
-	bucket.miss[name] = clk + 1.0             -- закэшировать промах на 1с
-	return nil
-end
-Bridge.getEspBodyPart = getBodyPart
-local ESP_WEAPON_TEXT = Color3.fromRGB(255, 255, 230)
-local ESP_SECONDARY_TEXT = Color3.fromRGB(255, 110, 110)
-local ESP_STANCE_CROUCH = Color3.fromRGB(255, 210, 100)
-local ESP_STANCE_LYING = Color3.fromRGB(255, 165, 80)
-local ESP_INVENTORY_TEXT = Color3.fromRGB(210, 220, 240)
-local ESP_STATUS_TEXT = Color3.fromRGB(235, 235, 245)
-local ESP_LABEL_SIZE = 14
-local ESP_LINE_STEP = 0.52
-local ESP_STACK_GAP = 3
-local ESP_STATUS_CHIP_MAX = 6
-local ESP_STATUS_CHIP_GAP = 2
-local ESP_STATUS_KIND_COLORS = {
-	weapon = Color3.fromRGB(255, 70, 70),
-	combat = Color3.fromRGB(255, 70, 70),
-	reload = Color3.fromRGB(255, 160, 45),
-	move = Color3.fromRGB(90, 200, 255),
-	stance = Color3.fromRGB(190, 170, 255),
-	interact = Color3.fromRGB(255, 210, 90),
-	gear = Color3.fromRGB(170, 255, 150),
-}
-local ESP_STATUS_ABBR = {
-	Sprinting = "Sprint",
-	Aiming = "Aim",
-	ADS = "Aim",
-	Firing = "Fire",
-	Reloading = "Reload",
-	Sliding = "Slide",
-	Swimming = "Swim",
-	Looting = "Loot",
-	Dragging = "Drag",
-	Dragged = "Dragged",
-	Climbing = "Climb",
-	Downed = "Down",
-	Medical = "Med",
-	Lockpick = "Lock",
-	Hostage = "Host",
-	Takedown = "Take",
-	CQB = "CQB",
-	Crouching = "Crouch",
-	Prone = "Prone",
-	Lying = "Lie",
-}
-
-
--- FIX (поведенческая ловушка): здесь была СВОЯ версия Bridge.isTeammateActor,
--- которая при загрузке ESP затирала библиотечную — глобально, для всех.
--- Логика у них разная: библиотечная сверяет отряды напрямую, эта же считала
--- «не враг = союзник». Из-за подмены внутренние потребители библиотеки
--- (collectTeammateIgnore — защита от стрельбы по своим, isEnemyHitPart)
--- молча начинали пользоваться упрощённым вариантом. Дубль удалён,
--- используется единственная реализация из library.lua.
-
-function Bridge.shouldEspShowActor(data)
-	if not data or data.class == "self" then return false end
-	-- Труп игрока (class=="dead"): пропускаем чтобы отрисовать метку 'Dead'.
-	-- Труп НЕ-игрока (NPC) не показываем.
-	if data.class == "dead" then
-		return CONFIG.EspShowDead ~= false and data.player ~= nil
-	end
-	if data.class == "player" then
-		return CONFIG.EspShowPlayers ~= false
-	end
-	-- FIX v4: дистанционный фильтр для NPC — zombie 200м, остальные NPC 1000м
-	if data.class == "npc_friendly" or data.class == "npc_hostile"
-		or data.class == "npc_zombie" or data.class == "npc" then
-		local root = data.root
-		if root and root.Parent then
-			local cam = workspace and workspace.CurrentCamera
-			local camPos = cam and cam.CFrame.Position
-			if camPos then
-				local p = root.Position
-				local distSq = (p.X-camPos.X)^2 + (p.Y-camPos.Y)^2 + (p.Z-camPos.Z)^2
-				local maxSq = (data.class == "npc_zombie") and (200*200) or (1000*1000)
-				if distSq > maxSq then return false end
-			end
-		end
-		if data.class == "npc_friendly" then return CONFIG.EspShowFriendly ~= false end
-		if data.class == "npc_hostile" then return CONFIG.EspShowHostile ~= false end
-		if data.class == "npc_zombie" then return CONFIG.EspShowZombie ~= false end
-		if data.class == "npc" then return CONFIG.EspShowNpc ~= false end
-	end
-	return true
-end
-
-function Bridge.shouldEspHideAsTeammate(data)
-	if not CONFIG.EspIgnoreTeam then return false end
-	if not data or data.class == "self" or data.class == "dead" then return false end
-	if Bridge.isEnemyActor(data) then return false end
-	if CONFIG.IgnoreTeammates ~= false then return true end
-	if CONFIG.TeamCheck and State.localSquad == nil then return false end
-	return Bridge.isTeammateActor(data)
-end
-
-function Bridge.getEspColor(data, visible)
-	if Bridge.isActorDead(data) or data.class == "dead" then
-		return ESP_COLORS.dead
-	end
-	if data.class == "self" then
-		return ESP_COLORS.self
-	end
-	if Bridge.isTeammateActor(data) then
-		return ESP_COLORS.teammate
-	end
-	-- FIX v4: NPC используют class-based цвета НЕЗАВИСИМО от EspVisibleCheck
-	-- hostile = красный, friendly = зелёный, zombie = желто-зелёный
-	if data.class == "npc_hostile" then
-		return ESP_COLORS.hostile
-	end
-	if data.class == "npc_zombie" then
-		return ESP_COLORS.zombie
-	end
-	if data.class == "npc_friendly" then
-		return ESP_COLORS.friendly
-	end
-	if data.class == "npc" then
-		return ESP_COLORS.npc
-	end
-	-- Для игроков: visible check работает как раньше
-	if CONFIG.EspVisibleCheck then
-		return visible and ESP_COLORS.visible or ESP_COLORS.hidden
-	end
-	if data.class == "player" then
-		return ESP_COLORS.hidden
-	end
-	return ESP_COLORS.unknown
-end
-
-function Bridge.resolveActorHealth(data)
-	if not data then return nil, nil end
-	-- v17: кэш здоровья на 0.2s — не дёргаем дампы каждый кадр ESP
-	local now = os.clock()
-	if data._healthCache and now - (data._healthCacheT or 0) < 0.2 then
-		return data._healthCache[1], data._healthCache[2]
-	end
-	local actorData = data.actorData
-	if not actorData and data.uid then
-		actorData = Bridge.getReplicatorActorData(data.uid)
-		if actorData then
-			data.actorData = actorData
-		end
-	end
-	local function cacheAndReturn(hp, maxHp)
-		data._healthCache = {hp, maxHp or 100}
-		data._healthCacheT = now
-		return hp, maxHp or 100
-	end
-	if type(actorData) == "table" then
-		local hp = tableField(actorData, "Health")
-		local maxHp = tableField(actorData, "MaxHealth") or tableField(actorData, "MaxHP")
-		if type(hp) == "number" then
-			return cacheAndReturn(hp, (type(maxHp) == "number" and maxHp > 0) and maxHp or 100)
-		end
-	end
-	if type(data.health) == "number" then
-		local maxHp = data.maxHealth
-		if data.class == "npc_zombie" and (type(maxHp) ~= "number" or maxHp <= 0) then
-			maxHp = 100
-		end
-		return cacheAndReturn(data.health, maxHp or 100)
-	end
-	local model = data.model
-	if model then
-		-- Кэшируем Humanoid в бакете частей (тот же weak-key по модели), чт��бы
-		-- не звать FindFirstChildOfClass каждый кадр на каждого актора.
-		local bucket = espPartCache[model]
-		local hum = bucket and bucket.hum
-		if not (hum and hum.Parent == model) then
-			hum = model:FindFirstChildOfClass("Humanoid")
-			if hum then
-				if not bucket then bucket = { hit = {}, miss = {} }; espPartCache[model] = bucket end
-				bucket.hum = hum
-			end
-		end
-		if hum then
-			return cacheAndReturn(hum.Health, hum.MaxHealth)
-		end
-	end
-	return nil, nil
-end
-
-function Bridge.parseWeaponFromCharacterModel(model)
-	if not model or not model.Parent then return nil end
-	local wm = model:FindFirstChild("WorldModel")
-	local roots = wm and wm:GetChildren() or model:GetChildren()
-	for _, child in ipairs(roots) do
-		if child:IsA("Model") then
-			local n = child.Name
-			if type(n) == "string" and string.match(n, "^Firearm") then
-				local display = string.gsub(n, "^FirearmPrimary", ""):gsub("^FirearmSecondary", "")
-				return { name = display, cur = nil, max = nil }
-			end
-		end
-	end
-	return nil
-end
-
-function Bridge.getSkeletonPairs(model)
-	if not model then return SKELETON_R15 end
-	-- Тип рига не меняется за жизнь модели → кэшируем в бакете частей.
-	local bucket = espPartCache[model]
-	if bucket and bucket.rig then return bucket.rig end
-	local pairs
-	if getBodyPart(model, "UpperTorso") then pairs = SKELETON_R15
-	elseif getBodyPart(model, "Torso") then pairs = SKELETON_R6
-	else pairs = SKELETON_R15 end
-	bucket = espPartCache[model]
-	if bucket then bucket.rig = pairs end
-	return pairs
-end
-
-function Bridge.hideEspEntry(entry, reason, detail)
-	if not entry then return end
-	-- FIX (главная оставшаяся причина просадки FPS): эта функция писала
-	-- Visible=false примерно в 45 Drawing-объектов КАЖДЫЙ кадр — для каждого
-	-- актора, которого сейчас не рисуем (тиммейты, мёртвые, за экраном,
-	-- отфильтрованные). Объекты уже были скрыты, запись ничего не меняла, но
-	-- каждая из них — переход через границу экзекутора. На смешанной карте
-	-- набегало 2-4 тысячи бессмысленных записей в кадр.
-	-- Теперь флаг: скрыли один раз — больше не трогаем, пока не отрисуем.
-	if entry._hidden then return end
-	entry._hidden = true
-	Bridge.logVizHide("ESP", reason or "entry", detail)
-	if entry.boxLines then
-		for _, line in ipairs(entry.boxLines) do line.Visible = false end
-	end
-	if entry.skelLines then
-		for _, line in ipairs(entry.skelLines) do line.Visible = false end
-	end
-	if entry.skelShoulderLine then entry.skelShoulderLine.Visible = false end
-	if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
-	if entry.hpBg     then entry.hpBg.Visible      = false end
-	if entry.hpFill   then entry.hpFill.Visible     = false end
-	if entry.hpOutline then entry.hpOutline.Visible = false end
-	if entry.weaponText then entry.weaponText.Visible = false end
-	if entry.weaponBg then entry.weaponBg.Visible = false end
-	Bridge.hideEspExtraTexts(entry)
-	if entry.statusText then entry.statusText.Visible = false end
-	if entry.statusBg then entry.statusBg.Visible = false end
-	if entry.statusChips then
-		for _, chip in ipairs(entry.statusChips) do
-			chip.Visible = false
-		end
-	end
-	if entry.text      then entry.text.Visible       = false end
-	-- smoothRect НЕ обнуляем: таблица переиспользуется (см. smoothEspRect),
-	-- обнуление заставляло бы аллоцировать её заново на каждом возврате
-	-- актора в кадр. Значения всё равно перезаписываются при отрисовке.
-	entry._boxRect = nil
-end
-
-function Bridge.ensureEspDrawing(uid)
-	local entry = State.drawings[uid]
-	if entry then
-		if not entry.hpOutline then
-			entry.hpOutline = Drawing.new("Square")
-			entry.hpOutline.Filled = false
-			entry.hpOutline.Thickness = 1
-			entry.hpOutline.Visible = false
-			entry.hpOutline.ZIndex = 17
-		end
-		if not entry.weaponText then
-			entry.weaponText = Drawing.new("Text")
-			entry.weaponText.Size = ESP_LABEL_SIZE
-			entry.weaponText.Outline = true
-			entry.weaponText.Center = true
-			entry.weaponText.Visible = false
-			entry.weaponText.ZIndex = 24
-		end
-		if not entry.weaponBg then
-			entry.weaponBg = Drawing.new("Square")
-			entry.weaponBg.Filled = true
-			entry.weaponBg.Visible = false
-			entry.weaponBg.ZIndex = 22
-		end
-		if not entry.statusText then
-			entry.statusText = Drawing.new("Text")
-			entry.statusText.Size = ESP_LABEL_SIZE
-			entry.statusText.Outline = true
-			entry.statusText.Center = true
-			entry.statusText.Visible = false
-			entry.statusText.ZIndex = 24
-		end
-		if not entry.statusBg then
-			entry.statusBg = Drawing.new("Square")
-			entry.statusBg.Filled = true
-			entry.statusBg.Visible = false
-			entry.statusBg.ZIndex = 22
-		end
-		if not entry.skelHeadCircle then
-			entry.skelHeadCircle = Drawing.new("Circle")
-			entry.skelHeadCircle.Filled = false
-			entry.skelHeadCircle.Thickness = 1.4
-			entry.skelHeadCircle.NumSides = 16
-			entry.skelHeadCircle.Visible = false
-			entry.skelHeadCircle.ZIndex = 19
-		end
-		if not entry.skelShoulderLine then
-			entry.skelShoulderLine = Drawing.new("Line")
-			entry.skelShoulderLine.Thickness = 1.35
-			entry.skelShoulderLine.Visible = false
-			entry.skelShoulderLine.ZIndex = 19
-		end
-		return entry
-	end
-	entry = {
-		boxLines = {},
-		skelLines = {},
-		skelShoulderLine = Drawing.new("Line"),
-		skelHeadCircle = Drawing.new("Circle"),
-		text = Drawing.new("Text"),
-		statusText = Drawing.new("Text"),
-		weaponText = Drawing.new("Text"),
-		weaponBg = Drawing.new("Square"),
-		statusBg = Drawing.new("Square"),
-		hpBg = Drawing.new("Square"),
-		hpFill = Drawing.new("Square"),
-		hpOutline = Drawing.new("Square"),
-	}
-	-- v12: 12 слотов для boxLines (Box=4, Corner=8, 3D=12)
-	for i = 1, 12 do
-		local line = Drawing.new("Line")
-		line.Thickness = 1.8
-		line.Visible = false
-		line.ZIndex = 20
-		entry.boxLines[i] = line
-	end
-	for i = 1, #SKELETON_R15 do
-		local line = Drawing.new("Line")
-		line.Thickness = 1.4
-		line.Visible = false
-		line.ZIndex = 19
-		entry.skelLines[i] = line
-	end
-	entry.skelHeadCircle.Filled = false
-	entry.skelHeadCircle.Thickness = 1.4
-	entry.skelHeadCircle.NumSides = 16
-	entry.skelHeadCircle.Visible = false
-	entry.skelHeadCircle.ZIndex = 19
-	entry.skelShoulderLine.Thickness = 1.35
-	entry.skelShoulderLine.Visible = false
-	entry.skelShoulderLine.ZIndex = 19
-	entry.text.Size = ESP_LABEL_SIZE + 1
-	entry.text.Outline = true
-	entry.text.Center = true
-	entry.text.Visible = false
-	entry.text.ZIndex = 22
-	entry.statusText.Size = ESP_LABEL_SIZE
-	entry.statusText.Outline = true
-	entry.statusText.Center = true
-	entry.statusText.Visible = false
-	entry.statusText.ZIndex = 23
-	entry.weaponText.Size = ESP_LABEL_SIZE
-	entry.weaponText.Outline = true
-	entry.weaponText.Center = true
-	entry.weaponText.Visible = false
-	entry.weaponText.ZIndex = 23
-	entry.hpBg.Filled = true
-	entry.hpBg.Visible = false
-	entry.hpBg.ZIndex = 18
-	entry.hpFill.Filled = true
-	entry.hpFill.Visible = false
-	entry.hpFill.ZIndex = 19
-	entry.hpOutline.Filled = false
-	entry.hpOutline.Thickness = 1
-	entry.hpOutline.Visible = false
-	entry.hpOutline.ZIndex = 17
-	State.drawings[uid] = entry
-	return entry
-end
-
-local function espStripFirearmName(name)
-	if type(name) ~= "string" then return "?" end
-	name = string.gsub(name, "^FirearmPrimary", "")
-	name = string.gsub(name, "^FirearmSecondary", "")
-	name = string.gsub(name, "^Melee", "")
-	if #name > 18 then
-		name = string.sub(name, 1, 16) .. ".."
-	end
-	return name
-end
-
-local function espGetEquippedUid(actor)
-	if type(actor) ~= "table" then return nil end
-	local eq = tableField(actor, "_equipped")
-	if type(eq) ~= "string" or eq == "" then
-		local state = tableField(actor, "CurrentState")
-		eq = state and tableField(state, "Equip")
-	end
-	if type(eq) == "string" and eq ~= "" then return eq end
-	return nil
-end
-
-local function espFindHandlerForUid(actor, uid)
-	if type(actor) ~= "table" or type(uid) ~= "string" or uid == "" then return nil end
-	local inv = tableField(actor, "_inventory")
-	if type(inv) == "table" and type(inv[uid]) == "table" then
-		return inv[uid]
-	end
-	if Bridge.findFirearmHandler then
-		return Bridge.findFirearmHandler(actor, uid)
-	end
-	return nil
-end
-
-local function espCollectHotbarWeapons(actor, uid)
-	local now = os.clock()
-	local cache = State._espHotbarCache
-	if uid and cache and cache.uid == uid and cache.t and now - cache.t < 2.0 then
-		return cache.rows, cache.eqUid
-	end
-	local eqUid = espGetEquippedUid(actor)
-	local rows = {}
-	local mods = State.sharedModules
-	if not mods and Bridge.loadSharedModules then
-		mods = Bridge.loadSharedModules()
-	end
-
-	if Bridge.readSlotsFromActorState then
-		local slots = Bridge.readSlotsFromActorState(actor, mods) or {}
-		for _, slot in ipairs({ "Primary", "Secondary", "Melee" }) do
-			local item = slots[slot]
-			if type(item) == "table" then
-				local uid = Bridge.itemUid(item)
-				local name = Bridge.firearmDisplayName and Bridge.firearmDisplayName(item) or rawget(item, "Name")
-				rows[#rows + 1] = {
-					slot = slot,
-					uid = uid,
-					name = espStripFirearmName(name or "?"),
-					item = item,
-					handler = espFindHandlerForUid(actor, uid),
-					equipped = (uid and uid == eqUid) or false,
-				}
-			end
-		end
-	end
-
-	if #rows == 0 then
-		local inv = tableField(actor, "_inventory")
-		if type(inv) == "table" then
-			for invUid, handler in pairs(inv) do
-				if type(handler) ~= "table" then continue end
-				local item = rawget(handler, "_item")
-				local name = type(item) == "table" and rawget(item, "Name") or nil
-				if type(name) ~= "string" or not string.match(name, "^Firearm") then continue end
-				local slot = Bridge.slotLabelFromItem and Bridge.slotLabelFromItem(item, mods) or "Primary"
-				rows[#rows + 1] = {
-					slot = slot,
-					uid = invUid,
-					name = espStripFirearmName(name),
-					item = item,
-					handler = handler,
-					equipped = (invUid == eqUid) or rawget(handler, "_equipped") == true,
-				}
-			end
-		end
-	end
-
-	if uid then
-		State._espHotbarCache = { uid = uid, rows = rows, eqUid = eqUid, t = now }
-	end
-	return rows, eqUid
-end
-
-local function espResolveMagMax(handler, item)
-	local mods = State.sharedModules
-	if not mods and Bridge.loadSharedModules then
-		mods = Bridge.loadSharedModules()
-	end
-	if type(handler) == "table" then
-		local mag = rawget(handler, "_mag")
-		if type(mag) == "table" then
-			local maxC = rawget(mag, "Max") or rawget(mag, "MaxCapacity") or rawget(mag, "Capacity")
-			if type(maxC) == "number" and maxC > 0 then return maxC end
-		end
-	end
-	if Bridge.resolveMagMax then
-		local maxMag = Bridge.resolveMagMax(handler, item, mods)
-		if type(maxMag) == "number" and maxMag > 0 then return maxMag end
-	end
-	if type(item) == "table" then
-		local meta = rawget(item, "MetaData")
-		if type(meta) == "table" then
-			local magMeta = rawget(meta, "Mag")
-			if type(magMeta) == "table" and type(rawget(magMeta, "Capacity")) == "number" then
-				return magMeta.Capacity
-			end
-		end
-		local firearm = rawget(item, "File")
-		local tune = type(firearm) == "table" and rawget(firearm, "Tune")
-		if type(tune) == "table" and type(tune.Ammo) == "number" then
-			return tune.Ammo
-		end
-	end
-	return nil
-end
-
-local function espParseActorWeaponInfo(data)
-	if not data or data.dead then return nil end
-	if not data.actorData and data.uid then
-		data.actorData = Bridge.getReplicatorActorData(data.uid)
-	end
-	local actor = data.actorData
-	if type(actor) ~= "table" then return nil end
-
-	local rows, eqUid = espCollectHotbarWeapons(actor, data.uid)
-	local primary, secondaryRow
-	for _, row in ipairs(rows) do
-		if row.equipped then
-			primary = row
-		elseif row.slot == "Secondary" and not secondaryRow then
-			secondaryRow = row
-		end
-	end
-	if not primary then
-		for _, row in ipairs(rows) do
-			if row.slot == "Primary" then
-				primary = row
-				break
-			end
-		end
-	end
-	if not primary and rows[1] then
-		primary = rows[1]
-	end
-	if not primary then return nil end
-
-	if secondaryRow and (secondaryRow.uid == primary.uid or secondaryRow.name == primary.name) then
-		secondaryRow = nil
-	end
-	if secondaryRow and secondaryRow.equipped then
-		secondaryRow = nil
-	end
-
-	data.espSecondaryName = secondaryRow and secondaryRow.name or nil
-	data.espSecondarySlot = secondaryRow and secondaryRow.slot or nil
-
-	local invNames = {}
-	if CONFIG.EspShowInventory then
-		local seen = { [primary.name] = true }
-		if secondaryRow then seen[secondaryRow.name] = true end
-		local stateInv = Bridge.actorCurrentInventory and Bridge.actorCurrentInventory(actor)
-		if type(stateInv) == "table" then
-			for uid, entry in pairs(stateInv) do
-				if type(uid) ~= "string" or uid == eqUid then continue end
-				if type(entry) ~= "table" then continue end
-				local n = rawget(entry, "Name")
-				if type(n) ~= "string" then continue end
-				if string.match(n, "^Firearm") then continue end
-				local dn = espStripFirearmName(n)
-				if not seen[dn] then
-					invNames[#invNames + 1] = dn
-					seen[dn] = true
-				end
-			end
-		end
-	end
-	data.espInventoryNames = invNames
-
-	local handler = primary.handler or espFindHandlerForUid(actor, primary.uid)
-	local item = primary.item or (handler and rawget(handler, "_item"))
-	local maxMag = espResolveMagMax(handler, item)
-
-	return {
-		name = primary.name,
-		max = maxMag,
-	}
-end
-
-function Bridge.refreshActorWeaponInfo(data)
-	if not data or data.dead then return end
-	if Bridge.isNpcActorClass(data.class) then return end
-	local now = os.clock()
-	local ttl = CONFIG.EspWeaponInfoTtl or 2.5
-	if data.weaponInfo and now - (data._weaponInfoT or 0) < ttl then return end
-	local info = espParseActorWeaponInfo(data)
-	if info then
-		data.weaponInfo = info
-		data._weaponInfoT = now
-	end
-end
-
-local function espGetStanceChip(actor)
-	if type(actor) ~= "table" then return nil end
-	local hs = tableField(actor, "HeightState")
-	if type(hs) ~= "number" then return nil end
-	if hs == 2 then
-		return { text = "Lying", color = ESP_STANCE_LYING }
-	end
-	if hs == 1 then
-		return { text = "Crouching", color = ESP_STANCE_CROUCH }
-	end
-	return nil
-end
-
-local function espAdaptiveLabelSize(lineCount)
-	lineCount = lineCount or 1
-	if lineCount >= 5 then return ESP_LABEL_SIZE - 2 end
-	if lineCount >= 3 then return ESP_LABEL_SIZE - 1 end
-	return ESP_LABEL_SIZE
-end
-
-function Bridge.ensureEspLayoutRect(entry, cam, model, vpCache)
-	if not model or not cam then
-		entry._boxRect = nil
-		return nil
-	end
-	local raw = Bridge.computeEspHeadFeetBox(model, cam, vpCache)
-	if not raw then
-		entry._boxRect = nil
-		return nil
-	end
-	local rect = Bridge.smoothEspRect(entry, raw)
-	entry._boxRect = rect
-	return rect
-end
-
-function Bridge.ensureEspStatusChips(entry)
-	entry.statusChips = entry.statusChips or {}
-	for i = 1, ESP_STATUS_CHIP_MAX do
-		if not entry.statusChips[i] then
-			local chip = Drawing.new("Text")
-			chip.Size = ESP_LABEL_SIZE
-			chip.Outline = true
-			chip.Center = true
-			chip.Visible = false
-			chip.ZIndex = 23
-			entry.statusChips[i] = chip
-		end
-	end
-	return entry.statusChips
-end
-
-local function espStatusColor(entry)
-	return ESP_STATUS_KIND_COLORS[entry.kind] or ESP_STATUS_TEXT
-end
-
-local function espStatusLabel(text)
-	return ESP_STATUS_ABBR[text] or text
-end
-
-local function espMeasureChipWidth(text, size)
-	size = size or ESP_LABEL_SIZE
-	return math.max(12, #tostring(text) * size * 0.5 + 2)
-end
-
-function Bridge.formatEspStatusLine(entries)
-	if type(entries) ~= "table" then return nil end
-	local parts = {}
-	for _, e in ipairs(entries) do
-		if e.text and e.text ~= "Armed" then
-			parts[#parts + 1] = espStatusLabel(e.text)
-		end
-	end
-	if #parts == 0 then return nil end
-	return table.concat(parts, "·")
-end
-
-function Bridge.drawEspPlainText(textObj, cx, y, line, color, textSize)
-	if not textObj or not line or line == "" then
-		if textObj then textObj.Visible = false end
-		return y
-	end
-	textSize = textSize or ESP_LABEL_SIZE
-	textObj.Text = line
-	textObj.Size = textSize
-	textObj.Center = true
-	textObj.Outline = true
-	textObj.Color = color
-	textObj.Position = Vector2.new(cx, y)
-	Bridge.setDrawingAlpha(textObj, 1)
-	textObj.Visible = true
-	return y + textSize * ESP_LINE_STEP + ESP_STACK_GAP
-end
-
-function Bridge.hideEspStatusBar(entry)
-	if not entry then return end
-	if entry.statusText then entry.statusText.Visible = false end
-	if entry.statusBg then entry.statusBg.Visible = false end
-	if entry.statusChips then
-		for _, chip in ipairs(entry.statusChips) do
-			chip.Visible = false
-		end
-	end
-end
-
-function Bridge.removeEspChams(uid)
-	local hl = State.espHighlights[uid]
-	if hl then
-		pcall(function() hl:Destroy() end)
-		State.espHighlights[uid] = nil
-	end
-end
-
-function Bridge.updateEspChams(uid, model, color)
-	if not CONFIG.EspChams or not model or not model.Parent then
-		Bridge.removeEspChams(uid)
-		return
-	end
-	local hl = State.espHighlights[uid]
-	if not hl or not hl.Parent then
-		hl = Instance.new("Highlight")
-		hl.Name = "BRM5_ESP"
-		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		hl.FillTransparency = 0.72
-		hl.OutlineTransparency = 0.15
-		hl.Parent = model
-		State.espHighlights[uid] = hl
-	end
-	hl.Adornee = model
-	hl.FillColor = color
-	hl.OutlineColor = color
-	if hl.Enabled ~= true then
-		hl.Enabled = true
-	end
-end
-
-function Bridge.computeEspBoundsBox(model, cam, vpCache)
-	if not model or not cam then return nil end
-	local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
-	local footY, any = nil, false
-	local headTopY = nil   -- v12.2: истинная ВЕРШИНА головы (не центр)
-	for _, name in ipairs(ESP_BOX_PARTS) do
-		local p = getBodyPart(model, name)
-		if p then
-			local sp, on
-			if vpCache then
-				local cached = vpCache[p]
-				if cached then
-					sp, on = cached[1], cached[2]
-				else
-					sp, on = cam:WorldToViewportPoint(p.Position)
-					vpCache[p] = { sp, on }
-				end
-			else
-				sp, on = cam:WorldToViewportPoint(p.Position)
-			end
-			if on and sp.Z > 0.01 then
-				any = true
-				-- FIX v12: pad убран — WorldToViewportPoint уже учитывает перспективу;
-				-- постоянный пиксельный pad делал бокс шире на далёких дистанциях.
-				minX = math.min(minX, sp.X)
-				maxX = math.max(maxX, sp.X)
-				minY = math.min(minY, sp.Y)
-				maxY = math.max(maxY, sp.Y)
-				if name == "LeftFoot" or name == "RightFoot" then
-					footY = math.max(footY or sp.Y, sp.Y)
-				end
-				-- FIX v12.2: части дают ЦЕНТР — бокс раньше обрывался на середине головы.
-				-- Проецируем реальную верхушку головы (Position + полвысоты по мировой оси Y),
-				-- перспектива учитывается автоматически → бокс корректен на любой дистанции.
-				if name == "Head" then
-					local topWP = p.Position + Vector3.new(0, p.Size.Y * 0.5, 0)
-					local tsp, ton = cam:WorldToViewportPoint(topWP)
-					if ton and tsp.Z > 0.01 then
-						headTopY = tsp.Y
-						minY = math.min(minY, tsp.Y)
-					end
-				end
-			end
-		end
-	end
-	if not any or minX == math.huge then
-		-- FIX v7 ZMP: HRP может существовать в InactiveWorld (Parent!=nil, но on=false)
-		-- Пробуем HRP сначала, при on=false — берём actorData позицию как fallback
-		local hrp = getBodyPart(model, "HumanoidRootPart")
-			or getBodyPart(model, "UpperTorso")
-			or getBodyPart(model, "Head")
-			or model:FindFirstChildWhichIsA("BasePart")
-		local tryPos = nil
-		if hrp then
-			local sp, on = cam:WorldToViewportPoint(hrp.Position)
-			if on and sp.Z > 0.01 then
-				tryPos = hrp.Position
-			end
-		end
-		-- Если HRP on=false (InactiveWorld) или нет HRP — берём actorData позицию
-		if not tryPos then
-			local rawUid = model:GetAttribute("ActorUID")
-			local suid = rawUid and tostring(rawUid)
-			local actorEntry = suid and State.actors and State.actors[suid]
-			if actorEntry then
-				local adPos = actorEntry.adPos
-				if not adPos then
-					local ad = actorEntry.actorData
-					if type(ad) == "table" then
-						local p = rawget(ad, "SimulatedPosition") or rawget(ad, "ServerPosition") or rawget(ad, "Position")
-						if typeof(p) == "Vector3" then adPos = p end
-					end
-				end
-				if typeof(adPos) == "Vector3" then tryPos = adPos end
-			end
-		end
-		if tryPos then
-			local sp, on = cam:WorldToViewportPoint(tryPos)
-			if on and sp.Z > 0.01 then
-				local pad = 28
-				return {
-					minX = sp.X - pad, maxX = sp.X + pad,
-					minY = sp.Y - pad * 2, maxY = sp.Y + pad,
-					topY = sp.Y - pad * 2,
-					footY = sp.Y + pad,
-					centerX = sp.X,
-				}
-			end
-		end
-		return nil
-	end
-	-- FIX v12.1: на близкой дистанции части тела (Head/UpperTorso/LeftUpperArm/RightUpperArm)
-	-- могут давать очень маленький X-спред если персонаж смотрит прямо в камеру.
-	-- Берём minWidth как max(спред, EspBoxAspect×height, абсолютный минимум 14px).
-	local height = math.max(maxY - minY, 10)
-	local rawWidth = maxX - minX
-	-- FIX v12.2: ширина ПРОПОРЦИОНАЛЬНА высоте (аспект персонажа), без жёсткого
-	-- пиксельного минимума. Прежний floor 14px доминировал на дистанции — бокс
-	-- становился всё шире относительно уменьшающейся высоты. Теперь аспект
-	-- сохраняется на любом расстоянии; крошечный floor 2px лишь против нуля.
-	local minWidth = math.max(height * (CONFIG.EspBoxAspect or 0.42), 2)
-	local width = math.max(rawWidth, minWidth)
-	local centerX = (minX + maxX) * 0.5
-	minX = centerX - width * 0.5
-	maxX = centerX + width * 0.5
-	return {
-		minX = minX, maxX = maxX,
-		minY = minY, maxY = maxY,
-		topY = minY,
-		headTopY = headTopY or minY,
-		footY = footY or maxY,
-		centerX = centerX,
-	}
-end
-
-function Bridge.computeEspHeadFeetBox(model, cam, vpCache)
-	return Bridge.computeEspBoundsBox(model, cam, vpCache)
-end
-
-function Bridge.smoothEspRect(entry, rect)
-	if not rect then return nil end
-	if CONFIG.EspSmooth == false or (CONFIG.EspSmoothAlpha or 1) >= 0.99 then
-		-- FIX: это ДЕФОЛТНАЯ ветка (сглаживание выключено), и она создавала
-		-- новую таблицу на каждого актора КАЖДЫЙ кадр — чистый мусор для GC.
-		-- Ветка со сглаживанием ниже пишет in-place; делаем так же.
-		local sr = entry.smoothRect
-		if not sr then
-			sr = {}
-			entry.smoothRect = sr
-		end
-		sr.minX = rect.minX; sr.maxX = rect.maxX
-		sr.minY = rect.minY; sr.maxY = rect.maxY
-		sr.footY = rect.footY or rect.maxY
-		sr.centerX = rect.centerX or (rect.minX + rect.maxX) * 0.5
-		return sr
-	end
-	local alpha = CONFIG.EspSmoothAlpha or 0.42
-	local s = entry.smoothRect
-	if not s then
-		entry.smoothRect = {
-			minX = rect.minX, maxX = rect.maxX,
-			minY = rect.minY, maxY = rect.maxY,
-			footY = rect.footY or rect.maxY,
-			centerX = rect.centerX or (rect.minX + rect.maxX) * 0.5,
-		}
-		return entry.smoothRect
-	end
-	s.minX += (rect.minX - s.minX) * alpha
-	s.maxX += (rect.maxX - s.maxX) * alpha
-	s.minY += (rect.minY - s.minY) * alpha
-	s.maxY += (rect.maxY - s.maxY) * alpha
-	if rect.footY then
-		s.footY = (s.footY or rect.footY) + (rect.footY - (s.footY or rect.footY)) * alpha
-	end
-	if rect.centerX then
-		s.centerX = (s.centerX or rect.centerX) + (rect.centerX - (s.centerX or rect.centerX)) * alpha
-	end
-	return s
-end
-
--- v12.2: режимы бокса — EspBoxMode: "Box" | "Corner"  (3D-режим удалён)
--- "Box"    — полный прямоугольник, 4 линии
--- "Corner" — уголки по 4 углам, длина = EspCornerLen * высоты, 8 линий
-function Bridge.drawEspBox(entry, cam, model, color, vpCache)
-	-- Любая отрисовка бокса означает, что запись снова видима — снимаем
-	-- флаг скрытия, иначе hideEspEntry больше никогда её не погасит.
-	if entry then entry._hidden = false end
-	if not CONFIG.EspBox then
-		for _, line in ipairs(entry.boxLines) do line.Visible = false end
-		return Bridge.ensureEspLayoutRect(entry, cam, model, vpCache)
-	end
-	local raw = Bridge.computeEspHeadFeetBox(model, cam, vpCache)
-	if not raw then
-		for _, line in ipairs(entry.boxLines) do line.Visible = false end
-		entry._boxRect = nil
-		entry.smoothRect = nil
-		return
-	end
-	local rect = Bridge.smoothEspRect(entry, raw)
-	entry._boxRect = rect
-	local mode = CONFIG.EspBoxMode or "Box"
-	-- v12.2: 3D-режим удалён — принудительно откатываем на обычный бокс.
-	if mode == "3D" then mode = "Box" end
-
-	-- Скрываем все линии первым проходом, потом включаем нужные
-	for _, line in ipairs(entry.boxLines) do line.Visible = false end
-
-	local function setLine(i, a, b)
-		local line = entry.boxLines[i]
-		if not line then return end
-		line.From = a; line.To = b
-		line.Color = color
-		Bridge.showDrawing(line, 1)
-	end
-
-	local tl = Vector2.new(rect.minX, rect.minY)
-	local tr = Vector2.new(rect.maxX, rect.minY)
-	local br = Vector2.new(rect.maxX, rect.maxY)
-	local bl = Vector2.new(rect.minX, rect.maxY)
-
-	if mode == "Corner" then
-		-- 4 угла × 2 линии = 8 линий
-		-- FIX v12.1: math.clamp крашился когда w/h малы (min > max). Безопасный кламп.
-		local cLen = CONFIG.EspCornerLen or 0.22
-		local w = rect.maxX - rect.minX
-		local h = rect.maxY - rect.minY
-		local cxMax = math.max(w * 0.45, 1)
-		local cyMax = math.max(h * 0.45, 1)
-		local cx = math.clamp(w * cLen, math.min(4, cxMax), cxMax)
-		local cy = math.clamp(h * cLen, math.min(4, cyMax), cyMax)
-		-- top-left
-		setLine(1, tl, Vector2.new(tl.X + cx, tl.Y))
-		setLine(2, tl, Vector2.new(tl.X, tl.Y + cy))
-		-- top-right
-		setLine(3, tr, Vector2.new(tr.X - cx, tr.Y))
-		setLine(4, tr, Vector2.new(tr.X, tr.Y + cy))
-		-- bottom-right
-		setLine(5, br, Vector2.new(br.X - cx, br.Y))
-		setLine(6, br, Vector2.new(br.X, br.Y - cy))
-		-- bottom-left
-		setLine(7, bl, Vector2.new(bl.X + cx, bl.Y))
-		setLine(8, bl, Vector2.new(bl.X, bl.Y - cy))
-
-	else -- "Box" (default) — 3D-режим удалён полностью (v12.2)
-		setLine(1, tl, tr); setLine(2, tr, br)
-		setLine(3, br, bl); setLine(4, bl, tl)
-	end
-
-	entry._boxTop = Vector2.new((rect.minX + rect.maxX) * 0.5, rect.minY)
-end
-
-function Bridge.drawEspHpBar(entry, rect, hp, maxHp, color)
-	if not CONFIG.EspHpBar or not entry.hpBg or not entry.hpFill or not rect then
-		if entry.hpBg then entry.hpBg.Visible = false end
-		if entry.hpFill then entry.hpFill.Visible = false end
-		if entry.hpOutline then entry.hpOutline.Visible = false end
-		return
-	end
-	local pct = 1
-	if type(hp) == "number" and type(maxHp) == "number" and maxHp > 0 then
-		pct = math.clamp(hp / maxHp, 0, 1)
-	elseif type(hp) == "number" then
-		pct = math.clamp(hp / 100, 0, 1)
-	end
-	local boxH = math.max(rect.maxY - rect.minY, 8)
-	local barW = 4
-	local x = rect.minX - barW - 3
-	local y = rect.minY
-	if entry.hpOutline then
-		entry.hpOutline.Size = Vector2.new(barW + 2, boxH + 2)
-		entry.hpOutline.Position = Vector2.new(x - 1, y - 1)
-		-- FIX: Color3 создавался на каждого актора каждый кадр. Константа +
-		-- запись только при изменении (цвет тут вообще не меняется).
-		if entry._hpOutlineCol ~= HP_OUTLINE_COL then
-			entry.hpOutline.Color = HP_OUTLINE_COL
-			entry._hpOutlineCol = HP_OUTLINE_COL
-		end
-		Bridge.showDrawing(entry.hpOutline, 0.85)
-	end
-	entry.hpBg.Size = Vector2.new(barW, boxH)
-	entry.hpBg.Position = Vector2.new(x, y)
-	if entry._hpBgCol ~= HP_BG_COL then
-		entry.hpBg.Color = HP_BG_COL
-		entry._hpBgCol = HP_BG_COL
-	end
-	Bridge.showDrawing(entry.hpBg, 0.7)
-	local fillH = math.max(boxH * pct, 1)
-	entry.hpFill.Size = Vector2.new(barW, fillH)
-	entry.hpFill.Position = Vector2.new(x, y + boxH - fillH)
-	entry.hpFill.Color = Color3.fromRGB(
-		math.floor(255 * (1 - pct) + 55 * pct),
-		math.floor(70 + 185 * pct),
-		50
-	)
-	Bridge.showDrawing(entry.hpFill, 0.98)
-end
-
-function Bridge.formatEspWeaponLine(weaponInfo)
-	if not weaponInfo then return nil end
-	-- FIX: вызывалось на каждого актора КАЖДЫЙ кадр — три string.gsub внутри
-	-- espStripFirearmName плюс string.format. При этом сами данные об оружии
-	-- обновляются раз в 2.5 сек (weaponInfo._t). Кэшируем результат прямо в
-	-- таблице weaponInfo и пересобираем только когда она реально сменилась.
-	local key = tostring(weaponInfo.name) .. "|" .. tostring(weaponInfo.max)
-	if weaponInfo._lineKey == key and weaponInfo._line ~= nil then
-		return weaponInfo._line
-	end
-	local name = espStripFirearmName(weaponInfo.name or "?")
-	local out
-	if type(weaponInfo.max) == "number" then
-		out = string.format("[%s] %d", name, weaponInfo.max)
-	else
-		out = "[" .. name .. "]"
-	end
-	weaponInfo._lineKey = key
-	weaponInfo._line = out
-	return out
-end
-
-function Bridge.ensureEspExtraTexts(entry)
-	entry.extraTexts = entry.extraTexts or {}
-	for i = 1, 3 do
-		if not entry.extraTexts[i] then
-			local t = Drawing.new("Text")
-			t.Size = ESP_LABEL_SIZE
-			t.Outline = true
-			t.Center = true
-			t.Visible = false
-			t.ZIndex = 23
-			entry.extraTexts[i] = t
-		end
-	end
-	return entry.extraTexts
-end
-
-function Bridge.hideEspExtraTexts(entry)
-	if not entry or not entry.extraTexts then return end
-	for _, t in ipairs(entry.extraTexts) do
-		t.Visible = false
-	end
-end
-
-function Bridge.drawEspExtraLines(entry, rect, data, startY, labelSize)
-	if not entry or not rect then return startY end
-	local texts = Bridge.ensureEspExtraTexts(entry)
-	local lines = {}
-	local colors = {}
-	labelSize = labelSize or ESP_LABEL_SIZE
-
-	if CONFIG.EspShowSecondary and data and data.espSecondaryName then
-		lines[#lines + 1] = data.espSecondaryName
-		colors[#colors + 1] = ESP_SECONDARY_TEXT
-	end
-	if CONFIG.EspShowInventory and data and type(data.espInventoryNames) == "table" and #data.espInventoryNames > 0 then
-		local invLine = table.concat(data.espInventoryNames, ", ")
-		if #invLine > 42 then invLine = string.sub(invLine, 1, 40) .. ".." end
-		lines[#lines + 1] = invLine
-		colors[#colors + 1] = ESP_INVENTORY_TEXT
-	end
-
-	local y = startY
-	for i = 1, #texts do
-		local t = texts[i]
-		local line = lines[i]
-		if line and line ~= "" then
-			y = Bridge.drawEspPlainText(t, rect.centerX or (rect.minX + rect.maxX) * 0.5, y, line, colors[i], labelSize)
-		else
-			t.Visible = false
-		end
-	end
-	return y
-end
-
-function Bridge.drawEspWeaponText(entry, rect, weaponInfo, labelSize)
-	if not CONFIG.EspWeaponInfo or not entry.weaponText or not rect then
-		if entry.weaponText then entry.weaponText.Visible = false end
-		if entry.weaponBg then entry.weaponBg.Visible = false end
-		return rect and (rect.maxY + ESP_STACK_GAP) or 0
-	end
-	local line = Bridge.formatEspWeaponLine(weaponInfo)
-	if not line then
-		entry.weaponText.Visible = false
-		if entry.weaponBg then entry.weaponBg.Visible = false end
-		return rect.maxY + ESP_STACK_GAP
-	end
-	local cx = rect.centerX or (rect.minX + rect.maxX) * 0.5
-	if entry.weaponBg then entry.weaponBg.Visible = false end
-	return Bridge.drawEspPlainText(entry.weaponText, cx, rect.maxY + ESP_STACK_GAP, line, ESP_WEAPON_TEXT, labelSize or ESP_LABEL_SIZE)
-end
-
-function Bridge.drawEspStatusBar(entry, rect, data, afterY, labelSize)
-	if not CONFIG.EspActorStatus or not rect then
-		Bridge.hideEspStatusBar(entry)
-		return
-	end
-	local isNpc = Bridge.isNpcActorClass(data and data.class)
-	if isNpc and CONFIG.EspNpcStatus == false then
-		Bridge.hideEspStatusBar(entry)
-		return
-	end
-	local getEntries = Bridge.getActorStatusEntriesCached or Bridge.getActorStatusEntries
-	local entries = {}
-	for _, e in ipairs(getEntries(data)) do
-		if not e.text or e.text == "Armed" then continue end
-		if e.kind == "stance" and CONFIG.EspShowStance == false then
-			continue
-		end
-		entries[#entries + 1] = e
-	end
-	if #entries == 0 then
-		Bridge.hideEspStatusBar(entry)
-		return
-	end
-
-	local chips = Bridge.ensureEspStatusChips(entry)
-	local shown = math.min(#entries, ESP_STATUS_CHIP_MAX)
-	local x = rect.maxX + 6
-	local chipSize = labelSize or ESP_LABEL_SIZE
-	local vGap = chipSize + ESP_STATUS_CHIP_GAP
-	-- Same bottom anchor as weapon/extra lines: rect.maxY (not footY — it desyncs at range)
-	local bottomY = rect.maxY
-
-	for i = 1, shown do
-		local chip = chips[i]
-		local e = entries[i]
-		chip.Text = espStatusLabel(e.text)
-		chip.Color = espStatusColor(e)
-		chip.Size = chipSize
-		chip.Center = false
-		chip.Outline = true
-		chip.Position = Vector2.new(x, bottomY - chipSize - (i - 1) * vGap)
-		Bridge.setDrawingAlpha(chip, 1)
-		chip.Visible = true
-	end
-	for i = shown + 1, #chips do
-		chips[i].Visible = false
-	end
-	if entry.statusText then entry.statusText.Visible = false end
-	if entry.statusBg then entry.statusBg.Visible = false end
-end
-
-local function skelShoulderWorldPos(torso, sign)
-	if not torso or not torso:IsA("BasePart") then return nil end
-	return torso.CFrame:PointToWorldSpace(
-		Vector3.new(sign * torso.Size.X * 0.42, torso.Size.Y * 0.46, 0)
-	)
-end
-
-local function skelBoneWorldPos(part, fromName, toName, torsoPart)
-	if not part or not part:IsA("BasePart") then return nil end
-	if torsoPart and fromName == "UpperTorso" and (toName == "RightUpperArm" or toName == "LeftUpperArm") then
-		local sign = toName == "RightUpperArm" and 1 or -1
-		return skelShoulderWorldPos(torsoPart, sign)
-	end
-	return part.Position
-end
-
-local function espHeadScreenRadius(head, cam)
-	if not head or not cam then return 4 end
-	local camPos = cam.CFrame.Position
-	local dist = (head.Position - camPos).Magnitude
-	if dist < 1 then dist = 1 end
-	local worldR = math.max(head.Size.X, head.Size.Z) * 0.38
-	local fovRad = math.rad(cam.FieldOfView)
-	local viewScale = (cam.ViewportSize.Y * 0.5) / math.tan(fovRad * 0.5)
-	local radius = worldR * viewScale / dist
-	if dist > 80 then
-		radius *= 1 - math.min((dist - 80) / 400, 0.12)
-	end
-	return math.clamp(radius, 2, 11)
-end
-
-function Bridge.drawEspSkeleton(entry, cam, model, color, vpCache)
-	if not CONFIG.EspSkeleton then
-		for _, line in ipairs(entry.skelLines) do
-			line.Visible = false
-		end
-		if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
-		if entry.skelShoulderLine then entry.skelShoulderLine.Visible = false end
-		return
-	end
-	local pairs = Bridge.getSkeletonPairs(model)
-	local idx = 0
-	local torso = getBodyPart(model, "UpperTorso") or getBodyPart(model, "Torso")
-	for _, pair in ipairs(pairs) do
-		idx += 1
-		local line = entry.skelLines[idx]
-		if not line then break end
-		local a = getBodyPart(model, pair[1])
-		local b = getBodyPart(model, pair[2])
-		if a and b then
-			local wp1 = skelBoneWorldPos(a, pair[1], pair[2], torso) or a.Position
-			local wp2 = b.Position
-			local sp1, on1, sp2, on2
-			if vpCache then
-				local c1 = vpCache[a]
-				if c1 and pair[1] ~= "UpperTorso" then sp1, on1 = c1[1], c1[2] else
-					sp1, on1 = cam:WorldToViewportPoint(wp1)
-					if pair[1] ~= "UpperTorso" then vpCache[a] = { sp1, on1 } end
-				end
-				local c2 = vpCache[b]
-				if c2 then sp2, on2 = c2[1], c2[2] else
-					sp2, on2 = cam:WorldToViewportPoint(wp2)
-					vpCache[b] = { sp2, on2 }
-				end
-			else
-				sp1, on1 = cam:WorldToViewportPoint(wp1)
-				sp2, on2 = cam:WorldToViewportPoint(wp2)
-			end
-			if (on1 or on2) and sp1.Z > 0.01 and sp2.Z > 0.01 then
-				line.From = Vector2.new(sp1.X, sp1.Y)
-				line.To = Vector2.new(sp2.X, sp2.Y)
-				line.Color = color
-				line.Visible = true
-			else
-				line.Visible = false
-			end
-		else
-			line.Visible = false
-		end
-	end
-	for i = idx + 1, #entry.skelLines do
-		entry.skelLines[i].Visible = false
-	end
-	local sl = entry.skelShoulderLine
-	if sl and torso and torso:IsA("BasePart") then
-		local wpL = skelShoulderWorldPos(torso, -1)
-		local wpR = skelShoulderWorldPos(torso, 1)
-		if wpL and wpR then
-			local spL, onL = cam:WorldToViewportPoint(wpL)
-			local spR, onR = cam:WorldToViewportPoint(wpR)
-			if onL and onR and spL.Z > 0.01 and spR.Z > 0.01 then
-				sl.From = Vector2.new(spL.X, spL.Y)
-				sl.To = Vector2.new(spR.X, spR.Y)
-				sl.Color = color
-				sl.Thickness = 1.35
-				Bridge.setDrawingAlpha(sl, 1)
-				sl.Visible = true
-			else
-				sl.Visible = false
-			end
-		else
-			sl.Visible = false
-		end
-	elseif sl then
-		sl.Visible = false
-	end
-	local head = getBodyPart(model, "Head")
-	local hc = entry.skelHeadCircle
-	if hc and head then
-		local sp, onScreen
-		if vpCache then
-			local cached = vpCache[head]
-			if cached then sp, onScreen = cached[1], cached[2] else
-				sp, onScreen = cam:WorldToViewportPoint(head.Position)
-				vpCache[head] = { sp, onScreen }
-			end
-		else
-			sp, onScreen = cam:WorldToViewportPoint(head.Position)
-		end
-		if onScreen and sp.Z > 0.01 then
-			hc.Position = Vector2.new(sp.X, sp.Y)
-			local hRad = espHeadScreenRadius(head, cam)
-			hc.Radius = hRad
-			-- кэшируем радиус для смещения лейбла выше
-			if entry then entry._headScreenRadius = hRad end
-			hc.Color = color
-			Bridge.setDrawingAlpha(hc, 1)
-			hc.Visible = true
-		else
-			hc.Visible = false
-		end
-	elseif hc then
-		hc.Visible = false
-	end
-end
-
--- ─────────────────────────────────────────────────────────────────────────
--- Единственная точка удаления ESP-entry.
---
--- Раньше было ДВЕ независимые реализации (clearESP и destroyEspEntry), и они
--- разъехались: clearESP не удалял extraTexts (3 Drawing.Text на актора,
--- аллоцируются лениво в ensureEspExtraTexts). А clearESP вызывается по
--- таймеру каждые EspFullRescanInterval секунд и следом делает
--- table.clear(State.drawings) — ссылки терялись, объекты навсегда оставались
--- висеть на экране. Это и был баг «элементы ESP не пропадают».
---
--- Теперь список полей ОДИН. Добавляешь новый Drawing в entry — дописываешь
--- сюда, и он гарантированно чистится на всех путях.
--- ─────────────────────────────────────────────────────────────────────────
-local ESP_ENTRY_SINGLE = {
-	"skelShoulderLine", "skelHeadCircle", "circle", "text",
-	"statusText", "weaponText", "weaponBg", "statusBg",
-	"hpBg", "hpFill", "hpOutline",
-}
-local ESP_ENTRY_LISTS = {
-	"boxLines", "skelLines", "statusChips", "extraTexts",
-}
-
-function Bridge.destroyEspEntry(entry)
-	if not entry then return end
-	for _, key in ipairs(ESP_ENTRY_SINGLE) do
-		Bridge.destroyDrawing(entry[key])
-		entry[key] = nil
-	end
-	for _, key in ipairs(ESP_ENTRY_LISTS) do
-		Bridge.destroyDrawingList(entry[key])
-		entry[key] = nil
-	end
-end
-
-function Bridge.clearESP()
-	for _, entry in pairs(State.drawings) do
-		Bridge.destroyEspEntry(entry)
-	end
-	table.clear(State.drawings)
-	for uid in pairs(State.espHighlights) do
-		Bridge.removeEspChams(uid)
-	end
-end
-
-function Bridge.cleanupEspCache()
-	if not State.drawings then return end
-	local actors = State.actors
-	-- FIX v12: собираем к удалению акторов которых нет в State.actors
-	local toRemove = {}
-	for uid in pairs(State.drawings) do
-		-- FIX: кластеров зомби НЕТ в State.actors по определению — раньше их
-		-- записи сносило каждые 5 секунд и пересоздавало на следующем кадре
-		-- (36 Drawing.new за раз). Кластерные ключи пропускаем, их жизненный
-		-- цикл ведёт сам построитель кластеров.
-		local isCluster = type(uid) == "string"
-			and (uid:sub(1, 3) == "zc:" or uid:sub(1, 9) == "zcluster_")
-		if not isCluster and (not actors or not actors[uid]) then
-			toRemove[#toRemove + 1] = uid
-		end
-	end
-	for _, uid in ipairs(toRemove) do
-		local entry = State.drawings[uid]
-		if entry then
-			Bridge.hideEspEntry(entry, "cleanup_not_in_actors", uid)
-			Bridge.destroyEspEntry(entry)
-		end
-		Bridge.removeEspChams(uid)
-		State.drawings[uid] = nil
-	end
-	-- FIX v12: visibleCache, espRanked чистятся от мёртвых uid
-	if State.espVisibleCache and actors then
-		for uid in pairs(State.espVisibleCache) do
-			if not actors[uid] then State.espVisibleCache[uid] = nil end
-		end
-	end
-	-- FIX v12: retire actor-level caches (_healthCache, _weaponInfoT) для исчезнувших акторов
-	-- чтобы старые данные не держали ссылки на части/модели удалённых персонажей.
-	if actors then
-		for uid, data in pairs(actors) do
-			if data and (not data.root or not data.root.Parent) then
-				data._healthCache  = nil
-				data._healthCacheT = nil
-				data._weaponInfoT  = nil
-				data.weaponInfo    = nil
-				data.actorData     = nil
-			end
-		end
-	end
-	-- FIX v12: чистим espRanked от записей с мёртвыми root'ами
-	if State.espRanked then
-		local clean = {}
-		for _, row in ipairs(State.espRanked) do
-			if row.data and row.data.root and row.data.root.Parent then
-				clean[#clean + 1] = row
-			end
-		end
-		State.espRanked = clean
-	end
-	-- FIX v12: hotbar weapon cache глобальный — сбрасываем если устарел
-	if State._espHotbarCache and os.clock() - (State._espHotbarCache.t or 0) > 10 then
-		State._espHotbarCache = nil
-	end
-end
-
-function Bridge.clearAllEspDrawings()
-	if not State.drawings then return end
-	-- FIX: immediately swap out the drawings table so the draw-loop sees empty state
-	-- this frame, then destroy the old entries in a deferred task to avoid a
-	-- multi-ms freeze spike when clearing 50+ Drawing objects synchronously.
-	local oldDrawings = State.drawings
-	State.drawings     = {}
-	-- Здесь обнуление ranked ОПРАВДАНО: Drawing-объекты реально уничтожаются,
-	-- рисовать по старому списку нечем. Но сбрасываем и счётчик акторов, чтобы
-	-- пересборка стартовала на следующем же кадре, а не через 1.5с таймера.
-	State.espRanked    = nil
-	State.espLastActorCount = -1
-	State.espRankedTime = 0
-	State.espVisibleCache = {}
-	State.espVisibleBatchIndex = 0
-	task.defer(function()
-		for uid, entry in pairs(oldDrawings) do
-			pcall(Bridge.hideEspEntry, entry, "clear_all")
-			pcall(Bridge.destroyEspEntry, entry)
-			pcall(Bridge.removeEspChams, uid)
-		end
-	end)
-end
-
-function Bridge.hideAllEspDrawings(reason)
-	for uid, entry in pairs(State.drawings) do
-		Bridge.hideEspEntry(entry, reason or "hide_all", uid)
-		Bridge.removeEspChams(uid)
-	end
-end
-
--- FIX v12: NPC-скан оптимизация — лейбл-only NPC (EspNpcNameOnly) больше не вызывают
--- дорогой computeEspBoundsBox (итерация по 7 BasePart). Вместо этого — один
--- WorldToViewportPoint по root.Position. Экономит ~85% работы ESP на NPC-картах.
-function Bridge.computeNpcLabelPoint(model, cam, data)
-	if not model or not cam then return nil end
-	-- Предпочитаем Head (более точно для Y-позиции лейбла)
-	local anchor = getBodyPart(model, "Head") or
-		getBodyPart(model, "UpperTorso") or
-		model:FindFirstChildWhichIsA("BasePart")
-	local worldPos
-	if anchor and anchor:IsA("BasePart") then
-		worldPos = anchor.Position
-	elseif data and data.adPos and typeof(data.adPos) == "Vector3" then
-		worldPos = data.adPos
-	else
-		return nil
-	end
-	local sp, on = cam:WorldToViewportPoint(worldPos)
-	if not on or sp.Z <= 0.01 then return nil end
-	return { sp = sp, worldPos = worldPos }
-end
-
--- FIX v12: Zombie Cluster — группирует близких зомби в один лейбл "Nx Zombies".
--- Возвращает { clusters = { {center=sp, count=N, uid="cluster_X"}, ... }, clustered = {uid=true} }
--- чтобы draw-цикл пропускал отдельные зомби которые вошли в кластер.
-local _zombieClusterCache = nil
-local _zombieClusterT = -999
-function Bridge.buildZombieCluster(ranked, cam, now)
-	local ttl = 0.5  -- обновляем кластеры раз в 0.5s
-	if _zombieClusterCache and now - _zombieClusterT < ttl then
-		return _zombieClusterCache
-	end
-	local clusterDist = CONFIG.EspZombieClusterDist or 8
-	local clusterMin  = CONFIG.EspZombieClusterMin  or 2
-
-	-- Собираем живых зомби из ranked
-	local zombies = {}
-	for _, row in ipairs(ranked) do
-		if row.data and row.data.class == "npc_zombie" and row.data.root and row.data.root.Parent then
-			local dead = row.data.dead == true or row.data.alive == false
-			if not dead then
-				zombies[#zombies + 1] = row
-			end
-		end
-	end
-
-	local assigned = {}  -- uid → cluster idx
-	local clusters = {}
-	for i, a in ipairs(zombies) do
-		if assigned[a.uid] then continue end
-		local members = { a }
-		local posA = a.data.root.Position
-		for j = i + 1, #zombies do
-			local b = zombies[j]
-			if assigned[b.uid] then continue end
-			if (posA - b.data.root.Position).Magnitude <= clusterDist then
-				members[#members + 1] = b
-			end
-		end
-		if #members >= clusterMin then
-			-- центр кластера = среднее по позициям
-			local cx, cy, cz = 0, 0, 0
-			for _, m in ipairs(members) do
-				local p = m.data.root.Position
-				cx += p.X; cy += p.Y; cz += p.Z
-				assigned[m.uid] = true
-			end
-			local n = #members
-			local center = Vector3.new(cx/n, cy/n + 1.5, cz/n)  -- чуть выше головы
-			local sp, on = cam:WorldToViewportPoint(center)
-			if on and sp.Z > 0.01 then
-				-- FIX: uid был "zcluster_"..i, где i — индекс в массиве,
-				-- отсортированном по дистанции. Массив пересортировывался
-				-- каждые ~1.5с, поэтому ОДИН И ТОТ ЖЕ кластер получал НОВЫЙ uid,
-				-- под него аллоцировалась новая пачка Drawing, а старая
-				-- висела сиротой. Ключ по квантованной позиции стабилен.
-				-- center уже усреднён (cx/cz — это СУММЫ, не центр!)
-				local cw = "zc:" .. math.floor(center.X / 16)
-					.. "_" .. math.floor(center.Z / 16)
-				clusters[#clusters + 1] = {
-					sp    = sp,
-					count = n,
-					uid   = cw,
-				}
-			end
-		end
-	end
-
-	_zombieClusterCache = { clusters = clusters, clustered = assigned }
-	_zombieClusterT = now
-	return _zombieClusterCache
-end
-
-local function cachedNpcCount()
-	local now = os.clock()
-	if State._espNpcCount ~= nil and now - (State._espNpcCountT or 0) < 1.0 then
-		return State._espNpcCount
-	end
-	local n = 0
-	for _, data in pairs(State.actors or {}) do
-		if data and Bridge.isNpcActorClass(data.class) then
-			n += 1
-		end
-	end
-	State._espNpcCount = n
-	State._espNpcCountT = now
-	return n
-end
-
-function Bridge.updateESP(dt)
-	if not CONFIG.ESP then
-		Bridge.hideAllEspDrawings("esp_disabled")
-		return
-	end
-	if not Drawing then return end
-	if not State.actors then
-		Bridge.hideAllEspDrawings("no_actors_table")
-		return
-	end
-	local now = os.clock()
-	local actorCount = State.trackedActorCount or 0
-	if actorCount <= 0 then
-		for _ in pairs(State.actors) do actorCount += 1 end
-		State.trackedActorCount = actorCount
-	end
-	local npcCount = cachedNpcCount()
-	local renderInterval = CONFIG.EspRenderInterval or 0.0167
-	if npcCount >= 15 or actorCount > 200 then
-		renderInterval = 0.033
-	elseif npcCount >= 8 or actorCount > 100 then
-		renderInterval = 0.025
-	elseif npcCount >= 4 then
-		renderInterval = 0.02
-	end
-	if now - (State.lastEspUpdate or 0) < renderInterval then return end
-	State.lastEspUpdate = now
-
-	local cam = workspace.CurrentCamera
-	if not cam then return end
-	local camPos = cam.CFrame.Position
-
-	-- FIX flicker: никогда не прячем ESP из-за actorCount==0 —
-	-- trackedActorCount может быть 0 на кадр пересборки.
-	-- Перепроверяем реальное число акторов через pairs.
-	if actorCount == 0 then
-		local real = 0
-		for _ in pairs(State.actors) do real += 1 end
-		actorCount = real
-		State.trackedActorCount = real
-		if actorCount == 0 then return end   -- таблица реально пустая — тихий выход бе�� hideAll
-	end
-
-	-- FIX v12: ranked-пересборка вынесена в defer чтобы НЕ блокировать draw-кадр.
-	-- Нет жёсткого ли��ита акторов — игроки всегда первыми, затем NPC по дистанции.
-	-- Пер��сборка триггерится при измене��ии actorCount или раз в 1.5s.
-	if (actorCount ~= (State.espLastActorCount or -1)) or (now - (State.espRankedTime or 0) > 1.5) then
-		State.espRankedTime     = now
-		State.espLastActorCount = actorCount
-		local capturedActors = State.actors
-		local capturedCamPos = camPos
-		-- Защита: если предыдущая пересборка ещё не финишировала (или упала),
-		-- не запускаем вторую поверх — иначе они дублируют работу и мешают
-		-- друг другу публиковать результат.
-		if State.espRankBusy then return end
-		State.espRankBusy = true
-		-- Страховка от залипания флага: если пересборка почему-то не дошла до
-		-- конца (исключение внутри defer), через 3с разрешаем новую попытку —
-		-- иначе ranked навсегда остался бы старым.
-		task.delay(3, function()
-			if State.espRankBusy then State.espRankBusy = false end
-		end)
-		task.defer(function()
-			local rankT = Bridge.perfBegin and Bridge.perfBegin() or nil
-			local players = {}
-			local npcs    = {}
-			for uid, data in pairs(capturedActors) do
-				if data.class == "self" then continue end
-				if Bridge.shouldSkipActorCollect(
-					data.class, data.player, data.squad, data.teamKey, data.uid
-				) then continue end
-				if not Bridge.shouldEspShowActor(data) then continue end
-				if CONFIG.EspIgnoreTeam and Bridge.shouldEspHideAsTeammate(data) then continue end
-				local root = data.root
-				if not root or not root.Parent then continue end
-				-- FIX v7: InactiveWorld actors — использовать adPos для корректной дистанции
-				local distPos
-				if data.inInactiveWorld and data.adPos and typeof(data.adPos) == "Vector3" then
-					distPos = data.adPos
-				else
-					distPos = root.Position
-				end
-				local row = { uid = uid, data = data, dist = (distPos - capturedCamPos).Magnitude }
-				if Bridge.isNpcActorClass(data.class) then
-					npcs[#npcs + 1] = row
-				else
-					players[#players + 1] = row
-				end
-			end
-			-- Приоритет: игроки (ближние) → NPC (ближние)
-			table.sort(players, function(a, b) return a.dist < b.dist end)
-			table.sort(npcs,    function(a, b) return a.dist < b.dist end)
-			local ranked = players
-			for i = 1, #npcs do ranked[#ranked + 1] = npcs[i] end
-			-- FIX: было `if #ranked > 0`. Если все акторы исчезли (конец матча,
-			-- смена карты), список НЕ обновлялся и ESP продолжал рисовать
-			-- мёртвые строки. Публикуем всегда — цикл отрисовки сам умеет
-			-- пропускать строки с уничтоженными моделями.
-			State.espRanked = ranked
-			State.espRankBusy = false
-			if Bridge.perfEnd then
-				Bridge.perfEnd("esp.rank", rankT, "p=" .. #players .. " n=" .. #npcs)
-			end
-		end)
-	end
-
-	local ranked = State.espRanked
-	if not ranked or #ranked == 0 then
-		-- ranked пуст. Раньше здесь был просто `return` — Drawing-объекты
-		-- оставались на экране с прошлыми координатами, и если пересборка
-		-- задерживалась (или акторов реально не стало), картинка «зависала».
-		-- Теперь: если акторов нет вообще — честно гасим всё. Если акторы
-		-- есть, а ranked ещё пересобирается — пропускаем кадр, не мигая.
-		if actorCount == 0 then
-			for uid, entry in pairs(State.drawings) do
-				Bridge.hideEspEntry(entry, "no_actors", uid)
-			end
-		else
-			Bridge.logVizHide("ESP", "ranked_rebuilding", "tracked=" .. tostring(actorCount))
-		end
-		return
-	end
-
-	-- FIX v6: VisibleCheck round-robin — строгий курсор, нет пропусков
-	-- Каждый актор проверяется ровно раз за ceil(#ranked/batchSize) кадров
-	if CONFIG.EspVisibleCheck then
-		local visT = Bridge.perfBegin and Bridge.perfBegin() or nil
-		local visN = 0
-		local batchSize = CONFIG.EspBatchSize or 4
-		local n = #ranked
-		local playerNear = 0
-		for _, row in ipairs(ranked) do
-			if row.data and not Bridge.isNpcActorClass(row.data.class) then
-				local d = row.dist or 0
-				if d < (CONFIG.EspVisiblePlayerDist or 500) then
-					playerNear += 1
-				end
-			end
-		end
-		if playerNear >= 8 then
-			batchSize = 1
-		elseif playerNear >= 4 then
-			batchSize = math.max(1, math.floor(batchSize * 0.5))
-		end
-		if CONFIG.EspVisibleFast ~= false then
-			batchSize = math.min(batchSize, CONFIG.EspVisibleMaxRaysPerFrame or 8)
-		else
-			batchSize = math.min(batchSize, math.max(1, math.floor((CONFIG.EspVisibleMaxRaysPerFrame or 8) / 6)))
-		end
-		if n > 0 then
-			State.espVisibleCursor = State.espVisibleCursor or 1
-			local cursor = State.espVisibleCursor
-			local baseInterval = CONFIG.EspVisibleInterval or 0.35
-			for i = 0, batchSize - 1 do
-				local idx = (cursor - 1 + i) % n + 1
-				local row = ranked[idx]
-				if row and row.data then
-					if Bridge.isNpcActorClass(row.data.class) then
-						visN += 1
-						local uid = row.uid
-						if uid and uid ~= "" then
-							State.espVisibleCache = State.espVisibleCache or {}
-							State.espVisibleCache[uid] = { v = true, t = now }
-						end
-					else
-						local dist = row.dist or 0
-						local interval = baseInterval
-						if dist > 400 then
-							interval = interval * 2.0
-						elseif dist > 250 then
-							interval = interval * 1.5
-						end
-						visN += 1
-						Bridge.isActorVisibleForEsp(row.data, cam, interval)
-					end
-				end
-			end
-			State.espVisibleCursor = (cursor - 1 + batchSize) % n + 1
-		end
-		if Bridge.perfEnd then
-			Bridge.perfEnd("esp.visibleBatch", visT, "n=" .. tostring(visN))
-		end
-	end
-
-	local live = {}
-	local vpCache = {}
-	local drawT = Bridge.perfBegin and Bridge.perfBegin() or nil
-	local drawnN = 0
-
-	-- FIX v12: Zombie Cluster — кластерные лейблы (opt-in: EspZombieCluster)
-	local clusterData = nil
-	local clusteredUids = {}  -- uid-ы зомби вошедших в кластер (пропускаем в draw-цикле)
-	if CONFIG.EspZombieCluster and CONFIG.EspShowZombie ~= false then
-		clusterData = Bridge.buildZombieCluster(ranked, cam, now)
-		if clusterData then
-			clusteredUids = clusterData.clustered or {}
-			-- Рисуем кластерные лейблы
-			for _, cl in ipairs(clusterData.clusters) do
-				local clEntry = Bridge.ensureEspDrawing(cl.uid)
-				live[cl.uid] = true
-				clEntry.text.Text     = tostring(cl.count) .. "x Zombies"
-				clEntry.text.Color    = ESP_COLORS.zombie
-				clEntry.text.Size     = ESP_LABEL_SIZE + 1
-				clEntry.text.Center   = true
-				clEntry.text.Outline  = true
-				clEntry.text.Position = Vector2.new(cl.sp.X, cl.sp.Y - ESP_LABEL_SIZE - 2)
-				Bridge.setDrawingAlpha(clEntry.text, 1)
-				clEntry.text.Visible  = true
-				for _, bl in ipairs(clEntry.boxLines) do bl.Visible = false end
-				if clEntry.skelLines then
-					for _, sl in ipairs(clEntry.skelLines) do sl.Visible = false end
-				end
-				if clEntry.hpBg     then clEntry.hpBg.Visible     = false end
-				if clEntry.hpFill   then clEntry.hpFill.Visible   = false end
-				if clEntry.hpOutline then clEntry.hpOutline.Visible = false end
-				if clEntry.weaponText then clEntry.weaponText.Visible = false end
-				Bridge.hideEspStatusBar(clEntry)
-			end
-		end
-	end
-
-	for i, row in ipairs(ranked) do
-		-- FIX v12: пропускаем зомби вошедших в кластер
-		if row.data and row.data.class == "npc_zombie" and clusteredUids[row.uid] then
-			continue
-		end
-		local uid  = row.uid
-		local data = row.data
-		-- FIX: тут был просто `continue`. Строка ranked живёт до пересборки
-		-- (до 1.5с), поэтому актор мог умереть/выгрузиться, а его Drawing
-		-- оставался на экране в последней позиции всё это время — один из
-		-- источников «элементы застывают».
-		if not data or not data.root or not data.root.Parent then
-			local stale = State.drawings[uid]
-			if stale then Bridge.hideEspEntry(stale, "root_gone", uid) end
-			Bridge.removeEspChams(uid)
-			continue
-		end
-		if not Bridge.shouldEspShowActor(data) then
-			local hidden = State.drawings[uid]
-			if hidden then Bridge.hideEspEntry(hidden, "npc_filter", uid) end
-			Bridge.removeEspChams(uid)
-			continue
-		end
-		if CONFIG.EspIgnoreTeam and Bridge.shouldEspHideAsTeammate(data) then
-			local entry = State.drawings[uid]
-			if entry then Bridge.hideEspEntry(entry, "teammate", uid) end
-			Bridge.removeEspChams(uid)
-			continue
-		end
-
-		local entry = Bridge.ensureEspDrawing(uid)
-		live[uid] = true
-		drawnN += 1
-
-		-- Труп: class=="dead" — метка Dead только для ИГРОКОВ (не NPC)
-		if data.class == "dead" then
-			if CONFIG.EspShowDead == false or data.player == nil then
-				Bridge.hideEspEntry(entry, "dead_hidden")
-				Bridge.removeEspChams(uid)
-				continue
-			end
-			local model = data.model
-			Bridge.drawEspBox(entry, cam, model, ESP_COLORS.dead, nil)
-			local dRect = entry._boxRect
-			if dRect then
-				entry.text.Text     = "Dead"
-				entry.text.Color    = ESP_COLORS.dead
-				entry.text.Position = Vector2.new(
-					dRect.minX + (dRect.maxX - dRect.minX) * 0.5,
-					dRect.minY - 14
-				)
-				entry.text.Visible  = true
-			else
-				Bridge.hideEspEntry(entry, "dead_no_rect")
-			end
-			if entry.hpBg      then entry.hpBg.Visible      = false end
-			if entry.hpFill    then entry.hpFill.Visible    = false end
-			if entry.hpOutline then entry.hpOutline.Visible = false end
-			if entry.weaponText then entry.weaponText.Visible = false end
-			if entry.weaponBg then entry.weaponBg.Visible = false end
-			Bridge.hideEspStatusBar(entry)
-			Bridge.removeEspChams(uid)
-			live[uid] = true
-			continue
-		end
-		-- dead=true/alive=false: для ИГРОКОВ (не NPC) показываем метку 'Dead',
-		-- для NPC — прячем как раньше.
-		local dead = data.dead == true or data.alive == false
-		if dead then
-			Bridge.removeEspChams(uid)
-			if CONFIG.EspShowDead ~= false and data.player ~= nil then
-				local model = data.model
-				local shown = false
-				if model and model.Parent then
-					Bridge.drawEspBox(entry, cam, model, ESP_COLORS.dead, nil)
-					local dRect = entry._boxRect
-					if dRect then
-						entry.text.Text     = "Dead"
-						entry.text.Color    = ESP_COLORS.dead
-						entry.text.Size     = ESP_LABEL_SIZE + 1
-						entry.text.Position = Vector2.new(
-							dRect.minX + (dRect.maxX - dRect.minX) * 0.5,
-							(dRect.headTopY or dRect.minY) - 14
-						)
-						Bridge.showDrawing(entry.text, 1)
-						shown = true
-					end
-				end
-				-- прячем всё лишнее, оставляя только текст+бокс
-				if entry.skelLines then for _, ln in ipairs(entry.skelLines) do ln.Visible = false end end
-				if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
-				if entry.hpBg      then entry.hpBg.Visible      = false end
-				if entry.hpFill    then entry.hpFill.Visible    = false end
-				if entry.hpOutline then entry.hpOutline.Visible = false end
-				if entry.weaponText then entry.weaponText.Visible = false end
-				if entry.weaponBg then entry.weaponBg.Visible = false end
-				Bridge.hideEspStatusBar(entry)
-				Bridge.hideEspExtraTexts(entry)
-				if not shown then Bridge.hideEspEntry(entry, "dead_no_rect") end
-				live[uid] = true
-				continue
-			end
-			Bridge.hideEspEntry(entry, "dead_flag")
-			continue
-		end
-
-		local model = data.model
-		if not model or not model.Parent then
-			Bridge.hideEspEntry(entry, "no_model")
-			continue
-		end
-
-		local npcNameOnly = Bridge.isNpcActorClass(data.class) and CONFIG.EspNpcNameOnly == true
-		if npcNameOnly then
-			-- FIX FPS: этот блок гасил ~35 объектов на КАЖДОГО NPC КАЖДЫЙ кадр,
-			-- хотя они скрыты с момента создания записи. На карте с 40 NPC это
-			-- ~1400 лишних записей в кадр. Гасим только при ВХОДЕ в режим.
-			if entry._mode ~= "label" then
-				entry._mode = "label"
-				for _, line in ipairs(entry.boxLines) do line.Visible = false end
-				if entry.skelLines then
-					for _, ln in ipairs(entry.skelLines) do ln.Visible = false end
-				end
-				if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
-				if entry.hpBg then entry.hpBg.Visible = false end
-				if entry.hpFill then entry.hpFill.Visible = false end
-				if entry.hpOutline then entry.hpOutline.Visible = false end
-				Bridge.hideEspStatusBar(entry)
-				if entry.weaponText then entry.weaponText.Visible = false end
-				Bridge.hideEspExtraTexts(entry)
-				Bridge.removeEspChams(uid)
-			end
-			local nPt = Bridge.computeNpcLabelPoint(model, cam, data)
-			if not nPt then
-				Bridge.hideEspEntry(entry, "offscreen")
-				Bridge.removeEspChams(uid)
-				local nRect = nil  -- ensure entry._boxRect cleared
-				entry._boxRect = nil
-				continue
-			end
-			entry._hidden = false   -- запись снова на экране
-			local boxColor = Bridge.getEspColor(data, Bridge.getEspActorVisible(uid))
-			entry.text.Text = Bridge.formatEspLabelWithDistance(data, camPos)
-			entry.text.Color = boxColor
-			entry.text.Size = ESP_LABEL_SIZE + 1
-			Bridge.showDrawing(entry.text, 1)
-			-- FIX v12: позиционируем по nPt.sp (от computeNpcLabelPoint) а не nRect
-			entry.text.Position = Vector2.new(nPt.sp.X, nPt.sp.Y - (ESP_LABEL_SIZE + 3))
-			continue
-		end
-
-		local visible  = Bridge.getEspActorVisible(uid)
-		-- Полная отрисовка: снимаем флаги, чтобы hideEspEntry снова сработал
-		-- когда актор уйдёт с экрана, и чтобы возврат из label-режима вернул
-		-- бокс/скелет/HP.
-		entry._hidden = false
-		entry._mode = "full"
-		local boxColor = Bridge.getEspColor(data, visible)
-
-		-- Box / layout rect
-		local boxT = Bridge.perfBegin and Bridge.perfBegin() or nil
-		if CONFIG.EspBox then
-			Bridge.drawEspBox(entry, cam, model, boxColor, vpCache)
-		else
-			for _, line in ipairs(entry.boxLines) do
-				line.Visible = false
-			end
-			Bridge.ensureEspLayoutRect(entry, cam, model, vpCache)
-		end
-		if Bridge.perfEnd then Bridge.perfEnd("esp.box", boxT) end
-
-		local rect = entry._boxRect
-		-- hide если off-screen или вне экрана
-		if not rect or rect.maxX < 0 or rect.minX > cam.ViewportSize.X
-			or rect.maxY < 0 or rect.minY > cam.ViewportSize.Y then
-			Bridge.hideEspEntry(entry, "offscreen")
-			Bridge.removeEspChams(uid)
-			continue
-		end
-
-		-- HP Bar
-		local hpT = Bridge.perfBegin and Bridge.perfBegin() or nil
-		if CONFIG.EspHpBar and rect and not npcNameOnly then
-			local hp, maxHp = Bridge.resolveActorHealth(data)
-			Bridge.drawEspHpBar(entry, rect, hp, maxHp, boxColor)
-		else
-			if entry.hpBg      then entry.hpBg.Visible      = false end
-			if entry.hpFill    then entry.hpFill.Visible    = false end
-			if entry.hpOutline then entry.hpOutline.Visible = false end
-		end
-		if Bridge.perfEnd then Bridge.perfEnd("esp.hp", hpT) end
-
-		-- Skeleton (batch limited by rank) — NPC: только name-only, без скелета
-		local skelMaxDist = CONFIG.EspSkeletonMaxDist or 800
-		local skelT = Bridge.perfBegin and Bridge.perfBegin() or nil
-		if CONFIG.EspSkeleton and not Bridge.isNpcActorClass(data.class)
-			and i <= (CONFIG.EspSkeletonMaxActors or 24) and row.dist <= skelMaxDist then
-			Bridge.drawEspSkeleton(entry, cam, model, boxColor, vpCache)
-		elseif entry.skelLines then
-			for _, ln in ipairs(entry.skelLines) do ln.Visible = false end
-			if entry.skelHeadCircle then entry.skelHeadCircle.Visible = false end
-		end
-		if Bridge.perfEnd then Bridge.perfEnd("esp.skel", skelT) end
-
-		-- Chams (batch limited by rank) — NPC пропускаем
-		local chamsT = Bridge.perfBegin and Bridge.perfBegin() or nil
-		if CONFIG.EspChams and not Bridge.isNpcActorClass(data.class)
-			and i <= (CONFIG.EspChamsMaxActors or 14) then
-			if Bridge.perfCount then Bridge.perfCount("chamsUpdate") end
-			Bridge.updateEspChams(uid, model, boxColor)
-		else
-			Bridge.removeEspChams(uid)
-		end
-		if Bridge.perfEnd then Bridge.perfEnd("esp.chams", chamsT) end
-
-		-- Weapon + stance/secondary/inventory + status (независимо от EspBox)
-		local metaT = Bridge.perfBegin and Bridge.perfBegin() or nil
-		local stackY = rect.maxY + ESP_STACK_GAP
-		local lineCount = 1
-		local showPlayerMeta = CONFIG.EspWeaponInfo and not Bridge.isNpcActorClass(data.class)
-		if showPlayerMeta then
-			if data.weaponInfo then lineCount += 1 end
-			if CONFIG.EspShowStance and espGetStanceChip(data.actorData) then lineCount += 1 end
-			if CONFIG.EspShowSecondary and data.espSecondaryName then lineCount += 1 end
-			if CONFIG.EspShowInventory and data.espInventoryNames and #data.espInventoryNames > 0 then
-				lineCount += 1
-			end
-		end
-		local labelSize = espAdaptiveLabelSize(lineCount)
-
-		if showPlayerMeta then
-			stackY = Bridge.drawEspWeaponText(entry, rect, data.weaponInfo, labelSize)
-			stackY = Bridge.drawEspExtraLines(entry, rect, data, stackY, labelSize)
-		else
-			if entry.weaponText then entry.weaponText.Visible = false end
-			if entry.weaponBg then entry.weaponBg.Visible = false end
-			Bridge.hideEspExtraTexts(entry)
-		end
-
-		local label = Bridge.formatEspLabelWithDistance(data, camPos)
-		entry.text.Text = label
-		entry.text.Color = boxColor
-		entry.text.Size = labelSize + 1
-		Bridge.showDrawing(entry.text, 1)
-		-- FIX v12.2: rect.minY теперь = ИСТИННАЯ вершина головы (см. computeEspBoundsBox),
-		-- поэтому лейбл ставится фиксированным малым зазором выше — без прежнего
-		-- headRadius-хака, из-за которого текст «уползал» вверх с дистанцией.
-		local topAnchor = rect.headTopY or rect.minY
-		local labelAboveOffset = labelSize + 4
-		entry.text.Position = Vector2.new(
-			rect.minX + (rect.maxX - rect.minX) * 0.5,
-			topAnchor - labelAboveOffset
-		)
-		if CONFIG.EspActorStatus then
-			Bridge.drawEspStatusBar(entry, rect, data, stackY, labelSize)
-		else
-			Bridge.hideEspStatusBar(entry)
-		end
-		if Bridge.perfEnd then Bridge.perfEnd("esp.meta", metaT) end
-	end
-
-	-- Hide vanished actors
-	local hiddenN = 0
-	for uid, entry in pairs(State.drawings) do
-		if not live[uid] then
-			hiddenN += 1
-			Bridge.hideEspEntry(entry)
-			Bridge.removeEspChams(uid)
-		end
-	end
-	if Bridge.perfSet then
-		Bridge.perfSet("drawActors", drawnN)
-		Bridge.perfSet("hiddenActors", hiddenN)
-	end
-	if Bridge.perfEnd then
-		Bridge.perfEnd("esp.drawLoop", drawT, "draw=" .. tostring(drawnN))
-	end
-end
-
-
-local _M = {
-	start = function()
-		if espConn then return end
-		-- v20 PATCH: не перезаписывать CONFIG ключи которые уже были установлены
-		-- (Silent/Library могут выставить свои значения до вызова start())
-		for k,v in pairs(ESP_CONFIG) do
-			if CONFIG[k] == nil then CONFIG[k] = v end
-		end
-		if type(Bridge.tickRepSyncBatch) == "function" then
-			task.defer(function()
-				Bridge.tickRepSyncBatch(16)
-			end)
-		end
-		local tFull = 0; local tGc = 0; local tEnrich = 0; local tSquad = 0
-		espConn = game:GetService("RunService").Heartbeat:Connect(function(dt)
-			local t = os.clock()
-			if not CONFIG.ESP then return end
-			local actorN = State.trackedActorCount or 0
-			local npcN = cachedNpcCount()
-			local enrichInterval = 0.15
-			if npcN >= 15 or actorN > 200 then
-				enrichInterval = 0.35
-			elseif npcN >= 8 or actorN > 100 then
-				enrichInterval = 0.28
-			elseif npcN >= 4 then
-				enrichInterval = 0.22
-			end
-			if t - tEnrich >= enrichInterval and type(Bridge._refreshActorsForEsp) == "function" then
-				tEnrich = t
-				local refreshT = Bridge.perfBegin and Bridge.perfBegin() or nil
-				Bridge._refreshActorsForEsp()
-				if Bridge.perfEnd then Bridge.perfEnd("esp.refresh.call", refreshT) end
-			end
-			local updateT = Bridge.perfBegin and Bridge.perfBegin() or nil
-			Bridge.updateESP(dt)
-			if Bridge.perfEnd then Bridge.perfEnd("esp.update", updateT) end
-			if Bridge.updatePerfHud then Bridge.updatePerfHud(dt) end
-			if t - tGc >= 5 then
-				tGc = t
-				Bridge.cleanupEspCache()
-			end
-			-- FIX (ESP «зависал» на пару секунд): раньше здесь по таймеру
-			-- вызывался clearESP() — он сносил ВСЕ Drawing-объекты сразу.
-			-- Экран на кадр пустел, а потом заново создавались десятки
-			-- Drawing в одном кадре → видимый ступор, и всё это ради сборки
-			-- мусора, которую и так делает cleanupEspCache каждые 5 сек.
-			-- Теперь полный рескан только инвалидирует КЭШИ, не трогая
-			-- отрисовку: мёртвые записи уберёт cleanupEspCache, живые
-			-- просто перерисуются на следующем кадре — без моргания.
-			if t - tFull >= (CONFIG.EspFullRescanInterval or 60) then
-				tFull = t
-				-- FIX (ESP «застывает на пару секунд»): раньше здесь стояло
-				-- State.espRanked = nil. Дальше в updateESP есть ранний выход
-				-- «ranked пустой → пропускаем кадр», и он срабатывал ДО всей
-				-- отрисовки. Пересборка ranked идёт в task.defer и может занять
-				-- несколько кадров — всё это время ESP не обновлялся вообще, а
-				-- Drawing-объекты оставались с прошлыми координатами. Выглядело
-				-- ровно как «замерло перед сканом».
-				-- Теперь ranked НЕ трогаем: сбрасываем только счётчик, чтобы
-				-- пересборка стартовала, а рисуем по старому списку до её
-				-- окончания. Мёртвые строки отфильтровываются в самом цикле.
-				State.espLastActorCount = -1
-				Bridge.invalidateReplicatorCache()
-				Bridge.cleanupEspCache()
-			end
-			-- Состав команд: держим синхронно с library (там же дефолт 3с),
-			-- чтобы после нового матча союзники не висели красными.
-			if t - tSquad >= (CONFIG.SquadRefreshInterval or 3) then
-				tSquad = t
-				if type(Bridge.refreshActorSquads) == "function" then
-					pcall(Bridge.refreshActorSquads)
-				end
-			end
-		end)
-	end,
-	stop = function()
-		if espConn then espConn:Disconnect(); espConn = nil end
-		-- FIX: clearESP сносит все Drawing СИНХРОННО — на 3-4к объектов это
-		-- заметный фриз при выключении. clearAllEspDrawings сразу подменяет
-		-- таблицу (кадр уже чистый), а уничтожает в task.defer.
-		Bridge.clearAllEspDrawings()
-	end,
-	toggle = function()
-		if espConn then
-			espConn:Disconnect(); espConn = nil; Bridge.clearAllEspDrawings()
-		else _M.start() end
-	end,
-	isRunning = function() return espConn ~= nil end,
-}
-
--- ─────────────────────────────────────────────────────────────────────────
--- UI-интеграция (MacLib). ESP живёт в табе Visuals (это визуал, не логика).
--- Колбэки пишут в CONFIG (= Lib.CONFIG), который модуль читает в рантайме.
--- ─────────────────────────────────────────────────────────────────────────
-function _M.buildUI(ui)
-	local flag = ui.flag or function(s) return "ESP_" .. s end
-	local tab = ui.tabs and ui.tabs.Visuals
-	if not tab then return end
-
-	local K = Bridge.makeUiKit(ui)
-
-	-- ═══ LEFT: сама фича и что она рисует ══════════════════════════════
-	local L = tab:Section({ Side = "Left" })
-
-	K.feature(L, {
-		Title = "ESP", Flag = "ESP",
-		get = function() return CONFIG.ESP end,
-		set = function(v) CONFIG.ESP = v end,
-		Desc = "boxes n info over players n npcs\nbind works on PC + mobile",
-	})
-
-	K.group(L, "Elements")
-	-- Стиль и длина уголков нужны только когда боксы включены.
-	local boxEls = {}
-	local function boxVis() K.setVisible(boxEls, CONFIG.EspBox ~= false) end
-	K.toggle(L, { Name = "Boxes", Flag = "Box", Title = "Boxes",
-		get = function() return CONFIG.EspBox end,
-		set = function(v) CONFIG.EspBox = v end,
-		after = boxVis })
-	local cornerEl
-	boxEls[#boxEls + 1] = K.dropdown(L, {
-		Name = "Box Style", Flag = "BoxMode",
-		Options = { "Box", "Corner" }, Default = CONFIG.EspBoxMode or "Box",
-		Callback = function(v) CONFIG.EspBoxMode = v end,
-		after = function(v)
-			-- Длина уголка бессмысленна для сплошного бокса
-			if cornerEl then pcall(function() cornerEl:SetVisibility(v == "Corner") end) end
-		end,
-	})
-	cornerEl = K.slider(L, { Name = "Corner Length", Flag = "CornerLen",
-		Default = math.floor((CONFIG.EspCornerLen or 0.22) * 100),
-		Min = 5, Max = 50, Suffix = "%",
-		Callback = function(v) CONFIG.EspCornerLen = v / 100 end })
-	boxEls[#boxEls + 1] = cornerEl
-	K.toggle(L, { Name = "Skeleton", Flag = "Skeleton", Title = "Skeleton",
-		get = function() return CONFIG.EspSkeleton end,
-		set = function(v) CONFIG.EspSkeleton = v end })
-	K.toggle(L, { Name = "Chams", Flag = "Chams", Title = "Chams",
-		get = function() return CONFIG.EspChams end,
-		set = function(v) CONFIG.EspChams = v end,
-		Desc = "fills bodies so u see them thru walls" })
-	K.toggle(L, { Name = "HP Bar", Flag = "HpBar", Title = "HP Bar",
-		get = function() return CONFIG.EspHpBar end,
-		set = function(v) CONFIG.EspHpBar = v end })
-	boxVis()
-	if CONFIG.EspBoxMode ~= "Corner" and cornerEl then
-		pcall(function() cornerEl:SetVisibility(false) end)
-	end
-
-	K.group(L, "Text")
-	K.toggle(L, { Name = "Distance", Flag = "Distance", Title = "Distance",
-		get = function() return CONFIG.EspShowDistance end,
-		set = function(v) CONFIG.EspShowDistance = v end })
-	K.toggle(L, { Name = "Weapon Info", Flag = "WeaponInfo", Title = "Weapon Info",
-		get = function() return CONFIG.EspWeaponInfo end,
-		set = function(v) CONFIG.EspWeaponInfo = v end,
-		Desc = "what theyre holding + ammo" })
-	K.toggle(L, { Name = "Secondary Weapon", Flag = "Secondary", Title = "Secondary Weapon",
-		get = function() return CONFIG.EspShowSecondary end,
-		set = function(v) CONFIG.EspShowSecondary = v end })
-	K.toggle(L, { Name = "Inventory", Flag = "Inventory", Title = "Inventory",
-		get = function() return CONFIG.EspShowInventory end,
-		set = function(v) CONFIG.EspShowInventory = v end })
-	K.toggle(L, { Name = "Actor Status", Flag = "Status", Title = "Actor Status",
-		get = function() return CONFIG.EspActorStatus end,
-		set = function(v) CONFIG.EspActorStatus = v end,
-		Desc = "downed, reloading, in a vehicle n so on" })
-	K.toggle(L, { Name = "Stance", Flag = "Stance", Title = "Stance",
-		get = function() return CONFIG.EspShowStance end,
-		set = function(v) CONFIG.EspShowStance = v end })
-
-	K.group(L, "Smoothing")
-	local smoothEls = {}
-	local function smoothVis() K.setVisible(smoothEls, CONFIG.EspSmooth ~= false) end
-	K.toggle(L, { Name = "Smooth Boxes", Flag = "Smooth", Title = "Smooth Boxes",
-		get = function() return CONFIG.EspSmooth end,
-		set = function(v) CONFIG.EspSmooth = v end,
-		after = smoothVis })
-	smoothEls[#smoothEls + 1] = K.slider(L, { Name = "Smooth Amount", Flag = "SmoothA",
-		Default = math.floor((1 - (CONFIG.EspSmoothAlpha or 1)) * 100),
-		Min = 0, Max = 90, Suffix = "%",
-		Callback = function(v) CONFIG.EspSmoothAlpha = 1 - (v / 100) end,
-		Desc = "higher = smoother but boxes lag behind" })
-	smoothVis()
-
-	-- ═══ RIGHT: цвета ══════════════════════════════════════════════════
-	local C = tab:Section({ Side = "Right" })
-	C:Header({ Name = "Colors" })
-	local function colorPick(name, key)
-		K.color(C, { Name = name, Flag = "Col_" .. key, Default = ESP_COLORS[key],
-			Callback = function(c) ESP_COLORS[key] = c end })
-	end
-	colorPick("Visible",   "visible")
-	colorPick("Hidden",    "hidden")
-	colorPick("Hostile",   "hostile")
-	colorPick("Friendly",  "friendly")
-	colorPick("NPC",       "npc")
-	colorPick("Zombie",    "zombie")
-	colorPick("Team",      "team")
-	colorPick("Teammate",  "teammate")
-	colorPick("Dead",      "dead")
-
-	-- ═══ RIGHT #2: кого показывать ═════════════════════════════════════
-	local R = tab:Section({ Side = "Right" })
-	R:Header({ Name = "Filters" })
-	K.toggle(R, { Name = "Players", Flag = "ShowPlayers", Title = "Players",
-		get = function() return CONFIG.EspShowPlayers end,
-		set = function(v) CONFIG.EspShowPlayers = v end })
-	K.toggle(R, { Name = "Hostile NPCs", Flag = "ShowHostile", Title = "Hostile NPCs",
-		get = function() return CONFIG.EspShowHostile end,
-		set = function(v) CONFIG.EspShowHostile = v end })
-	K.toggle(R, { Name = "Friendly NPCs", Flag = "ShowFriendly", Title = "Friendly NPCs",
-		get = function() return CONFIG.EspShowFriendly end,
-		set = function(v) CONFIG.EspShowFriendly = v end })
-	K.toggle(R, { Name = "Zombies", Flag = "ShowZombie", Title = "Zombies",
-		get = function() return CONFIG.EspShowZombie end,
-		set = function(v) CONFIG.EspShowZombie = v end })
-	K.toggle(R, { Name = "Generic NPCs", Flag = "ShowNpc", Title = "Generic NPCs",
-		get = function() return CONFIG.EspShowNpc end,
-		set = function(v) CONFIG.EspShowNpc = v end })
-	K.toggle(R, { Name = "Dead Players", Flag = "ShowDead", Title = "Dead Players",
-		get = function() return CONFIG.EspShowDead end,
-		set = function(v) CONFIG.EspShowDead = v end })
-	K.toggle(R, { Name = "Players in PVE", Flag = "ShowPvePlayers", Title = "PVE Players",
-		get = function() return CONFIG.EspShowPlayersInPve end,
-		set = function(v) CONFIG.EspShowPlayersInPve = v end })
-
-	K.group(R, "Visibility")
-	local losEls = {}
-	local function losVis() K.setVisible(losEls, CONFIG.EspVisibleCheck ~= false) end
-	K.toggle(R, { Name = "Visible Check", Flag = "VisibleCheck", Title = "Visible Check",
-		get = function() return CONFIG.EspVisibleCheck end,
-		set = function(v) CONFIG.EspVisibleCheck = v end,
-		after = losVis,
-		Desc = "colors targets by line of sight" })
-	losEls[#losEls + 1] = K.toggle(R, { Name = "Strict LOS", Flag = "VisibleStrict",
-		Title = "Strict LOS",
-		get = function() return CONFIG.EspVisibleStrict end,
-		set = function(v) CONFIG.EspVisibleStrict = v end,
-		Desc = "checks more bones — accurate but heavier" })
-	losVis()
-
-	-- ═══ DEBUG ═════════════════════════════════════════════════════════
-	local dtab = ui.tabs and ui.tabs.Debug
-	if dtab then
-		local D = dtab:Section({ Side = "Right" })
-		D:Header({ Name = "ESP" })
-		K.slider(D, { Name = "Render Interval", Flag = "DbgRender",
-			Default = math.floor((CONFIG.EspRenderInterval or 0.0167) * 1000),
-			Min = 8, Max = 200, Suffix = " ms",
-			Callback = function(v) CONFIG.EspRenderInterval = v / 1000 end,
-			Desc = "higher = less cpu, choppier boxes" })
-		-- Слайдер "Rescan Interval" удалён: CONFIG.EspRescanInterval не читает
-		-- ни один цикл, ручка ничего не делала. Вместо неё — реально
-		-- работающий интервал пересчёта состава команд.
-		K.slider(D, { Name = "Squad Refresh", Flag = "DbgSquad",
-			Default = math.floor((CONFIG.SquadRefreshInterval or 3) * 1000),
-			Min = 500, Max = 15000, Suffix = " ms",
-			Callback = function(v) CONFIG.SquadRefreshInterval = v / 1000 end,
-			Desc = "how fast we re-check whos on ur team\nlower = teammates stop showing red sooner" })
-		K.slider(D, { Name = "Full Rescan", Flag = "DbgFullRescan",
-			Default = CONFIG.EspFullRescanInterval or 30,
-			Min = 5, Max = 120, Suffix = " s",
-			Callback = function(v) CONFIG.EspFullRescanInterval = v end })
-		K.slider(D, { Name = "Visible Check Interval", Flag = "DbgVisIv",
-			Default = math.floor((CONFIG.EspVisibleInterval or 0.35) * 1000),
-			Min = 100, Max = 2000, Suffix = " ms",
-			Callback = function(v) CONFIG.EspVisibleInterval = v / 1000 end })
-
-		K.group(D, "Diagnostics")
-		local stat = D:Label({ Text = "Tracked actors: -" })
-		task.spawn(function()
-			while stat and stat._frame and stat._frame.Parent do
-				local n = 0
-				pcall(function() if type(State.espRanked) == "table" then n = #State.espRanked end end)
-				local drawn = 0
-				pcall(function() for _ in pairs(State.drawings or {}) do drawn += 1 end end)
-				pcall(function() stat:UpdateName(("Ranked: %d | Drawings: %d | Running: %s")
-					:format(n, drawn, tostring(espConn ~= nil))) end)
-				task.wait(0.5)
-			end
-		end)
-	end
-
-	K.ready()
-end
-
-Bridge._espModule = _M
-return _M
+    local CONFIG = Lib.CONFIG
+    local State  = Lib.State
+    local Bridge = Lib.Bridge   -- нужен для общего UI-kit (Bridge.makeUiKit)
+
+    local RunService = game:GetService("RunService")
+    local UIS        = game:GetService("UserInputService")
+    local Lighting   = game:GetService("Lighting")
+    local Workspace  = game:GetService("Workspace")
+    local Players    = game:GetService("Players")
+    local PPS        = game:GetService("ProximityPromptService")
+    local LP         = Players.LocalPlayer
+
+    local function now() return os.clock() end
+    local function log() end   -- logging disabled (was print("[VIS]", ...))
+
+    ---------------------------------------------------------------------------
+    -- ⚙️  НАСТРОЙКИ ВИЗУАЛОВ  ─────────────────────────────────────────────────
+    --  Всё, что можно менять, лежит ЗДЕСЬ, в одной таблице SETTINGS.
+    --  Формат: Ключ = значение,  -- пояснение.
+    --  *Enabled  — включена ли фича (можно стартовать сразу включённой).
+    --  *Key      — хоткей (Numpad). Меняй на любой Enum.KeyCode.
+    --  Цвета: Color3.fromRGB(r,g,b).  Материалы: Enum.Material.*.
+    ---------------------------------------------------------------------------
+    CONFIG.Visuals = CONFIG.Visuals or {}
+    local V = CONFIG.Visuals
+
+    local SETTINGS = {
+        --== 1 · VIEWMODEL — вид РУК от первого лица (перекраска/материал/сдвиг) ==
+        --   Оружие красит отдельная фича GunModel (№2). Хоткей: Numpad 1.
+        ViewmodelEnabled          = false,
+        ViewmodelKey              = Enum.KeyCode.KeypadOne,
+        ViewmodelColorEnabled     = true,                        -- красить руки (ВКЛ → эффект виден сразу)
+        ViewmodelColor            = Color3.fromRGB(0, 200, 255), -- цвет рук
+        -- ВКЛ по умолчанию: ForceField даёт красивое равномерное свечение и, что
+        -- важно, ПЕРЕКРЫВАЕТ текстуры/SurfaceAppearance рукавов и перчаток —
+        -- поэтому теперь рукав/перчатка красятся так же, как сама рука.
+        ViewmodelMaterialEnabled  = true,                        -- менять материал рук
+        ViewmodelMaterial         = Enum.Material.ForceField,
+        ViewmodelTransparency     = 0,                           -- 0..1 прозрачность рук (0 = как есть)
+        ViewmodelOffset           = Vector3.new(0, 0, 0),        -- сдвиг рук: право / верх / назад (studs)
+        ViewmodelTilt             = 0,                           -- наклон рук (градусы)
+        ViewmodelDepth            = 0,     -- приближение рук по Z, в сотых studs (0 = как в игре)
+        WorldFOVEnabled           = false, -- мировой FOV камеры (отдельно от рук)
+        WorldFOV                  = 70,
+
+        --== 2 · GUNMODEL — подсветка МОДЕЛИ ОРУЖИЯ. Хоткей: Numpad 2 ==
+        GunModelEnabled           = false,
+        GunModelKey               = Enum.KeyCode.KeypadTwo,
+        GunModelHighlightEnabled  = true,   -- show Highlight instance on gun
+        GunModelFill              = Color3.fromRGB(0, 170, 255),
+        GunModelOutline           = Color3.fromRGB(255, 255, 255),
+        GunModelFillTransparency  = 0.5,
+        GunModelOutlineTransparency = 0,
+        -- Те же «визуалы», что и у рук (Viewmodel): реальная перекраска частей
+        -- оружия + смена материала (ForceField перекрывает текстуры/камо).
+        GunModelColorEnabled      = true,
+        GunModelColor             = Color3.fromRGB(0, 170, 255),
+        GunModelMaterialEnabled   = true,
+        GunModelMaterial          = Enum.Material.ForceField,
+        GunModelTransparency      = 0,                           -- 0..1 прозрачность оружия
+
+        --== 3 · THIRD PERSON SKIN — стилизация СВОЕЙ модели в 3-м лице. Numpad 3 ==
+        --   (камерой рулит movement; тут только внешний вид тела)
+        ThirdPersonEnabled        = false,
+        ThirdPersonKey            = Enum.KeyCode.KeypadThree,
+        ThirdPersonFill           = Color3.fromRGB(120, 200, 255),
+        ThirdPersonOutline        = Color3.fromRGB(180, 235, 255),
+        ThirdPersonFillTransparency = 0.55,
+        ThirdPersonMaterial       = Enum.Material.Glass,          -- nil = не менять материал
+        ThirdPersonBodyColor      = Color3.fromRGB(120, 200, 255),
+        ThirdPersonBodyTransparency = 0.35,
+
+        --== 3b · GRADIENT — плавный градиент МЕЖДУ ДВУМЯ ЦВЕТАМИ ==
+        --   НЕ радуга: цвет пингпонг-л��рпит ColorA ⇆ ColorB (по умолчанию
+        --   светло-фиолетовый ⇆ голубой). Работает поверх перекраски рук/оружия/
+        --   тела. Для оружия «умный»: фаза бежит волной по частям (GradientSpread),
+        --   поэтому части переливаются постепенно, а не все разом.
+        ViewmodelGradientEnabled   = false,   -- переливать руки (Viewmodel)
+        GunModelGradientEnabled    = false,   -- переливать оружие (GunModel)
+        GunModelHighlightGradient  = true,    -- и обводку тоже красить волной
+        ThirdPersonGradientEnabled = false,   -- переливать тело (ThirdPerson)
+        GradientSpeed              = 0.35,     -- скорость перелива (циклов A⇆B в секунду)
+        GradientColorA             = Color3.fromRGB(190, 150, 255), -- светло-фиолетовый
+        GradientColorB             = Color3.fromRGB(120, 210, 255), -- голубой
+        GunModelGradientSpread     = 1.6,      -- «растяжение» волны по частям оружия (0 = все синхронно)
+
+        --== 4 · VEHICLE FLY — полёт на транспорте (WASD + Space/Ctrl). Numpad 4 ==
+        VehicleFlyEnabled         = false,
+        VehicleFlyKey             = Enum.KeyCode.KeypadFour,
+        VehicleFlySpeed           = 120,                          -- studs/сек
+
+        --== 5 · VEHICLE SPEED — множитель скорости транспорта. Numpad 5 ==
+        VehicleSpeedEnabled       = false,
+        VehicleSpeedKey           = Enum.KeyCode.KeypadFive,
+        VehicleSpeedMult          = 2.0,
+
+        --== 5b · FREE GUN — снять блок экипировки оружия (в транспорте и пр.). KeypadEnter ==
+        -- Игра гейтит экипировку в InventoryService._canEquip: в транспорте
+        -- HeightState==Sitting и SeatCanEquip==false → оружие не достать.
+        -- FreeGun хукает _canEquip (возвращает true) и держит SeatCanEquip=true.
+        FreeGunEnabled            = false,
+        FreeGunKey                = Enum.KeyCode.KeypadEnter,
+
+        --== 6 · AMBIENT — время суток и яркость (только у тебя). Numpad 6 ==
+        AmbientEnabled            = false,
+        AmbientPreset             = "Custom",
+        AmbientColor              = Color3.fromRGB(120, 120, 130),
+        AmbientOutdoorColor       = Color3.fromRGB(140, 140, 150),
+        AmbientTintTop            = Color3.fromRGB(0, 0, 0),
+        AmbientTintBottom         = Color3.fromRGB(0, 0, 0),
+        AmbientExposure           = 0,
+        AmbientLatitude           = 45,
+        AmbientDiffuse            = 1,
+        AmbientSpecular           = 1,
+        AmbientShadows            = true,
+        AmbientFogEnabled         = false,
+        AmbientFogColor           = Color3.fromRGB(150, 160, 175),
+        AmbientFogStart           = 0,
+        AmbientFogEnd             = 800,
+        AmbientKey                = Enum.KeyCode.KeypadSix,
+        AmbientClockTime          = 14,                           -- 0..24 (14 = день, 0 = ночь)
+        AmbientBrightness         = 2,
+
+        --== 7 · NO F WAIT — убирает hold-таймер взаимодействий (F). Numpad 7 ==
+        NoFWaitEnabled            = false,
+        NoFWaitKey                = Enum.KeyCode.KeypadSeven,
+
+        --== 8 · LOCKPICK BYPASS — авто-успех мини-игры взлома. Numpad 8 ==
+        LockpickBypassEnabled     = false,
+        LockpickBypassKey         = Enum.KeyCode.KeypadEight,
+        LockpickScanInterval      = 0.4,                          -- как часто (сек) искать активный замок, если стейт неизвестен
+
+        --== 9 · FULLBRIGHT — максимум света без теней. Numpad 9 ==
+        FullbrightEnabled         = false,
+        FullbrightKey             = Enum.KeyCode.KeypadNine,
+
+        --== 0 · NO FOG — убирает туман. Numpad 0 ==
+        NoFogEnabled              = false,
+        NoFogKey                  = Enum.KeyCode.KeypadZero,
+    }
+
+    -- применяем дефолты, не затирая уже заданные пользователем значения
+    for k, val in pairs(SETTINGS) do if V[k] == nil then V[k] = val end end
+
+    ---------------------------------------------------------------------------
+    -- GC-ФАЙНДЕРЫ
+    ---------------------------------------------------------------------------
+    local function isCtrl(t)
+        if type(t) ~= "table" then return false end
+        if type(rawget(t, "MoveSpeed"))    ~= "number"  then return false end
+        if type(rawget(t, "IsGrounded"))   ~= "boolean" then return false end
+        if type(rawget(t, "IsSprinting"))  ~= "boolean" then return false end
+        local la = rawget(t, "_localActor")
+        return type(la) == "table" and rawget(la, "IsLocalPlayer") ~= false
+    end
+    local _scanCd, _lastScan = 1.0, -999
+    local _ctrl
+    local _ctrlRescan = -999
+    -- жив ли актор этого контроллера?
+    local function ctrlAlive(c)
+        local la = c and rawget(c, "_localActor")
+        return type(la) == "table" and rawget(la, "Alive") ~= false
+    end
+    local function rescanCtrl()
+        if type(filtergc) ~= "function" then return nil end
+        local ok, gc = pcall(filtergc, "table",
+            { Keys = { "MoveSpeed", "VelocityGravity", "TrySprinting", "IsGrounded", "IsSprinting" } })
+        if not ok then return nil end
+        -- предпочитаем ЖИВОЙ контроллер (после респавна старый _ctrl мёртв, но
+        -- его таблица ещё проходит isCtrl → без этого 3-е лицо не возвращалось)
+        local firstValid
+        for _, v in ipairs(gc) do
+            if isCtrl(v) then
+                firstValid = firstValid or v
+                if ctrlAlive(v) then _ctrl = v; return v end
+            end
+        end
+        if firstValid then _ctrl = firstValid end
+        return firstValid
+    end
+    local function findCtrl()
+        -- кэш валиден И актор жив → используем без сканов
+        if _ctrl and isCtrl(_ctrl) and ctrlAlive(_ctrl) then return _ctrl end
+        -- кэш есть, но актор мёртв (умерли/респавн): троттлим ре-скан на живой
+        if _ctrl and isCtrl(_ctrl) then
+            local t = now()
+            if t - _ctrlRescan >= _scanCd then
+                _ctrlRescan = t
+                local fresh = rescanCtrl()
+                if fresh then return fresh end
+            end
+            return _ctrl   -- пока живого нет — возвращаем мёртвый (мы реально мертвы)
+        end
+        _ctrl = nil
+        return rescanCtrl()
+    end
+    local function getLA()
+        local c = findCtrl(); return c and rawget(c, "_localActor") or nil
+    end
+
+    -- (поиск транспорта переехал в findVehicleController — секция VEHICLE FLY/SPEED)
+
+    -- LockPickController (активная мини-игра)
+    local function isLockPick(t)
+        return type(t) == "table"
+            and type(rawget(t, "_picks")) == "number"
+            and rawget(t, "_expires") ~= nil
+            and type(rawget(t, "_localActor")) == "table"
+            and rawget(t, "_cancelled") ~= nil
+    end
+    local function findLockPick()
+        if type(filtergc) ~= "function" then return nil end
+        local ok, gc = pcall(filtergc, "table",
+            { Keys = { "_picks", "_speed", "_expires", "_cancelled" } })
+        if not ok then return nil end
+        for _, v in ipairs(gc) do
+            if isLockPick(v) and not rawget(v, "_cancelled") then return v end
+        end
+    end
+
+    -- Net module (для LockpickBypass)
+    local function isNetObj(v)
+        if type(v) ~= "table" then return false end
+        local ok, fs = pcall(function() return v.FireServer end)
+        return ok and type(fs) == "function"
+            and type(rawget(v, "_code")) == "string"
+            and type(rawget(v, "_events")) == "table"
+    end
+    local function findNet()
+        if isNetObj(State.networkModule) then return State.networkModule end
+        if type(filtergc) ~= "function" then return nil end
+        local ok, gc = pcall(filtergc, "table",
+            { Keys = { "_code", "_key", "_events", "_functions" } })
+        if not ok then return nil end
+        for _, v in ipairs(gc) do
+            if isNetObj(v) then State.networkModule = v; return v end
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 1. VIEWMODEL hook (пост-смещение ПОСЛЕ игрового Update)
+    --
+    -- ВАЖНО: hookfunction(orig, hook) -> origRef
+    --   origRef — это безопасный вызываемый «оригинал». Вызов самого orig
+    --   внутри hook уже перенаправлен на hook → бесконечная рекурсия.
+    --   Всегда вызываем возвращённый origRef.
+    ---------------------------------------------------------------------------
+    -- Объявлен ЗДЕСЬ, до хука viewmodel: хук читает `running`, и если объявить
+    -- локал ниже (у главного цикла), внутри хука он станет глобалом=nil и
+    -- Viewmodel/GunModel перестанут применяться.
+    local running     = false
+    local vmHooked    = false
+    local vmOrigRef   = nil   -- ← значение, ВОЗВРАЩЁННОЕ hookfunction (НЕ исходный rawget)
+    local vmHookMode  = nil   -- "hookfunction" | "field" — как ставили, так и снимаем
+    local vmHookTbl   = nil   -- таблица класса для field-режима (cls.Update = orig)
+    local vmHookFn    = nil   -- исходная функция для hookfunction-режима
+    -- FIX: раньше `local gunHighlight` объявлялся НИЖЕ (стр. 624) — уже после
+    -- замыкания хука, которое его использует. Из-за этого обращения внутри
+    -- хука компилировались как ГЛОБАЛ, а весь код очистки (хоткей, stop,
+    -- тоггл в UI) захватывал пустой локал → gunHighlight:Destroy() никогда
+    -- не выполнялся и Highlight утекал навсегда. Теперь объявлен ДО хука.
+    local gunHighlight = nil
+
+    -- Список стилизованных частей: { [part] = { M, C, T } } для restore
+    local vmStyledParts  = {}
+    local vmStyledVM     = nil
+    local _vmStyleApplied = nil   -- FIX: declared here so restoreViewmodelStyle can reset it
+    local _vmRestyleT     = 0     -- время последнего пере-обхода частей рук
+
+    local function restoreViewmodelStyle()
+        for part, s in pairs(vmStyledParts) do
+            if part and part.Parent then
+                pcall(function()
+                    part.Material    = s.M
+                    part.Color       = s.C
+                    part.Transparency = s.T
+                    if s.tex ~= nil then part.TextureID = s.tex end
+                end)
+            end
+            -- вернуть отключённые SurfaceAppearance (иначе рукав останется без текстуры)
+            if s.sa then
+                for _, rec in ipairs(s.sa) do
+                    pcall(function()
+                        if rec.inst and rec.parent then rec.inst.Parent = rec.parent end
+                    end)
+                end
+            end
+        end
+        vmStyledParts = {}
+        vmStyledVM    = nil
+        _vmStyleApplied = nil
+    end
+
+    -- ── ПОДХОД (переписан): красим ИМЕННО РУКИ ────────────────────────────
+    -- По дампу ViewmodelClass руки — это _leftArm / _rightArm (MeshPart'ы) плюс
+    -- приваренные к ним перчатки/рукава/часы (Part0 = _leftArm/_rightArm,
+    -- Parent = _container). Оружие — это отдельная _container-модель CurrentModel.
+    -- Раньше стилизация опиралась ТОЛЬКО на об��од контейнера, и если руки лежали
+    -- не там / грузились позже — эффекта не было («не работает»). Теперь мы
+    -- ЯВНО берём _leftArm/_rightArm + их потомков И добираем контейнер (минус
+    -- оружие). Плюс каждый кадр ПЕРЕ-применяем цвет к уже пойманным частям, если
+    -- игра/анимации его сбросили — так эффект реально держится и виден.
+    -- Обобщённое ядро: красит одну часть и сохраняет оригинал в store.
+    -- opts = { colorOn, color, matOn, mat, transp }. Возвращает true если тронул.
+    local function stylePartInto(d, store, opts)
+        if not (d:IsA("BasePart") or d:IsA("MeshPart")) then return false end
+        local paint = opts.colorOn or opts.matOn
+        if store[d] == nil then
+            local rec = { M = d.Material, C = d.Color, T = d.Transparency }
+            -- Текстуры/камо (TextureID у MeshPart, SurfaceAppearance/Decal/Texture)
+            -- перекрывают наш цвет — снимаем их с сохранением для восстановления.
+            if paint then
+                if d:IsA("MeshPart") and d.TextureID ~= "" then rec.tex = d.TextureID end
+                local sa = {}
+                for _, ch in ipairs(d:GetChildren()) do
+                    if ch:IsA("SurfaceAppearance") or ch:IsA("Decal") or ch:IsA("Texture") then
+                        sa[#sa + 1] = { inst = ch, parent = ch.Parent }
+                    end
+                end
+                if #sa > 0 then rec.sa = sa end
+            end
+            store[d] = rec
+        end
+        local rec = store[d]
+        pcall(function()
+            if opts.matOn   then d.Material = opts.mat   end
+            if opts.colorOn then d.Color    = opts.color end
+            if paint then
+                if rec.tex ~= nil and d:IsA("MeshPart") and d.TextureID ~= "" then
+                    d.TextureID = ""
+                end
+                if rec.sa then
+                    for _, r in ipairs(rec.sa) do
+                        if r.inst and r.inst.Parent then r.inst.Parent = nil end
+                    end
+                end
+            end
+            -- При transp > 0 → ставим, при transp == 0 → восстанавливаем оригинал (если часть не полностью невидима)
+            if (opts.transp or 0) > 0 then
+                if d.Transparency < 1 then d.Transparency = opts.transp end
+            elseif rec and (rec.T or 0) < 1 then
+                d.Transparency = rec.T or 0
+            end
+        end)
+        return true
+    end
+
+    -- восстановление произвольного store (руки ИЛИ оружие)
+    local function restoreStore(store)
+        for part, s in pairs(store) do
+            if part and part.Parent then
+                pcall(function()
+                    part.Material     = s.M
+                    part.Color        = s.C
+                    part.Transparency = s.T
+                    if s.tex ~= nil then part.TextureID = s.tex end
+                end)
+            end
+            if s.sa then
+                for _, rec in ipairs(s.sa) do
+                    pcall(function()
+                        if rec.inst and rec.parent then rec.inst.Parent = rec.parent end
+                    end)
+                end
+            end
+        end
+        table.clear(store)
+    end
+
+    -- ── GRADIENT (плавный перелив между ДВУМЯ цветами, НЕ радуга) ─────────────
+    -- phase01 крутится 0..1; треугольная (пинг-понг) волна t: 0→1→0 даёт
+    -- плавный ColorA → ColorB → ColorA без резкого скачка на стыке цикла.
+    local function gradientColorAt(phase01)
+        local a = V.GradientColorA or Color3.fromRGB(190, 150, 255)
+        local b = V.GradientColorB or Color3.fromRGB(120, 210, 255)
+        local p = phase01 % 1
+        local t = (p < 0.5) and (p * 2) or (2 - p * 2)   -- ping-pong 0..1..0
+        return a:Lerp(b, t)
+    end
+    -- Фаза части по её ИНДЕКСУ в store (не по мировой позиции — та меняется при движении и даёт джиттер).
+    -- Индекс определяется один раз: сортируем части по начальной мировой Y+X, присваиваем idx.
+    -- spread растягивает/сжимает волну по индексам; 0 → все части в фазе (синхронно).
+    -- Вынесено из горячего цикла: одна функция вместо замыкания на часть/кадр.
+    local function _setPartColor(part, col) part.Color = col end
+    local function tickGradientStore(store, spread, baseHue)
+        -- 1) Собираем пары (part, rec) где нужно посчитать gp
+        -- FIX: таблица needPhase создавалась каждый вызов, даже когда все фазы
+        -- уже посчитаны (обычный случай) — теперь только по факту необходимости.
+        local needPhase = nil
+        local total = 0
+        for part, rec in pairs(store) do
+            if part and part.Parent then
+                total = total + 1
+                if rec.gp == nil then
+                    needPhase = needPhase or {}
+                    needPhase[part] = rec
+                end
+            end
+        end
+        if total == 0 then return end
+        -- 2) Для частей без фазы — назначаем по сортировке idx/total
+        if needPhase then
+            local arr = {}
+            for part in pairs(needPhase) do arr[#arr + 1] = part end
+            -- Сортировка по базовой позиции: стабильная, не меняется при движении игрока
+            table.sort(arr, function(a, b)
+                local pa = pcall(function() return a.Position end) and a.Position or Vector3.zero
+                local pb = pcall(function() return b.Position end) and b.Position or Vector3.zero
+                return (pa.Y + pa.X) < (pb.Y + pb.X)
+            end)
+            for i, part in ipairs(arr) do
+                local rec = needPhase[part]
+                if rec then
+                    rec.gp = ((i - 1) / math.max(1, #arr)) * (spread or 1)
+                end
+            end
+        end
+        -- 3) Красим с кэшированными фазами
+        for part, rec in pairs(store) do
+            if part and part.Parent then
+                -- FIX: было pcall(function() ... end) — новое замыкание на КАЖДУЮ
+                -- часть КАЖДЫЙ кадр (2-4 тысячи аллокаций в секунду → GC-нагрузка
+                -- и микрофризы). Теперь передаём аргументы в готовую функцию.
+                pcall(_setPartColor, part, gradientColorAt(baseHue + (rec.gp or 0)))
+            end
+        end
+    end
+
+    local function styleOnePart(d, weapon)
+        if weapon and d:IsDescendantOf(weapon) then return end   -- это оружие → мимо
+        stylePartInto(d, vmStyledParts, {
+            -- при включённом градиенте красим всегда (иначе текстуры перекроют цвет)
+            colorOn = V.ViewmodelColorEnabled or V.ViewmodelGradientEnabled,
+            color   = V.ViewmodelColor,
+            matOn   = V.ViewmodelMaterialEnabled,
+            mat     = V.ViewmodelMaterial,
+            transp  = V.ViewmodelTransparency,
+        })
+    end
+
+    -- FIX: стиль применяется один раз и кэшируется по (vm/оружие). Смена
+    -- материала, цвета или тумблеров кэш НЕ сбрасывала — работал только
+    -- слайдер прозрачности, потому что он единственный звал restore*Style().
+    -- Отсюда «материал переприменяется только при смене прозрачности».
+    -- Эти два хелпера вызываются из UI на любое изменение стиля.
+    local function invalidateVmStyle()
+        restoreViewmodelStyle()
+    end
+
+    local function applyViewmodelStyle(vm)
+        if vmStyledVM ~= nil and vmStyledVM ~= vm then
+            restoreViewmodelStyle()  -- resets _vmStyleApplied = nil
+        end
+        -- FIX FPS: обходим GetDescendants только при смене vm/оружия.
+        -- Раньше при включённом градиенте этот ранний выход пропускался и весь
+        -- обход дерева шёл КАЖДЫЙ кадр — тысячи Instance-вызовов в секунду,
+        -- ровно отсюда и брался просад FPS при включении градиента.
+        -- Перекраску градиента делает tickGradientStore по уже собранному
+        -- списку частей, повторно собирать его не нужно.
+        -- FIX («после смерти меняет руки, но не рукав»): стиль применялся
+        -- РОВНО ОДИН раз на объект viewmodel. Части рук (перчатки, рукав,
+        -- часы) досоздаются игрой асинхронно — те, что появились после
+        -- первого прохода, так и оставались неокрашенными. При первом
+        -- включении обычно успевало, после респавна — нет.
+        -- Решение то же, что уже работает для тела в thirdPersonStep:
+        -- периодический пере-обход раз в VmRestyleSec (дёшево, не каждый кадр).
+        local nowT = now()
+        if _vmStyleApplied == vm and (nowT - _vmRestyleT) < (V.VmRestyleSec or 3) then
+            return
+        end
+        _vmRestyleT = nowT
+        _vmStyleApplied = vm
+        local weapon = rawget(vm, "CurrentModel")   -- модель оружия — НЕ трогаем
+
+        -- 1) явные корни рук + всё, что к ним приварено/вложено (перчатки, рукав, часы)
+        for _, key in ipairs({ "_leftArm", "_rightArm" }) do
+            local arm = rawget(vm, key)
+            if typeof(arm) == "Instance" then
+                styleOnePart(arm, weapon)
+                for _, d in ipairs(arm:GetDescendants()) do styleOnePart(d, weapon) end
+            end
+        end
+
+        -- 2) добор по контейнеру (на случай перчаток, вложенных в _container, а не в руку)
+        local root = rawget(vm, "Root")
+        local container = root and root.Parent
+        if container then
+            for _, d in ipairs(container:GetDescendants()) do styleOnePart(d, weapon) end
+        end
+
+        vmStyledVM = vm
+    end
+
+    -- ── GUNMODEL: та же перекраска/материал, но для МОДЕЛИ ОРУЖИЯ ──────────────
+    local gunStyledParts  = {}     -- [part] = { M, C, T, tex, sa }
+    local gunStyledModel  = nil
+    local _gunStyleApplied = nil  -- FIX: declared here so restoreGunStyle can reset it
+    local _gunRestyleT     = 0
+    local function restoreGunStyle()
+        restoreStore(gunStyledParts)
+        gunStyledModel = nil
+        _gunStyleApplied = nil
+    end
+    local function invalidateGunStyle()
+        restoreGunStyle()
+    end
+
+    local function applyGunStyle(vm)
+        local weapon = rawget(vm, "CurrentModel")
+        if not (typeof(weapon) == "Instance" and weapon.Parent) then
+            if gunStyledModel then restoreGunStyle() end  -- resets _gunStyleApplied = nil
+            return
+        end
+        if gunStyledModel ~= nil and gunStyledModel ~= weapon then
+            restoreGunStyle()   -- сменили ствол → вернуть старый
+            _gunStyleApplied = nil
+        end
+        -- FIX FPS: GetDescendants только при смене ствола (см. коммент в
+        -- applyViewmodelStyle) — при градиенте кэш больше не обходится.
+        -- Та же периодическая доводка, что и для рук: аттачменты/магазин
+        -- могут досоздаться после первого прохода.
+        local nowG = now()
+        if _gunStyleApplied == weapon and (nowG - _gunRestyleT) < (V.VmRestyleSec or 3) then
+            return
+        end
+        _gunRestyleT = nowG
+        _gunStyleApplied = weapon
+        local opts = {
+            colorOn = V.GunModelColorEnabled or V.GunModelGradientEnabled,
+            color   = V.GunModelColor,
+            matOn   = V.GunModelMaterialEnabled,
+            mat     = V.GunModelMaterial,
+            transp  = V.GunModelTransparency,
+        }
+        stylePartInto(weapon, gunStyledParts, opts)   -- no-op если weapon это Model
+        for _, d in ipairs(weapon:GetDescendants()) do
+            stylePartInto(d, gunStyledParts, opts)
+        end
+        gunStyledModel = weapon
+    end
+
+    local function ensureViewmodelHook()
+        if vmHooked then return true end
+        if type(hookfunction) ~= "function" then return false end
+        if type(filtergc)     ~= "function" then return false end
+
+        -- Ищем ViewmodelClass (таблица методов, общая для всех экземпляров)
+        local ok, gc = pcall(filtergc, "table",
+            { Keys = { "Update", "SetModel", "AddReticle", "LoadAnimation" } })
+        if not ok then return false end
+        local cls
+        for _, v in ipairs(gc) do
+            if type(rawget(v, "Update")) == "function"
+            and type(rawget(v, "SetModel")) == "function"
+            and type(rawget(v, "AddReticle")) == "function" then
+                cls = v; break
+            end
+        end
+        if not cls then return false end
+
+        local origFn = rawget(cls, "Update")
+        if type(origFn) ~= "function" then return false end
+
+        -- hookfunction возвращает origRef — именно его вызываем внутри хука
+        local function newUpdate(self, dt, ...)
+            -- FIX: хук раньше не проверял `running`, поэтому после M.stop()
+            -- продолжал каждый кадр перекрашивать руки/оружие — и откатывал
+            -- restoreViewmodelStyle буквально на следующем кадре.
+            if not running then return vmOrigRef(self, dt, ...) end
+            local r = table.pack(vmOrigRef(self, dt, ...))   -- ← vmOrigRef, не origFn!
+            pcall(function()
+                -- ГЕОМЕТРИЯ РУК (offset / tilt / zoom) — ВНЕ гейта
+                -- V.ViewmodelEnabled.
+                -- FIX: раньше этот блок был внутри `if V.ViewmodelEnabled`,
+                -- то есть Hand Zoom и смещение работали только когда включена
+                -- ПЕРЕКРАСКА рук. Это НЕ связанные вещи: человек крутил ползунок
+                -- при выключенном тумблере и не понимал, почему ничего нет.
+                --
+                -- Про сам зум: «Custom FOV» раньше писал в Camera.FieldOfView —
+                -- это мировой FOV (отсюда ощущение смены чувствительности). В
+                -- BRM5 руки рендерятся ОБЩЕЙ камерой (дамп ViewmodelClass:822,
+                -- FOV там только масштабирует отдачу), отдельной камеры для
+                -- viewmodel нет. Честный аналог «зума рук» — двигать сами руки
+                -- по оси Z.
+                do
+                    local root = rawget(self, "Root")
+                    if root and root.Parent then
+                        local o = V.ViewmodelOffset or Vector3.new()
+                        local tilt = V.ViewmodelTilt or 0
+                        local depth = (V.ViewmodelDepth or 0) / 100   -- studs
+                        if o.Magnitude > 0.001 or math.abs(tilt) > 0.001
+                        or math.abs(depth) > 0.0001 then
+                            root.CFrame = root.CFrame
+                                * CFrame.new(o.X, o.Y, -o.Z + depth)
+                                * CFrame.Angles(0, 0, math.rad(tilt))
+                        end
+                    end
+                end
+                if V.ViewmodelEnabled then
+                    -- стилизация рук — только один раз (не каждый кадр)
+                    if V.ViewmodelMaterialEnabled or V.ViewmodelColorEnabled
+                    or (V.ViewmodelTransparency or 0) > 0 or V.ViewmodelGradientEnabled then
+                        applyViewmodelStyle(self)
+                        -- градиент — перекрас каждый кадр под текущую фазу
+                        if V.ViewmodelGradientEnabled then
+                            tickGradientStore(vmStyledParts, 0.4, now() * (V.GradientSpeed or 0.35))
+                        end
+                    elseif vmStyledVM then
+                        restoreViewmodelStyle()
+                    end
+                else
+                    if vmStyledVM then restoreViewmodelStyle() end
+                end
+                -- GunModel Highlight — ТОЛЬКО модель оружия (self.CurrentModel),
+                -- НЕ руки. Highlight держим в контейнере, адорним само оружие;
+                -- при смене ствола игра пересоздаёт CurrentModel — переадорним.
+                if V.GunModelEnabled then
+                    local root2 = rawget(self, "Root")
+                    local container = root2 and root2.Parent
+                    local weapon = rawget(self, "CurrentModel")
+                    -- Highlight is optional — can be disabled without disabling full GunModel
+                    if V.GunModelHighlightEnabled ~= false then
+                        if container and weapon and weapon.Parent then
+                            if not (gunHighlight and gunHighlight.Parent) then
+                                gunHighlight = Instance.new("Highlight")
+                                gunHighlight.Name = "BRM5_GunHL"
+                                gunHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                            end
+                            -- FIX: у Highlight не было градиента вообще —
+                            -- переливалась только сама модель, а обводка
+                            -- оставалась статичной, из-за чего эффект выглядел
+                            -- рассинхронизированным. Теперь Highlight берёт
+                            -- тот же цвет волны, что и части оружия.
+                            if V.GunModelGradientEnabled and V.GunModelHighlightGradient ~= false then
+                                local gcol = gradientColorAt(now() * (V.GradientSpeed or 0.35))
+                                gunHighlight.FillColor    = gcol
+                                gunHighlight.OutlineColor = gcol
+                            else
+                                gunHighlight.FillColor    = V.GunModelFill
+                                gunHighlight.OutlineColor = V.GunModelOutline
+                            end
+                            gunHighlight.FillTransparency   = V.GunModelFillTransparency
+                            gunHighlight.OutlineTransparency = V.GunModelOutlineTransparency
+                            if gunHighlight.Adornee ~= weapon then gunHighlight.Adornee = weapon end
+                            gunHighlight.Parent = container
+                        elseif gunHighlight then
+                            gunHighlight.Adornee = nil  -- оружие не экипировано сейчас
+                        end
+                    elseif gunHighlight then
+                        -- Highlight toggled off while GunModel is still on
+                        pcall(function() gunHighlight:Destroy() end); gunHighlight = nil
+                    end
+                    -- та же перекраска/материал, что и у рук — но для оружия
+                    if V.GunModelColorEnabled or V.GunModelMaterialEnabled
+                    or (V.GunModelTransparency or 0) > 0 or V.GunModelGradientEnabled then
+                        applyGunStyle(self)
+                        -- умный градиент: волна фазы бежит по частям (spread из конфига)
+                        if V.GunModelGradientEnabled then
+                            tickGradientStore(gunStyledParts, V.GunModelGradientSpread or 1.6,
+                                now() * (V.GradientSpeed or 0.35))
+                        end
+                    elseif gunStyledModel then
+                        restoreGunStyle()
+                    end
+                else
+                    if gunHighlight then
+                        pcall(function() gunHighlight:Destroy() end)
+                        gunHighlight = nil
+                    end
+                    if gunStyledModel then restoreGunStyle() end
+                end
+            end)
+            return table.unpack(r, 1, r.n)
+        end
+
+        local wrapped = (type(newcclosure) == "function")
+            and newcclosure(newUpdate, "ViewmodelClass.Update")
+            or newUpdate
+
+        -- hookfunction возвращает оригинальный безопасный callable
+        local hookOk, ret = pcall(hookfunction, origFn, wrapped)
+        if hookOk and type(ret) == "function" then
+            vmOrigRef  = ret
+            vmHooked   = true
+            vmHookMode = "hookfunction"
+            vmHookFn   = origFn
+            vmHookTbl  = cls
+            log("Viewmodel hook OK (hookfunction)")
+            return true
+        end
+
+        -- Fallback: заменяем метод в таблице
+        -- В этом случае origFn и есть оригинал — кладём его в vmOrigRef
+        vmOrigRef = origFn
+        local ok2 = pcall(function() cls.Update = wrapped end)
+        if ok2 then
+            vmHooked   = true
+            vmHookMode = "field"
+            vmHookFn   = origFn
+            vmHookTbl  = cls
+            log("Viewmodel hook OK (table replace fallback)")
+            return true
+        end
+        log("Viewmodel hook FAILED")
+        return false
+    end
+
+    -- FIX: раньше хук не снимался НИКОГДА. После unload он продолжал жить и
+    -- каждый кадр перекрашивал руки/оружие, а повторный запуск скрипта вешал
+    -- хук поверх хука. Теперь снимаем ровно тем способом, каким ставили.
+    local function unhookViewmodel()
+        if not vmHooked then return end
+        if vmHookMode == "hookfunction" and vmHookFn and vmOrigRef then
+            pcall(hookfunction, vmHookFn, vmOrigRef)
+        elseif vmHookMode == "field" and vmHookTbl and vmHookFn then
+            pcall(function() vmHookTbl.Update = vmHookFn end)
+        end
+        vmHooked, vmHookMode, vmHookTbl, vmHookFn, vmOrigRef = false, nil, nil, nil, nil
+    end
+
+    -- (gunHighlight объявлен выше, до хука — см. FIX там)
+
+    ---------------------------------------------------------------------------
+    -- FOV override (после камеры каждый кадр)
+    ---------------------------------------------------------------------------
+    local FOV_BIND = "BRM5_FOV"
+    local fovBound = false
+    local fovApplied = false  -- флаг: мы изменили FOV → надо восстановить при выключении
+    -- FIX: восстанавливали жёстко 70. Запоминаем настоящий FOV до первой правки.
+    local _origFov = nil
+    -- Мировой FOV камеры. ОТДЕЛЬНАЯ фича от «зума рук»: она реально меняет
+    -- угол обзора всей сцены (и да, ощущается как смена чувствительности —
+    -- это нормально и ожидаемо для FOV, поэтому вынесено в свой тумблер).
+    local function fovStep()
+        local fov = V.WorldFOV or 0
+        if V.WorldFOVEnabled and fov > 0 then
+            local cam = Workspace.CurrentCamera
+            if cam then
+                if not _origFov then _origFov = cam.FieldOfView end
+                pcall(function() cam.FieldOfView = fov end)
+                fovApplied = true
+            end
+        else
+            if fovApplied then
+                local cam = Workspace.CurrentCamera
+                if cam then pcall(function() cam.FieldOfView = _origFov or 70 end) end
+                fovApplied = false
+            end
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 3. THIRD PERSON SKIN
+    ---------------------------------------------------------------------------
+    local selfHighlight  = nil
+    local tpOrig         = {}   -- [part] = { M, C, T }
+    local tpStyledChar   = nil
+
+    -- В этой игре НЕТ Roblox-персонажа (LP.Character почти всегда nil). Тело
+    -- живёт на кастомном акторе: _localActor.Character. Берём его И только пока
+    -- мы ЖИВЫ (la.Alive) — иначе после смерти будем стилизовать рэгдолл/чужие
+    -- модели каждый кадр → просадка FPS.
+    local function getSelfCharacter()
+        -- FIX (Self Skin «вообще не работает»): раньше функция ВЫХОДИЛА, если
+        -- не резолвился Flux-контроллер (getLA). findCtrl зависит от filtergc
+        -- и на части экзекуторов/в лобби просто не находит контроллер — и
+        -- фича молча ничего не делала, даже когда персонаж есть.
+        -- Теперь Flux-путь опционален, а базовый LP.Character работает всегда.
+        local la = getLA()
+        if type(la) == "table" then
+            if rawget(la, "Alive") == false then return nil end
+            local ok, char = pcall(function() return la.Character end)
+            if ok and typeof(char) == "Instance" and char:IsA("Model") and char.Parent then
+                return char
+            end
+        end
+        local c = LP.Character
+        if typeof(c) == "Instance" and c:IsA("Model") and c.Parent then
+            -- если есть Humanoid и он мёртв — не стилизуем труп
+            local hum = c:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health <= 0 then return nil end
+            return c
+        end
+        return nil
+    end
+
+    local function applySelfHighlight(char)
+        char = char or getSelfCharacter()
+        if not char then return end
+        if not (selfHighlight and selfHighlight.Parent) then
+            selfHighlight = Instance.new("Highlight")
+            selfHighlight.Name = "BRM5_SelfHL"
+            selfHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        end
+        selfHighlight.FillColor          = V.ThirdPersonFill
+        selfHighlight.OutlineColor       = V.ThirdPersonOutline
+        selfHighlight.FillTransparency   = V.ThirdPersonFillTransparency
+        selfHighlight.OutlineTransparency = 0
+        if selfHighlight.Adornee ~= char then selfHighlight.Adornee = char end
+        selfHighlight.Parent = char
+    end
+
+    local function clearSelfHighlight()
+        if selfHighlight then
+            pcall(function() selfHighlight:Destroy() end)
+            selfHighlight = nil
+        end
+    end
+
+    local function restoreSelfBody()
+        for part, s in pairs(tpOrig) do
+            if part and part.Parent then
+                pcall(function() part.Material     = s.M end)
+                pcall(function() part.Color        = s.C end)
+                pcall(function() part.Transparency = s.T end)
+            end
+        end
+        tpOrig = {}
+        tpStyledChar = nil
+    end
+
+    -- Части, которые игра прячет НАМЕРЕННО и навсегда — их нельзя проявлять.
+    -- Head в BRM5 всегда Transparency=1 (дамп ActorClass:1419: у головы
+    -- удаляются Pupil/Mouth, вместо неё рисуется отдельный меш), плюс
+    -- служебные коллайдеры и якоря аксессуаров.
+    local TP_NEVER_SHOW = {
+        Head = true, HumanoidRootPart = true,
+        Handle = true, RootPart = true,
+    }
+    local function tpShouldSkip(d)
+        if TP_NEVER_SHOW[d.Name] then return true end
+        -- хитбоксы/триггеры: невидимые и без коллизии — служебные
+        if d.Transparency >= 1 and d.CanCollide == false then return true end
+        -- части внутри аксессуаров/инструментов трогать не надо
+        local par = d.Parent
+        if par and (par:IsA("Accessory") or par:IsA("Tool")) then return true end
+        return false
+    end
+
+    local function styleSelfBody(char)
+        restoreSelfBody()
+        local bodyTranp = V.ThirdPersonBodyTransparency or 0
+        local styled = 0
+        for _, d in ipairs(char:GetDescendants()) do
+            if (d:IsA("BasePart") or d:IsA("MeshPart")) and not tpShouldSkip(d) then
+                local origT = d.Transparency
+                -- Баланс двух ошибок:
+                --  • раньше стоял `if origT >= 1 then continue end` — под него
+                --    попадало почти всё тело, и фича не работала вообще;
+                --  • затем я снял проверку целиком — и стали проявляться
+                --    служебные парты, которые видимыми быть не должны.
+                -- Теперь: пропускаем только заведомо служебные (tpShouldSkip),
+                -- а у остальных скрытых НЕ трогаем прозрачность — красим лишь
+                -- цвет/материал. Так скрытое остаётся скрытым, а видимое
+                -- получает скин.
+                local isHidden = origT >= 1
+                tpOrig[d] = { M = d.Material, C = d.Color, T = origT }
+                if V.ThirdPersonMaterial then
+                    pcall(function() d.Material = V.ThirdPersonMaterial end)
+                end
+                pcall(function() d.Color = V.ThirdPersonBodyColor end)
+                if not isHidden then
+                    pcall(function() d.Transparency = bodyTranp end)
+                end
+                styled += 1
+            end
+        end
+        tpStyledChar = char
+        State._tpStyledCount = styled
+    end
+
+    local _tpRestyeT = 0
+    local function thirdPersonStep()
+        if not V.ThirdPersonEnabled then
+            if tpStyledChar then restoreSelfBody() end
+            clearSelfHighlight()
+            return
+        end
+        local char = getSelfCharacter()
+        if not char then
+            -- мертвы / модели ещё нет: чистим виз, НЕ работаем каждый кадр
+            if tpStyledChar then restoreSelfBody() end
+            clearSelfHighlight()
+            return
+        end
+        applySelfHighlight(char)
+        -- FIX: check if character changed OR re-style every 3s to catch late-spawning parts
+        -- (avoids calling styleSelfBody / GetDescendants on every single heartbeat frame)
+        local t = now()
+        if tpStyledChar ~= char or (t - _tpRestyeT) > 3 then
+            _tpRestyeT = t
+            styleSelfBody(char)
+        end
+        -- градиент по телу: перекрас каждый кадр под текущую фазу
+        if V.ThirdPersonGradientEnabled then
+            tickGradientStore(tpOrig, 0.5, now() * (V.GradientSpeed or 0.35))
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 4 + 5. VEHICLE FLY / SPEED
+    ---------------------------------------------------------------------------
+    -- ── КАК УСТРОЕН ТРАНСПОРТ (по дампу GroundController/VehicleClass) ─────────
+    -- Активный контроллер машины (LocalActor.Controller) — это GroundController
+    -- с полями: _solver, _tune, _vehicle, _throttle, _localActor. Игра меняет
+    -- поведение машины ИМЕННО через _tune + _solver:NewTune() (так работают её
+    -- собственные дебаг-слайдеры: AccelerationFactor, Mass, Grip …), а
+    -- телепортирует машину методом _solver:SetState(cf, vel, angvel, compRep).
+    -- Поэтому:
+    --   • VehicleSpeed = увеличить _tune.AccelerationFactor и вызвать NewTune()
+    --     (реально меняем параметры транспорта, как и просил юзер);
+    --   • VehicleFly  = каждый кадр solver:SetState(новый CFrame, 0, 0, compRep).
+    -- Старый код искал несуществующие поля (Throttle/Steering/Seats у объекта
+    -- машины, LocalActor.Vehicle) → findVehicle никогда не находил → не работало.
+    local function isVehicleController(t)
+        if type(t) ~= "table" then return false end
+        if type(rawget(t, "_solver")) ~= "table" then return false end
+        if type(rawget(t, "_tune"))   ~= "table" then return false end
+        local veh = rawget(t, "_vehicle")
+        if type(veh) ~= "table" then return false end
+        if rawget(veh, "Controlling") == false then return false end -- вышли из машины
+        return true
+    end
+    local _vehCtrl
+    local function findVehicleController()
+        if isVehicleController(_vehCtrl) then return _vehCtrl end
+        _vehCtrl = nil
+        -- 1) через LocalActor.Controller — без сканов
+        local la = getLA()
+        if type(la) == "table" then
+            local c = rawget(la, "Controller")
+            if isVehicleController(c) then _vehCtrl = c; return c end
+        end
+        -- 2) GC-скан (троттлится) — персонажный контроллер в машине уничтожен,
+        --    поэтому getLA() может не сработать; ищем контроллер напрямую.
+        local t = now()
+        if t - _lastScan < _scanCd then return nil end
+        _lastScan = t
+        if type(filtergc) ~= "function" then return nil end
+        local ok, gc = pcall(filtergc, "table",
+            { Keys = { "_solver", "_tune", "_vehicle", "_throttle" } })
+        if not ok then return nil end
+        for _, v in ipairs(gc) do
+            if isVehicleController(v) then _vehCtrl = v; return v end
+        end
+        return nil
+    end
+
+    -- восстановление оригинальных параметров машины после VehicleSpeed.
+    -- Храним снимок всех тронутых полей tune, чтобы вернуть штатное поведение.
+    local _spdTune, _spdOrig, _spdSolver = nil, nil, nil
+    local function restoreVehicleSpeed()
+        if _spdTune and type(_spdOrig) == "table" then
+            pcall(function()
+                if _spdOrig.Accel ~= nil then _spdTune.AccelerationFactor = _spdOrig.Accel end
+                if _spdOrig.Mass  ~= nil then _spdTune.Mass = _spdOrig.Mass end
+                local fw, rw = rawget(_spdTune, "FrontWheels"), rawget(_spdTune, "RearWheels")
+                if type(fw) == "table" and _spdOrig.FGrip ~= nil then fw.Grip = _spdOrig.FGrip end
+                if type(rw) == "table" and _spdOrig.RGrip ~= nil then rw.Grip = _spdOrig.RGrip end
+                if _spdSolver then _spdSolver:NewTune() end
+            end)
+        end
+        _spdTune, _spdOrig, _spdSolver = nil, nil, nil
+    end
+
+    local function vehicleStep(dt)
+        local wantAny = V.VehicleFlyEnabled or V.VehicleSpeedEnabled
+        local ctrl = wantAny and findVehicleController() or nil
+
+        -- вернуть оригинальную скорость, если SpeedHack выключен / сменилась машина
+        if _spdTune and not (V.VehicleSpeedEnabled and ctrl and rawequal(rawget(ctrl, "_tune"), _spdTune)) then
+            restoreVehicleSpeed()
+        end
+        if not ctrl then return end
+
+        dt = (type(dt) == "number" and dt > 0) and dt or (1 / 60)
+        local solver  = rawget(ctrl, "_solver")
+        local vehicle = rawget(ctrl, "_vehicle")
+        local tune    = rawget(ctrl, "_tune")
+
+        -- VEHICLE SPEED — меняем параметры транспорта (как дебаг-слайдеры игры).
+        -- Прошлый вариант трогал только AccelerationFactor (в игре капается ~1) —
+        -- он влияет на РАЗГОН, но почти не на максималку → эффект был незаметен.
+        -- Главный рычаг максимальной скорости — Mass: при фиксированной силе движка
+        -- и сопротивлении лёгкая машина имеет и выше разгон, и выше терминальную
+        -- скорость. Дополнительно поднимаем Grip, чтобы на скорости не срывало.
+        if V.VehicleSpeedEnabled and type(tune) == "table" then
+            local mult = V.VehicleSpeedMult or 2
+            if mult < 1 then mult = 1 end
+            if not rawequal(_spdTune, tune) then
+                restoreVehicleSpeed()
+                _spdTune, _spdSolver = tune, solver
+                local fw, rw = rawget(tune, "FrontWheels"), rawget(tune, "RearWheels")
+                _spdOrig = {
+                    Accel = rawget(tune, "AccelerationFactor"),
+                    Mass  = rawget(tune, "Mass"),
+                    FGrip = type(fw) == "table" and rawget(fw, "Grip") or nil,
+                    RGrip = type(rw) == "table" and rawget(rw, "Grip") or nil,
+                }
+            end
+            local o = _spdOrig
+            -- целевые значения
+            local wantMass  = (type(o.Mass) == "number") and (o.Mass / mult) or nil
+            local wantAccel = (type(o.Accel) == "number") and math.min(o.Accel * mult, 1) or nil
+            local wantFGrip = (type(o.FGrip) == "number") and (o.FGrip * math.min(mult, 3)) or nil
+            local wantRGrip = (type(o.RGrip) == "number") and (o.RGrip * math.min(mult, 3)) or nil
+            local dirty = false
+            pcall(function()
+                if wantMass and rawget(tune, "Mass") ~= wantMass then tune.Mass = wantMass; dirty = true end
+                if wantAccel and rawget(tune, "AccelerationFactor") ~= wantAccel then tune.AccelerationFactor = wantAccel; dirty = true end
+                local fw, rw = rawget(tune, "FrontWheels"), rawget(tune, "RearWheels")
+                if type(fw) == "table" and wantFGrip and rawget(fw, "Grip") ~= wantFGrip then fw.Grip = wantFGrip; dirty = true end
+                if type(rw) == "table" and wantRGrip and rawget(rw, "Grip") ~= wantRGrip then rw.Grip = wantRGrip; dirty = true end
+                if dirty then solver:NewTune() end
+            end)
+        end
+
+        -- VEHICLE FLY — репозиционируем машину штатным solver:SetState
+        if V.VehicleFlyEnabled then
+            local cam = Workspace.CurrentCamera
+            if not cam then return end
+            local baseCF = rawget(vehicle, "CFrame")
+            if typeof(baseCF) ~= "CFrame" then
+                local st = rawget(solver, "_state")
+                if type(st) == "table" and typeof(st.CFrame) == "CFrame" then
+                    baseCF = st.CFrame
+                end
+            end
+            if typeof(baseCF) ~= "CFrame" then return end
+            local dir = Vector3.zero
+            if UIS:IsKeyDown(Enum.KeyCode.W)           then dir += cam.CFrame.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.S)           then dir -= cam.CFrame.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.A)           then dir -= cam.CFrame.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.D)           then dir += cam.CFrame.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.Space)       then dir += Vector3.yAxis end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
+            local step = (dir.Magnitude > 0.001)
+                and (dir.Unit * (V.VehicleFlySpeed or 120) * dt)
+                or  Vector3.zero
+            local newCF = baseCF.Rotation + (baseCF.Position + step)
+            local compRep = rawget(vehicle, "ComponentReplicates")
+            pcall(function()
+                solver:SetState(newCF, Vector3.zero, Vector3.zero, compRep)
+            end)
+            -- двигаем и VehicleMain, чтобы визуально не «резинило»
+            local vm = rawget(vehicle, "VehicleMain")
+            if typeof(vm) == "Instance" then
+                pcall(function()
+                    local p = vm:IsA("BasePart") and vm or vm.PrimaryPart
+                    if p then p.CFrame = newCF end
+                end)
+            end
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 5b. FREE GUN — снять блок экипировки оружия
+    ---------------------------------------------------------------------------
+    -- Блок находится в InventoryService._canEquip(self, localActor):
+    --   • HeightState == Sitting (в транспорте) и not SeatCanEquip → false
+    --   • Climbing/Vaulting/Swimming/Skydiving/Parachuting → false
+    -- Хукаем сам метод: пока FreeGunEnabled — возвращаем true (живым, с контроллером).
+    -- Хук ставится один раз и гейтится флагом, поэтому при выкле остаётся инертным
+    -- (та же схема, что и у Viewmodel-хука выше).
+    local _canEquipHooked = false
+    local _canEquipCallOrig = nil        -- вызываемый оригинал
+    local _fgScanCd = 0
+    -- FIX: не хранили ни таблицу, ни режим установки → снять хук было нечем.
+    local _fgTbl, _fgMode, _fgRawFn = nil, nil, nil
+    -- FIX: SeatCanEquip форсился в true и никогда не возвращался обратно —
+    -- фича «выключена», а оружие в транспорте всё равно достаётся.
+    local _fgSeatOrig = nil
+    local function installFreeGunHook()
+        if _canEquipHooked then return true end
+        local t = now()
+        if t - _fgScanCd < 2.0 then return false end
+        _fgScanCd = t
+        if type(filtergc) ~= "function" then return false end
+        local ok, res = pcall(filtergc, "table",
+            { Keys = { "_canEquip", "_cycle", "_sync" } })
+        if not ok or type(res) ~= "table" then return false end
+        for _, tbl in ipairs(res) do
+            local fn = rawget(tbl, "_canEquip")
+            if type(fn) == "function" then
+                _canEquipCallOrig = fn
+                local wrapper = function(self, la)
+                    if V.FreeGunEnabled and la and la.Alive
+                        and la.Controller and not la.Downed then
+                        return true
+                    end
+                    return _canEquipCallOrig(self, la)
+                end
+                -- 1) замена поля класса (обратимо и без детуров)
+                local setOk = pcall(function() tbl._canEquip = wrapper end)
+                if setOk and rawget(tbl, "_canEquip") == wrapper then
+                    _canEquipHooked = true
+                    _fgTbl, _fgMode, _fgRawFn = tbl, "field", fn
+                    log("FreeGun: _canEquip перехвачен (field)")
+                    return true
+                end
+                -- 2) таблица заморожена → hookfunction (origRef = callable оригинал)
+                if type(hookfunction) == "function" then
+                    local hookOk, origRef = pcall(hookfunction, fn, wrapper)
+                    if hookOk then
+                        _canEquipCallOrig = (type(origRef) == "function") and origRef or fn
+                        _canEquipHooked = true
+                        _fgTbl, _fgMode, _fgRawFn = tbl, "hookfunction", fn
+                        log("FreeGun: _canEquip перехвачен (hookfunction)")
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    -- FIX: полностью снимаем FreeGun — и хук, и форс SeatCanEquip.
+    local function restoreFreeGunHook()
+        V.FreeGunEnabled = false
+        if _fgSeatOrig ~= nil then
+            pcall(function()
+                local la = getLA()
+                if type(la) == "table" then la.SeatCanEquip = _fgSeatOrig end
+            end)
+            _fgSeatOrig = nil
+        end
+        if not _canEquipHooked then return end
+        if _fgMode == "field" and _fgTbl and _canEquipCallOrig then
+            pcall(function() _fgTbl._canEquip = _canEquipCallOrig end)
+        elseif _fgMode == "hookfunction" and _fgRawFn and _canEquipCallOrig then
+            pcall(hookfunction, _fgRawFn, _canEquipCallOrig)
+        end
+        _canEquipHooked = false
+        _fgTbl, _fgMode, _fgRawFn = nil, nil, nil
+    end
+
+    local function freeGunStep()
+        if not V.FreeGunEnabled then return end
+        if not _canEquipHooked then installFreeGunHook() end
+        -- лёгкий фолбэк для транспорта: разрешаем экипировку в сиденье
+        local la = getLA()
+        if type(la) == "table" and rawget(la, "SeatCanEquip") ~= true then
+            -- запоминаем исходное значение ОДИН раз, чтобы вернуть его в stop
+            if _fgSeatOrig == nil then _fgSeatOrig = rawget(la, "SeatCanEquip") or false end
+            pcall(function() la.SeatCanEquip = true end)
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 6 + bonus. AMBIENT / FULLBRIGHT / NOFOG
+    ---------------------------------------------------------------------------
+    local lightSaved, lightSavedOK = {}, false
+    local function saveLighting()
+        if lightSavedOK then return end
+        lightSaved = {
+            ClockTime    = Lighting.ClockTime,
+            Brightness   = Lighting.Brightness,
+            Ambient      = Lighting.Ambient,
+            OutdoorAmbient = Lighting.OutdoorAmbient,
+            FogEnd       = Lighting.FogEnd,
+            FogStart     = Lighting.FogStart,
+            GlobalShadows = Lighting.GlobalShadows,
+            -- расширенная атмосфера
+            FogColor        = Lighting.FogColor,
+            ColorShift_Top  = Lighting.ColorShift_Top,
+            ColorShift_Bottom = Lighting.ColorShift_Bottom,
+            ExposureCompensation = Lighting.ExposureCompensation,
+            GeographicLatitude = Lighting.GeographicLatitude,
+            EnvironmentDiffuseScale  = Lighting.EnvironmentDiffuseScale,
+            EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+        }
+        lightSavedOK = true
+    end
+    local function restoreLighting()
+        if not lightSavedOK then return end
+        pcall(function()
+            Lighting.ClockTime     = lightSaved.ClockTime
+            Lighting.Brightness    = lightSaved.Brightness
+            Lighting.Ambient       = lightSaved.Ambient
+            Lighting.OutdoorAmbient = lightSaved.OutdoorAmbient
+            Lighting.FogEnd        = lightSaved.FogEnd
+            Lighting.FogStart      = lightSaved.FogStart
+            Lighting.GlobalShadows  = lightSaved.GlobalShadows
+            Lighting.FogColor       = lightSaved.FogColor
+            Lighting.ColorShift_Top = lightSaved.ColorShift_Top
+            Lighting.ColorShift_Bottom = lightSaved.ColorShift_Bottom
+            Lighting.ExposureCompensation = lightSaved.ExposureCompensation
+            Lighting.GeographicLatitude   = lightSaved.GeographicLatitude
+            Lighting.EnvironmentDiffuseScale  = lightSaved.EnvironmentDiffuseScale
+            Lighting.EnvironmentSpecularScale = lightSaved.EnvironmentSpecularScale
+        end)
+    end
+
+    -- Константа: раньше два Color3 создавались каждый кадр при Fullbright
+    local FULLBRIGHT_COL = Color3.fromRGB(178, 178, 178)
+
+    -- ── Готовые атмосферы ──────────────────────────────────────────────
+    -- Крутить 12 ползунков вручную, чтобы получить нормальный вайб, —
+    -- неудобно. Пресет ставит всё разом, дальше можно доводить руками
+    -- (любая правка ползунка переводит пресет в "Custom").
+    local AMBIENT_PRESETS = {
+        Midnight = {
+            ClockTime = 0, Brightness = 1.2, Exposure = 0.15,
+            Ambient = Color3.fromRGB(38, 44, 70),
+            Outdoor = Color3.fromRGB(48, 56, 88),
+            TintTop = Color3.fromRGB(20, 28, 60), TintBottom = Color3.fromRGB(0, 0, 0),
+            Fog = true, FogColor = Color3.fromRGB(18, 22, 40), FogStart = 0, FogEnd = 420,
+            Shadows = true, Latitude = 20,
+        },
+        Sunset = {
+            ClockTime = 17.6, Brightness = 2.4, Exposure = 0.2,
+            Ambient = Color3.fromRGB(120, 78, 62),
+            Outdoor = Color3.fromRGB(178, 108, 70),
+            TintTop = Color3.fromRGB(255, 150, 70), TintBottom = Color3.fromRGB(40, 20, 30),
+            Fog = true, FogColor = Color3.fromRGB(220, 130, 85), FogStart = 40, FogEnd = 1400,
+            Shadows = true, Latitude = 60,
+        },
+        Overcast = {
+            ClockTime = 11, Brightness = 1.8, Exposure = -0.1,
+            Ambient = Color3.fromRGB(120, 124, 132),
+            Outdoor = Color3.fromRGB(150, 155, 165),
+            TintTop = Color3.fromRGB(180, 190, 200), TintBottom = Color3.fromRGB(0, 0, 0),
+            Fog = true, FogColor = Color3.fromRGB(168, 175, 185), FogStart = 20, FogEnd = 700,
+            Shadows = false, Latitude = 45,
+        },
+        Toxic = {
+            ClockTime = 14, Brightness = 2.2, Exposure = 0.35,
+            Ambient = Color3.fromRGB(70, 105, 55),
+            Outdoor = Color3.fromRGB(120, 165, 70),
+            TintTop = Color3.fromRGB(150, 255, 90), TintBottom = Color3.fromRGB(20, 40, 10),
+            Fog = true, FogColor = Color3.fromRGB(110, 160, 70), FogStart = 0, FogEnd = 520,
+            Shadows = true, Latitude = 45,
+        },
+        Nightvision = {
+            ClockTime = 12, Brightness = 4.5, Exposure = 0.6,
+            Ambient = Color3.fromRGB(90, 190, 90),
+            Outdoor = Color3.fromRGB(110, 220, 110),
+            TintTop = Color3.fromRGB(120, 255, 120), TintBottom = Color3.fromRGB(0, 30, 0),
+            Fog = false, FogColor = Color3.fromRGB(40, 90, 40), FogStart = 0, FogEnd = 2000,
+            Shadows = false, Latitude = 45,
+        },
+        Clear = {
+            ClockTime = 13, Brightness = 2.6, Exposure = 0,
+            Ambient = Color3.fromRGB(130, 135, 145),
+            Outdoor = Color3.fromRGB(160, 168, 180),
+            TintTop = Color3.fromRGB(0, 0, 0), TintBottom = Color3.fromRGB(0, 0, 0),
+            Fog = false, FogColor = Color3.fromRGB(180, 190, 200), FogStart = 0, FogEnd = 5000,
+            Shadows = true, Latitude = 45,
+        },
+    }
+    local AMBIENT_PRESET_ORDER = {
+        "Custom", "Clear", "Midnight", "Sunset", "Overcast", "Toxic", "Nightvision",
+    }
+
+    local function applyAmbientPreset(name)
+        local pr = AMBIENT_PRESETS[name]
+        if not pr then return false end
+        V.AmbientClockTime      = pr.ClockTime
+        V.AmbientBrightness     = pr.Brightness
+        V.AmbientExposure       = pr.Exposure
+        V.AmbientColor          = pr.Ambient
+        V.AmbientOutdoorColor   = pr.Outdoor
+        V.AmbientTintTop        = pr.TintTop
+        V.AmbientTintBottom     = pr.TintBottom
+        V.AmbientFogEnabled     = pr.Fog
+        V.AmbientFogColor       = pr.FogColor
+        V.AmbientFogStart       = pr.FogStart
+        V.AmbientFogEnd         = pr.FogEnd
+        V.AmbientShadows        = pr.Shadows
+        V.AmbientLatitude       = pr.Latitude
+        V.AmbientPreset         = name
+        return true
+    end
+    local function lightingStep()
+        if V.AmbientEnabled or V.FullbrightEnabled or V.NoFogEnabled then saveLighting() end
+        -- Atmosphere: полноценная кастомизация вайба (время суток, оттенки,
+        -- экспозиция, туман). Раньше тут было только время + яркость.
+        if V.AmbientEnabled then
+            pcall(function()
+                Lighting.ClockTime  = V.AmbientClockTime
+                Lighting.Brightness = V.AmbientBrightness
+                Lighting.Ambient        = V.AmbientColor
+                Lighting.OutdoorAmbient = V.AmbientOutdoorColor
+                Lighting.ColorShift_Top    = V.AmbientTintTop
+                Lighting.ColorShift_Bottom = V.AmbientTintBottom
+                Lighting.ExposureCompensation = V.AmbientExposure or 0
+                Lighting.GeographicLatitude   = V.AmbientLatitude or 45
+                Lighting.EnvironmentDiffuseScale  = V.AmbientDiffuse  or 1
+                Lighting.EnvironmentSpecularScale = V.AmbientSpecular or 1
+                Lighting.GlobalShadows = V.AmbientShadows ~= false
+                if V.AmbientFogEnabled then
+                    Lighting.FogColor = V.AmbientFogColor
+                    Lighting.FogStart = V.AmbientFogStart or 0
+                    Lighting.FogEnd   = V.AmbientFogEnd or 800
+                end
+            end)
+        end
+        -- Fullbright — отдельная простая фича: просто «видно всё».
+        if V.FullbrightEnabled then
+            pcall(function()
+                Lighting.Brightness     = math.max(Lighting.Brightness, 2)
+                Lighting.Ambient        = FULLBRIGHT_COL
+                Lighting.OutdoorAmbient = FULLBRIGHT_COL
+                Lighting.GlobalShadows  = false
+            end)
+        end
+        if V.NoFogEnabled then
+            pcall(function()
+                Lighting.FogEnd   = 1e9
+                Lighting.FogStart = 1e9
+            end)
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 7. NO F WAIT
+    ---------------------------------------------------------------------------
+    -- ВАЖНО: игра НЕ использует HoldDuration прокси-промпта для тайминга.
+    -- InteractionInterface при нажатии читает АТРИБУТ "Timer" промпта и держит
+    -- задачу PromptTask ровно Timer секунд (см. дамп InteractionInterface:Enable
+    -- → prompt:GetAttribute("Timer")). Поэтому чтобы убрать ожидание, обнуляем
+    -- атрибут "Timer" (0 → задача финиширует в тот же кадр). HoldDuration тоже
+    -- зануляем — на случай промптов со штатным нативным триггеро��.
+    local promptConn = nil
+    local promptAttrConn = {}
+    local function zeroPrompt(p)
+        if not (p and p:IsA("ProximityPrompt")) then return end
+        pcall(function()
+            local t = p:GetAttribute("Timer")
+            if type(t) == "number" and t > 0 and p:GetAttribute("BRM5_timer") == nil then
+                p:SetAttribute("BRM5_timer", t)
+            end
+            if p:GetAttribute("BRM5_hold") == nil then
+                p:SetAttribute("BRM5_hold", p.HoldDuration)
+            end
+            if p:GetAttribute("Timer") ~= nil then p:SetAttribute("Timer", 0) end
+            p.HoldDuration = 0
+        end)
+        -- сервер/игра могут переустановить Timer → держим его в 0, пока фича вкл
+        if not promptAttrConn[p] then
+            promptAttrConn[p] = p:GetAttributeChangedSignal("Timer"):Connect(function()
+                if V.NoFWaitEnabled and p:GetAttribute("Timer") and p:GetAttribute("Timer") ~= 0 then
+                    pcall(function() p:SetAttribute("Timer", 0) end)
+                end
+            end)
+        end
+    end
+    local function enableNoFWait()
+        if promptConn then return end
+        for _, d in ipairs(Workspace:GetDescendants()) do zeroPrompt(d) end
+        promptConn = PPS.PromptShown:Connect(function(p)
+            if V.NoFWaitEnabled then zeroPrompt(p) end
+        end)
+    end
+    local function disableNoFWait()
+        if promptConn then promptConn:Disconnect(); promptConn = nil end
+        for p, c in pairs(promptAttrConn) do
+            pcall(function() c:Disconnect() end)
+            promptAttrConn[p] = nil
+        end
+        for _, d in ipairs(Workspace:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then
+                local st = d:GetAttribute("BRM5_timer")
+                if st ~= nil then pcall(function() d:SetAttribute("Timer", st) end) end
+                local s = d:GetAttribute("BRM5_hold")
+                if s ~= nil then pcall(function() d.HoldDuration = s end) end
+            end
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- 8. LOCKPICK BYPASS
+    --
+    -- ФИКС ПРОСАДКИ FPS: раньше lockpickStep() дёргал findLockPick() (это
+    -- filtergc — полный проход по GC) КАЖДЫЙ кадр, даже когда никакого замка
+    -- рядом нет. Полный GC-скан 60 раз/сек = дикая просадка.
+    --
+    -- Теперь:
+    --   1) СНАЧАЛА дешёвая проверка стейта актора — CurrentState.LockPick
+    --      (по дампу LockPickController:new вызывает localActor:State("LockPick",
+    --      true), а :State пишет в CurrentState[name]). Нет мини-игры → мгновенно
+    --      выходим, БЕЗ единого GC-скана.
+    --   2) Только когда мини-игра реально активна — ищем её экземпляр (и то не
+    --      чаще LockpickScanInterval), кэшируем, шлём успех ОДИН раз.
+    ---------------------------------------------------------------------------
+    local lpLastScan = -999
+    local function lockpickActive()
+        local la = getLA()
+        if type(la) ~= "table" then return false end
+        local cs = rawget(la, "CurrentState")
+        return type(cs) == "table" and cs.LockPick and true or false
+    end
+    local function lockpickStep()
+        if not V.LockpickBypassEnabled then return end
+        -- дешёвый гейт: пока замок не открыт игрой — никаких GC-сканов
+        if not lockpickActive() then return end
+        local t = now()
+        if t - lpLastScan < (V.LockpickScanInterval or 0.4) then return end
+        lpLastScan = t
+        local lp = findLockPick()          -- filtergc только во время активной мини-игры
+        if not lp then return end
+        local net = findNet()
+        if net then
+            pcall(function() lp._cancelled = true end)
+            pcall(function() net:FireServer("ActivateInteract", "Picked") end)
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- ГЛАВНЫЙ ЦИКЛ
+    ---------------------------------------------------------------------------
+    local hbConn  = nil
+    -- ВАЖНО: `running` объявлен в самом верху модуля (рядом с vmHooked), а НЕ
+    -- здесь. Хук viewmodel читает его на ~548 — если объявить локал тут, внутри
+    -- хука это будет глобал (=nil), и Viewmodel/GunModel молча перестанут
+    -- работать. Ровно та же ловушка, что была с gunHighlight.
+
+    local function heartbeat(dt)
+        if not running then return end
+        pcall(function()
+            if V.ViewmodelEnabled or V.GunModelEnabled then ensureViewmodelHook() end
+        thirdPersonStep()
+        vehicleStep(dt)
+        freeGunStep()
+            lightingStep()
+            lockpickStep()
+        end)
+    end
+
+    ---------------------------------------------------------------------------
+    -- ХОТКЕИ
+    ---------------------------------------------------------------------------
+    local inputConn = nil
+    local function toggle(name, label)
+        V[name] = not V[name]
+        log(label, V[name] and "ВКЛ" or "выкл")
+        return V[name]
+    end
+
+    local function onInput(input, gpe)
+        if gpe then return end
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        local kc = input.KeyCode
+        if kc == V.ViewmodelKey then
+            if not toggle("ViewmodelEnabled", "Viewmodel") then restoreViewmodelStyle() end
+        elseif kc == V.GunModelKey then
+            if not toggle("GunModelEnabled", "GunModel") then
+                if gunHighlight then pcall(function() gunHighlight:Destroy() end); gunHighlight = nil end
+            end
+        elseif kc == V.ThirdPersonKey then
+            if not toggle("ThirdPersonEnabled", "ThirdPersonSkin") then
+                clearSelfHighlight(); restoreSelfBody()
+            end
+        elseif kc == V.VehicleFlyKey   then toggle("VehicleFlyEnabled",    "VehicleFly")
+        elseif kc == V.VehicleSpeedKey then toggle("VehicleSpeedEnabled",   "VehicleSpeed")
+        elseif kc == V.FreeGunKey then
+            if toggle("FreeGunEnabled", "FreeGun") then installFreeGunHook() end
+        elseif kc == V.AmbientKey then
+            if not toggle("AmbientEnabled", "Ambient") then restoreLighting(); lightSavedOK = false end
+        elseif kc == V.NoFWaitKey then
+            if toggle("NoFWaitEnabled", "NoFWait") then enableNoFWait() else disableNoFWait() end
+        elseif kc == V.LockpickBypassKey then
+            toggle("LockpickBypassEnabled", "LockpickBypass")
+        elseif kc == V.FullbrightKey then
+            if not toggle("FullbrightEnabled", "Fullbright") then restoreLighting(); lightSavedOK = false end
+        elseif kc == V.NoFogKey then
+            if not toggle("NoFogEnabled", "NoFog") then restoreLighting(); lightSavedOK = false end
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- START / STOP
+    ---------------------------------------------------------------------------
+    local M = {}
+
+    function M.start()
+        if running then return end
+        running = true
+        hbConn = RunService.Heartbeat:Connect(heartbeat)
+        pcall(function()
+            RunService:BindToRenderStep(FOV_BIND,
+                Enum.RenderPriority.Camera.Value + 1, fovStep)
+            fovBound = true
+        end)
+        inputConn = UIS.InputBegan:Connect(onInput)
+        log("Visuals/World v2 запущен | Numpad1..0 = тумблеры | CONFIG.Visuals для настройки")
+    end
+
+    function M.stop()
+        running = false
+        if hbConn    then hbConn:Disconnect();    hbConn    = nil end
+        if inputConn then inputConn:Disconnect(); inputConn = nil end
+        if fovBound  then
+            pcall(function() RunService:UnbindFromRenderStep(FOV_BIND) end)
+            fovBound = false
+        end
+        -- Снимаем хук ДО restore — иначе живой хук вернёт стиль обратно
+        -- на следующем же кадре (ровно так и было раньше).
+        unhookViewmodel()
+        restoreViewmodelStyle()
+        restoreGunStyle()        -- FIX: не вызывался → оружие оставалось перекрашенным
+        restoreVehicleSpeed()    -- FIX: не вызывался → тачка навсегда с изменённой массой
+        if gunHighlight then pcall(function() gunHighlight:Destroy() end); gunHighlight = nil end
+        clearSelfHighlight()
+        restoreSelfBody()
+        restoreFreeGunHook()     -- FIX: снимаем _canEquip и возвращаем SeatCanEquip
+        disableNoFWait()
+        restoreLighting(); lightSavedOK = false
+        pcall(function()
+            local cam = Workspace.CurrentCamera
+            -- FIX: было жёстко 70 — теперь возвращаем реально захваченный FOV
+            if cam then cam.FieldOfView = _origFov or 70 end
+        end)
+        log("Visuals/World остановлен")
+    end
+
+    -- ─────────────────────────────────────────────────────────────────────
+    -- UI-интеграция (MacLib). Visuals-модуль раскидывает ко��тролы по табам:
+    --   Visuals  → Viewmodel / GunModel / Gradient / ThirdPerson
+    --   Movement → Vehicle (fly/speed) — это движение
+    --   GunMods  → FreeGun — это изменение оружия
+    --   Misc     → Fullbright / Ambient / NoFog / NoFWait
+    -- Все колбэки пишут в V (= CONFIG.Visuals), heartbeat применяет каждый кадр.
+    -- ─────────────────────────────────────────────────────────────────────
+    -- Материалы для дропдаунов (строка ⇄ Enum.Material).
+    local MATERIALS = { "ForceField", "Neon", "Glass", "SmoothPlastic", "Plastic", "Metal", "Marble" }
+    local function matName(m) return (typeof(m) == "EnumItem") and m.Name or tostring(m or "ForceField") end
+    local function matFromName(n) return Enum.Material[n] or Enum.Material.ForceField end
+
+    function M.buildUI(ui)
+        local tabV    = ui.tabs and ui.tabs.Visuals
+        local tabMov  = ui.tabs and ui.tabs.Movement
+        local tabGM   = ui.tabs and ui.tabs.GunMods
+        local tabMisc = ui.tabs and ui.tabs.Misc
+        local tabDbg  = ui.tabs and ui.tabs.Debug
+        local K = Bridge.makeUiKit(ui)
+
+        if tabV then
+            -- ═══ Viewmodel ═════════════════════════════════════════════
+            local S = tabV:Section({ Side = "Left" })
+            -- Настройки видны ВСЕГДА, даже когда фича выключена: иначе панель
+            -- выглядит пустой и непонятно, что она вообще умеет.
+            K.feature(S, {
+                Title = "Viewmodel", Flag = "VM",
+                get = function() return V.ViewmodelEnabled end,
+                set = function(v) V.ViewmodelEnabled = v end,
+                Desc = "restyles ur first person arms",
+            })
+            K.toggle(S, { Name = "Recolor", Flag = "VMColorOn", Title = "VM Recolor",
+                get = function() return V.ViewmodelColorEnabled end,
+                set = function(v) V.ViewmodelColorEnabled = v end,
+                after = invalidateVmStyle })
+            K.color(S, { Name = "Color", Flag = "VMColor",
+                Default = V.ViewmodelColor,
+                Callback = function(c) V.ViewmodelColor = c; invalidateVmStyle() end })
+            K.toggle(S, { Name = "Change Material", Flag = "VMMatOn",
+                Title = "VM Material",
+                get = function() return V.ViewmodelMaterialEnabled end,
+                set = function(v) V.ViewmodelMaterialEnabled = v end,
+                after = invalidateVmStyle })
+            K.dropdown(S, { Name = "Material", Flag = "VMMat",
+                Options = MATERIALS, Default = matName(V.ViewmodelMaterial),
+                -- FIX: смена материала не применялась, пока не дёрнешь
+                -- прозрачность — только она сбрасывала кэш стиля.
+                Callback = function(n) V.ViewmodelMaterial = matFromName(n); invalidateVmStyle() end })
+            K.slider(S, { Name = "Transparency", Flag = "VMTransp",
+                Default = math.floor((V.ViewmodelTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
+                Callback = function(v)
+                    V.ViewmodelTransparency = v / 100
+                    invalidateVmStyle()
+                end })
+            K.toggle(S, { Name = "Gradient", Flag = "VMGrad", Title = "VM Gradient",
+                get = function() return V.ViewmodelGradientEnabled end,
+                set = function(v) V.ViewmodelGradientEnabled = v end,
+                after = invalidateVmStyle,
+                Desc = "colors set in Gradient on the right" })
+
+            K.group(S, "Placement")
+            K.slider(S, { Name = "Hand Zoom", Flag = "VMDepth",
+                Default = math.floor(V.ViewmodelDepth or 0) + 100, Min = 0, Max = 200,
+                Callback = function(v) V.ViewmodelDepth = v - 100 end,
+                Desc = "100 = stock. pulls the arms closer or pushes em away\nthis is NOT camera fov, that one lives in Misc" })
+
+            -- ═══ Gun Model ═════════════════════════════════════════════
+            local G = tabV:Section({ Side = "Left" })
+            K.feature(G, {
+                Title = "Gun Model", Flag = "GM",
+                get = function() return V.GunModelEnabled end,
+                set = function(v) V.GunModelEnabled = v end,
+                Desc = "same styling but for the gun in ur hands",
+            })
+            K.toggle(G, { Name = "Recolor", Flag = "GMColorOn", Title = "Gun Recolor",
+                get = function() return V.GunModelColorEnabled end,
+                set = function(v) V.GunModelColorEnabled = v end,
+                after = invalidateGunStyle })
+            K.color(G, { Name = "Color", Flag = "GMColor",
+                Default = V.GunModelColor,
+                Callback = function(c) V.GunModelColor = c; invalidateGunStyle() end })
+            K.toggle(G, { Name = "Change Material", Flag = "GMMatOn",
+                Title = "Gun Material",
+                get = function() return V.GunModelMaterialEnabled end,
+                set = function(v) V.GunModelMaterialEnabled = v end,
+                after = invalidateGunStyle })
+            K.dropdown(G, { Name = "Material", Flag = "GMMat",
+                Options = MATERIALS, Default = matName(V.GunModelMaterial),
+                Callback = function(n) V.GunModelMaterial = matFromName(n); invalidateGunStyle() end })
+            K.slider(G, { Name = "Transparency", Flag = "GMTransp",
+                Default = math.floor((V.GunModelTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
+                Callback = function(v)
+                    V.GunModelTransparency = v / 100
+                    invalidateGunStyle()
+                end })
+            K.toggle(G, { Name = "Gradient", Flag = "GMGrad", Title = "Gun Gradient",
+                get = function() return V.GunModelGradientEnabled end,
+                set = function(v) V.GunModelGradientEnabled = v end,
+                after = invalidateGunStyle,
+                Desc = "wave runs part to part, see Wave Spread" })
+
+            K.group(G, "Highlight")
+            K.toggle(G, { Name = "Enabled", Flag = "GMHighlight",
+                Title = "Gun Highlight",
+                get = function() return V.GunModelHighlightEnabled ~= false end,
+                set = function(v)
+                    V.GunModelHighlightEnabled = v
+                    if not v and gunHighlight then
+                        pcall(function() gunHighlight:Destroy() end); gunHighlight = nil
+                    end
+                end,
+                Desc = "glowing outline around the gun" })
+            K.color(G, { Name = "Fill", Flag = "GMFill",
+                Default = V.GunModelFill,
+                Callback = function(c) V.GunModelFill = c end })
+            K.color(G, { Name = "Outline", Flag = "GMOutline",
+                Default = V.GunModelOutline,
+                Callback = function(c) V.GunModelOutline = c end })
+            K.slider(G, { Name = "Fill Transparency", Flag = "GMFillT",
+                Default = math.floor((V.GunModelFillTransparency or 0.5) * 100),
+                Min = 0, Max = 100, Suffix = "%",
+                Callback = function(v) V.GunModelFillTransparency = v / 100 end })
+            K.toggle(G, { Name = "Follow Gradient", Flag = "GMHlGrad",
+                Title = "Highlight Gradient",
+                get = function() return V.GunModelHighlightGradient ~= false end,
+                set = function(v) V.GunModelHighlightGradient = v end,
+                Desc = "outline rides the same wave as the gun\noff = keeps the fixed colors above" })
+
+            -- ═══ Third Person ══════════════════════════════════════════
+            local S2 = tabV:Section({ Side = "Right" })
+            -- Честное имя: фича НЕ включает камеру от третьего лица (та живёт
+            -- в модуле Movement). Она красит твою собственную модель, которую
+            -- видно, когда камера уже отъехала.
+            K.feature(S2, {
+                Title = "Self Skin", Flag = "TP",
+                get = function() return V.ThirdPersonEnabled end,
+                set = function(v) V.ThirdPersonEnabled = v end,
+                Desc = "recolors ur own body\nu see it in third person or spectate",
+            })
+            K.color(S2, { Name = "Body Color", Flag = "TPColor",
+                Default = V.ThirdPersonBodyColor,
+                Callback = function(c) V.ThirdPersonBodyColor = c end })
+            K.slider(S2, { Name = "Transparency", Flag = "TPTransp",
+                Default = math.floor((V.ThirdPersonBodyTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
+                Callback = function(v) V.ThirdPersonBodyTransparency = v / 100 end })
+            K.dropdown(S2, { Name = "Material", Flag = "TPMat",
+                Options = MATERIALS, Default = matName(V.ThirdPersonMaterial),
+                Callback = function(n) V.ThirdPersonMaterial = matFromName(n) end })
+            K.toggle(S2, { Name = "Gradient", Flag = "TPGrad", Title = "TP Gradient",
+                get = function() return V.ThirdPersonGradientEnabled end,
+                set = function(v) V.ThirdPersonGradientEnabled = v end })
+
+            -- ═══ Общие цвета градиента ═════════════════════════════════
+            local GC = tabV:Section({ Side = "Right" })
+            GC:Header({ Name = "Gradient" })
+            GC:SubLabel({ Text = "blends A into B n back, its not a rainbow" })
+            K.color(GC, { Name = "Color A", Flag = "GradA", Default = V.GradientColorA,
+                Callback = function(c) V.GradientColorA = c end })
+            K.color(GC, { Name = "Color B", Flag = "GradB", Default = V.GradientColorB,
+                Callback = function(c) V.GradientColorB = c end })
+            K.slider(GC, { Name = "Speed", Flag = "GradSpeed",
+                Default = math.floor((V.GradientSpeed or 0.5) * 100),
+                Min = 5, Max = 200, Suffix = "%",
+                Callback = function(v) V.GradientSpeed = v / 100 end })
+            K.slider(GC, { Name = "Wave Spread", Flag = "GradSpread",
+                Default = math.floor((V.GunModelGradientSpread or 1.6) * 10),
+                Min = 0, Max = 50,
+                Callback = function(v)
+                    V.GunModelGradientSpread = v / 10
+                    -- сбрасываем фазы частей, иначе волна не пересчитается
+                    for _, rec in pairs(gunStyledParts) do rec.gp = nil end
+                end,
+                Desc = "0 = whole gun changes color at once" })
+        end
+
+        -- ═══ TAB: Movement ═════════════════════════════════════════════
+        if tabMov then
+            -- Транспорт — правая колонка. Модуль Movement теперь раскладывает
+            -- свои фичи по обеим сторонам (перемещение слева, камера/десинк
+            -- справа), так что vehicle встаёт третьим блоком справа и колонки
+            -- остаются сбалансированными.
+            local S = tabMov:Section({ Side = "Right" })
+            K.feature(S, {
+                Title = "Vehicle Fly", Flag = "VehFly",
+                get = function() return V.VehicleFlyEnabled end,
+                set = function(v) V.VehicleFlyEnabled = v end,
+                Desc = "flies whatever ur driving",
+            })
+            K.slider(S, { Name = "Fly Speed", Flag = "VehFlySpeed",
+                Default = V.VehicleFlySpeed, Min = 20, Max = 400, Suffix = " st/s",
+                Callback = function(v) V.VehicleFlySpeed = v end })
+
+            K.group(S, "Vehicle Speed")
+            K.toggle(S, { Name = "Enabled", Flag = "VehSpeed", Title = "Vehicle Speed",
+                get = function() return V.VehicleSpeedEnabled end,
+                set = function(v) V.VehicleSpeedEnabled = v end })
+            if ui.keybind then
+                ui.keybind(S, { Name = "Keybind", Flag = (ui.flag or tostring)("VehSpeed_KB"),
+                    Toggle = function()
+                        V.VehicleSpeedEnabled = not V.VehicleSpeedEnabled
+                        K.syncToggle((ui.flag or tostring)("VehSpeed"), V.VehicleSpeedEnabled)
+                        K.notify("Vehicle Speed", V.VehicleSpeedEnabled and "Enabled" or "Disabled")
+                    end })
+            end
+            K.slider(S, { Name = "Multiplier", Flag = "VehSpeedMult",
+                Default = math.floor((V.VehicleSpeedMult or 1) * 10), Min = 10, Max = 60,
+                Callback = function(v) V.VehicleSpeedMult = v / 10 end,
+                Desc = "10 = stock, 60 = 6x" })
+        end
+
+        -- ═══ TAB: Gun Mods ═════════════════════════════════════════════
+        if tabGM then
+            local S = tabGM:Section({ Side = "Left" })
+            K.feature(S, {
+                Title = "Free Gun", Flag = "FreeGun",
+                get = function() return V.FreeGunEnabled end,
+                set = function(v) V.FreeGunEnabled = v end,
+                Desc = "lets u draw a weapon where the game blocks it\nlike inside a vehicle",
+            })
+        end
+
+        -- ═══ TAB: Misc ═════════════════════════════════════════════════
+        if tabMisc then
+            local SL = tabMisc:Section({ Side = "Left" })
+            K.feature(SL, {
+                Title = "Fullbright", Flag = "Fullbright",
+                get = function() return V.FullbrightEnabled end,
+                set = function(v) V.FullbrightEnabled = v end,
+                Desc = "flat max light, no shadows anywhere\nfor mood lighting use Atmosphere instead",
+            })
+
+            K.group(SL, "No Fog")
+            K.toggle(SL, { Name = "Enabled", Flag = "NoFog", Title = "No Fog",
+                get = function() return V.NoFogEnabled end,
+                set = function(v) V.NoFogEnabled = v end,
+                Desc = "strips fog entirely — see the whole map" })
+
+            K.group(SL, "Camera FOV")
+            K.toggle(SL, { Name = "Enabled", Flag = "WorldFOVOn", Title = "Camera FOV",
+                get = function() return V.WorldFOVEnabled end,
+                set = function(v) V.WorldFOVEnabled = v end,
+                Desc = "real field of view — wider = see more but aim feels faster" })
+            K.slider(SL, { Name = "FOV", Flag = "WorldFOV",
+                Default = V.WorldFOV or 70, Min = 40, Max = 120, Suffix = "°",
+                Callback = function(v) V.WorldFOV = v end,
+                Desc = "70 = game default" })
+
+            -- ═══ Atmosphere: свой вайб ═════════════════════════════════
+            local SA = tabMisc:Section({ Side = "Left" })
+            K.feature(SA, {
+                Title = "Atmosphere", Flag = "Ambient",
+                get = function() return V.AmbientEnabled end,
+                set = function(v) V.AmbientEnabled = v end,
+                Desc = "ur own time of day n mood\noverrides whatever the map sets",
+            })
+            -- Пресет ставит всю атмосферу разом. Ползунки ниже остаются
+            -- доступны — любая правка переводит пресет в Custom.
+            local ambRefresh
+            K.dropdown(SA, { Name = "Preset", Flag = "AmbPreset",
+                Options = AMBIENT_PRESET_ORDER,
+                Default = V.AmbientPreset or "Custom",
+                Callback = function(v)
+                    if v ~= "Custom" and applyAmbientPreset(v) then
+                        V.AmbientEnabled = true
+                        if ambRefresh then ambRefresh() end
+                    else
+                        V.AmbientPreset = "Custom"
+                    end
+                end,
+                Desc = "ready-made vibes\ntweak anything below n it flips to Custom" })
+
+            -- Любое ручное изменение сбрасывает пресет в Custom
+            local function manual() V.AmbientPreset = "Custom" end
+
+            local elTime = K.slider(SA, { Name = "Time", Flag = "ClockTime",
+                Default = V.AmbientClockTime, Min = 0, Max = 24, Suffix = "h",
+                Callback = function(v) V.AmbientClockTime = v; manual() end,
+                Desc = "0 = midnight, 12 = noon, 18 = sunset" })
+            local elBright = K.slider(SA, { Name = "Brightness", Flag = "AmbBright",
+                Default = math.floor((V.AmbientBrightness or 2) * 10), Min = 0, Max = 100,
+                Callback = function(v) V.AmbientBrightness = v / 10; manual() end })
+            local elExp = K.slider(SA, { Name = "Exposure", Flag = "AmbExposure",
+                Default = math.floor((V.AmbientExposure or 0) * 100) + 200, Min = 0, Max = 400,
+                Callback = function(v) V.AmbientExposure = (v - 200) / 100; manual() end,
+                Desc = "200 = neutral, lower = darker, higher = blown out" })
+            local elLat = K.slider(SA, { Name = "Sun Angle", Flag = "AmbLat",
+                Default = math.floor(V.AmbientLatitude or 45) + 90, Min = 0, Max = 180,
+                Callback = function(v) V.AmbientLatitude = v - 90; manual() end,
+                Desc = "moves where the sun sits in the sky" })
+
+            K.group(SA, "Colors")
+            local elAmb = K.color(SA, { Name = "Shadow Tint", Flag = "AmbColor",
+                Default = V.AmbientColor,
+                Callback = function(c) V.AmbientColor = c; manual() end,
+                Desc = "color of everything in shade" })
+            local elOut = K.color(SA, { Name = "Outdoor Tint", Flag = "AmbOutColor",
+                Default = V.AmbientOutdoorColor,
+                Callback = function(c) V.AmbientOutdoorColor = c; manual() end })
+            local elTintT = K.color(SA, { Name = "Highlight Tint", Flag = "AmbTintTop",
+                Default = V.AmbientTintTop,
+                Callback = function(c) V.AmbientTintTop = c; manual() end,
+                Desc = "tints lit surfaces — keep it subtle" })
+            local elTintB = K.color(SA, { Name = "Shade Tint", Flag = "AmbTintBottom",
+                Default = V.AmbientTintBottom,
+                Callback = function(c) V.AmbientTintBottom = c; manual() end })
+            local elShadows = K.toggle(SA, { Name = "Shadows", Flag = "AmbShadows", Title = "Shadows",
+                get = function() return V.AmbientShadows ~= false end,
+                set = function(v) V.AmbientShadows = v end })
+
+            K.group(SA, "Fog")
+            local elFogOn = K.toggle(SA, { Name = "Custom Fog", Flag = "AmbFogOn", Title = "Custom Fog",
+                get = function() return V.AmbientFogEnabled end,
+                set = function(v) V.AmbientFogEnabled = v end,
+                Desc = "for haze n distance mood\nuse No Fog instead if u just want it gone" })
+            local elFogCol = K.color(SA, { Name = "Fog Color", Flag = "AmbFogColor",
+                Default = V.AmbientFogColor,
+                Callback = function(c) V.AmbientFogColor = c; manual() end })
+            local elFogStart = K.slider(SA, { Name = "Fog Start", Flag = "AmbFogStart",
+                Default = V.AmbientFogStart or 0, Min = 0, Max = 2000, Suffix = " st",
+                Callback = function(v) V.AmbientFogStart = v; manual() end })
+            local elFogEnd = K.slider(SA, { Name = "Fog End", Flag = "AmbFogEnd",
+                Default = V.AmbientFogEnd or 800, Min = 50, Max = 5000, Suffix = " st",
+                Callback = function(v) V.AmbientFogEnd = v; manual() end })
+
+            -- Пресет меняет V.*, но ползунки/пикеры об этом не знают —
+            -- синхронизируем их отображение, иначе они показывают старые числа.
+            ambRefresh = function()
+                local function setV(el, val)
+                    if el and val then pcall(function() el:UpdateValue(val, true) end) end
+                end
+                local function setC(el, col)
+                    if el and col then pcall(function() el:SetColor(col) end) end
+                end
+                setV(elTime,    V.AmbientClockTime)
+                setV(elBright,  math.floor((V.AmbientBrightness or 2) * 10))
+                setV(elExp,     math.floor((V.AmbientExposure or 0) * 100) + 200)
+                setV(elLat,     math.floor(V.AmbientLatitude or 45) + 90)
+                setV(elFogStart, V.AmbientFogStart or 0)
+                setV(elFogEnd,  V.AmbientFogEnd or 800)
+                setC(elAmb,     V.AmbientColor)
+                setC(elOut,     V.AmbientOutdoorColor)
+                setC(elTintT,   V.AmbientTintTop)
+                setC(elTintB,   V.AmbientTintBottom)
+                setC(elFogCol,  V.AmbientFogColor)
+                if elShadows then pcall(function() elShadows:UpdateState(V.AmbientShadows ~= false) end) end
+                if elFogOn   then pcall(function() elFogOn:UpdateState(V.AmbientFogEnabled == true) end) end
+            end
+
+            local SIN = tabMisc:Section({ Side = "Right" })
+            SIN:Header({ Name = "Interactions" })
+            K.toggle(SIN, { Name = "No Prompt Hold", Flag = "NoFWait", Title = "No Prompt Hold",
+                get = function() return V.NoFWaitEnabled end,
+                set = function(v) V.NoFWaitEnabled = v end,
+                Desc = "prompts fire instantly instead of holding F" })
+            K.toggle(SIN, { Name = "Lockpick Bypass", Flag = "Lockpick", Title = "Lockpick Bypass",
+                get = function() return V.LockpickBypassEnabled end,
+                set = function(v) V.LockpickBypassEnabled = v end,
+                Desc = "solves the lockpick minigame for u" })
+        end
+
+        -- ═══ DEBUG ═════════════════════════════════════════════════════
+        if tabDbg then
+            local D = tabDbg:Section({ Side = "Left" })
+            D:Header({ Name = "Visuals" })
+            K.slider(D, { Name = "Lockpick Scan", Flag = "DbgLockpick",
+                Default = math.floor((V.LockpickScanInterval or 0.4) * 1000),
+                Min = 100, Max = 2000, Suffix = " ms",
+                Callback = function(v) V.LockpickScanInterval = v / 1000 end })
+        end
+
+        K.ready()
+    end
+
+    return M
 end
