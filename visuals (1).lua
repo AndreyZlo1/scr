@@ -851,33 +851,49 @@ return function(Lib)
         tpStyledChar = nil
     end
 
+    -- Части, которые игра прячет НАМЕРЕННО и навсегда — их нельзя проявлять.
+    -- Head в BRM5 всегда Transparency=1 (дамп ActorClass:1419: у головы
+    -- удаляются Pupil/Mouth, вместо неё рисуется отдельный меш), плюс
+    -- служебные коллайдеры и якоря аксессуаров.
+    local TP_NEVER_SHOW = {
+        Head = true, HumanoidRootPart = true,
+        Handle = true, RootPart = true,
+    }
+    local function tpShouldSkip(d)
+        if TP_NEVER_SHOW[d.Name] then return true end
+        -- хитбоксы/триггеры: невидимые и без коллизии — служебные
+        if d.Transparency >= 1 and d.CanCollide == false then return true end
+        -- части внутри аксессуаров/инструментов трогать не надо
+        local par = d.Parent
+        if par and (par:IsA("Accessory") or par:IsA("Tool")) then return true end
+        return false
+    end
+
     local function styleSelfBody(char)
         restoreSelfBody()
         local bodyTranp = V.ThirdPersonBodyTransparency or 0
         local styled = 0
         for _, d in ipairs(char:GetDescendants()) do
-            if (d:IsA("BasePart") or d:IsA("MeshPart")) then
+            if (d:IsA("BasePart") or d:IsA("MeshPart")) and not tpShouldSkip(d) then
                 local origT = d.Transparency
-                -- FIX (Self Skin «вообще не работает»): здесь стоял
-                -- `if origT >= 1 then continue end`. Игра сама выставляет
-                -- Transparency = 1 частям тела (дамп ActorClass:1029 Model,
-                -- :1419 Head; ViewmodelClass:334/366) — особенно в первом
-                -- лице. То есть под условие попадали ПРАКТИЧЕСКИ ВСЕ части, и
-                -- фича молча не делала ничего.
-                --
-                -- Смысл у старой проверки был: не записать T=1 как «оригинал»,
-                -- иначе после restore часть осталась бы невидимой. Решаем
-                -- иначе — часть стилизуем, но в оригинал пишем 0, чтобы
-                -- restore вернул её видимой, а не спрятанной.
-                local restoreT = (origT >= 1) and 0 or origT
-                tpOrig[d] = { M = d.Material, C = d.Color, T = restoreT }
-                -- Каждое свойство отдельно: отказ на одном (некоторые mesh
-                -- в BRM5 не принимают Material) не блокирует остальные.
+                -- Баланс двух ошибок:
+                --  • раньше стоял `if origT >= 1 then continue end` — под него
+                --    попадало почти всё тело, и фича не работала вообще;
+                --  • затем я снял проверку целиком — и стали проявляться
+                --    служебные парты, которые видимыми быть не должны.
+                -- Теперь: пропускаем только заведомо служебные (tpShouldSkip),
+                -- а у остальных скрытых НЕ трогаем прозрачность — красим лишь
+                -- цвет/материал. Так скрытое остаётся скрытым, а видимое
+                -- получает скин.
+                local isHidden = origT >= 1
+                tpOrig[d] = { M = d.Material, C = d.Color, T = origT }
                 if V.ThirdPersonMaterial then
                     pcall(function() d.Material = V.ThirdPersonMaterial end)
                 end
                 pcall(function() d.Color = V.ThirdPersonBodyColor end)
-                pcall(function() d.Transparency = bodyTranp end)
+                if not isHidden then
+                    pcall(function() d.Transparency = bodyTranp end)
+                end
                 styled += 1
             end
         end
