@@ -132,12 +132,13 @@ local SA_CONFIG = {
 	-- Когда включён — полностью подменяет обычный предикт (см. library.predictAimPoint).
 	PredictionLite = false,
 	PredictionLiteTime = 0.12,    -- секунд упреждения для лёгкого предикта
-	PingCompensation = false,
+	PingCompensation = true,      -- на высоком пинге без неё выстрел не регается
 	PredictionIterations = 3,     -- итераций сходимости времени полёта (2-4)
 	PredictionVertical = false,    -- учитывать вертикальную скорость (прыжки/падения)
 	PredictionVertCap = 10,       -- кап вертикальной скорости (studs/s)
 	PredictionMaxVelCap = 35,     -- кап горизонтальной скорости (studs/s)
-	PingCompensationScale = 0.5,  -- доля RTT при PingCompensation=true
+	PingCompensationScale = 1.0,  -- доля RTT (1.0 = полный RTT)
+	PingCompensationMax = 0.5,    -- потолок упреждения по пингу, сек
 	DefaultBulletSpeed = 920,
 	ForceZeroSpread = true,
 	MultiPoint = false,
@@ -4377,7 +4378,15 @@ local SilentAim = {
 	start  = function()
 		brm5Global().State = State
 		State.running = true
-		for k,v in pairs(SA_CONFIG) do Bridge.CONFIG[k] = v end
+		-- FIX (хитсаунды кроме Default не работали, и не только они): здесь
+		-- SA_CONFIG заливался в CONFIG БЕЗУСЛОВНО. Дефолты уже применены при
+		-- загрузке модуля (строка ~247), а этот повторный проход при каждом
+		-- start() затирал всё, что успел выставить пользователь или
+		-- автозагрузка конфига MacLib — HitSoundName возвращался в "Default",
+		-- цвета/громкость/пресеты тоже. Дозаливаем только НЕДОСТАЮЩИЕ ключи.
+		for k, v in pairs(SA_CONFIG) do
+			if Bridge.CONFIG[k] == nil then Bridge.CONFIG[k] = v end
+		end
 		if type(Bridge.installCharacterLifecycle) == "function" then
 			Bridge.installCharacterLifecycle(resetAfterRespawn)
 		end
