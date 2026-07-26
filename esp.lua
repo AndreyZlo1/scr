@@ -1781,9 +1781,11 @@ function Bridge.updateESP(dt)
 			table.sort(npcs,    function(a, b) return a.dist < b.dist end)
 			local ranked = players
 			for i = 1, #npcs do ranked[#ranked + 1] = npcs[i] end
-			if #ranked > 0 then
-				State.espRanked = ranked
-			end
+			-- FIX: было `if #ranked > 0`. Если все акторы исчезли (конец матча,
+			-- смена карты), список НЕ обновлялся и ESP продолжал рисовать
+			-- мёртвые строки. Публикуем всегда — цикл отрисовки сам умеет
+			-- пропускать строки с уничтоженными моделями.
+			State.espRanked = ranked
 			if Bridge.perfEnd then
 				Bridge.perfEnd("esp.rank", rankT, "p=" .. #players .. " n=" .. #npcs)
 			end
@@ -1792,9 +1794,18 @@ function Bridge.updateESP(dt)
 
 	local ranked = State.espRanked
 	if not ranked or #ranked == 0 then
-		-- FIX flicker: ranked пустой только на кадр пересборки →
-		-- не прячем все рисунки, просто пропускаем этот кадр.
-		Bridge.logVizHide("ESP", "ranked_empty_skip", "tracked=" .. tostring(actorCount))
+		-- ranked пуст. Раньше здесь был просто `return` — Drawing-объекты
+		-- оставались на экране с прошлыми координатами, и если пересборка
+		-- задерживалась (или акторов реально не стало), картинка «зависала».
+		-- Теперь: если акторов нет вообще — честно гасим всё. Если акторы
+		-- есть, а ranked ещё пересобирается — пропускаем кадр, не мигая.
+		if actorCount == 0 then
+			for uid, entry in pairs(State.drawings) do
+				Bridge.hideEspEntry(entry, "no_actors", uid)
+			end
+		else
+			Bridge.logVizHide("ESP", "ranked_rebuilding", "tracked=" .. tostring(actorCount))
+		end
 		return
 	end
 
@@ -1903,7 +1914,16 @@ function Bridge.updateESP(dt)
 		end
 		local uid  = row.uid
 		local data = row.data
-		if not data or not data.root or not data.root.Parent then continue end
+		-- FIX: тут был просто `continue`. Строка ranked живёт до пересборки
+		-- (до 1.5с), поэтому актор мог умереть/выгрузиться, а его Drawing
+		-- оставался на экране в последней позиции всё это время — один из
+		-- источников «элементы застывают».
+		if not data or not data.root or not data.root.Parent then
+			local stale = State.drawings[uid]
+			if stale then Bridge.hideEspEntry(stale, "root_gone", uid) end
+			Bridge.removeEspChams(uid)
+			continue
+		end
 		if not Bridge.shouldEspShowActor(data) then
 			local hidden = State.drawings[uid]
 			if hidden then Bridge.hideEspEntry(hidden, "npc_filter", uid) end
@@ -2218,7 +2238,16 @@ local _M = {
 			-- просто перерисуются на следующем кадре — без моргания.
 			if t - tFull >= (CONFIG.EspFullRescanInterval or 60) then
 				tFull = t
-				State.espRanked = nil
+				-- FIX (ESP «застывает на пару секунд»): раньше здесь стояло
+				-- State.espRanked = nil. Дальше в updateESP есть ранний выход
+				-- «ranked пустой → пропускаем кадр», и он срабатывал ДО всей
+				-- отрисовки. Пересборка ranked идёт в task.defer и может занять
+				-- несколько кадров — всё это время ESP не обновлялся вообще, а
+				-- Drawing-объекты оставались с прошлыми координатами. Выглядело
+				-- ровно как «замерло перед сканом».
+				-- Теперь ranked НЕ трогаем: сбрасываем только счётчик, чтобы
+				-- пересборка стартовала, а рисуем по старому списку до её
+				-- окончания. Мёртвые строки отфильтровываются в самом цикле.
 				State.espLastActorCount = -1
 				Bridge.invalidateReplicatorCache()
 				Bridge.cleanupEspCache()
