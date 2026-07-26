@@ -93,7 +93,11 @@ local KA_CONFIG = {
     --   "LegitAuto"  — авто: через _use+Impact (с анимацией замаха)
     --   "Hook"       — ручной удар, скрипт перенаправляет Impact на цель
     KillAuraMode     = "Hook",
-    KillAuraDebugKey = Enum.KeyCode.H,
+    -- FIX: было Enum.KeyCode.H — дебаг-дамп висел на H ВСЕГДА, без всякого
+    -- UI-контрола. Игрок жал H в игре и получал непонятный вывод в консоль,
+    -- выглядело как «захардкоженный кейбинд». Теперь по умолчанию бинда нет,
+    -- клавишу можно назначить в Debug-табе.
+    KillAuraDebugKey = nil,
     -- ── Модификации ближнего боя (только клиент — пакеты не меняются) ───────
     -- Применяются к AnimationTrack и клиентскому _distance оружия после экипировки.
     -- Сервер получает стандартные пакеты без учёта этих значений.
@@ -2066,7 +2070,7 @@ function _M.start()
     kaInputConn = UIS.InputBegan:Connect(function(input, processed)
         if processed or input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         local key = input.KeyCode
-        if key == (CONFIG.KillAuraDebugKey or Enum.KeyCode.H) then
+        if CONFIG.KillAuraDebugKey and key == CONFIG.KillAuraDebugKey then
             task.spawn(function() dumpDebug(true) end)
         end
     end)
