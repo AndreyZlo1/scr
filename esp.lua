@@ -230,12 +230,13 @@ local ESP_STATUS_ABBR = {
 }
 
 
-function Bridge.isTeammateActor(data)
-	if not data or data.class == "self" then return false end
-	if not CONFIG.TeamCheck and not CONFIG.EspIgnoreTeam then return false end
-	if data.class == "npc_friendly" then return true end
-	return not Bridge.isEnemyActor(data)
-end
+-- FIX (поведенческая ловушка): здесь была СВОЯ версия Bridge.isTeammateActor,
+-- которая при загрузке ESP затирала библиотечную — глобально, для всех.
+-- Логика у них разная: библиотечная сверяет отряды напрямую, эта же считала
+-- «не враг = союзник». Из-за подмены внутренние потребители библиотеки
+-- (collectTeammateIgnore — защита от стрельбы по своим, isEnemyHitPart)
+-- молча начинали пользоваться упрощённым вариантом. Дубль удалён,
+-- используется единственная реализация из library.lua.
 
 function Bridge.shouldEspShowActor(data)
 	if not data or data.class == "self" then return false end
