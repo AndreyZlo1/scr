@@ -32,6 +32,7 @@
 return function(Lib)
     local CONFIG = Lib.CONFIG
     local State  = Lib.State
+    local Bridge = Lib.Bridge   -- нужен для общего UI-kit (Bridge.makeUiKit)
 
     local RunService = game:GetService("RunService")
     local UIS        = game:GetService("UserInputService")
@@ -261,6 +262,15 @@ return function(Lib)
     ---------------------------------------------------------------------------
     local vmHooked    = false
     local vmOrigRef   = nil   -- ← значение, ВОЗВРАЩЁННОЕ hookfunction (НЕ исходный rawget)
+    local vmHookMode  = nil   -- "hookfunction" | "field" — как ставили, так и снимаем
+    local vmHookTbl   = nil   -- таблица класса для field-режима (cls.Update = orig)
+    local vmHookFn    = nil   -- исходная функция для hookfunction-режима
+    -- FIX: раньше `local gunHighlight` объявлялся НИЖЕ (стр. 624) — уже после
+    -- замыкания хука, которое его использует. Из-за этого обращения внутри
+    -- хука компилировались как ГЛОБАЛ, а весь код очистки (хоткей, stop,
+    -- тоггл в UI) захватывал пустой локал → gunHighlight:Destroy() никогда
+    -- не выполнялся и Highlight утекал навсегда. Теперь объявлен ДО хука.
+    local gunHighlight = nil
 
     -- Список стилизованных частей: { [part] = { M, C, T } } для restore
     local vmStyledParts  = {}
@@ -380,19 +390,26 @@ return function(Lib)
     -- Фаза части по её ИНДЕКСУ в store (не по мировой позиции — та меняется при движении и даёт джиттер).
     -- Индекс определяется один раз: сортируем части по начальной мировой Y+X, присваиваем idx.
     -- spread растягивает/сжимает волну по индексам; 0 → все части в фазе (синхронно).
+    -- Вынесено из горячего цикла: одна функция вместо замыкания на часть/кадр.
+    local function _setPartColor(part, col) part.Color = col end
     local function tickGradientStore(store, spread, baseHue)
         -- 1) Собираем пары (part, rec) где нужно посчитать gp
-        local needPhase = {}
+        -- FIX: таблица needPhase создавалась каждый вызов, даже когда все фазы
+        -- уже посчитаны (обычный случай) — теперь только по факту необходимости.
+        local needPhase = nil
         local total = 0
         for part, rec in pairs(store) do
             if part and part.Parent then
                 total = total + 1
-                if rec.gp == nil then needPhase[part] = rec end
+                if rec.gp == nil then
+                    needPhase = needPhase or {}
+                    needPhase[part] = rec
+                end
             end
         end
         if total == 0 then return end
         -- 2) Для частей без фазы — назначаем по сортировке idx/total
-        if next(needPhase) then
+        if needPhase then
             local arr = {}
             for part in pairs(needPhase) do arr[#arr + 1] = part end
             -- Сортировка по базовой позиции: стабильная, не меняется при движении игрока
@@ -411,8 +428,10 @@ return function(Lib)
         -- 3) Красим с кэшированными фазами
         for part, rec in pairs(store) do
             if part and part.Parent then
-                local col = gradientColorAt(baseHue + (rec.gp or 0))
-                pcall(function() part.Color = col end)
+                -- FIX: было pcall(function() ... end) — новое замыкание на КАЖДУЮ
+                -- часть КАЖДЫЙ кадр (2-4 тысячи аллокаций в секунду → GC-нагрузка
+                -- и микрофризы). Теперь передаём аргументы в готовую функцию.
+                pcall(_setPartColor, part, gradientColorAt(baseHue + (rec.gp or 0)))
             end
         end
     end
@@ -433,8 +452,13 @@ return function(Lib)
         if vmStyledVM ~= nil and vmStyledVM ~= vm then
             restoreViewmodelStyle()  -- resets _vmStyleApplied = nil
         end
-        -- FIX FPS: only iterate GetDescendants when vm/weapon changes, not every frame
-        if _vmStyleApplied == vm and not V.ViewmodelGradientEnabled then return end
+        -- FIX FPS: обходим GetDescendants только при смене vm/оружия.
+        -- Раньше при включённом градиенте этот ранний выход пропускался и весь
+        -- обход дерева шёл КАЖДЫЙ кадр — тысячи Instance-вызовов в секунду,
+        -- ровно отсюда и брался просад FPS при включении градиента.
+        -- Перекраску градиента делает tickGradientStore по уже собранному
+        -- списку частей, повторно собирать его не нужно.
+        if _vmStyleApplied == vm then return end
         _vmStyleApplied = vm
         local weapon = rawget(vm, "CurrentModel")   -- модель оружия — НЕ трогаем
 
@@ -476,8 +500,9 @@ return function(Lib)
             restoreGunStyle()   -- сменили ствол → вернуть старый
             _gunStyleApplied = nil
         end
-        -- FIX FPS: only call GetDescendants() when weapon changes, not every frame
-        if _gunStyleApplied == weapon and not V.GunModelGradientEnabled then return end
+        -- FIX FPS: GetDescendants только при смене ствола (см. коммент в
+        -- applyViewmodelStyle) — при градиенте кэш больше не обходится.
+        if _gunStyleApplied == weapon then return end
         _gunStyleApplied = weapon
         local opts = {
             colorOn = V.GunModelColorEnabled or V.GunModelGradientEnabled,
@@ -517,6 +542,10 @@ return function(Lib)
 
         -- hookfunction возвращает origRef — именно его вызываем внутри хука
         local function newUpdate(self, dt, ...)
+            -- FIX: хук раньше не проверял `running`, поэтому после M.stop()
+            -- продолжал каждый кадр перекрашивать руки/оружие — и откатывал
+            -- restoreViewmodelStyle буквально на следующем кадре.
+            if not running then return vmOrigRef(self, dt, ...) end
             local r = table.pack(vmOrigRef(self, dt, ...))   -- ← vmOrigRef, не origFn!
             pcall(function()
                 if V.ViewmodelEnabled then
@@ -602,18 +631,24 @@ return function(Lib)
         -- hookfunction возвращает оригинальный безопасный callable
         local hookOk, ret = pcall(hookfunction, origFn, wrapped)
         if hookOk and type(ret) == "function" then
-            vmOrigRef = ret
-            vmHooked  = true
+            vmOrigRef  = ret
+            vmHooked   = true
+            vmHookMode = "hookfunction"
+            vmHookFn   = origFn
+            vmHookTbl  = cls
             log("Viewmodel hook OK (hookfunction)")
             return true
         end
 
         -- Fallback: заменяем метод в таблице
-        -- В ����том случае origFn и есть оригинал — кладём его в vmOrigRef
+        -- В этом случае origFn и есть оригинал — кладём его в vmOrigRef
         vmOrigRef = origFn
         local ok2 = pcall(function() cls.Update = wrapped end)
         if ok2 then
-            vmHooked = true
+            vmHooked   = true
+            vmHookMode = "field"
+            vmHookFn   = origFn
+            vmHookTbl  = cls
             log("Viewmodel hook OK (table replace fallback)")
             return true
         end
@@ -621,7 +656,20 @@ return function(Lib)
         return false
     end
 
-    local gunHighlight -- объявлен здесь (до newUpdate замыкания использован выше)
+    -- FIX: раньше хук не снимался НИКОГДА. После unload он продолжал жить и
+    -- каждый кадр перекрашивал руки/оружие, а повторный запуск скрипта вешал
+    -- хук поверх хука. Теперь снимаем ровно тем способом, каким ставили.
+    local function unhookViewmodel()
+        if not vmHooked then return end
+        if vmHookMode == "hookfunction" and vmHookFn and vmOrigRef then
+            pcall(hookfunction, vmHookFn, vmOrigRef)
+        elseif vmHookMode == "field" and vmHookTbl and vmHookFn then
+            pcall(function() vmHookTbl.Update = vmHookFn end)
+        end
+        vmHooked, vmHookMode, vmHookTbl, vmHookFn, vmOrigRef = false, nil, nil, nil, nil
+    end
+
+    -- (gunHighlight объявлен выше, до хука — см. FIX там)
 
     ---------------------------------------------------------------------------
     -- FOV override (после камеры каждый кадр)
@@ -629,11 +677,14 @@ return function(Lib)
     local FOV_BIND = "BRM5_FOV"
     local fovBound = false
     local fovApplied = false  -- флаг: мы изменили FOV → надо восстановить при выключении
+    -- FIX: восстанавливали жёстко 70. Запоминаем настоящий FOV до первой правки.
+    local _origFov = nil
     local function fovStep()
         local fov = V.ViewmodelFOV or 0
         if V.ViewmodelEnabled and fov > 0 then
             local cam = Workspace.CurrentCamera
             if cam then
+                if not _origFov then _origFov = cam.FieldOfView end
                 pcall(function() cam.FieldOfView = fov end)
                 fovApplied = true
             end
@@ -641,7 +692,7 @@ return function(Lib)
             -- FOV выключен или равен 0 → восстановить стандартный FOV игры
             if fovApplied then
                 local cam = Workspace.CurrentCamera
-                if cam then pcall(function() cam.FieldOfView = 70 end) end
+                if cam then pcall(function() cam.FieldOfView = _origFov or 70 end) end
                 fovApplied = false
             end
         end
@@ -924,6 +975,11 @@ return function(Lib)
     local _canEquipHooked = false
     local _canEquipCallOrig = nil        -- вызываемый оригинал
     local _fgScanCd = 0
+    -- FIX: не хранили ни таблицу, ни режим установки → снять хук было нечем.
+    local _fgTbl, _fgMode, _fgRawFn = nil, nil, nil
+    -- FIX: SeatCanEquip форсился в true и никогда не возвращался обратно —
+    -- фича «выключена», а оружие в транспорте всё равно достаётся.
+    local _fgSeatOrig = nil
     local function installFreeGunHook()
         if _canEquipHooked then return true end
         local t = now()
@@ -948,6 +1004,7 @@ return function(Lib)
                 local setOk = pcall(function() tbl._canEquip = wrapper end)
                 if setOk and rawget(tbl, "_canEquip") == wrapper then
                     _canEquipHooked = true
+                    _fgTbl, _fgMode, _fgRawFn = tbl, "field", fn
                     log("FreeGun: _canEquip перехвачен (field)")
                     return true
                 end
@@ -957,6 +1014,7 @@ return function(Lib)
                     if hookOk then
                         _canEquipCallOrig = (type(origRef) == "function") and origRef or fn
                         _canEquipHooked = true
+                        _fgTbl, _fgMode, _fgRawFn = tbl, "hookfunction", fn
                         log("FreeGun: _canEquip перехвачен (hookfunction)")
                         return true
                     end
@@ -966,12 +1024,34 @@ return function(Lib)
         return false
     end
 
+    -- FIX: полностью снимаем FreeGun — и хук, и форс SeatCanEquip.
+    local function restoreFreeGunHook()
+        V.FreeGunEnabled = false
+        if _fgSeatOrig ~= nil then
+            pcall(function()
+                local la = getLA()
+                if type(la) == "table" then la.SeatCanEquip = _fgSeatOrig end
+            end)
+            _fgSeatOrig = nil
+        end
+        if not _canEquipHooked then return end
+        if _fgMode == "field" and _fgTbl and _canEquipCallOrig then
+            pcall(function() _fgTbl._canEquip = _canEquipCallOrig end)
+        elseif _fgMode == "hookfunction" and _fgRawFn and _canEquipCallOrig then
+            pcall(hookfunction, _fgRawFn, _canEquipCallOrig)
+        end
+        _canEquipHooked = false
+        _fgTbl, _fgMode, _fgRawFn = nil, nil, nil
+    end
+
     local function freeGunStep()
         if not V.FreeGunEnabled then return end
         if not _canEquipHooked then installFreeGunHook() end
         -- лёгкий фолбэк для транспорта: разрешаем экипировку в сиденье
         local la = getLA()
         if type(la) == "table" and rawget(la, "SeatCanEquip") ~= true then
+            -- запоминаем исходное значение ОДИН раз, чтобы вернуть его в stop
+            if _fgSeatOrig == nil then _fgSeatOrig = rawget(la, "SeatCanEquip") or false end
             pcall(function() la.SeatCanEquip = true end)
         end
     end
@@ -1209,16 +1289,22 @@ return function(Lib)
             pcall(function() RunService:UnbindFromRenderStep(FOV_BIND) end)
             fovBound = false
         end
+        -- Снимаем хук ДО restore — иначе живой хук вернёт стиль обратно
+        -- на следующем же кадре (ровно так и было раньше).
+        unhookViewmodel()
         restoreViewmodelStyle()
+        restoreGunStyle()        -- FIX: не вызывался → оружие оставалось перекрашенным
+        restoreVehicleSpeed()    -- FIX: не вызывался → тачка навсегда с изменённой массой
         if gunHighlight then pcall(function() gunHighlight:Destroy() end); gunHighlight = nil end
         clearSelfHighlight()
         restoreSelfBody()
-        V.FreeGunEnabled = false  -- хук _canEquip остаётся, но инертен (гейт по флагу)
+        restoreFreeGunHook()     -- FIX: снимаем _canEquip и возвращаем SeatCanEquip
         disableNoFWait()
         restoreLighting(); lightSavedOK = false
         pcall(function()
             local cam = Workspace.CurrentCamera
-            if cam then cam.FieldOfView = 70 end
+            -- FIX: было жёстко 70 — теперь возвращаем реально захваченный FOV
+            if cam then cam.FieldOfView = _origFov or 70 end
         end)
         log("Visuals/World остановлен")
     end
@@ -1237,254 +1323,254 @@ return function(Lib)
     local function matFromName(n) return Enum.Material[n] or Enum.Material.ForceField end
 
     function M.buildUI(ui)
-        local flag = ui.flag or function(s) return "VIS_" .. s end
-        local tabV   = ui.tabs and ui.tabs.Visuals
-        local tabMov = ui.tabs and ui.tabs.Movement
-        local tabGM  = ui.tabs and ui.tabs.GunMods
+        local tabV    = ui.tabs and ui.tabs.Visuals
+        local tabMov  = ui.tabs and ui.tabs.Movement
+        local tabGM   = ui.tabs and ui.tabs.GunMods
         local tabMisc = ui.tabs and ui.tabs.Misc
         local tabDbg  = ui.tabs and ui.tabs.Debug
-        local ntf = ui.notify or function() end
-
-        -- Sync a MacLib toggle's visual state with V[<key>] (used by keybinds).
-        local function syncToggle(f, val)
-            local ML = ui.MacLib
-            if ML and ML.Options and ML.Options[f] then
-                pcall(function() ML.Options[f]:UpdateState(val) end)
-            end
-        end
-        -- FIX double-notify: syncToggle re-fires the Toggle Callback which also calls ntf().
-        local _notifyBlocked = false
-        -- Keybind that toggles a V[key] boolean and updates its paired toggle.
-        local function kbToggle(section, name, key, toggleFlag, label)
-            if not ui.keybind then return end
-            ui.keybind(section, { Name = name, Flag = flag(key .. "_KB"),
-                Toggle = function()
-                    V[key] = not V[key]
-                    _notifyBlocked = true
-                    syncToggle(flag(toggleFlag), V[key])
-                    _notifyBlocked = false
-                    ntf(label or name, V[key] and "Enabled" or "Disabled")
-                end })
-        end
+        local K = Bridge.makeUiKit(ui)
 
         if tabV then
-            -- ── Viewmodel (hands) ──────────────────────────────────────────
-            local S = tabV:Section({ Name = "Viewmodel", Side = "Left" })
-            S:Header({ Name = "Viewmodel (hands)" })
-            S:Toggle({ Name = "Enabled", Default = V.ViewmodelEnabled,
-                Callback = function(v)
-                    V.ViewmodelEnabled = v
-                    if not _notifyBlocked then ntf("Viewmodel", v and "Enabled" or "Disabled") end
-                end }, flag("VM"))
-            kbToggle(S, "Keybind", "ViewmodelEnabled", "VM", "Viewmodel")
-            S:SubLabel({ Text = "Recolors/re-materializes your first-person arms." })
-            S:Toggle({ Name = "Recolor", Default = V.ViewmodelColorEnabled,
-                Callback = function(v) V.ViewmodelColorEnabled = v end }, flag("VMColorOn"))
-            S:Colorpicker({ Name = "Color", Default = V.ViewmodelColor,
-                Callback = function(c) V.ViewmodelColor = c end }, flag("VMColor"))
-            S:Toggle({ Name = "Change Material", Default = V.ViewmodelMaterialEnabled,
-                Callback = function(v) V.ViewmodelMaterialEnabled = v end }, flag("VMMatOn"))
-            S:Dropdown({ Name = "Material", Options = MATERIALS, Default = matName(V.ViewmodelMaterial),
-                Callback = function(n)
-                    V.ViewmodelMaterial = matFromName(n)
-                    ntf("Viewmodel Material", n)
-                end }, flag("VMMat"))
-            S:Slider({ Name = "Transparency", Default = math.floor((V.ViewmodelTransparency or 0) * 100),
-                Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+            -- ═══ Viewmodel ═════════════════════════════════════════════
+            local S = tabV:Section({ Side = "Left" })
+            local vmEls = {}
+            local function vmVis() K.setVisible(vmEls, V.ViewmodelEnabled ~= false) end
+
+            K.feature(S, {
+                Title = "Viewmodel", Flag = "VM",
+                get = function() return V.ViewmodelEnabled end,
+                set = function(v) V.ViewmodelEnabled = v; vmVis() end,
+                Desc = "recolors ur first person arms",
+            })
+            vmEls[#vmEls + 1] = K.toggle(S, { Name = "Recolor", Flag = "VMColorOn", Title = "VM Recolor",
+                get = function() return V.ViewmodelColorEnabled end,
+                set = function(v) V.ViewmodelColorEnabled = v end })
+            vmEls[#vmEls + 1] = K.color(S, { Name = "Color", Flag = "VMColor",
+                Default = V.ViewmodelColor,
+                Callback = function(c) V.ViewmodelColor = c end })
+            vmEls[#vmEls + 1] = K.toggle(S, { Name = "Change Material", Flag = "VMMatOn",
+                Title = "VM Material",
+                get = function() return V.ViewmodelMaterialEnabled end,
+                set = function(v) V.ViewmodelMaterialEnabled = v end })
+            vmEls[#vmEls + 1] = K.dropdown(S, { Name = "Material", Flag = "VMMat",
+                Options = MATERIALS, Default = matName(V.ViewmodelMaterial),
+                Callback = function(n) V.ViewmodelMaterial = matFromName(n) end })
+            vmEls[#vmEls + 1] = K.slider(S, { Name = "Transparency", Flag = "VMTransp",
+                Default = math.floor((V.ViewmodelTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
                 Callback = function(v)
                     V.ViewmodelTransparency = v / 100
-                    -- при изменении прозрачности сбросить кэш store чтобы переприменить
-                    restoreViewmodelStyle()
-                end }, flag("VMTransp"))
-            S:Slider({ Name = "Custom FOV", Default = V.ViewmodelFOV or 0, Minimum = 0, Maximum = 120,
-                Precision = 0, Callback = function(v) V.ViewmodelFOV = v end }, flag("VMFov"))
-            S:SubLabel({ Text = "0 = don't change camera FOV." })
-            S:Divider()
-            S:Header({ Name = "Viewmodel Gradient" })
-            S:Toggle({ Name = "Gradient", Default = V.ViewmodelGradientEnabled,
-                Callback = function(v)
-                    V.ViewmodelGradientEnabled = v
-                    ntf("VM Gradient", v and "Enabled" or "Disabled")
-                end }, flag("VMGrad"))
-            S:SubLabel({ Text = "Two-color gradient (set colors on the right)." })
+                    restoreViewmodelStyle()   -- сбрасываем кэш, чтобы стиль лёг заново
+                end })
+            vmEls[#vmEls + 1] = K.slider(S, { Name = "Custom FOV", Flag = "VMFov",
+                Default = V.ViewmodelFOV or 0, Min = 0, Max = 120,
+                Callback = function(v) V.ViewmodelFOV = v end,
+                Desc = "0 = dont touch the camera" })
+            vmEls[#vmEls + 1] = K.toggle(S, { Name = "Gradient", Flag = "VMGrad", Title = "VM Gradient",
+                get = function() return V.ViewmodelGradientEnabled end,
+                set = function(v) V.ViewmodelGradientEnabled = v end,
+                Desc = "colors set in Gradient on the right" })
+            vmVis()
 
-            -- ── Gun Model ──────────────────────────────────────────────────
-            local G = tabV:Section({ Name = "Gun Model", Side = "Left" })
-            G:Header({ Name = "Gun Model" })
-            G:Toggle({ Name = "Enabled", Default = V.GunModelEnabled,
-                Callback = function(v)
-                    V.GunModelEnabled = v
-                    if not _notifyBlocked then ntf("Gun Model", v and "Enabled" or "Disabled") end
-                end }, flag("GM"))
-            kbToggle(G, "Keybind", "GunModelEnabled", "GM", "Gun Model")
-            G:Toggle({ Name = "Highlight", Default = V.GunModelHighlightEnabled ~= false,
-                Callback = function(v)
+            -- ═══ Gun Model ═════════════════════════════════════════════
+            local G = tabV:Section({ Side = "Left" })
+            local gmEls = {}
+            local function gmVis() K.setVisible(gmEls, V.GunModelEnabled ~= false) end
+
+            K.feature(G, {
+                Title = "Gun Model", Flag = "GM",
+                get = function() return V.GunModelEnabled end,
+                set = function(v) V.GunModelEnabled = v; gmVis() end,
+                Desc = "same styling but for the gun in ur hands",
+            })
+            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Highlight", Flag = "GMHighlight",
+                Title = "Gun Highlight",
+                get = function() return V.GunModelHighlightEnabled ~= false end,
+                set = function(v)
                     V.GunModelHighlightEnabled = v
                     if not v and gunHighlight then
                         pcall(function() gunHighlight:Destroy() end); gunHighlight = nil
                     end
-                    ntf("Gun Highlight", v and "Enabled" or "Disabled")
-                end }, flag("GMHighlight"))
-            G:SubLabel({ Text = "Uncheck to keep recolor/material without the colored outline." })
-            G:Toggle({ Name = "Recolor", Default = V.GunModelColorEnabled,
-                Callback = function(v) V.GunModelColorEnabled = v end }, flag("GMColorOn"))
-            G:Colorpicker({ Name = "Color", Default = V.GunModelColor,
-                Callback = function(c) V.GunModelColor = c end }, flag("GMColor"))
-            G:Toggle({ Name = "Change Material", Default = V.GunModelMaterialEnabled,
-                Callback = function(v) V.GunModelMaterialEnabled = v end }, flag("GMMatOn"))
-            G:Dropdown({ Name = "Material", Options = MATERIALS, Default = matName(V.GunModelMaterial),
-                Callback = function(n)
-                    V.GunModelMaterial = matFromName(n)
-                    ntf("Gun Model Material", n)
-                end }, flag("GMMat"))
-            G:Slider({ Name = "Transparency", Default = math.floor((V.GunModelTransparency or 0) * 100),
-                Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
+                end,
+                Desc = "off = keep the recolor without the outline" })
+            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Recolor", Flag = "GMColorOn", Title = "Gun Recolor",
+                get = function() return V.GunModelColorEnabled end,
+                set = function(v) V.GunModelColorEnabled = v end })
+            gmEls[#gmEls + 1] = K.color(G, { Name = "Color", Flag = "GMColor",
+                Default = V.GunModelColor,
+                Callback = function(c) V.GunModelColor = c end })
+            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Change Material", Flag = "GMMatOn",
+                Title = "Gun Material",
+                get = function() return V.GunModelMaterialEnabled end,
+                set = function(v) V.GunModelMaterialEnabled = v end })
+            gmEls[#gmEls + 1] = K.dropdown(G, { Name = "Material", Flag = "GMMat",
+                Options = MATERIALS, Default = matName(V.GunModelMaterial),
+                Callback = function(n) V.GunModelMaterial = matFromName(n) end })
+            gmEls[#gmEls + 1] = K.slider(G, { Name = "Transparency", Flag = "GMTransp",
+                Default = math.floor((V.GunModelTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
                 Callback = function(v)
                     V.GunModelTransparency = v / 100
                     restoreGunStyle()
-                end }, flag("GMTransp"))
-            G:Divider()
-            G:Header({ Name = "Gun Model Gradient" })
-            G:Toggle({ Name = "Gradient", Default = V.GunModelGradientEnabled,
-                Callback = function(v)
-                    V.GunModelGradientEnabled = v
-                    ntf("GM Gradient", v and "Enabled" or "Disabled")
-                end }, flag("GMGrad"))
-            G:SubLabel({ Text = "Wave flows part-to-part (see Wave Spread on the right)." })
+                end })
+            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Gradient", Flag = "GMGrad", Title = "Gun Gradient",
+                get = function() return V.GunModelGradientEnabled end,
+                set = function(v) V.GunModelGradientEnabled = v end,
+                Desc = "wave runs part to part, see Wave Spread" })
+            gmVis()
 
-            -- ── Third person + shared gradient colors ──────────────────────
-            local S2 = tabV:Section({ Name = "Third Person", Side = "Right" })
-            S2:Header({ Name = "Third Person Model" })
-            S2:Toggle({ Name = "Enabled", Default = V.ThirdPersonEnabled,
-                Callback = function(v)
-                    V.ThirdPersonEnabled = v
-                    if not _notifyBlocked then ntf("Third Person", v and "Enabled" or "Disabled") end
-                end }, flag("TP"))
-            kbToggle(S2, "Keybind", "ThirdPersonEnabled", "TP", "Third Person")
-            S2:SubLabel({ Text = "Styles your own body (visible in third person camera)." })
-            S2:Colorpicker({ Name = "Body Color", Default = V.ThirdPersonBodyColor,
-                Callback = function(c) V.ThirdPersonBodyColor = c end }, flag("TPColor"))
-            S2:Slider({ Name = "Body Transparency", Default = math.floor((V.ThirdPersonBodyTransparency or 0) * 100),
-                Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-                Callback = function(v) V.ThirdPersonBodyTransparency = v / 100 end }, flag("TPTransp"))
-            S2:Toggle({ Name = "Gradient", Default = V.ThirdPersonGradientEnabled,
-                Callback = function(v)
-                    V.ThirdPersonGradientEnabled = v
-                    ntf("TP Gradient", v and "Enabled" or "Disabled")
-                end }, flag("TPGrad"))
+            -- ═══ Third Person ══════════════════════════════════════════
+            local S2 = tabV:Section({ Side = "Right" })
+            local tpEls = {}
+            local function tpVis() K.setVisible(tpEls, V.ThirdPersonEnabled ~= false) end
 
-            local GC = tabV:Section({ Name = "Gradient Colors", Side = "Right" })
-            GC:Header({ Name = "Gradient (2-color)" })
-            GC:SubLabel({ Text = "Smoothly blends Color A into Color B and back. Not a rainbow." })
-            GC:Colorpicker({ Name = "Color A", Default = V.GradientColorA,
-                Callback = function(c) V.GradientColorA = c end }, flag("GradA"))
-            GC:Colorpicker({ Name = "Color B", Default = V.GradientColorB,
-                Callback = function(c) V.GradientColorB = c end }, flag("GradB"))
-            GC:Slider({ Name = "Speed", Default = V.GradientSpeed, Minimum = 0.05, Maximum = 2,
-                Precision = 2, Suffix = " Hz",
-                Callback = function(v) V.GradientSpeed = v end }, flag("GradSpeed"))
-            GC:Slider({ Name = "Gun Wave Spread", Default = V.GunModelGradientSpread, Minimum = 0,
-                Maximum = 5, Precision = 1,
+            K.feature(S2, {
+                Title = "Third Person", Flag = "TP",
+                get = function() return V.ThirdPersonEnabled end,
+                set = function(v) V.ThirdPersonEnabled = v; tpVis() end,
+                Desc = "styles ur own body, only u see it",
+            })
+            tpEls[#tpEls + 1] = K.color(S2, { Name = "Body Color", Flag = "TPColor",
+                Default = V.ThirdPersonBodyColor,
+                Callback = function(c) V.ThirdPersonBodyColor = c end })
+            tpEls[#tpEls + 1] = K.slider(S2, { Name = "Transparency", Flag = "TPTransp",
+                Default = math.floor((V.ThirdPersonBodyTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
+                Callback = function(v) V.ThirdPersonBodyTransparency = v / 100 end })
+            tpEls[#tpEls + 1] = K.toggle(S2, { Name = "Gradient", Flag = "TPGrad", Title = "TP Gradient",
+                get = function() return V.ThirdPersonGradientEnabled end,
+                set = function(v) V.ThirdPersonGradientEnabled = v end })
+            tpVis()
+
+            -- ═══ Общие цвета градиента ═════════════════════════════════
+            local GC = tabV:Section({ Side = "Right" })
+            GC:Header({ Name = "Gradient" })
+            GC:SubLabel({ Text = "blends A into B n back, its not a rainbow" })
+            K.color(GC, { Name = "Color A", Flag = "GradA", Default = V.GradientColorA,
+                Callback = function(c) V.GradientColorA = c end })
+            K.color(GC, { Name = "Color B", Flag = "GradB", Default = V.GradientColorB,
+                Callback = function(c) V.GradientColorB = c end })
+            K.slider(GC, { Name = "Speed", Flag = "GradSpeed",
+                Default = math.floor((V.GradientSpeed or 0.5) * 100),
+                Min = 5, Max = 200, Suffix = "%",
+                Callback = function(v) V.GradientSpeed = v / 100 end })
+            K.slider(GC, { Name = "Wave Spread", Flag = "GradSpread",
+                Default = math.floor((V.GunModelGradientSpread or 1.6) * 10),
+                Min = 0, Max = 50,
                 Callback = function(v)
-                    V.GunModelGradientSpread = v
-                    -- сбросить кэш фаз частей (gp) чтобы волна пересчиталась
+                    V.GunModelGradientSpread = v / 10
+                    -- сбрасываем фазы частей, иначе волна не пересчитается
                     for _, rec in pairs(gunStyledParts) do rec.gp = nil end
-                end }, flag("GradSpread"))
-            GC:SubLabel({ Text = "0 = all gun parts change color together." })
+                end,
+                Desc = "0 = whole gun changes color at once" })
         end
 
+        -- ═══ TAB: Movement ═════════════════════════════════════════════
         if tabMov then
-            local S = tabMov:Section({ Name = "Vehicle", Side = "Right" })
-            S:Header({ Name = "Vehicle" })
-            S:Toggle({ Name = "Enabled", Default = V.VehicleFlyEnabled,
-                Callback = function(v)
-                    V.VehicleFlyEnabled = v
-                    ntf("Vehicle Fly", v and "Enabled" or "Disabled")
-                end }, flag("VehFly"))
-            kbToggle(S, "Fly Keybind", "VehicleFlyEnabled", "VehFly", "Vehicle Fly")
-            S:Slider({ Name = "Fly Speed", Default = V.VehicleFlySpeed, Minimum = 20, Maximum = 400,
-                Precision = 0, Suffix = " st/s",
-                Callback = function(v) V.VehicleFlySpeed = v end }, flag("VehFlySpeed"))
-            S:Divider()
-            S:Header({ Name = "Vehicle Speed" })
-            S:Toggle({ Name = "Enabled", Default = V.VehicleSpeedEnabled,
-                Callback = function(v)
-                    V.VehicleSpeedEnabled = v
-                    ntf("Vehicle Speed", v and "Enabled" or "Disabled")
-                end }, flag("VehSpeed"))
-            kbToggle(S, "Speed Keybind", "VehicleSpeedEnabled", "VehSpeed", "Vehicle Speed")
-            S:Slider({ Name = "Speed Multiplier", Default = V.VehicleSpeedMult, Minimum = 1, Maximum = 6,
-                Precision = 1, Suffix = "x",
-                Callback = function(v) V.VehicleSpeedMult = v end }, flag("VehSpeedMult"))
+            local S = tabMov:Section({ Side = "Right" })
+            local flyEls = {}
+            local function flyVis() K.setVisible(flyEls, V.VehicleFlyEnabled ~= false) end
+
+            K.feature(S, {
+                Title = "Vehicle Fly", Flag = "VehFly",
+                get = function() return V.VehicleFlyEnabled end,
+                set = function(v) V.VehicleFlyEnabled = v; flyVis() end,
+                Desc = "flies whatever ur driving",
+            })
+            flyEls[#flyEls + 1] = K.slider(S, { Name = "Fly Speed", Flag = "VehFlySpeed",
+                Default = V.VehicleFlySpeed, Min = 20, Max = 400, Suffix = " st/s",
+                Callback = function(v) V.VehicleFlySpeed = v end })
+            flyVis()
+
+            K.group(S, "Vehicle Speed")
+            local spdEls = {}
+            local function spdVis() K.setVisible(spdEls, V.VehicleSpeedEnabled ~= false) end
+            K.toggle(S, { Name = "Enabled", Flag = "VehSpeed", Title = "Vehicle Speed",
+                get = function() return V.VehicleSpeedEnabled end,
+                set = function(v) V.VehicleSpeedEnabled = v end,
+                after = spdVis })
+            if ui.keybind then
+                ui.keybind(S, { Name = "Keybind", Flag = (ui.flag or tostring)("VehSpeed_KB"),
+                    ForceAutoLoad = true,
+                    Toggle = function()
+                        V.VehicleSpeedEnabled = not V.VehicleSpeedEnabled
+                        K.syncToggle((ui.flag or tostring)("VehSpeed"), V.VehicleSpeedEnabled)
+                        K.notify("Vehicle Speed", V.VehicleSpeedEnabled and "Enabled" or "Disabled")
+                        spdVis()
+                    end })
+            end
+            spdEls[#spdEls + 1] = K.slider(S, { Name = "Multiplier", Flag = "VehSpeedMult",
+                Default = math.floor((V.VehicleSpeedMult or 1) * 10), Min = 10, Max = 60,
+                Callback = function(v) V.VehicleSpeedMult = v / 10 end,
+                Desc = "10 = stock, 60 = 6x" })
+            spdVis()
         end
 
+        -- ═══ TAB: Gun Mods ═════════════════════════════════════════════
         if tabGM then
-            local S = tabGM:Section({ Name = "Free Gun", Side = "Left" })
-            S:Header({ Name = "Free Gun" })
-            S:Toggle({ Name = "Enabled", Default = V.FreeGunEnabled,
-                Callback = function(v)
-                    V.FreeGunEnabled = v
-                    ntf("Free Gun", v and "Enabled" or "Disabled")
-                end }, flag("FreeGun"))
-            kbToggle(S, "Keybind", "FreeGunEnabled", "FreeGun", "Free Gun")
-            S:SubLabel({ Text = "Removes the equip block (e.g. lets you draw a weapon inside vehicles)." })
+            local S = tabGM:Section({ Side = "Left" })
+            K.feature(S, {
+                Title = "Free Gun", Flag = "FreeGun",
+                get = function() return V.FreeGunEnabled end,
+                set = function(v) V.FreeGunEnabled = v end,
+                Desc = "lets u draw a weapon where the game blocks it\nlike inside a vehicle",
+            })
         end
 
+        -- ═══ TAB: Misc ═════════════════════════════════════════════════
         if tabMisc then
-            local SFB = tabMisc:Section({ Name = "Fullbright", Side = "Left" })
-            SFB:Header({ Name = "Fullbright" })
-            SFB:Toggle({ Name = "Enabled", Default = V.FullbrightEnabled,
-                Callback = function(v)
-                    V.FullbrightEnabled = v
-                    ntf("Fullbright", v and "Enabled" or "Disabled")
-                end }, flag("Fullbright"))
-            kbToggle(SFB, "Keybind", "FullbrightEnabled", "Fullbright", "Fullbright")
+            local SL = tabMisc:Section({ Side = "Left" })
+            K.feature(SL, {
+                Title = "Fullbright", Flag = "Fullbright",
+                get = function() return V.FullbrightEnabled end,
+                set = function(v) V.FullbrightEnabled = v end,
+                Desc = "kills all shadows, u see into every corner",
+            })
 
-            local SNF = tabMisc:Section({ Name = "No Fog", Side = "Left" })
-            SNF:Header({ Name = "No Fog" })
-            SNF:Toggle({ Name = "Enabled", Default = V.NoFogEnabled,
-                Callback = function(v)
-                    V.NoFogEnabled = v
-                    ntf("No Fog", v and "Enabled" or "Disabled")
-                end }, flag("NoFog"))
+            K.group(SL, "No Fog")
+            K.toggle(SL, { Name = "Enabled", Flag = "NoFog", Title = "No Fog",
+                get = function() return V.NoFogEnabled end,
+                set = function(v) V.NoFogEnabled = v end })
 
-            local SA = tabMisc:Section({ Name = "Ambient", Side = "Left" })
-            SA:Header({ Name = "Ambient (time of day)" })
-            SA:Toggle({ Name = "Enabled", Default = V.AmbientEnabled,
-                Callback = function(v)
-                    V.AmbientEnabled = v
-                    ntf("Ambient", v and "Enabled" or "Disabled")
-                end }, flag("Ambient"))
-            SA:Slider({ Name = "Clock Time", Default = V.AmbientClockTime, Minimum = 0, Maximum = 24,
-                Precision = 0, Suffix = "h",
-                Callback = function(v) V.AmbientClockTime = v end }, flag("ClockTime"))
-            SA:Slider({ Name = "Brightness", Default = V.AmbientBrightness or 2, Minimum = 0, Maximum = 10,
-                Precision = 1,
-                Callback = function(v) V.AmbientBrightness = v end }, flag("AmbBright"))
+            K.group(SL, "Ambient")
+            local ambEls = {}
+            local function ambVis() K.setVisible(ambEls, V.AmbientEnabled ~= false) end
+            K.toggle(SL, { Name = "Enabled", Flag = "Ambient", Title = "Ambient",
+                get = function() return V.AmbientEnabled end,
+                set = function(v) V.AmbientEnabled = v end,
+                after = ambVis,
+                Desc = "forces ur own time of day" })
+            ambEls[#ambEls + 1] = K.slider(SL, { Name = "Clock Time", Flag = "ClockTime",
+                Default = V.AmbientClockTime, Min = 0, Max = 24, Suffix = "h",
+                Callback = function(v) V.AmbientClockTime = v end })
+            ambEls[#ambEls + 1] = K.slider(SL, { Name = "Brightness", Flag = "AmbBright",
+                Default = math.floor((V.AmbientBrightness or 2) * 10), Min = 0, Max = 100,
+                Callback = function(v) V.AmbientBrightness = v / 10 end })
+            ambVis()
 
-            local SIN = tabMisc:Section({ Name = "Interactions", Side = "Left" })
+            local SIN = tabMisc:Section({ Side = "Right" })
             SIN:Header({ Name = "Interactions" })
-            SIN:Toggle({ Name = "No Prompt Hold", Default = V.NoFWaitEnabled,
-                Callback = function(v)
-                    V.NoFWaitEnabled = v
-                    ntf("No Prompt Hold", v and "Enabled" or "Disabled")
-                end }, flag("NoFWait"))
-            SIN:SubLabel({ Text = "Interactions trigger instantly instead of holding F." })
-            SIN:Toggle({ Name = "Lockpick Bypass", Default = V.LockpickBypassEnabled,
-                Callback = function(v)
-                    V.LockpickBypassEnabled = v
-                    ntf("Lockpick Bypass", v and "Enabled" or "Disabled")
-                end }, flag("Lockpick"))
-            SIN:SubLabel({ Text = "Auto-completes the lockpick minigame." })
+            K.toggle(SIN, { Name = "No Prompt Hold", Flag = "NoFWait", Title = "No Prompt Hold",
+                get = function() return V.NoFWaitEnabled end,
+                set = function(v) V.NoFWaitEnabled = v end,
+                Desc = "prompts fire instantly instead of holding F" })
+            K.toggle(SIN, { Name = "Lockpick Bypass", Flag = "Lockpick", Title = "Lockpick Bypass",
+                get = function() return V.LockpickBypassEnabled end,
+                set = function(v) V.LockpickBypassEnabled = v end,
+                Desc = "solves the lockpick minigame for u" })
         end
 
+        -- ═══ DEBUG ═════════════════════════════════════════════════════
         if tabDbg then
-            local D = tabDbg:Section({ Name = "Visuals", Side = "Left" })
-            D:Header({ Name = "Visuals — Intervals" })
-            D:Slider({ Name = "Lockpick Scan Interval", Default = math.floor((V.LockpickScanInterval or 0.4) * 1000),
-                Minimum = 100, Maximum = 2000, Precision = 0, Suffix = " ms",
-                Callback = function(v) V.LockpickScanInterval = v / 1000 end }, flag("DbgLockpick"))
+            local D = tabDbg:Section({ Side = "Left" })
+            D:Header({ Name = "Visuals" })
+            K.slider(D, { Name = "Lockpick Scan", Flag = "DbgLockpick",
+                Default = math.floor((V.LockpickScanInterval or 0.4) * 1000),
+                Min = 100, Max = 2000, Suffix = " ms",
+                Callback = function(v) V.LockpickScanInterval = v / 1000 end })
         end
+
+        K.ready()
     end
 
     return M
