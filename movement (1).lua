@@ -819,9 +819,18 @@ return function(Lib, Core)
 
     -- ══════════════════════════ AUTO SPRINT ══════════��══════════════════════
     local sprintSingleton
+    -- [V97/PERF] RATE-LIMITED MISS. filterOne stops at the first HIT, but a MISS still walks the
+    -- whole heap — and getSprint is called from THREE per-frame drivers (InfStamina, the sprint
+    -- re-assert, setSprint). Before the singleton exists (menu, respawn, or a game that simply has
+    -- no sprint controller) that meant a full heap sweep EVERY FRAME, forever. That is the movement
+    -- stutter. Now a failed lookup backs off for a second, so the miss path costs one compare.
+    local _sprintNextTry = 0
     local function getSprint()
         if sprintSingleton then return sprintSingleton end
         if type(filtergc) ~= "function" then return nil end
+        local nowc = os.clock()
+        if nowc < _sprintNextTry then return nil end
+        _sprintNextTry = nowc + 1.0
         -- filterOne = true: grab the first table carrying _sprintInputDesired instead
         -- of collecting every matching table on the heap (the old full sweep froze).
         local ok, res = pcall(filtergc, "table", { Keys = { "_sprintInputDesired" } }, true)
