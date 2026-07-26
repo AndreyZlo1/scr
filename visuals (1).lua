@@ -1614,10 +1614,11 @@ return function(Lib)
 
         -- ═══ TAB: Movement ═════════════════════════════════════════════
         if tabMov then
-            -- Транспорт кладём в ЛЕВУЮ колонку: модуль Movement занимает правую
-            -- своими фичами, и когда всё валилось направо, левая половина таба
-            -- оставалась пустой.
-            local S = tabMov:Section({ Side = "Left" })
+            -- Транспорт — правая колонка. Модуль Movement теперь раскладывает
+            -- свои фичи по обеим сторонам (перемещение слева, камера/десинк
+            -- справа), так что vehicle встаёт третьим блоком справа и колонки
+            -- остаются сбалансированными.
+            local S = tabMov:Section({ Side = "Right" })
             K.feature(S, {
                 Title = "Vehicle Fly", Flag = "VehFly",
                 get = function() return V.VehicleFlyEnabled end,
