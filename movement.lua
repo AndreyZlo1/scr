@@ -2456,9 +2456,13 @@ return function(Lib)
 
         -- Фича модуля: состояние живёт в upvalue-флагах, читается через
         -- _M.isActive и меняется через _M.setFeature (идемпотентно).
-        local function movFeature(section, title, name, desc)
+        -- noHeader=true, когда заголовок уже нарисован через K.group — иначе
+        -- получается дубль вида «Fly» / «Fly» (K.group рисует Header, и
+        -- K.feature по умолчанию рисует свой).
+        local function movFeature(section, title, name, desc, noHeader)
             return K.feature(section, {
                 Title = title, Flag = name,
+                Header = noHeader and false or nil,
                 get = function() return _M.isActive(name) end,
                 set = function(v) _M.setFeature(name, v) end,
                 Desc = desc,
@@ -2482,7 +2486,7 @@ return function(Lib)
             Desc = "always sprint without holding shift" })
 
         K.group(L, "Fly")
-        movFeature(L, "Fly", "Fly", "free-cam flight\nspace = up, ctrl = down")
+        movFeature(L, "Fly", "Fly", "free-cam flight\nspace = up, ctrl = down", true)
         K.slider(L, { Name = "Fly Speed", Flag = "FlySpeed",
             Default = MOV.FlySpeed, Min = 8, Max = 200,
             Callback = function(v) MOV.FlySpeed = v end })
@@ -2492,7 +2496,7 @@ return function(Lib)
             Desc = "keeps the server position in sync so u dont get\nrubber-banded or kicked mid flight" })
 
         K.group(L, "No Clip")
-        movFeature(L, "No Clip", "NoClip", "walk thru walls n objects")
+        movFeature(L, "No Clip", "NoClip", "walk thru walls n objects", true)
 
         K.group(L, "Jump")
         K.toggle(L, { Name = "Infinite Jump", Flag = "InfJump", Title = "Infinite Jump",
@@ -2515,10 +2519,10 @@ return function(Lib)
         end
 
         K.group(L, "No Fall")
-        movFeature(L, "No Fall", "NoFall", "spoofs height state so u take no fall dmg")
+        movFeature(L, "No Fall", "NoFall", "spoofs height state so u take no fall dmg", true)
 
         K.group(L, "Strafer")
-        movFeature(L, "Strafer", "Strafer", "free air-strafe, turn without input")
+        movFeature(L, "Strafer", "Strafer", "free air-strafe, turn without input", true)
 
         -- ═══ RIGHT: камера и десинк ════════════════════════════════════
         local R = tab:Section({ Side = "Right" })
@@ -2530,20 +2534,20 @@ return function(Lib)
             Desc = "scroll wheel also works in game" })
 
         K.group(R, "Spin Bot")
-        movFeature(R, "Spin Bot", "SpinBot", "spins ur model for everyone else")
+        movFeature(R, "Spin Bot", "SpinBot", "spins ur model for everyone else", true)
         K.slider(R, { Name = "Spin Speed", Flag = "SpinRPS",
             Default = MOV.SpinBotRPS, Min = 1, Max = 30, Suffix = " rps",
             Callback = function(v) MOV.SpinBotRPS = v end })
 
         K.group(R, "Velocity Desync")
-        movFeature(R, "Velocity Desync", "VelDesync", "jitters replicated velocity to break their prediction")
+        movFeature(R, "Velocity Desync", "VelDesync", "jitters replicated velocity to break their prediction", true)
         K.slider(R, { Name = "Amplitude", Flag = "VelAmp",
             Default = math.floor((MOV.VelocityDesyncAmp or 1) * 10), Min = 5, Max = 100,
             Callback = function(v) MOV.VelocityDesyncAmp = v / 10 end,
             Desc = "10 = 1 stud. higher = harder to hit but more visible" })
 
         K.group(R, "Lean")
-        movFeature(R, "Lean Lock", "LeanLock", "locks ur lean at a fixed angle")
+        movFeature(R, "Lean Lock", "LeanLock", "locks ur lean at a fixed angle", true)
         K.slider(R, { Name = "Lean Value", Flag = "LeanVal",
             Default = math.floor((MOV.LeanLockValue or 0) * 100) + 100, Min = 0, Max = 200,
             Callback = function(v) MOV.LeanLockValue = (v - 100) / 100 end,
@@ -2576,8 +2580,8 @@ return function(Lib)
                 end })
         end
 
-        -- ═══ RIGHT #2: Fake Angles — своя секция, фича большая ══════════
-        local FA = tab:Section({ Side = "Right" })
+        -- ═══ LEFT #2: Fake Angles — своя секция, фича большая ══════════
+        local FA = tab:Section({ Side = "Left" })
         FA:Header({ Name = "Fake Angles" })
         local FA_MODES = { "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch" }
         local faGuard, faTog = false, nil
