@@ -71,7 +71,9 @@ return function(Lib)
         ViewmodelTransparency     = 0,                           -- 0..1 прозрачность рук (0 = как есть)
         ViewmodelOffset           = Vector3.new(0, 0, 0),        -- сдвиг рук: право / верх / назад (studs)
         ViewmodelTilt             = 0,                           -- наклон рук (градусы)
-        ViewmodelFOV              = 0,                           -- FOV камеры (0 = не трогать)
+        ViewmodelDepth            = 0,     -- приближение рук по Z, в сотых studs (0 = как в игре)
+        WorldFOVEnabled           = false, -- мировой FOV камеры (отдельно от рук)
+        WorldFOV                  = 70,
 
         --== 2 · GUNMODEL — подсветка МОДЕЛИ ОРУЖИЯ. Хоткей: Numpad 2 ==
         GunModelEnabled           = false,
@@ -107,6 +109,7 @@ return function(Lib)
         --   поэтому части переливаются постепенно, а не все разом.
         ViewmodelGradientEnabled   = false,   -- переливать руки (Viewmodel)
         GunModelGradientEnabled    = false,   -- переливать оружие (GunModel)
+        GunModelHighlightGradient  = true,    -- и обводку тоже красить волной
         ThirdPersonGradientEnabled = false,   -- переливать тело (ThirdPerson)
         GradientSpeed              = 0.35,     -- скорость перелива (циклов A⇆B в секунду)
         GradientColorA             = Color3.fromRGB(190, 150, 255), -- светло-фиолетовый
@@ -132,6 +135,19 @@ return function(Lib)
 
         --== 6 · AMBIENT — время суток и яркость (только у тебя). Numpad 6 ==
         AmbientEnabled            = false,
+        AmbientColor              = Color3.fromRGB(120, 120, 130),
+        AmbientOutdoorColor       = Color3.fromRGB(140, 140, 150),
+        AmbientTintTop            = Color3.fromRGB(0, 0, 0),
+        AmbientTintBottom         = Color3.fromRGB(0, 0, 0),
+        AmbientExposure           = 0,
+        AmbientLatitude           = 45,
+        AmbientDiffuse            = 1,
+        AmbientSpecular           = 1,
+        AmbientShadows            = true,
+        AmbientFogEnabled         = false,
+        AmbientFogColor           = Color3.fromRGB(150, 160, 175),
+        AmbientFogStart           = 0,
+        AmbientFogEnd             = 800,
         AmbientKey                = Enum.KeyCode.KeypadSix,
         AmbientClockTime          = 14,                           -- 0..24 (14 = день, 0 = ночь)
         AmbientBrightness         = 2,
@@ -280,6 +296,7 @@ return function(Lib)
     local vmStyledParts  = {}
     local vmStyledVM     = nil
     local _vmStyleApplied = nil   -- FIX: declared here so restoreViewmodelStyle can reset it
+    local _vmRestyleT     = 0     -- время последнего пере-обхода частей рук
 
     local function restoreViewmodelStyle()
         for part, s in pairs(vmStyledParts) do
@@ -452,6 +469,15 @@ return function(Lib)
         })
     end
 
+    -- FIX: стиль применяется один раз и кэшируется по (vm/оружие). Смена
+    -- материала, цвета или тумблеров кэш НЕ сбрасывала — работал только
+    -- слайдер прозрачности, потому что он единственный звал restore*Style().
+    -- Отсюда «материал переприменяется только при смене прозрачности».
+    -- Эти два хелпера вызываются из UI на любое изменение стиля.
+    local function invalidateVmStyle()
+        restoreViewmodelStyle()
+    end
+
     local function applyViewmodelStyle(vm)
         if vmStyledVM ~= nil and vmStyledVM ~= vm then
             restoreViewmodelStyle()  -- resets _vmStyleApplied = nil
@@ -462,7 +488,18 @@ return function(Lib)
         -- ровно отсюда и брался просад FPS при включении градиента.
         -- Перекраску градиента делает tickGradientStore по уже собранному
         -- списку частей, повторно собирать его не нужно.
-        if _vmStyleApplied == vm then return end
+        -- FIX («после смерти меняет руки, но не рукав»): стиль применялся
+        -- РОВНО ОДИН раз на объект viewmodel. Части рук (перчатки, рукав,
+        -- часы) досоздаются игрой асинхронно — те, что появились после
+        -- первого прохода, так и оставались неокрашенными. При первом
+        -- включении обычно успевало, после респавна — нет.
+        -- Решение то же, что уже работает для тела в thirdPersonStep:
+        -- периодический пере-обход раз в VmRestyleSec (дёшево, не каждый кадр).
+        local nowT = now()
+        if _vmStyleApplied == vm and (nowT - _vmRestyleT) < (V.VmRestyleSec or 3) then
+            return
+        end
+        _vmRestyleT = nowT
         _vmStyleApplied = vm
         local weapon = rawget(vm, "CurrentModel")   -- модель оружия — НЕ трогаем
 
@@ -489,11 +526,16 @@ return function(Lib)
     local gunStyledParts  = {}     -- [part] = { M, C, T, tex, sa }
     local gunStyledModel  = nil
     local _gunStyleApplied = nil  -- FIX: declared here so restoreGunStyle can reset it
+    local _gunRestyleT     = 0
     local function restoreGunStyle()
         restoreStore(gunStyledParts)
         gunStyledModel = nil
         _gunStyleApplied = nil
     end
+    local function invalidateGunStyle()
+        restoreGunStyle()
+    end
+
     local function applyGunStyle(vm)
         local weapon = rawget(vm, "CurrentModel")
         if not (typeof(weapon) == "Instance" and weapon.Parent) then
@@ -506,7 +548,13 @@ return function(Lib)
         end
         -- FIX FPS: GetDescendants только при смене ствола (см. коммент в
         -- applyViewmodelStyle) — при градиенте кэш больше не обходится.
-        if _gunStyleApplied == weapon then return end
+        -- Та же периодическая доводка, что и для рук: аттачменты/магазин
+        -- могут досоздаться после первого прохода.
+        local nowG = now()
+        if _gunStyleApplied == weapon and (nowG - _gunRestyleT) < (V.VmRestyleSec or 3) then
+            return
+        end
+        _gunRestyleT = nowG
         _gunStyleApplied = weapon
         local opts = {
             colorOn = V.GunModelColorEnabled or V.GunModelGradientEnabled,
@@ -557,9 +605,19 @@ return function(Lib)
                     if root and root.Parent then
                         local o = V.ViewmodelOffset or Vector3.new()
                         local tilt = V.ViewmodelTilt or 0
-                        if o.Magnitude > 0.001 or math.abs(tilt) > 0.001 then
+                        -- FIX: раньше «Custom FOV» писал в Camera.FieldOfView.
+                        -- Но в BRM5 руки рендерятся ОБЩЕЙ камерой (в дампе
+                        -- ViewmodelClass:822 FOV используется только для
+                        -- масштаба отдачи) — то есть менялся мировой FOV, а
+                        -- вместе с ним и ощущение чувствительности мыши, а
+                        -- никак не «фов рук». Отдельной камеры для viewmodel в
+                        -- игре нет, поэтому честный аналог — придвинуть/отодвинуть
+                        -- сами руки по оси Z. Это и читается как «зум рук».
+                        local depth = (V.ViewmodelDepth or 0) / 100   -- studs
+                        if o.Magnitude > 0.001 or math.abs(tilt) > 0.001
+                        or math.abs(depth) > 0.0001 then
                             root.CFrame = root.CFrame
-                                * CFrame.new(o.X, o.Y, -o.Z)
+                                * CFrame.new(o.X, o.Y, -o.Z + depth)
                                 * CFrame.Angles(0, 0, math.rad(tilt))
                         end
                     end
@@ -592,8 +650,19 @@ return function(Lib)
                                 gunHighlight.Name = "BRM5_GunHL"
                                 gunHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
                             end
-                            gunHighlight.FillColor          = V.GunModelFill
-                            gunHighlight.OutlineColor       = V.GunModelOutline
+                            -- FIX: у Highlight не было градиента вообще —
+                            -- переливалась только сама модель, а обводка
+                            -- оставалась статичной, из-за чего эффект выглядел
+                            -- рассинхронизированным. Теперь Highlight берёт
+                            -- тот же цвет волны, что и части оружия.
+                            if V.GunModelGradientEnabled and V.GunModelHighlightGradient ~= false then
+                                local gcol = gradientColorAt(now() * (V.GradientSpeed or 0.35))
+                                gunHighlight.FillColor    = gcol
+                                gunHighlight.OutlineColor = gcol
+                            else
+                                gunHighlight.FillColor    = V.GunModelFill
+                                gunHighlight.OutlineColor = V.GunModelOutline
+                            end
                             gunHighlight.FillTransparency   = V.GunModelFillTransparency
                             gunHighlight.OutlineTransparency = V.GunModelOutlineTransparency
                             if gunHighlight.Adornee ~= weapon then gunHighlight.Adornee = weapon end
@@ -683,9 +752,12 @@ return function(Lib)
     local fovApplied = false  -- флаг: мы изменили FOV → надо восстановить при выключении
     -- FIX: восстанавливали жёстко 70. Запоминаем настоящий FOV до первой правки.
     local _origFov = nil
+    -- Мировой FOV камеры. ОТДЕЛЬНАЯ фича от «зума рук»: она реально меняет
+    -- угол обзора всей сцены (и да, ощущается как смена чувствительности —
+    -- это нормально и ожидаемо для FOV, поэтому вынесено в свой тумблер).
     local function fovStep()
-        local fov = V.ViewmodelFOV or 0
-        if V.ViewmodelEnabled and fov > 0 then
+        local fov = V.WorldFOV or 0
+        if V.WorldFOVEnabled and fov > 0 then
             local cam = Workspace.CurrentCamera
             if cam then
                 if not _origFov then _origFov = cam.FieldOfView end
@@ -693,7 +765,6 @@ return function(Lib)
                 fovApplied = true
             end
         else
-            -- FOV выключен или равен 0 → восстановить стандартный FOV игры
             if fovApplied then
                 local cam = Workspace.CurrentCamera
                 if cam then pcall(function() cam.FieldOfView = _origFov or 70 end) end
@@ -714,15 +785,27 @@ return function(Lib)
     -- мы ЖИВЫ (la.Alive) — иначе после смерти будем стилизовать рэгдолл/чужие
     -- модели каждый кадр → просадка FPS.
     local function getSelfCharacter()
+        -- FIX (Self Skin «вообще не работает»): раньше функция ВЫХОДИЛА, если
+        -- не резолвился Flux-контроллер (getLA). findCtrl зависит от filtergc
+        -- и на части экзекуторов/в лобби просто не находит контроллер — и
+        -- фича молча ничего не делала, даже когда персонаж есть.
+        -- Теперь Flux-путь опционален, а базовый LP.Character работает всегда.
         local la = getLA()
-        if type(la) ~= "table" then return nil end
-        if rawget(la, "Alive") == false then return nil end
-        local ok, char = pcall(function() return la.Character end)
-        if ok and typeof(char) == "Instance" and char:IsA("Model") then
-            return char
+        if type(la) == "table" then
+            if rawget(la, "Alive") == false then return nil end
+            local ok, char = pcall(function() return la.Character end)
+            if ok and typeof(char) == "Instance" and char:IsA("Model") and char.Parent then
+                return char
+            end
         end
-        -- fallback на штатный путь, если он вдруг есть
-        return LP.Character
+        local c = LP.Character
+        if typeof(c) == "Instance" and c:IsA("Model") and c.Parent then
+            -- если есть Humanoid и он мёртв — не стилизуем труп
+            local hum = c:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health <= 0 then return nil end
+            return c
+        end
+        return nil
     end
 
     local function applySelfHighlight(char)
@@ -1074,6 +1157,14 @@ return function(Lib)
             FogEnd       = Lighting.FogEnd,
             FogStart     = Lighting.FogStart,
             GlobalShadows = Lighting.GlobalShadows,
+            -- расширенная атмосфера
+            FogColor        = Lighting.FogColor,
+            ColorShift_Top  = Lighting.ColorShift_Top,
+            ColorShift_Bottom = Lighting.ColorShift_Bottom,
+            ExposureCompensation = Lighting.ExposureCompensation,
+            GeographicLatitude = Lighting.GeographicLatitude,
+            EnvironmentDiffuseScale  = Lighting.EnvironmentDiffuseScale,
+            EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
         }
         lightSavedOK = true
     end
@@ -1087,22 +1178,48 @@ return function(Lib)
             Lighting.FogEnd        = lightSaved.FogEnd
             Lighting.FogStart      = lightSaved.FogStart
             Lighting.GlobalShadows  = lightSaved.GlobalShadows
+            Lighting.FogColor       = lightSaved.FogColor
+            Lighting.ColorShift_Top = lightSaved.ColorShift_Top
+            Lighting.ColorShift_Bottom = lightSaved.ColorShift_Bottom
+            Lighting.ExposureCompensation = lightSaved.ExposureCompensation
+            Lighting.GeographicLatitude   = lightSaved.GeographicLatitude
+            Lighting.EnvironmentDiffuseScale  = lightSaved.EnvironmentDiffuseScale
+            Lighting.EnvironmentSpecularScale = lightSaved.EnvironmentSpecularScale
         end)
     end
 
+    -- Константа: раньше два Color3 создавались каждый кадр при Fullbright
+    local FULLBRIGHT_COL = Color3.fromRGB(178, 178, 178)
     local function lightingStep()
         if V.AmbientEnabled or V.FullbrightEnabled or V.NoFogEnabled then saveLighting() end
+        -- Atmosphere: полноценная кастомизация вайба (время суток, оттенки,
+        -- экспозиция, туман). Раньше тут было только время + яркость.
         if V.AmbientEnabled then
             pcall(function()
                 Lighting.ClockTime  = V.AmbientClockTime
                 Lighting.Brightness = V.AmbientBrightness
+                Lighting.Ambient        = V.AmbientColor
+                Lighting.OutdoorAmbient = V.AmbientOutdoorColor
+                Lighting.ColorShift_Top    = V.AmbientTintTop
+                Lighting.ColorShift_Bottom = V.AmbientTintBottom
+                Lighting.ExposureCompensation = V.AmbientExposure or 0
+                Lighting.GeographicLatitude   = V.AmbientLatitude or 45
+                Lighting.EnvironmentDiffuseScale  = V.AmbientDiffuse  or 1
+                Lighting.EnvironmentSpecularScale = V.AmbientSpecular or 1
+                Lighting.GlobalShadows = V.AmbientShadows ~= false
+                if V.AmbientFogEnabled then
+                    Lighting.FogColor = V.AmbientFogColor
+                    Lighting.FogStart = V.AmbientFogStart or 0
+                    Lighting.FogEnd   = V.AmbientFogEnd or 800
+                end
             end)
         end
+        -- Fullbright — отдельная простая фича: просто «видно всё».
         if V.FullbrightEnabled then
             pcall(function()
                 Lighting.Brightness     = math.max(Lighting.Brightness, 2)
-                Lighting.Ambient        = Color3.fromRGB(178, 178, 178)
-                Lighting.OutdoorAmbient = Color3.fromRGB(178, 178, 178)
+                Lighting.Ambient        = FULLBRIGHT_COL
+                Lighting.OutdoorAmbient = FULLBRIGHT_COL
                 Lighting.GlobalShadows  = false
             end)
         end
@@ -1340,57 +1457,88 @@ return function(Lib)
         if tabV then
             -- ═══ Viewmodel ═════════════════════════════════════════════
             local S = tabV:Section({ Side = "Left" })
-            local vmEls = {}
-            local function vmVis() K.setVisible(vmEls, V.ViewmodelEnabled ~= false) end
-
+            -- Настройки видны ВСЕГДА, даже когда фича выключена: иначе панель
+            -- выглядит пустой и непонятно, что она вообще умеет.
             K.feature(S, {
                 Title = "Viewmodel", Flag = "VM",
                 get = function() return V.ViewmodelEnabled end,
-                set = function(v) V.ViewmodelEnabled = v; vmVis() end,
-                Desc = "recolors ur first person arms",
+                set = function(v) V.ViewmodelEnabled = v end,
+                Desc = "restyles ur first person arms",
             })
-            vmEls[#vmEls + 1] = K.toggle(S, { Name = "Recolor", Flag = "VMColorOn", Title = "VM Recolor",
+            K.toggle(S, { Name = "Recolor", Flag = "VMColorOn", Title = "VM Recolor",
                 get = function() return V.ViewmodelColorEnabled end,
-                set = function(v) V.ViewmodelColorEnabled = v end })
-            vmEls[#vmEls + 1] = K.color(S, { Name = "Color", Flag = "VMColor",
+                set = function(v) V.ViewmodelColorEnabled = v end,
+                after = invalidateVmStyle })
+            K.color(S, { Name = "Color", Flag = "VMColor",
                 Default = V.ViewmodelColor,
-                Callback = function(c) V.ViewmodelColor = c end })
-            vmEls[#vmEls + 1] = K.toggle(S, { Name = "Change Material", Flag = "VMMatOn",
+                Callback = function(c) V.ViewmodelColor = c; invalidateVmStyle() end })
+            K.toggle(S, { Name = "Change Material", Flag = "VMMatOn",
                 Title = "VM Material",
                 get = function() return V.ViewmodelMaterialEnabled end,
-                set = function(v) V.ViewmodelMaterialEnabled = v end })
-            vmEls[#vmEls + 1] = K.dropdown(S, { Name = "Material", Flag = "VMMat",
+                set = function(v) V.ViewmodelMaterialEnabled = v end,
+                after = invalidateVmStyle })
+            K.dropdown(S, { Name = "Material", Flag = "VMMat",
                 Options = MATERIALS, Default = matName(V.ViewmodelMaterial),
-                Callback = function(n) V.ViewmodelMaterial = matFromName(n) end })
-            vmEls[#vmEls + 1] = K.slider(S, { Name = "Transparency", Flag = "VMTransp",
+                -- FIX: смена материала не применялась, пока не дёрнешь
+                -- прозрачность — только она сбрасывала кэш стиля.
+                Callback = function(n) V.ViewmodelMaterial = matFromName(n); invalidateVmStyle() end })
+            K.slider(S, { Name = "Transparency", Flag = "VMTransp",
                 Default = math.floor((V.ViewmodelTransparency or 0) * 100),
                 Min = 0, Max = 100, Suffix = "%",
                 Callback = function(v)
                     V.ViewmodelTransparency = v / 100
-                    restoreViewmodelStyle()   -- сбрасываем кэш, чтобы стиль лёг заново
+                    invalidateVmStyle()
                 end })
-            vmEls[#vmEls + 1] = K.slider(S, { Name = "Custom FOV", Flag = "VMFov",
-                Default = V.ViewmodelFOV or 0, Min = 0, Max = 120,
-                Callback = function(v) V.ViewmodelFOV = v end,
-                Desc = "0 = dont touch the camera" })
-            vmEls[#vmEls + 1] = K.toggle(S, { Name = "Gradient", Flag = "VMGrad", Title = "VM Gradient",
+            K.toggle(S, { Name = "Gradient", Flag = "VMGrad", Title = "VM Gradient",
                 get = function() return V.ViewmodelGradientEnabled end,
                 set = function(v) V.ViewmodelGradientEnabled = v end,
+                after = invalidateVmStyle,
                 Desc = "colors set in Gradient on the right" })
-            vmVis()
+
+            K.group(S, "Placement")
+            K.slider(S, { Name = "Hand Zoom", Flag = "VMDepth",
+                Default = math.floor(V.ViewmodelDepth or 0) + 100, Min = 0, Max = 200,
+                Callback = function(v) V.ViewmodelDepth = v - 100 end,
+                Desc = "100 = stock. pulls the arms closer or pushes em away\nthis is NOT camera fov, that one lives in Misc" })
 
             -- ═══ Gun Model ═════════════════════════════════════════════
             local G = tabV:Section({ Side = "Left" })
-            local gmEls = {}
-            local function gmVis() K.setVisible(gmEls, V.GunModelEnabled ~= false) end
-
             K.feature(G, {
                 Title = "Gun Model", Flag = "GM",
                 get = function() return V.GunModelEnabled end,
-                set = function(v) V.GunModelEnabled = v; gmVis() end,
+                set = function(v) V.GunModelEnabled = v end,
                 Desc = "same styling but for the gun in ur hands",
             })
-            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Highlight", Flag = "GMHighlight",
+            K.toggle(G, { Name = "Recolor", Flag = "GMColorOn", Title = "Gun Recolor",
+                get = function() return V.GunModelColorEnabled end,
+                set = function(v) V.GunModelColorEnabled = v end,
+                after = invalidateGunStyle })
+            K.color(G, { Name = "Color", Flag = "GMColor",
+                Default = V.GunModelColor,
+                Callback = function(c) V.GunModelColor = c; invalidateGunStyle() end })
+            K.toggle(G, { Name = "Change Material", Flag = "GMMatOn",
+                Title = "Gun Material",
+                get = function() return V.GunModelMaterialEnabled end,
+                set = function(v) V.GunModelMaterialEnabled = v end,
+                after = invalidateGunStyle })
+            K.dropdown(G, { Name = "Material", Flag = "GMMat",
+                Options = MATERIALS, Default = matName(V.GunModelMaterial),
+                Callback = function(n) V.GunModelMaterial = matFromName(n); invalidateGunStyle() end })
+            K.slider(G, { Name = "Transparency", Flag = "GMTransp",
+                Default = math.floor((V.GunModelTransparency or 0) * 100),
+                Min = 0, Max = 100, Suffix = "%",
+                Callback = function(v)
+                    V.GunModelTransparency = v / 100
+                    invalidateGunStyle()
+                end })
+            K.toggle(G, { Name = "Gradient", Flag = "GMGrad", Title = "Gun Gradient",
+                get = function() return V.GunModelGradientEnabled end,
+                set = function(v) V.GunModelGradientEnabled = v end,
+                after = invalidateGunStyle,
+                Desc = "wave runs part to part, see Wave Spread" })
+
+            K.group(G, "Highlight")
+            K.toggle(G, { Name = "Enabled", Flag = "GMHighlight",
                 Title = "Gun Highlight",
                 get = function() return V.GunModelHighlightEnabled ~= false end,
                 set = function(v)
@@ -1399,59 +1547,47 @@ return function(Lib)
                         pcall(function() gunHighlight:Destroy() end); gunHighlight = nil
                     end
                 end,
-                Desc = "off = keep the recolor without the outline" })
-            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Recolor", Flag = "GMColorOn", Title = "Gun Recolor",
-                get = function() return V.GunModelColorEnabled end,
-                set = function(v) V.GunModelColorEnabled = v end })
-            gmEls[#gmEls + 1] = K.color(G, { Name = "Color", Flag = "GMColor",
-                Default = V.GunModelColor,
-                Callback = function(c) V.GunModelColor = c end })
-            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Change Material", Flag = "GMMatOn",
-                Title = "Gun Material",
-                get = function() return V.GunModelMaterialEnabled end,
-                set = function(v) V.GunModelMaterialEnabled = v end })
-            gmEls[#gmEls + 1] = K.dropdown(G, { Name = "Material", Flag = "GMMat",
-                Options = MATERIALS, Default = matName(V.GunModelMaterial),
-                Callback = function(n) V.GunModelMaterial = matFromName(n) end })
-            gmEls[#gmEls + 1] = K.slider(G, { Name = "Transparency", Flag = "GMTransp",
-                Default = math.floor((V.GunModelTransparency or 0) * 100),
+                Desc = "glowing outline around the gun" })
+            K.color(G, { Name = "Fill", Flag = "GMFill",
+                Default = V.GunModelFill,
+                Callback = function(c) V.GunModelFill = c end })
+            K.color(G, { Name = "Outline", Flag = "GMOutline",
+                Default = V.GunModelOutline,
+                Callback = function(c) V.GunModelOutline = c end })
+            K.slider(G, { Name = "Fill Transparency", Flag = "GMFillT",
+                Default = math.floor((V.GunModelFillTransparency or 0.5) * 100),
                 Min = 0, Max = 100, Suffix = "%",
-                Callback = function(v)
-                    V.GunModelTransparency = v / 100
-                    restoreGunStyle()
-                end })
-            gmEls[#gmEls + 1] = K.toggle(G, { Name = "Gradient", Flag = "GMGrad", Title = "Gun Gradient",
-                get = function() return V.GunModelGradientEnabled end,
-                set = function(v) V.GunModelGradientEnabled = v end,
-                Desc = "wave runs part to part, see Wave Spread" })
-            gmVis()
+                Callback = function(v) V.GunModelFillTransparency = v / 100 end })
+            K.toggle(G, { Name = "Follow Gradient", Flag = "GMHlGrad",
+                Title = "Highlight Gradient",
+                get = function() return V.GunModelHighlightGradient ~= false end,
+                set = function(v) V.GunModelHighlightGradient = v end,
+                Desc = "outline rides the same wave as the gun\noff = keeps the fixed colors above" })
 
             -- ═══ Third Person ══════════════════════════════════════════
             local S2 = tabV:Section({ Side = "Right" })
-            local tpEls = {}
-            local function tpVis() K.setVisible(tpEls, V.ThirdPersonEnabled ~= false) end
-
             -- Честное имя: фича НЕ включает камеру от третьего лица (та живёт
             -- в модуле Movement). Она красит твою собственную модель, которую
-            -- видно, когда камера уже отъехала. Раньше называлась
-            -- "Third Person" и все её искали не там.
+            -- видно, когда камера уже отъехала.
             K.feature(S2, {
                 Title = "Self Skin", Flag = "TP",
                 get = function() return V.ThirdPersonEnabled end,
-                set = function(v) V.ThirdPersonEnabled = v; tpVis() end,
-                Desc = "recolors ur own body\nu only see it in third person cam",
+                set = function(v) V.ThirdPersonEnabled = v end,
+                Desc = "recolors ur own body\nu see it in third person or spectate",
             })
-            tpEls[#tpEls + 1] = K.color(S2, { Name = "Body Color", Flag = "TPColor",
+            K.color(S2, { Name = "Body Color", Flag = "TPColor",
                 Default = V.ThirdPersonBodyColor,
                 Callback = function(c) V.ThirdPersonBodyColor = c end })
-            tpEls[#tpEls + 1] = K.slider(S2, { Name = "Transparency", Flag = "TPTransp",
+            K.slider(S2, { Name = "Transparency", Flag = "TPTransp",
                 Default = math.floor((V.ThirdPersonBodyTransparency or 0) * 100),
                 Min = 0, Max = 100, Suffix = "%",
                 Callback = function(v) V.ThirdPersonBodyTransparency = v / 100 end })
-            tpEls[#tpEls + 1] = K.toggle(S2, { Name = "Gradient", Flag = "TPGrad", Title = "TP Gradient",
+            K.dropdown(S2, { Name = "Material", Flag = "TPMat",
+                Options = MATERIALS, Default = matName(V.ThirdPersonMaterial),
+                Callback = function(n) V.ThirdPersonMaterial = matFromName(n) end })
+            K.toggle(S2, { Name = "Gradient", Flag = "TPGrad", Title = "TP Gradient",
                 get = function() return V.ThirdPersonGradientEnabled end,
                 set = function(v) V.ThirdPersonGradientEnabled = v end })
-            tpVis()
 
             -- ═══ Общие цвета градиента ═════════════════════════════════
             local GC = tabV:Section({ Side = "Right" })
@@ -1482,42 +1618,32 @@ return function(Lib)
             -- своими фичами, и когда всё валилось направо, левая половина таба
             -- оставалась пустой.
             local S = tabMov:Section({ Side = "Left" })
-            local flyEls = {}
-            local function flyVis() K.setVisible(flyEls, V.VehicleFlyEnabled ~= false) end
-
             K.feature(S, {
                 Title = "Vehicle Fly", Flag = "VehFly",
                 get = function() return V.VehicleFlyEnabled end,
-                set = function(v) V.VehicleFlyEnabled = v; flyVis() end,
+                set = function(v) V.VehicleFlyEnabled = v end,
                 Desc = "flies whatever ur driving",
             })
-            flyEls[#flyEls + 1] = K.slider(S, { Name = "Fly Speed", Flag = "VehFlySpeed",
+            K.slider(S, { Name = "Fly Speed", Flag = "VehFlySpeed",
                 Default = V.VehicleFlySpeed, Min = 20, Max = 400, Suffix = " st/s",
                 Callback = function(v) V.VehicleFlySpeed = v end })
-            flyVis()
 
             K.group(S, "Vehicle Speed")
-            local spdEls = {}
-            local function spdVis() K.setVisible(spdEls, V.VehicleSpeedEnabled ~= false) end
             K.toggle(S, { Name = "Enabled", Flag = "VehSpeed", Title = "Vehicle Speed",
                 get = function() return V.VehicleSpeedEnabled end,
-                set = function(v) V.VehicleSpeedEnabled = v end,
-                after = spdVis })
+                set = function(v) V.VehicleSpeedEnabled = v end })
             if ui.keybind then
                 ui.keybind(S, { Name = "Keybind", Flag = (ui.flag or tostring)("VehSpeed_KB"),
-                    ForceAutoLoad = true,
                     Toggle = function()
                         V.VehicleSpeedEnabled = not V.VehicleSpeedEnabled
                         K.syncToggle((ui.flag or tostring)("VehSpeed"), V.VehicleSpeedEnabled)
                         K.notify("Vehicle Speed", V.VehicleSpeedEnabled and "Enabled" or "Disabled")
-                        spdVis()
                     end })
             end
-            spdEls[#spdEls + 1] = K.slider(S, { Name = "Multiplier", Flag = "VehSpeedMult",
+            K.slider(S, { Name = "Multiplier", Flag = "VehSpeedMult",
                 Default = math.floor((V.VehicleSpeedMult or 1) * 10), Min = 10, Max = 60,
                 Callback = function(v) V.VehicleSpeedMult = v / 10 end,
                 Desc = "10 = stock, 60 = 6x" })
-            spdVis()
         end
 
         -- ═══ TAB: Gun Mods ═════════════════════════════════════════════
@@ -1538,29 +1664,82 @@ return function(Lib)
                 Title = "Fullbright", Flag = "Fullbright",
                 get = function() return V.FullbrightEnabled end,
                 set = function(v) V.FullbrightEnabled = v end,
-                Desc = "kills all shadows, u see into every corner",
+                Desc = "flat max light, no shadows anywhere\nfor mood lighting use Atmosphere instead",
             })
 
             K.group(SL, "No Fog")
             K.toggle(SL, { Name = "Enabled", Flag = "NoFog", Title = "No Fog",
                 get = function() return V.NoFogEnabled end,
-                set = function(v) V.NoFogEnabled = v end })
+                set = function(v) V.NoFogEnabled = v end,
+                Desc = "strips fog entirely — see the whole map" })
 
-            K.group(SL, "Ambient")
-            local ambEls = {}
-            local function ambVis() K.setVisible(ambEls, V.AmbientEnabled ~= false) end
-            K.toggle(SL, { Name = "Enabled", Flag = "Ambient", Title = "Ambient",
+            K.group(SL, "Camera FOV")
+            K.toggle(SL, { Name = "Enabled", Flag = "WorldFOVOn", Title = "Camera FOV",
+                get = function() return V.WorldFOVEnabled end,
+                set = function(v) V.WorldFOVEnabled = v end,
+                Desc = "real field of view — wider = see more but aim feels faster" })
+            K.slider(SL, { Name = "FOV", Flag = "WorldFOV",
+                Default = V.WorldFOV or 70, Min = 40, Max = 120, Suffix = "°",
+                Callback = function(v) V.WorldFOV = v end,
+                Desc = "70 = game default" })
+
+            -- ═══ Atmosphere: свой вайб ═════════════════════════════════
+            local SA = tabMisc:Section({ Side = "Left" })
+            K.feature(SA, {
+                Title = "Atmosphere", Flag = "Ambient",
                 get = function() return V.AmbientEnabled end,
                 set = function(v) V.AmbientEnabled = v end,
-                after = ambVis,
-                Desc = "forces ur own time of day" })
-            ambEls[#ambEls + 1] = K.slider(SL, { Name = "Clock Time", Flag = "ClockTime",
+                Desc = "ur own time of day n mood\noverrides whatever the map sets",
+            })
+            K.slider(SA, { Name = "Time", Flag = "ClockTime",
                 Default = V.AmbientClockTime, Min = 0, Max = 24, Suffix = "h",
-                Callback = function(v) V.AmbientClockTime = v end })
-            ambEls[#ambEls + 1] = K.slider(SL, { Name = "Brightness", Flag = "AmbBright",
+                Callback = function(v) V.AmbientClockTime = v end,
+                Desc = "0 = midnight, 12 = noon, 18 = sunset" })
+            K.slider(SA, { Name = "Brightness", Flag = "AmbBright",
                 Default = math.floor((V.AmbientBrightness or 2) * 10), Min = 0, Max = 100,
                 Callback = function(v) V.AmbientBrightness = v / 10 end })
-            ambVis()
+            K.slider(SA, { Name = "Exposure", Flag = "AmbExposure",
+                Default = math.floor((V.AmbientExposure or 0) * 100) + 200, Min = 0, Max = 400,
+                Callback = function(v) V.AmbientExposure = (v - 200) / 100 end,
+                Desc = "200 = neutral, lower = darker, higher = blown out" })
+            K.slider(SA, { Name = "Sun Angle", Flag = "AmbLat",
+                Default = math.floor(V.AmbientLatitude or 45) + 90, Min = 0, Max = 180,
+                Callback = function(v) V.AmbientLatitude = v - 90 end,
+                Desc = "moves where the sun sits in the sky" })
+
+            K.group(SA, "Colors")
+            K.color(SA, { Name = "Shadow Tint", Flag = "AmbColor",
+                Default = V.AmbientColor,
+                Callback = function(c) V.AmbientColor = c end,
+                Desc = "color of everything in shade" })
+            K.color(SA, { Name = "Outdoor Tint", Flag = "AmbOutColor",
+                Default = V.AmbientOutdoorColor,
+                Callback = function(c) V.AmbientOutdoorColor = c end })
+            K.color(SA, { Name = "Highlight Tint", Flag = "AmbTintTop",
+                Default = V.AmbientTintTop,
+                Callback = function(c) V.AmbientTintTop = c end,
+                Desc = "tints lit surfaces — keep it subtle" })
+            K.color(SA, { Name = "Shade Tint", Flag = "AmbTintBottom",
+                Default = V.AmbientTintBottom,
+                Callback = function(c) V.AmbientTintBottom = c end })
+            K.toggle(SA, { Name = "Shadows", Flag = "AmbShadows", Title = "Shadows",
+                get = function() return V.AmbientShadows ~= false end,
+                set = function(v) V.AmbientShadows = v end })
+
+            K.group(SA, "Fog")
+            K.toggle(SA, { Name = "Custom Fog", Flag = "AmbFogOn", Title = "Custom Fog",
+                get = function() return V.AmbientFogEnabled end,
+                set = function(v) V.AmbientFogEnabled = v end,
+                Desc = "for haze n distance mood\nuse No Fog instead if u just want it gone" })
+            K.color(SA, { Name = "Fog Color", Flag = "AmbFogColor",
+                Default = V.AmbientFogColor,
+                Callback = function(c) V.AmbientFogColor = c end })
+            K.slider(SA, { Name = "Fog Start", Flag = "AmbFogStart",
+                Default = V.AmbientFogStart or 0, Min = 0, Max = 2000, Suffix = " st",
+                Callback = function(v) V.AmbientFogStart = v end })
+            K.slider(SA, { Name = "Fog End", Flag = "AmbFogEnd",
+                Default = V.AmbientFogEnd or 800, Min = 50, Max = 5000, Suffix = " st",
+                Callback = function(v) V.AmbientFogEnd = v end })
 
             local SIN = tabMisc:Section({ Side = "Right" })
             SIN:Header({ Name = "Interactions" })
