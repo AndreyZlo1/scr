@@ -161,7 +161,11 @@ local CONFIG = {
 	-- (для сравнения/отладки). По умолчанию выключен.
 	PredictionLite = false,
 	PredictionLiteTime = 0.12,   -- секунд упреждения
-	PredictionMaxVelCap = 35,  -- FIX v10: max velocity в studs/s для предикта (WalkSpeed~16, Sprint~28)
+	PingCompensation = true,   -- компенсация RTT: без неё на высоком пинге выстрел не регается
+	PingCompensationScale = 1.0,
+	PingCompensationMax = 0.5, -- потолок упреждения по пингу, сек
+	PredictionMaxVelCap = 120, -- потолок скорости для предикта: отсекает телепорты репликации,
+	                           -- но НЕ режет легальный бег со Speed-модом (42+) и транспорт
 	-- ── Вертикальный prediction (FIX v23) ────────────────────────
 	-- ВЫКЛ по умолчанию: раньше линейный vertVel*t завышал аим над головой.
 	-- Включай только если реально нужно упреждать по прыжкам. Теперь модель
@@ -175,7 +179,6 @@ local CONFIG = {
 	-- При медленных снарядах (бол. tFlight) lead автоматически растёт,
 	-- но слишком агрессивно — уменьши до 0.6-0.8 если аим "уводит" вперёд.
 	PredictionScale       = 1.0,
-	PingCompensation = false,  -- FIX v11: не включать — добавляет лишний offset (pingMs*0.0005 к tFlight)
 	DefaultBulletSpeed = 920,
 	TracerLocalOnly = true,
 	MultiPoint = false,
@@ -10438,7 +10441,7 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 		-- теперь и лёгкий тоже.
 		local horiz = Vector3.new(vel.X, 0, vel.Z)
 		local mag = horiz.Magnitude
-		local cap = CONFIG.PredictionMaxVelCap or 35
+		local cap = CONFIG.PredictionMaxVelCap or 120
 		if mag > cap then horiz = horiz * (cap / mag) end
 		-- Вертикаль учитываем, только если цель реально летит (прыжок/падение),
 		-- и тоже с клампом — иначе дрожь по Y попадает в прицел.
@@ -10472,8 +10475,22 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 	local vel = Bridge.getActorRootVelocity(part, uid)
 	local horiz = Vector3.new(vel.X, 0, vel.Z)
 	local velMag = horiz.Magnitude
-	local velCap = CONFIG.PredictionMaxVelCap or 35  -- studs/s, ~WalkSpeed*2
-	local velScaled = velMag > velCap and horiz * (velCap / velMag) or horiz
+	-- FIX (по далёким быстрым целям сервер не регал выстрел): кламп был
+	-- жёстко 35 studs/s «~WalkSpeed*2». Но это потолок ПЕШЕХОДА: со Speed-модом
+	-- бегут 42+, в транспорте — сотни. Реальную скорость обрезало, упреждение
+	-- получалось меньше нужного, и чем дальше цель (больше время полёта) — тем
+	-- сильнее недолёт. Именно поэтому «далеко и быстро» = мимо.
+	--
+	-- Кламп нужен только чтобы отсечь всплески репликации (телепорт даёт
+	-- сотни studs/s за кадр), а не чтобы ограничивать легальное движение.
+	-- Поднимаем потолок и делаем его адаптивным: у транспорта он выше.
+	local velCap = CONFIG.PredictionMaxVelCap or 120
+	if velMag > velCap then
+		-- Всплеск — но не режем в ноль: сохраняем направление и берём потолок.
+		horiz = horiz * (velCap / velMag)
+		velMag = velCap
+	end
+	local velScaled = horiz
 	-- FIX v23: глобальный масштаб предикта. Для медленных оружий уменьши
 	-- PredictionScale (0.6-0.8) — иначе большой tFlight даёт избыточный lead.
 	local predScale = math.clamp(CONFIG.PredictionScale or 1.0, 0.0, 2.0)
@@ -10519,7 +10536,15 @@ function Bridge.predictAimPoint(uid, currentPos, origin, bulletSpeed, part, _ext
 		-- ошибку, pingMs всегда был 0, и тумблер «Ping Compensation» вместе с
 		-- PingCompensationScale не делали ровным счётом ничего.
 		local pingMs = (type(Bridge.getNetworkPingMs) == "function" and Bridge.getNetworkPingMs()) or 0
-		local pingLead = math.clamp(pingMs / 1000, 0, 0.2) * (CONFIG.PingCompensationScale or 0.5)
+		-- FIX (при большом пинге сервер не регает): потолок был 0.2с при
+		-- множителе 0.5 — то есть максимум 100мс упреждения. На 250-350мс RTT
+		-- этого не хватает совсем: сервер обрабатывает выстрел, когда цель уже
+		-- ушла. Потолок поднят до 0.5с, множитель по умолчанию 1.0 (RTT
+		-- целиком: пока пакет идёт туда-обратно, цель успевает пройти весь
+		-- этот путь). Оба параметра настраиваются.
+		local pingCapSec = CONFIG.PingCompensationMax or 0.5
+		local pingLead = math.clamp(pingMs / 1000, 0, pingCapSec)
+			* (CONFIG.PingCompensationScale or 1.0)
 		predicted = predicted + velScaled * pingLead
 		tTotal = tTotal + pingLead
 	end
