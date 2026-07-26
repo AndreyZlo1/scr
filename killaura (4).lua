@@ -2055,7 +2055,12 @@ _M.CONFIG = KA_CONFIG
 
 function _M.start()
     if kaConn then return end
-    for k, v in pairs(KA_CONFIG) do CONFIG[k] = v end
+    -- FIX: безусловная заливка затирала пользовательские значения и
+    -- автозагруженный конфиг MacLib при каждом старте. Дефолты уже применены
+    -- при загрузке модуля — здесь дозаполняем только отсутствующие ключи.
+    for k, v in pairs(KA_CONFIG) do
+        if CONFIG[k] == nil then CONFIG[k] = v end
+    end
     State.running = true
     pcall(function()
         if type(shared) == "table" and type(shared.import) == "function" then
