@@ -2459,14 +2459,22 @@ return function(Lib)
         -- noHeader=true, когда заголовок уже нарисован через K.group — иначе
         -- получается дубль вида «Fly» / «Fly» (K.group рисует Header, и
         -- K.feature по умолчанию рисует свой).
+        -- noHeader=true → заголовок уже нарисован через K.group, свой не нужен.
+        --
+        -- ВАЖНО: тернарник `noHeader and false or nil` здесь НЕ РАБОТАЕТ и был
+        -- причиной дубля «Fly / Fly»: (true and false) = false, затем
+        -- (false or nil) = nil — то есть Header всегда получался nil, и kit
+        -- рисовал второй заголовок. В Lua нельзя протащить false через `or`.
+        -- Поэтому строим таблицу и выставляем поле явным присваиванием.
         local function movFeature(section, title, name, desc, noHeader)
-            return K.feature(section, {
+            local opts = {
                 Title = title, Flag = name,
-                Header = noHeader and false or nil,
                 get = function() return _M.isActive(name) end,
                 set = function(v) _M.setFeature(name, v) end,
                 Desc = desc,
-            })
+            }
+            if noHeader then opts.Header = false end
+            return K.feature(section, opts)
         end
 
         -- ═══ LEFT: перемещение ═════════════════════════════════════════
