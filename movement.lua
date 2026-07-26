@@ -16,7 +16,9 @@ return function(Lib)
 
     local MOV = {
 
-        Speed          = true,
+        -- FIX: единственная фича, включённая по умолчанию. Скрипт стартовал с
+        -- уже активным Speed — игрок этого не просил и не ожидал.
+        Speed          = false,
         SpeedToggleKey = Enum.KeyCode.X,
         SpeedValue     = 24,
         SprintKey      = Enum.KeyCode.LeftShift,
@@ -1403,17 +1405,61 @@ return function(Lib)
         if ok2 then faGhostHL = hl end
     end
 
+    -- Прячет/показывает гост локально. Вынесено из tickFakeGhost, потому что
+    -- скрывать его нужно и на путях РАННЕГО ВЫХОДА (нет контроллера, нет
+    -- персонажа, первое лицо) — раньше в этих случаях функция просто
+    -- возвращалась, и клон навсегда оставался висеть в последней позе.
+    local function setGhostHidden(hide)
+        if not faGhostModel then return end
+        if faGhostHidden == hide then return end
+        faGhostHidden = hide
+        local ghostTr = MOV.FakeAnglesGhostTransparency or 0.5
+        for _, d in ipairs(faGhostModel:GetDescendants()) do
+            if d:IsA("BasePart") then
+                pcall(function() d.Transparency = hide and 1 or ghostTr end)
+            end
+        end
+        if faGhostHL then pcall(function() faGhostHL.Enabled = not hide end) end
+    end
+
+    -- Определение первого лица. Собственный сигнал игры — LocalActor.Zoom
+    -- (CharacterCamera: Zoom > 0 = третье лицо). Дистанция до головы — fallback.
+    local function isFirstPersonNow(la, char)
+        local zoom = la and rawget(la, "Zoom")
+        if type(zoom) ~= "number" and la then
+            local okZ, z = pcall(function() return la.Zoom end)
+            if okZ and type(z) == "number" then zoom = z end
+        end
+        if type(zoom) == "number" then
+            return zoom <= (MOV.FakeAnglesGhostFPZoom or 0.5)
+        end
+        local cam = workspace.CurrentCamera
+        local realHead = char and char:FindFirstChild("Head")
+        if cam and realHead and realHead:IsA("BasePart") then
+            return (cam.CFrame.Position - realHead.Position).Magnitude
+                < (MOV.FakeAnglesGhostFPDist or 1.5)
+        end
+        return false
+    end
+
     local function tickFakeGhost()
         if fakeAngMode == 0 or not MOV.FakeAnglesGhost then
             if faGhostModel then destroyFakeGhost() end
             return
         end
+        -- FIX (гост не исчезал при переходе в первое лицо): ниже три ранних
+        -- return. Если контроллер/актор/персонаж на кадр недоступны — а это
+        -- ровно то, что происходит при смене камеры, респавне и посадке в
+        -- транспорт — функция выходила, НЕ тронув клон. Он оставался видимым
+        -- там, где стоял. Теперь на любом раннем выходе гост прячем.
         local ctrl = ctrlCache
-        if not ctrl then return end
+        if not ctrl then setGhostHidden(true) return end
         local la = rawget(ctrl, "_localActor")
-        if not la then return end
+        if not la then setGhostHidden(true) return end
         local char = rawget(la, "Character")
-        if typeof(char) ~= "Instance" then return end
+        if typeof(char) ~= "Instance" or not char.Parent then
+            setGhostHidden(true) return
+        end
         if not faGhostModel or not faGhostModel.Parent then
             destroyFakeGhost()
             -- FIX: destroyFakeGhost resets faGhostHidden=false; buildFakeGhost
@@ -1430,36 +1476,11 @@ return function(Lib)
         -- Надёжный сигнал = собственный игры: LocalActor.Zoom<=0 → первое лицо
         -- (CharacterCamera:153 v36 = Zoom>0 = третье лицо). Camera-дист — fallback.
         if MOV.FakeAnglesGhostFirstPersonHide ~= false then
-            local firstPerson = false
-            -- Zoom может быть raw-полем ИЛИ геттером через __index — пробуем оба.
-            local zoom = rawget(la, "Zoom")
-            if type(zoom) ~= "number" then
-                local okZ, z = pcall(function() return la.Zoom end)
-                if okZ and type(z) == "number" then zoom = z end
-            end
-            if type(zoom) == "number" then
-                firstPerson = zoom <= (MOV.FakeAnglesGhostFPZoom or 0.5)
-            else
-                local cam = workspace.CurrentCamera
-                local realHead = char:FindFirstChild("Head")
-                if cam and realHead and realHead:IsA("BasePart") then
-                    local d = (cam.CFrame.Position - realHead.Position).Magnitude
-                    firstPerson = d < (MOV.FakeAnglesGhostFPDist or 1.5)
-                end
-            end
-            if firstPerson ~= faGhostHidden then
-                faGhostHidden = firstPerson
-                -- FIX: LocalTransparencyModifier is unreliable in BRM5 (custom renderer).
-                -- Use actual Transparency property instead. Store originals to restore.
-                local ghostTr = MOV.FakeAnglesGhostTransparency or 0.5
-                for _, d in ipairs(faGhostModel:GetDescendants()) do
-                    if d:IsA("BasePart") then
-                        pcall(function() d.Transparency = firstPerson and 1 or ghostTr end)
-                    end
-                end
-                if faGhostHL then pcall(function() faGhostHL.Enabled = not firstPerson end) end
-            end
+            local firstPerson = isFirstPersonNow(la, char)
+            setGhostHidden(firstPerson)
             if firstPerson then return end   -- в 1-м лице не двигаем/не рисуем
+        else
+            setGhostHidden(false)
         end
 
         -- v19.2 — воспроизводим РОВНО игровую позу (дамп ActorClass):
@@ -2428,249 +2449,239 @@ return function(Lib)
     --     не дублировать логику onInput. UI-состояние стартует из фактического.
     -- ─────────────────────────────────────────────────────────────────────
     function _M.buildUI(ui)
-        local flag = ui.flag or function(s) return "MOV_" .. s end
         local tab = ui.tabs and ui.tabs.Movement
         if not tab then return end
         local dtab = ui.tabs and ui.tabs.Debug
-        local ntf = ui.notify or function() end
+        local K = Bridge.makeUiKit(ui)
 
-        local ML = ui.MacLib
-        local function syncToggle(f, val)
-            if ML and ML.Options and ML.Options[f] then
-                pcall(function() ML.Options[f]:UpdateState(val) end)
-            end
-        end
-        -- Feature toggle + keybind helper.
-        -- FIX double-notify: syncToggle(flag) re-triggers the Toggle Callback which
-        -- calls ntf() again. Block Toggle Callbacks during programmatic state sync.
-        local _notifyBlocked = false
-        local function feature(section, label, name, desc)
-            section:Toggle({ Name = "Enabled", Default = _M.isActive(name),
-                Callback = function(v)
-                    _M.setFeature(name, v)
-                    if not _notifyBlocked then
-                        ntf(label, v and "Enabled" or "Disabled")
-                    end
-                end }, flag(name))
-            if ui.keybind then
-                ui.keybind(section, { Name = "Keybind", Flag = flag(name .. "_KB"),
-                    Toggle = function()
-                        local nv = not _M.isActive(name)
-                        _M.setFeature(name, nv)
-                        _notifyBlocked = true
-                        syncToggle(flag(name), nv)
-                        _notifyBlocked = false
-                        ntf(label, nv and "Enabled" or "Disabled")
-                    end })
-            end
-            if desc then section:SubLabel({ Text = desc }) end
+        -- Фича модуля: состояние живёт в upvalue-флагах, читается через
+        -- _M.isActive и меняется через _M.setFeature (идемпотентно).
+        local function movFeature(section, title, name, desc)
+            return K.feature(section, {
+                Title = title, Flag = name,
+                get = function() return _M.isActive(name) end,
+                set = function(v) _M.setFeature(name, v) end,
+                Desc = desc,
+            })
         end
 
-        -- ── Speed ─────────────────────────────────────────────────────────
-        local LS = tab:Section({ Name = "Speed", Side = "Left" })
-        LS:Header({ Name = "Speed" })
-        feature(LS, "Speed", "Speed", "Overrides walk/sprint speed.")
-        LS:Slider({ Name = "Walk Speed", Default = MOV.SpeedValue, Minimum = 16, Maximum = 120,
-            Precision = 0, Callback = function(v) MOV.SpeedValue = v end }, flag("SpeedValue"))
-        LS:Slider({ Name = "Sprint Speed", Default = MOV.SprintSpeed, Minimum = 16, Maximum = 200,
-            Precision = 0, Callback = function(v) MOV.SprintSpeed = v end }, flag("SprintSpeed"))
-        LS:Toggle({ Name = "Auto Sprint", Default = MOV.AutoSprint,
-            Callback = function(v) MOV.AutoSprint = v end }, flag("AutoSprint"))
+        -- ═══ LEFT: перемещение ═════════════════════════════════════════
+        local L = tab:Section({ Side = "Left" })
 
-        -- ── Fly ───────────────────────────────────────────────────────────
-        local LF = tab:Section({ Name = "Fly", Side = "Left" })
-        LF:Header({ Name = "Fly" })
-        feature(LF, "Fly", "Fly", "Free-cam style flight. Hold Space/Ctrl for up/down.")
-        LF:Slider({ Name = "Fly Speed", Default = MOV.FlySpeed, Minimum = 8, Maximum = 200,
-            Precision = 0, Callback = function(v) MOV.FlySpeed = v end }, flag("FlySpeed"))
-        LF:Toggle({ Name = "TP Bypass", Default = MOV.FlyTPBypass ~= false,
-            Callback = function(v)
-                MOV.FlyTPBypass = v
-                ntf("Fly TP Bypass", v and "Enabled" or "Disabled")
-            end }, flag("FlyTPBypass"))
-        LF:SubLabel({ Text = "Teleport-bypass: keeps the server position in sync while flying to avoid rubber-band kicks." })
+        movFeature(L, "Speed", "Speed", "overrides ur walk n sprint speed")
+        K.slider(L, { Name = "Walk Speed", Flag = "SpeedValue",
+            Default = MOV.SpeedValue, Min = 16, Max = 120,
+            Callback = function(v) MOV.SpeedValue = v end,
+            Desc = "16 = stock. past ~40 it gets obvious" })
+        K.slider(L, { Name = "Sprint Speed", Flag = "SprintSpeed",
+            Default = MOV.SprintSpeed, Min = 16, Max = 200,
+            Callback = function(v) MOV.SprintSpeed = v end })
+        K.toggle(L, { Name = "Auto Sprint", Flag = "AutoSprint", Title = "Auto Sprint",
+            get = function() return MOV.AutoSprint end,
+            set = function(v) MOV.AutoSprint = v end,
+            Desc = "always sprint without holding shift" })
 
-        -- ── No Clip ───────────────────────────────────────────────────────
-        local LC = tab:Section({ Name = "No Clip", Side = "Left" })
-        LC:Header({ Name = "No Clip" })
-        feature(LC, "No Clip", "NoClip", "Walk through walls and objects.")
+        K.group(L, "Fly")
+        movFeature(L, "Fly", "Fly", "free-cam flight\nspace = up, ctrl = down")
+        K.slider(L, { Name = "Fly Speed", Flag = "FlySpeed",
+            Default = MOV.FlySpeed, Min = 8, Max = 200,
+            Callback = function(v) MOV.FlySpeed = v end })
+        K.toggle(L, { Name = "TP Bypass", Flag = "FlyTPBypass", Title = "Fly TP Bypass",
+            get = function() return MOV.FlyTPBypass ~= false end,
+            set = function(v) MOV.FlyTPBypass = v end,
+            Desc = "keeps the server position in sync so u dont get\nrubber-banded or kicked mid flight" })
 
-        -- ── Jump ─────────────────────────────────────────────────────────
-        local LJ = tab:Section({ Name = "Jump", Side = "Left" })
-        LJ:Header({ Name = "Jump" })
-        LJ:Toggle({ Name = "Infinite Jump", Default = MOV.InfiniteJump,
-            Callback = function(v)
-                MOV.InfiniteJump = v
-                ntf("Infinite Jump", v and "Enabled" or "Disabled")
-            end }, flag("InfJump"))
-        LJ:Toggle({ Name = "Bunny Hop", Default = MOV.BunnyHop,
-            Callback = function(v)
-                MOV.BunnyHop = v
-                ntf("Bunny Hop", v and "Enabled" or "Disabled")
-            end }, flag("Bhop"))
-        LJ:Slider({ Name = "Super Jump Power", Default = MOV.SuperJumpVel, Minimum = 20, Maximum = 200,
-            Precision = 0, Callback = function(v) MOV.SuperJumpVel = v end }, flag("SJVel"))
+        K.group(L, "No Clip")
+        movFeature(L, "No Clip", "NoClip", "walk thru walls n objects")
+
+        K.group(L, "Jump")
+        K.toggle(L, { Name = "Infinite Jump", Flag = "InfJump", Title = "Infinite Jump",
+            get = function() return MOV.InfiniteJump end,
+            set = function(v) MOV.InfiniteJump = v end })
+        K.toggle(L, { Name = "Bunny Hop", Flag = "Bhop", Title = "Bunny Hop",
+            get = function() return MOV.BunnyHop end,
+            set = function(v) MOV.BunnyHop = v end,
+            Desc = "auto-jumps while u hold space" })
+        K.slider(L, { Name = "Super Jump Power", Flag = "SJVel",
+            Default = MOV.SuperJumpVel, Min = 20, Max = 200,
+            Callback = function(v) MOV.SuperJumpVel = v end })
         if ui.keybind then
-            ui.keybind(LJ, { Name = "Super Jump Keybind", Flag = flag("SuperJump_KB"),
+            ui.keybind(L, { Name = "Super Jump Keybind",
+                Flag = (ui.flag or tostring)("SuperJump_KB"),
                 Toggle = function()
                     _M.superJump()
-                    ntf("Super Jump", "Fired")
+                    K.notify("Super Jump", "Fired")
                 end })
         end
-        LJ:SubLabel({ Text = "Super Jump fires once per press (bind a key above)." })
 
-        -- ── No Fall ───────────────────────────────────────────────────────
-        local RNF = tab:Section({ Name = "No Fall", Side = "Right" })
-        RNF:Header({ Name = "No Fall" })
-        feature(RNF, "No Fall", "NoFall", "Spoofs the height state to cancel fall damage.")
-        RNF:Toggle({ Name = "Lean on Sprint", Default = MOV.LeanSprint,
-            Callback = function(v) MOV.LeanSprint = v end }, flag("LeanSprint"))
-        RNF:Slider({ Name = "Lean Angle", Default = MOV.LeanAngle, Minimum = 0, Maximum = 20,
-            Precision = 0, Suffix = "°", Callback = function(v) MOV.LeanAngle = v end }, flag("LeanAngle"))
+        K.group(L, "No Fall")
+        movFeature(L, "No Fall", "NoFall", "spoofs height state so u take no fall dmg")
 
-        -- ── Third Person Camera ───────────────────────────────────────────
-        local RTP = tab:Section({ Name = "Third Person", Side = "Right" })
-        RTP:Header({ Name = "Third Person Camera" })
-        feature(RTP, "Force Third Person", "ThirdPerson", "Forces a third-person camera.")
-        RTP:Slider({ Name = "Camera Distance", Default = MOV.ThirdPersonDist, Minimum = 5, Maximum = 40,
-            Precision = 0, Callback = function(v) MOV.ThirdPersonDist = v end }, flag("TPDist"))
+        K.group(L, "Strafer")
+        movFeature(L, "Strafer", "Strafer", "free air-strafe, turn without input")
 
-        -- ── Spin Bot ─────────────────────────────────────────────────────
-        local RSB = tab:Section({ Name = "Spin Bot", Side = "Right" })
-        RSB:Header({ Name = "Spin Bot" })
-        feature(RSB, "Spin Bot", "SpinBot", "Spins your third-person model.")
-        RSB:Slider({ Name = "Spin Speed (RPS)", Default = MOV.SpinBotRPS, Minimum = 1, Maximum = 30,
-            Precision = 0, Callback = function(v) MOV.SpinBotRPS = v end }, flag("SpinRPS"))
+        -- ═══ RIGHT: камера и десинк ════════════════════════════════════
+        local R = tab:Section({ Side = "Right" })
 
-        -- ── Strafer ───────────────────────────────────────────────────────
-        local RST = tab:Section({ Name = "Strafer", Side = "Right" })
-        RST:Header({ Name = "Strafer" })
-        feature(RST, "Strafer", "Strafer", "Free air-strafe (turn without input).")
+        movFeature(R, "Third Person", "ThirdPerson", "forces the camera out to third person")
+        K.slider(R, { Name = "Camera Distance", Flag = "TPDist",
+            Default = MOV.ThirdPersonDist, Min = 5, Max = 40,
+            Callback = function(v) MOV.ThirdPersonDist = v end,
+            Desc = "scroll wheel also works in game" })
 
-        -- ── Velocity Desync ───────────────────────────────────────────────
-        local RVD = tab:Section({ Name = "Velocity Desync", Side = "Right" })
-        RVD:Header({ Name = "Velocity Desync" })
-        feature(RVD, "Velocity Desync", "VelDesync", "Jitters replicated velocity to confuse prediction.")
-        RVD:Slider({ Name = "Desync Amplitude", Default = MOV.VelocityDesyncAmp, Minimum = 0.5, Maximum = 10,
-            Precision = 1, Suffix = " st", Callback = function(v) MOV.VelocityDesyncAmp = v end }, flag("VelAmp"))
+        K.group(R, "Spin Bot")
+        movFeature(R, "Spin Bot", "SpinBot", "spins ur model for everyone else")
+        K.slider(R, { Name = "Spin Speed", Flag = "SpinRPS",
+            Default = MOV.SpinBotRPS, Min = 1, Max = 30, Suffix = " rps",
+            Callback = function(v) MOV.SpinBotRPS = v end })
 
-        -- ── Lean Lock ─────────────────────────────────────────────────────
-        local RLL = tab:Section({ Name = "Lean Lock", Side = "Right" })
-        RLL:Header({ Name = "Lean Lock" })
-        feature(RLL, "Lean Lock", "LeanLock", "Locks the lean value for a fixed body angle.")
-        RLL:Slider({ Name = "Lean Value", Default = MOV.LeanLockValue, Minimum = -1, Maximum = 1,
-            Precision = 2, Callback = function(v) MOV.LeanLockValue = v end }, flag("LeanVal"))
+        K.group(R, "Velocity Desync")
+        movFeature(R, "Velocity Desync", "VelDesync", "jitters replicated velocity to break their prediction")
+        K.slider(R, { Name = "Amplitude", Flag = "VelAmp",
+            Default = math.floor((MOV.VelocityDesyncAmp or 1) * 10), Min = 5, Max = 100,
+            Callback = function(v) MOV.VelocityDesyncAmp = v / 10 end,
+            Desc = "10 = 1 stud. higher = harder to hit but more visible" })
 
-        -- ── Fake Angles ───────────────────────────────────────────────────
-        -- Вместо Dropdown+Keybind: простой Toggle ON/OFF (Keybind) + выбор режима через Dropdown.
-        -- Keybind включает/выключает последний выбранный режим (не Off).
-        local FA = tab:Section({ Name = "Fake Angles", Side = "Right" })
+        K.group(R, "Lean")
+        movFeature(R, "Lean Lock", "LeanLock", "locks ur lean at a fixed angle")
+        K.slider(R, { Name = "Lean Value", Flag = "LeanVal",
+            Default = math.floor((MOV.LeanLockValue or 0) * 100) + 100, Min = 0, Max = 200,
+            Callback = function(v) MOV.LeanLockValue = (v - 100) / 100 end,
+            Desc = "100 = straight, 0 = full left, 200 = full right" })
+        K.toggle(R, { Name = "Lean on Sprint", Flag = "LeanSprint", Title = "Lean on Sprint",
+            get = function() return MOV.LeanSprint end,
+            set = function(v) MOV.LeanSprint = v end })
+        K.slider(R, { Name = "Sprint Lean Angle", Flag = "LeanAngle",
+            Default = MOV.LeanAngle, Min = 0, Max = 20, Suffix = "°",
+            Callback = function(v) MOV.LeanAngle = v end })
+
+        K.group(R, "Speed State")
+        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
+        local ssOpts = { "Off" }
+        for _, n in ipairs(order) do ssOpts[#ssOpts + 1] = n end
+        K.dropdown(R, { Name = "State", Flag = "SpeedState",
+            Options = ssOpts,
+            Default = ssOpts[(_M.getSpeedStateMode() or 0) + 1] or "Off",
+            Callback = function(n)
+                local idx = table.find(ssOpts, n)
+                if idx then _M.setSpeedStateMode(idx - 1) end
+            end,
+            Desc = "movement-state multiplier\nSkydiving is the fastest one" })
+        if ui.keybind then
+            ui.keybind(R, { Name = "Cycle Keybind",
+                Flag = (ui.flag or tostring)("SSCycle_KB"),
+                Toggle = function()
+                    _M.simulateKey(MOV.SpeedStateKey)
+                    K.notify("Speed State", "Cycled")
+                end })
+        end
+
+        -- ═══ RIGHT #2: Fake Angles — своя секция, фича большая ══════════
+        local FA = tab:Section({ Side = "Right" })
         FA:Header({ Name = "Fake Angles" })
         local FA_MODES = { "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch" }
-        -- Enabled toggle: On = включает первый/последний режим, Off = режим 0 (Off)
-        local _faNotifyBlocked = false
-        FA:Toggle({ Name = "Enabled", Default = _M.getFakeAngMode() ~= 0,
-            Callback = function(v)
-                if v then
-                    local mode = _M.getFakeAngMode()
-                    if mode == 0 then _M.setFakeAngMode(1) end
-                else
-                    _M.setFakeAngMode(0)
-                end
-                if not _faNotifyBlocked then
-                    ntf("Fake Angles", v and "Enabled" or "Disabled")
-                end
-            end }, flag("FAEnabled"))
-        if ui.keybind then
-            ui.keybind(FA, { Name = "Keybind", Flag = flag("FA_KB"),
-                Toggle = function()
-                    local mode = _M.getFakeAngMode()
-                    _faNotifyBlocked = true
-                    if mode ~= 0 then
-                        _M.setFakeAngMode(0)
-                        syncToggle(flag("FAEnabled"), false)
-                        _faNotifyBlocked = false
-                        ntf("Fake Angles", "Disabled")
-                    else
-                        _M.setFakeAngMode(1)
-                        syncToggle(flag("FAEnabled"), true)
-                        _faNotifyBlocked = false
-                        ntf("Fake Angles", "Enabled")
-                    end
-                end })
+        local faGuard, faTog = false, nil
+        local function faCommit(on)
+            if on then
+                if _M.getFakeAngMode() == 0 then _M.setFakeAngMode(1) end
+            else
+                _M.setFakeAngMode(0)
+            end
+            K.notify("Fake Angles", on and "Enabled" or "Disabled")
+            faGuard = true
+            if faTog then pcall(function() faTog:UpdateState(on) end) end
+            faGuard = false
         end
-        FA:Dropdown({ Name = "Mode", Options = FA_MODES, Default = FA_MODES[math.max(1, _M.getFakeAngMode())] or "Instant",
+        faTog = FA:Toggle({ Name = "Enabled", Default = _M.getFakeAngMode() ~= 0,
+            Callback = function(v)
+                if faGuard then return end
+                faCommit(v and true or false)
+            end }, (ui.flag or tostring)("FAEnabled"))
+        FA:SubLabel({ Text = "spoofs the body angles others see\ndoesnt touch ur own aim or shots" })
+        if ui.keybind then
+            ui.keybind(FA, { Name = "Keybind", Flag = (ui.flag or tostring)("FA_KB"),
+                Toggle = function() faCommit(_M.getFakeAngMode() == 0) end })
+        end
+        K.dropdown(FA, { Name = "Mode", Flag = "FAMode",
+            Options = FA_MODES,
+            Default = FA_MODES[math.max(1, _M.getFakeAngMode())] or "Instant",
             Callback = function(n)
                 local idx = table.find(FA_MODES, n)
                 if idx then
                     _M.setFakeAngMode(idx)
-                    _faNotifyBlocked = true
-                    syncToggle(flag("FAEnabled"), true)
-                    _faNotifyBlocked = false
-                    ntf("Fake Angles Mode", n)
+                    faGuard = true
+                    if faTog then pcall(function() faTog:UpdateState(true) end) end
+                    faGuard = false
                 end
-            end }, flag("FAMode"))
-        FA:SubLabel({ Text = "Spoofs replicated body angles. Does NOT affect your aim/shots." })
-        FA:Slider({ Name = "Jitter (yaw)", Default = MOV.FakeAnglesJitter, Minimum = 0, Maximum = 6.28,
-            Precision = 2, Callback = function(v) MOV.FakeAnglesJitter = v end }, flag("FAJitter"))
-        FA:Slider({ Name = "Pitch Amount", Default = MOV.FakeAnglesPitchAmp, Minimum = 0, Maximum = 3.14,
-            Precision = 2, Callback = function(v) MOV.FakeAnglesPitchAmp = v end }, flag("FAPitch"))
-        FA:Slider({ Name = "Spin Step", Default = MOV.FakeAnglesSpinStep, Minimum = 0.1, Maximum = 3.14,
-            Precision = 2, Callback = function(v) MOV.FakeAnglesSpinStep = v end }, flag("FASpin"))
-        FA:Divider()
-        FA:Header({ Name = "Ghost" })
-        FA:Toggle({ Name = "Show Ghost Model", Default = MOV.FakeAnglesGhost,
-            Callback = function(v) MOV.FakeAnglesGhost = v end }, flag("FAGhost"))
-        FA:Colorpicker({ Name = "Ghost Color", Default = MOV.FakeAnglesGhostColor,
-            Callback = function(c) MOV.FakeAnglesGhostColor = c end }, flag("FAGhostCol"))
-        FA:Slider({ Name = "Ghost Transparency", Default = math.floor((MOV.FakeAnglesGhostTransparency or 0.5) * 100),
-            Minimum = 0, Maximum = 100, Precision = 0, Suffix = "%",
-            Callback = function(v) MOV.FakeAnglesGhostTransparency = v / 100 end }, flag("FAGhostTr"))
+            end })
+        K.slider(FA, { Name = "Yaw Jitter", Flag = "FAJitter",
+            Default = math.floor((MOV.FakeAnglesJitter or 2.8) * 100), Min = 0, Max = 628,
+            Callback = function(v) MOV.FakeAnglesJitter = v / 100 end,
+            Desc = "how far the body snaps each packet" })
+        K.slider(FA, { Name = "Pitch Amount", Flag = "FAPitch",
+            Default = math.floor((MOV.FakeAnglesPitchAmp or 1.4) * 100), Min = 0, Max = 314,
+            Callback = function(v) MOV.FakeAnglesPitchAmp = v / 100 end })
+        K.slider(FA, { Name = "Spin Step", Flag = "FASpin",
+            Default = math.floor((MOV.FakeAnglesSpinStep or 0.9) * 100), Min = 10, Max = 314,
+            Callback = function(v) MOV.FakeAnglesSpinStep = v / 100 end,
+            Desc = "only used by Spin mode" })
 
-        -- ── Speed State ───────────────────────────────────────────────────
-        local RSS = tab:Section({ Name = "Speed State", Side = "Right" })
-        RSS:Header({ Name = "Speed State" })
-        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
-        local ssOpts = { "Off" }
-        for _, n in ipairs(order) do ssOpts[#ssOpts + 1] = n end
-        RSS:Dropdown({ Name = "State", Options = ssOpts, Default = ssOpts[(_M.getSpeedStateMode() or 0) + 1] or "Off",
-            Callback = function(n)
-                local idx = table.find(ssOpts, n)
-                if idx then
-                    _M.setSpeedStateMode(idx - 1)
-                    ntf("Speed State", n)
-                end
-            end }, flag("SpeedState"))
-        if ui.keybind then
-            ui.keybind(RSS, { Name = "Cycle Keybind", Flag = flag("SSCycle_KB"),
-                Toggle = function()
-                    _M.simulateKey(MOV.SpeedStateKey)
-                    ntf("Speed State", "Cycled")
+        K.group(FA, "Ghost")
+        K.toggle(FA, { Name = "Show Ghost", Flag = "FAGhost", Title = "Ghost Model",
+            get = function() return MOV.FakeAnglesGhost end,
+            set = function(v) MOV.FakeAnglesGhost = v end,
+            Desc = "draws where others think u are\nonly u can see it" })
+        K.toggle(FA, { Name = "Hide in First Person", Flag = "FAGhostFP",
+            Title = "Ghost FP Hide",
+            get = function() return MOV.FakeAnglesGhostFirstPersonHide ~= false end,
+            set = function(v) MOV.FakeAnglesGhostFirstPersonHide = v end,
+            Desc = "off = ghost stays visible even in first person" })
+        K.color(FA, { Name = "Ghost Color", Flag = "FAGhostCol",
+            Default = MOV.FakeAnglesGhostColor,
+            Callback = function(c) MOV.FakeAnglesGhostColor = c end })
+        K.slider(FA, { Name = "Ghost Transparency", Flag = "FAGhostTr",
+            Default = math.floor((MOV.FakeAnglesGhostTransparency or 0.5) * 100),
+            Min = 0, Max = 100, Suffix = "%",
+            Callback = function(v) MOV.FakeAnglesGhostTransparency = v / 100 end })
+
+        -- ═══ DEBUG ═════════════════════════════════════════════════════
+        if dtab then
+            local D = dtab:Section({ Side = "Right" })
+            D:Header({ Name = "Movement" })
+            K.slider(D, { Name = "Ghost Update Rate", Flag = "DbgFAHz",
+                Default = MOV.FakeAnglesSendHz or 22, Min = 5, Max = 60, Suffix = " Hz",
+                Callback = function(v) MOV.FakeAnglesSendHz = v end })
+            K.slider(D, { Name = "State Hold", Flag = "DbgFAHold",
+                Default = MOV.FakeAnglesStateHold or 8, Min = 1, Max = 30,
+                Callback = function(v) MOV.FakeAnglesStateHold = v end,
+                Desc = "packets per spoofed state" })
+            K.toggle(D, { Name = "Clamp Safe Angles", Flag = "DbgFAClamp",
+                Title = "Clamp Safe Angles",
+                get = function() return MOV.FakeAnglesClampSafe end,
+                set = function(v) MOV.FakeAnglesClampSafe = v end })
+            K.toggle(D, { Name = "Suppress Game Packet", Flag = "DbgFASuppress",
+                Title = "Suppress Game Packet",
+                get = function() return MOV.FakeAnglesSuppressGame end,
+                set = function(v) MOV.FakeAnglesSuppressGame = v end })
+
+            K.group(D, "Logging")
+            D:SubLabel({ Text = "console spam, keep off for normal play" })
+            K.toggle(D, { Name = "Fake Angles Diag", Flag = "DbgFADiag",
+                Title = "Fake Angles Diagnostics",
+                get = function() return MOV.FakeAnglesDiag end,
+                set = function(v) MOV.FakeAnglesDiag = v end })
+            K.slider(D, { Name = "Diag Packet Count", Flag = "DbgFADiagN",
+                Default = MOV.FakeAnglesDiagCount or 20, Min = 5, Max = 100,
+                Callback = function(v) MOV.FakeAnglesDiagCount = v end })
+            K.button(D, { Name = "Run Diagnostic", Flag = "DbgRunDiag",
+                Title = "Movement",
+                Callback = function()
+                    task.spawn(runDiagnostic)
+                    return "running, check console"
                 end })
         end
-        RSS:SubLabel({ Text = "Applies a movement-state multiplier (e.g. Skydiving is very fast)." })
 
-        -- ── Debug subsection ───────────────────────────────────────────────
-        if dtab then
-            local D = dtab:Section({ Name = "Movement", Side = "Right" })
-            D:Header({ Name = "Movement — Fake Angles" })
-            D:Slider({ Name = "Ghost Update Rate", Default = MOV.FakeAnglesSendHz or 22, Minimum = 5, Maximum = 60,
-                Precision = 0, Suffix = " Hz", Callback = function(v) MOV.FakeAnglesSendHz = v end }, flag("DbgFAHz"))
-            D:Slider({ Name = "State Hold (packets)", Default = MOV.FakeAnglesStateHold or 8, Minimum = 1, Maximum = 30,
-                Precision = 0, Callback = function(v) MOV.FakeAnglesStateHold = v end }, flag("DbgFAHold"))
-            D:Toggle({ Name = "Clamp Safe Angles", Default = MOV.FakeAnglesClampSafe,
-                Callback = function(v) MOV.FakeAnglesClampSafe = v end }, flag("DbgFAClamp"))
-            D:Toggle({ Name = "Suppress Game Packet", Default = MOV.FakeAnglesSuppressGame,
-                Callback = function(v) MOV.FakeAnglesSuppressGame = v end }, flag("DbgFASuppress"))
-            D:Divider()
-            D:Header({ Name = "Movement — Logging" })
-            D:SubLabel({ Text = "Console diagnostics. Leave off for normal play." })
-            D:Toggle({ Name = "Fake Angles Diagnostics", Default = MOV.FakeAnglesDiag,
-                Callback = function(v) MOV.FakeAnglesDiag = v end }, flag("DbgFADiag"))
-            D:Slider({ Name = "Diagnostic Packet Count", Default = MOV.FakeAnglesDiagCount or 20, Minimum = 5, Maximum = 100,
-                Precision = 0, Callback = function(v) MOV.FakeAnglesDiagCount = v end }, flag("DbgFADiagN"))
-            D:Button({ Name = "Run Diagnostic (console)", Callback = function() task.spawn(runDiagnostic) end }, flag("DbgRunDiag"))
-        end
+        K.ready()
     end
 
     return _M
