@@ -104,11 +104,8 @@ local FIREMODE = {
 }
 
 local CONFIG = {
-	ScanInterval = 30.0,
-	GcRefreshInterval = 180.0,
 	WeaponHudInterval = 1.5,
 	LocalClientGcCooldown = 2.0,
-	ClientResolveInterval = 0.5,
 	WeaponHudMaxLines = 0,
 	WeaponHudMaxTuneLines = 22,
 	WeaponHudLineHeight = 16,
@@ -139,7 +136,6 @@ local CONFIG = {
 	AimTargetRefreshInterval = 0.05,
 	CombatAimRefreshInterval = 0.035,
 	AimScanMaxActors = 24,
-	MultiPointMaxActors = 5,
 	MultiPointCacheSec = 0.15,
 	SpoofMuzzleCacheSec = 0.25,
 	ResolverLite = true,
@@ -186,14 +182,9 @@ local CONFIG = {
 	LiteMultiPoint = true,
 	LiteMultiPointCacheSec = 0.55,
 	LiteMultiPointMaxDist = 6,
-	LiteMultiPointStep = 1.8,
 	LiteMultiPointMaxActors = 6,
 	LiteMultiPointBinarySteps = 3,
 	LiteMultiPointRefreshInterval = 0.08,
-	MultiPointBones = {
-	"Head", "UpperTorso", "LowerTorso",
-	"LeftUpperArm", "RightUpperArm", "LeftHand", "RightHand",
-	},
 	ForceClientHit = false,
 	ForceHit = false,
 	-- Backtrack удалён v4
@@ -208,16 +199,11 @@ local CONFIG = {
 	-- FIX v8: Отображение игроков в PVE/ZMP режимах
 	EspShowPlayersInPve = true,  -- показывать игроков в PVE-зонах
 	ForceShowAllPlayers = true,  -- показывать ВСЕХ игроков (bypass isEnemyActor)
-	SaCornerPeekDist = 4.5,
-	SaPeekMaxOffset = 2.5,
 	MultiPointStickySec = 0.35,
-	MultiPointNegCacheSec = 0.05,
 	AimSkipDeadHP = true,
 	AimVisuals = true,
 	ShotTracers = true,
 	ModifyEnabled = false,
-	NoSpread = false,
-	NoRecoil = false,
 
 -- ESP defaults (overridden by ESP_CONFIG on ESP.start)
 	ESP = true,
@@ -231,10 +217,10 @@ local CONFIG = {
 	EspWeaponInfo = true,
 	EspUpdateInterval = 0.0167,  -- FIX v8: 60fps
 	EspMaxDistance = 1800,       -- глобальный лимит ESP (studs), дальше не рендерится
-	EspRescanInterval = 4.0,     -- FIX v8: ресканирование каждые 4s
 	EspRenderInterval = 0.0167,  -- FIX v8: 60fps рендер
 	EspFullRescanInterval = 60.0,  -- FIX v10: полный скан каждые 60s (было 30s) — снижает фризы на NPC картах
 	SquadRefreshInterval = 3.0,    -- как часто пересчитывать состав команд (было захардкожено 10s)
+	UiHideInactive = false,        -- прятать настройки выключенных фич (по умолчанию НЕТ)
 	EspBoxAspect = 0.42,
 	EspVisibleInterval = 0.22,
 	EspVisibleFast = true,
@@ -243,13 +229,10 @@ local CONFIG = {
 	EspSkeletonMaxActors = 24,       -- FIX v9
 	EspSkeletonMaxDist = 800,        -- FIX v9: скелет только до 800 studs
 	EspBoxMaxActors = 64,            -- FIX v9: ESP box для 64 акторов
-	EspBoundsParts = 4,
 	EspWeaponPlayersOnly = true,
 	EspIgnoreTeam = true,
 	EspVisibleBones = { "Head", "UpperTorso", "LowerTorso" },
-	EspVisibleMinBones = 1,
 	EspBatchSize = 6,               -- акторов за кадр для ESP (батчинг)
-	EspScanWorldModels = false,
 	ActorSyncBatchSize = 8,          -- v18 PATCH: было 5 (дубль 12 удалён), повышено для NPC скан
 	ActorEnrichBatchSize = 2,
 	RepSyncMinInterval = 0.35,       -- минимум между батчами rep sync (снижает FPS при enrich)
@@ -3002,18 +2985,38 @@ local function updateActorVelocity(uid, root)
 	local track = State.actorVelTrack[uid]
 	if track and typeof(track.pos) == "Vector3" then
 		local dt = now - (track.t or now)
-		if dt >= 0.01 and dt <= 0.5 then
-			local rawVel = (pos - track.pos) / dt
-			-- FIX v9: EMA по скорости (alpha=0.35) — сглаживает зиг-заг без задержки позиции
-			-- НЕ интерполируем позицию, только усредняем производную
-			local prev = State.actorVelInstant[uid]
-			if prev and typeof(prev) == "Vector3" and prev.Magnitude > 0.05 then
-				State.actorVelInstant[uid] = prev:Lerp(rawVel, 0.35)
+		-- FIX (ГЛАВНАЯ причина «Light Prediction целится хуй пойми куда»):
+		-- база трека перезаписывалась БЕЗУСЛОВНО, в том числе когда dt < 0.01
+		-- и скорость не считалась. А getActorRootVelocity дёргает эту функцию
+		-- на КАЖДОМ обращении — и ESP, и аим зовут её по несколько раз за
+		-- кадр. В итоге база постоянно сдвигалась на доли миллисекунды вперёд,
+		-- нормальный интервал не набирался НИКОГДА, и actorVelInstant либо
+		-- оставался пустым, либо ловил случайный выброс (позиция/крошечный dt
+		-- = сотни studs/s). Отсюда и «дёргает туда-сюда».
+		-- Теперь база двигается ТОЛЬКО когда мы реально посчитали скорость.
+		if dt >= 0.01 then
+			if dt <= 0.5 then
+				local rawVel = (pos - track.pos) / dt
+				-- Отсекаем телепорты/рывки реплики: 200 studs/s быстрее любого
+				-- легального перемещения игрока в этой игре.
+				if rawVel.Magnitude <= 200 then
+					local prev = State.actorVelInstant[uid]
+					if prev and typeof(prev) == "Vector3" and prev.Magnitude > 0.05 then
+						State.actorVelInstant[uid] = prev:Lerp(rawVel, 0.35)
+					else
+						State.actorVelInstant[uid] = rawVel
+					end
+				end
 			else
-				State.actorVelInstant[uid] = rawVel
+				-- Разрыв больше 0.5с — старая база бесполезна, скорость сбрасываем
+				State.actorVelInstant[uid] = nil
 			end
+			track.pos = pos
+			track.t   = now
 		end
+		return
 	end
+	-- Первое наблюдение: заводим трек (и переиспользуем таблицу дальше)
 	State.actorVelTrack[uid] = { pos = pos, t = now }
 end
 
@@ -11380,10 +11383,14 @@ function Bridge.makeUiKit(ui)
 		-- клавиши. MacLib сам рисует мобильный FAB для каждого Keybind —
 		-- своя кнопка не нужна.
 		if o.NoKeybind ~= true and ui.keybind then
+			-- FIX: тут стоял ForceAutoLoad = true — MacLib сам сохранял бинд в
+			-- FAutoLoad/<flag>.syl и подтягивал его при следующем запуске. Из-за
+			-- этого случайно нажатая клавиша «прилипала» навсегда, хотя биндов
+			-- по умолчанию быть не должно. Сохранение биндов теперь только
+			-- через обычную систему конфигов (Save/Load), как и всё остальное.
 			ui.keybind(section, {
 				Name   = "Keybind",
 				Flag   = flag(o.Flag .. "_KB"),
-				ForceAutoLoad = true,
 				Toggle = function() commit(not o.get()) end,
 			})
 		end
@@ -11469,8 +11476,18 @@ function Bridge.makeUiKit(ui)
 	end
 
 	-- ── Показ/скрытие зависимых контролов ──────────────────────────────
-	-- «не показываем ручки, которые сейчас ничего не делают»
-	function kit.setVisible(els, state)
+	--
+	-- ВАЖНО про поведение. Скрывать настройки под выключенным тумблером —
+	-- плохая идея почти везде: человек открывает панель, видит голый список
+	-- тумблеров и не понимает, что фича вообще умеет. Настроить заранее, ДО
+	-- включения, тоже нельзя. Поэтому по умолчанию мы НИЧЕГО не прячем.
+	--
+	-- Скрытие оставлено только для взаимоисключающих режимов (когда контрол
+	-- физически не участвует в выбранном режиме — например длина уголка при
+	-- стиле бокса "Box", или скорость аимлока при методе "LookAt").
+	-- Для таких случаев вызывать kit.setVisible(els, state, true).
+	function kit.setVisible(els, state, force)
+		if not force and CONFIG.UiHideInactive ~= true then return end
 		for _, el in ipairs(els) do
 			if el then pcall(function() el:SetVisibility(state and true or false) end) end
 		end
