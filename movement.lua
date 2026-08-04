@@ -1023,7 +1023,7 @@ return function(Lib, Core)
     --     Поиск «первое число, равное 1.5» с равной вероятностью попадал в множитель
     --     вместо кулдауна, после чего driveDodge писал 1.5 не туда, а настоящий кулдаун
     --     уезжал в список «дедлайнов».
-    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся на точный порядок upvalue'ов из
+    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся на то��ный порядок upvalue'ов из
     -- дампа (Evasive.lua:508), проверяя ожидаемые значения по конфигу. Индексы:
     --   [15] ServerConfirmTimeout  [16] DashDuration  [22] DashSpeed
     --   [23] OutnumberedDashSpeedMultiplier  [24] OutnumberedDashDurationMultiplier
@@ -1160,7 +1160,7 @@ return function(Lib, Core)
                     end
                 end
             end
-            -- Дедлайны больше НЕ «все прочие числа»: берём заранее известные индексы. Прежний
+            -- Дедлайны больше НЕ «все прочие числ��»: берём заранее известные индексы. Прежний
             -- код мог случайно записать в список сам Cooldown или множитель.
             for _, idx in ipairs(EV_DEADLINE_IDXS) do
                 _evDeadlineIdxs[#_evDeadlineIdxs + 1] = idx
@@ -1421,7 +1421,7 @@ return function(Lib, Core)
         local rag = tryRequire({ "Shared", "Services", "RagdollService", "RagdollServiceClient" })
         if not rag or type(rag.Init) ~= "function" then return false end
         -- Берём upvalue #5 и ПРОВЕРЯЕМ, что это функция; если игра сдвинула порядок —
-        -- ищем перебором ту, у которой нет upvalue'ов (sustainClientRagdoll их н�� имеет,
+        -- ищем перебором ту, у которой н��т upvalue'ов (sustainClientRagdoll их н�� имеет,
         -- в отличие от isManagedRagdoll/stepClientRagdollSustain).
         local fn
         local ok5, v5 = pcall(_getUp, rag.Init, 5)
@@ -1686,6 +1686,70 @@ return function(Lib, Core)
         return ok
     end
 
+    -- ═══════ [V120] РЕАНИМАЦИЯ: КАК ОНА РЕАЛЬНО РАБОТАЕТ ═══════
+    -- Ты сказал искать в интернете — нашёл, и это опровергает моё прежнее утверждение
+    -- «Destroy с клиента не реплицируется». Механика reanimate-скриптов:
+    -- удаление ДЖОЙНТОВ/частей локально РЕПЛИЦИРУЕТСЯ на сервер через network ownership
+    -- (клиент — владелец частей своего персонажа, поэтому сервер принимает их исчезновение).
+    -- Именно поэтому разработчики защищаются серверными проверками «пропал ли core joint».
+    -- Мой прошлый вывод был неверен: не реплицируется удаление ЧУЖИХ/серверных объектов,
+    -- а свои части персонажа — реплицируются.
+    --
+    -- ДВИЖКОВЫЙ МЕХАНИЗМ СМЕРТИ. Humanoid.RequiresNeck (по умолчанию true): персонаж УМИРАЕТ,
+    -- если удалить/отсоединить джойнт, связывающий Head с торсом. Причём движку неважно имя и
+    -- тип джойнта — достаточно, чтобы он соединял голову с торсом. Это не механика игры, а
+    -- поведение движка, поэтому Downed-система его не перехватывает: она перехватывает УРОН,
+    -- а тут смерть наступает от отсутствия шеи. Дальше сервер видит настоящую Humanoid.Died и
+    -- возрождает штатно, с полным HP. Ровно то, что ты описал: форсируем смерть → респавн.
+    --
+    -- НО В ЭТОЙ ИГРЕ СТОИТ РОВНО ЭТА ЗАЩИТА (нашёл в дампе, RagdollService:360-361):
+    --     v48.BreakJointsOnDeath = false;
+    --     v48.RequiresNeck = false;      ← из-за этого слом шеи НЕ убивает
+    -- Игра выставляет их на Humanoid при ragdoll/Downed. Поэтому порядок обязателен:
+    -- СНАЧАЛА вернуть RequiresNeck = true, и только ПОТОМ рвать шею. Без этого трюк молча
+    -- ничего не делает — что и объясняет, почему «просто лежу».
+    local function breakNeck()
+        local c = LocalPlayer.Character
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if not (c and hum) then return false end
+        -- 1) Снимаем защиты игры, иначе движок не считает потерю шеи смертью.
+        pcall(function() hum.RequiresNeck = true end)
+        pcall(function() hum.BreakJointsOnDeath = true end)
+        -- 2) Ищем шейный джойнт. R15: Head.Neck (Motor6D). R6: Torso.Neck (Motor6D/Weld).
+        -- Ищем по СВЯЗИ, а не по имени: движку важно, что джойнт соединяет Head с торсом,
+        -- и в дампе видно, что игра работает с обоими ригами (RigType R15 и Torso/UpperTorso).
+        local head = c:FindFirstChild("Head")
+        local killed = false
+        for _, d in ipairs(c:GetDescendants()) do
+            if d:IsA("JointInstance") or d:IsA("Motor6D") or d:IsA("Weld") then
+                local ok, p0, p1 = pcall(function() return d.Part0, d.Part1 end)
+                if ok and head and (p0 == head or p1 == head) then
+                    if pcall(function() d:Destroy() end) then killed = true end
+                end
+            end
+        end
+        return killed
+    end
+
+    -- Второй, НЕЗАВИСИМЫЙ путь форсировать смерть — падение в бездну.
+    -- В дампе игра сама держит void-монитор (SpawnServiceUtils:12-21):
+    --     VOID_MARGIN_STUDS = 50, VOID_CHECK_INTERVAL = 0.2
+    --     GetVoidThresholdY() = workspace.FallenPartsDestroyHeight - 50
+    -- В клиентских файлах GetVoidThresholdY НЕ вызывается ни разу — значит его вызывает
+    -- СЕРВЕРНЫЙ скрипт (серверных в дампе нет). То есть сервер каждые 0.2с проверяет, не упал
+    -- ли игрок ниже порога, и сам помечает Dead → respawn. Телепорт своего root part вниз
+    -- реплицируется (мы его владелец), поэтому этот путь тоже доступен с клиента.
+    local function dropToVoid()
+        local c = LocalPlayer.Character
+        local root = c and (c:FindFirstChild("HumanoidRootPart") or c.PrimaryPart)
+        if not root then return false end
+        local threshold = workspace.FallenPartsDestroyHeight - 50
+        return (pcall(function()
+            root.CFrame = CFrame.new(root.Position.X, threshold - 100, root.Position.Z)
+            root.AssemblyLinearVelocity = Vector3.new(0, -300, 0)
+        end))
+    end
+
     -- ═══════════════ [V113] ПОЧЕМУ RESPAWN НЕ РАБОТАЛ ═══════════════
     -- Ремоут и путь были верны — я это перепроверил по дампу:
     --   ReplicatedStorage/Remotes/SpawnRequest.RE существует и это RemoteEvent
@@ -1799,7 +1863,7 @@ return function(Lib, Core)
     -- БЕЗ таймаута — то есть скрипт навсегда висит на этой строке и НИКОГДА не доходит до
     -- своего кода. Весь respawnstuff (экран "RESTART YOUR HEART", 7 кликов, dorespawn) —
     -- мёртвый легаси, который не исполняется. Значит вся моя «находка» V116 и поиск
-    -- dorespawn через filtergc в V117 не могли сработать ни при каких условиях:
+    -- dorespawn через filtergc в V117 не могли сработать ни при каких ус��овиях:
     -- getRespawnRemote() всегда nil → фильтр по upvalue всегда nil.
     --
     -- ЖИВАЯ система респавна — другая:
@@ -1871,13 +1935,21 @@ return function(Lib, Core)
     -- вторым — прямой SpawnRequest:FireServer(), третьим — сигнал из whitelist.
     -- Возвращает вторым значением строку с тем, что реально сработало: без этого мы опять
     -- гадали бы, какой из путей доступен на твоём клиенте.
-    local function tryRespawnOnce()
+    -- [V120] ЭСКАЛАЦИЯ по номеру попытки. Смысл: сначала пробуем самое мягкое и быстрое —
+    -- подъём БЕЗ смерти. Если игра держит нас лежать (а она держит принудительно), переходим
+    -- к форсированию НАСТОЯЩЕЙ смерти, потому что только настоящая Humanoid.Died заставляет
+    -- сервер возродить нас с полным HP. Раньше я эскалации не делал вообще: долбил один и тот
+    -- же путь, который игра блокировала, и поэтому «просто лежал».
+    local function tryRespawnOnce(attempt)
         local via = {}
-        -- [V119] ПЕРВЫМ — движковый подъём (твой универсальный метод). Он не зависит от
-        -- механики игры и работает без смерти, поэтому это основной путь.
+        -- Шаг 1 (попытки 1-2): движковый подъём. Дёшево, без смерти, без респавна.
         if reviveViaHumanoidState() then via[#via + 1] = "GettingUp" end
-        -- Дальше — игровые пути, они нужны только если персонаж действительно мёртв
-        -- (Humanoid уничтожен/HP серверно в нуле) и поднимать уже нечего.
+        -- Шаг 2 (с попытки 3): форсируем настоящую смерть сломом шеи. Работает, потому что
+        -- RequiresNeck возвращаем в true — игра его снимала в RagdollService:361.
+        if attempt >= 3 and breakNeck() then via[#via + 1] = "neck" end
+        -- Шаг 3 (с попытки 6): бездна. Серверный void-монитор помечает Dead сам.
+        if attempt >= 6 and dropToVoid() then via[#via + 1] = "void" end
+        -- Игровые пути — только когда персонаж уже реально мёртв и поднимать нечего.
         if isTrulyDead() then
             if callGameRespawn() then via[#via + 1] = "_doRespawn" end
             if fireRespawn() then via[#via + 1] = "SpawnRequest" end
@@ -1909,20 +1981,24 @@ return function(Lib, Core)
 
     local function pushRespawnUntilAlive()
         local up = false
-        -- Ловим и настоящий респавн тоже: если сервер выдаст нового персонажа — это успех.
+        -- [V120] Настоящий респавн — это НОВЫЙ персонаж, поэтому CharacterAdded здесь главный
+        -- критерий успеха: слом шеи и бездна ведут именно к нему.
         local conn = LocalPlayer.CharacterAdded:Connect(function() up = true end)
         _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
-        local t0, via = os.clock(), ""
-        -- 3с вместо 10: подъём через state-машину мгновенный, ждать дольше нет смысла.
-        while not up and os.clock() - t0 < 3 do
-            local _, v = tryRespawnOnce()
-            if v ~= "" then via = v end
-            if isUpAgain() then up = true; break end
-            task.wait(0.15)             -- бьём часто: игра может переставить Ragdoll обратно
+        local t0, via, attempt = os.clock(), "", 0
+        -- 12с: слому шеи и void-монитору (0.2с у сервера) нужен реальный round-trip,
+        -- плюс сам респавн. 3с из V119 обрывали процесс на середине.
+        while not up and os.clock() - t0 < 12 do
+            attempt = attempt + 1
+            local _, v = tryRespawnOnce(attempt)
+            if v ~= "" then via = (via == "" and v or via .. ">" .. v) end
+            -- Успех считаем и по подъёму (если хватило мягкого шага), и по новому персонажу.
+            if isUpAgain() and attempt <= 2 then up = true; break end
+            task.wait(0.3)
         end
         if conn then conn:Disconnect() end
         _respawnDiag = (via == "" and "no path: no Humanoid to revive"
-            or ("via " .. via .. (up and " -> up" or " -> tried, still down")))
+            or ("via " .. via .. (up and " -> OK" or " -> failed in 12s")))
         return up
     end
 
@@ -2371,9 +2447,13 @@ return function(Lib, Core)
                 local c = LocalPlayer.Character
                 local hum = c and c:FindFirstChildOfClass("Humanoid")
                 local st = hum and tostring(hum:GetState()):gsub("^Enum.HumanoidStateType%.", "") or "no humanoid"
+                -- [V120] RequiresNeck/BreakJointsOnDeath — это ровно те защиты, что игра ставит
+                -- в RagdollService:360-361. Если тут false, слом шеи не убьёт, и это видно сразу.
                 notify("Respawn Diag", "state: " .. st
                     .. " | PlatformStand: " .. tostring(hum and hum.PlatformStand)
                     .. " | Downed: " .. tostring(c and c:GetAttribute("Downed"))
+                    .. " | RequiresNeck: " .. tostring(hum and hum.RequiresNeck)
+                    .. " | BreakJoints: " .. tostring(hum and hum.BreakJointsOnDeath)
                     .. " | last: " .. tostring(_respawnDiag))
             end,
         })
