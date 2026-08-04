@@ -708,7 +708,7 @@ return function(Lib, Core)
             and type(debug.getupvalue) == "function"
     end
 
-    -- ═══════════════════════════�����═══════════════════════════════════════════════
+    -- ═════════════════════════��═�����═══════════════════════════════════════════════
     -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хука task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
@@ -1023,7 +1023,7 @@ return function(Lib, Core)
     --     Поиск «первое число, равное 1.5» с равной вероятностью попадал в множитель
     --     вместо кулдауна, после чего driveDodge писал 1.5 не туда, а настоящий кулдаун
     --     уезжал в список «дедлайнов».
-    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся на то��ный порядок upvalue'ов из
+    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся на то����ный порядок upvalue'ов из
     -- дампа (Evasive.lua:508), проверяя ожидаемые значения по конфигу. Индексы:
     --   [15] ServerConfirmTimeout  [16] DashDuration  [22] DashSpeed
     --   [23] OutnumberedDashSpeedMultiplier  [24] OutnumberedDashDurationMultiplier
@@ -1665,32 +1665,16 @@ return function(Lib, Core)
     -- ChangeState(GettingUp) по ЗАПРЕЩЁННОМУ состоянию движок просто игнорирует. Поэтому
     -- порядок обязателен: сначала РАЗРЕШИТЬ GettingUp и снять Ragdoll/PlatformStand, и только
     -- потом менять состояние. Именно этого не хватало, чтобы «встать», а не «лежать и ждать».
-    local function reviveViaHumanoidState()
-        local c = LocalPlayer.Character
-        local hum = c and c:FindFirstChildOfClass("Humanoid")
-        if not hum then return false end
-        -- 1) Снимаем игровой замок Downed: без этого ChangeState ниже не даст ничего.
-        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true) end)
-        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false) end)
-        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
-        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Physics, false) end)
-        pcall(function() hum.PlatformStand = false end)
-        -- 2) Собственно подъём — то самое, что делает твой универсальный reset.
-        local ok = pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-        -- 3) MoveTo на текущую позицию: в разобранном скрипте это есть, и смысл в том, чтобы
-        -- сбросить залипшую цель ходьбы, иначе персонаж после подъёма может «уползать».
-        pcall(function()
-            local root = hum.RootPart or c:FindFirstChild("HumanoidRootPart")
-            if root then hum:MoveTo(root.Position) end
-        end)
-        return ok
-    end
+    -- [V121] Функция reviveViaHumanoidState УДАЛЕНА из пути респавна. Причина по твоему диагу:
+    -- её `pcall(ChangeState)` возвращал true даже когда состояние не менялось, и цикл респавна
+    -- принимал это за успех («via GettingUp -> OK» при state Running). И по сути: подъём даёт
+    -- ноги, но НЕ полное HP, а нужен именно новый персонаж. Разбор выше оставлен как история.
 
     -- ═══════ [V120] РЕАНИМАЦИЯ: КАК ОНА РЕАЛЬНО РАБОТАЕТ ═══════
     -- Ты сказал искать в интернете — нашёл, и это опровергает моё прежнее утверждение
     -- «Destroy с клиента не реплицируется». Механика reanimate-скриптов:
     -- удаление ДЖОЙНТОВ/частей локально РЕПЛИЦИРУЕТСЯ на сервер через network ownership
-    -- (клиент — владелец частей своего персонажа, поэтому сервер принимает их исчезновение).
+    -- (клиент — владелец частей своего персонажа, поэтому сервер принимает их и��чезновение).
     -- Именно поэтому разработчики защищаются серверными проверками «пропал ли core joint».
     -- Мой прошлый вывод был неверен: не реплицируется удаление ЧУЖИХ/серверных объектов,
     -- а свои части персонажа — реплицируются.
@@ -1934,22 +1918,29 @@ return function(Lib, Core)
     -- [V118] Первым идёт ЖИВОЙ _doRespawn игры (со сбросом залипшего _respawnInFlight),
     -- вторым — прямой SpawnRequest:FireServer(), третьим — сигнал из whitelist.
     -- Возвращает вторым значением строку с тем, что реально сработало: без этого мы опять
-    -- гадали бы, какой из путей доступен на твоём клиенте.
-    -- [V120] ЭСКАЛАЦИЯ по номеру попытки. Смысл: сначала пробуем самое мягкое и быстрое —
-    -- подъём БЕЗ смерти. Если игра держит нас лежать (а она держит принудительно), переходим
-    -- к форсированию НАСТОЯЩЕЙ смерти, потому что только настоящая Humanoid.Died заставляет
-    -- сервер возродить нас с полным HP. Раньше я эскалации не делал вообще: долбил один и тот
-    -- же путь, который игра блокировала, и поэтому «просто лежал».
+    -- гадали б��, какой из путей доступен на твоём клиенте.
+    -- ═══════ [V121] ТВОЙ ДИАГ ДОКАЗАЛ МОЮ ОШИБКУ В V119/V120 ═══════
+    -- На скриншоте: `state: Running | PlatformStand: false | last: via GettingUp -> OK`.
+    -- Это и есть ответ, почему «ничего не делает вообще»:
+    --   1) reviveViaHumanoidState() возвращал true всегда, когда есть Humanoid — pcall на
+    --      ChangeState успешен даже если состояние ничего не поменяло.
+    --   2) isUpAgain() возвращал true всегда, когда мы просто ЖИВЫ (state Running).
+    --   3) В pushRespawnUntilAlive стояло `if isUpAgain() and attempt <= 2 then up = true`.
+    -- Итог: на ПЕРВОЙ попытке цикл объявлял успех и выходил. До эскалации (шея с попытки 3,
+    -- бездна с 6-й) дело не доходило НИКОГДА. Скрипт честно писал «OK» и не делал ничего.
+    --
+    -- Плюс концептуальная ошибка: «подъём» и «респавн» — разные вещи. GettingUp максимум
+    -- поднимает на ноги с тем же HP, а тебе нужен НОВЫЙ персонаж с полным HP. Поэтому из
+    -- пути респавна GettingUp убран совсем: респавн = форсировать НАСТОЯЩУЮ смерть и дать
+    -- серверу возродить нас. Слом шеи идёт сразу с 1-й попытки, без разогрева.
     local function tryRespawnOnce(attempt)
         local via = {}
-        -- Шаг 1 (попытки 1-2): движковый подъём. Дёшево, без смерти, без респавна.
-        if reviveViaHumanoidState() then via[#via + 1] = "GettingUp" end
-        -- Шаг 2 (с попытки 3): форсируем настоящую смерть сломом шеи. Работает, потому что
-        -- RequiresNeck возвращаем в true — игра его снимала в RagdollService:361.
-        if attempt >= 3 and breakNeck() then via[#via + 1] = "neck" end
-        -- Шаг 3 (с попытки 6): бездна. Серверный void-монитор помечает Dead сам.
-        if attempt >= 6 and dropToVoid() then via[#via + 1] = "void" end
-        -- Игровые пути — только когда персонаж уже реально мёртв и поднимать нечего.
+        -- Шаг 1 (сразу): слом шеи. RequiresNeck возвращаем в true — игра снимает его в
+        -- RagdollService:361, и именно поэтому раньше трюк не убивал.
+        if breakNeck() then via[#via + 1] = "neck" end
+        -- Шаг 2 (с попытки 4, ~1.2с): бездна. Серверный void-монитор (0.2с) помечает Dead сам.
+        if attempt >= 4 and dropToVoid() then via[#via + 1] = "void" end
+        -- Шаг 3: когда смерть уже случилась — просим игру заспавнить нас.
         if isTrulyDead() then
             if callGameRespawn() then via[#via + 1] = "_doRespawn" end
             if fireRespawn() then via[#via + 1] = "SpawnRequest" end
@@ -1962,22 +1953,10 @@ return function(Lib, Core)
     -- ФАКТ («_doRespawn не найден», «пути есть, но персонаж не пришёл»), а не мои гипотезы.
     local _respawnDiag = "not attempted yet"
 
-    -- [V119] Поднялись ли мы. Критерий — НЕ CharacterAdded (новый персонаж приходит только
-    -- при настоящем респавне), а выход из лежачего состояния: GettingUp/подъём означает, что
-    -- мы снова управляем персонажем. Прежний код ждал CharacterAdded все 10 секунд и потому
-    -- всегда «истекал», даже когда подъём фактически удался.
-    local function isUpAgain()
-        local c = LocalPlayer.Character
-        local hum = c and c:FindFirstChildOfClass("Humanoid")
-        if not hum then return false end
-        if hum.PlatformStand == true then return false end
-        if c:GetAttribute("Downed") == true then return false end
-        local st = hum:GetState()
-        return st ~= Enum.HumanoidStateType.Physics
-            and st ~= Enum.HumanoidStateType.Ragdoll
-            and st ~= Enum.HumanoidStateType.FallingDown
-            and st ~= Enum.HumanoidStateType.Dead
-    end
+    -- [V121] isUpAgain() УДАЛЁН. Он был причиной «ничего не делает»: возвращал true при любом
+    -- живом персонаже (state Running), из-за чего первая же попытка считалась успешной.
+    -- Единственный честный признак респавна — CharacterAdded: сервер выдаёт НОВУЮ модель.
+    -- Ниже критерий успеха только он, поэтому ложного «OK» больше быть не может.
 
     local function pushRespawnUntilAlive()
         local up = false
@@ -1992,13 +1971,14 @@ return function(Lib, Core)
             attempt = attempt + 1
             local _, v = tryRespawnOnce(attempt)
             if v ~= "" then via = (via == "" and v or via .. ">" .. v) end
-            -- Успех считаем и по подъёму (если хватило мягкого шага), и по новому персонажу.
-            if isUpAgain() and attempt <= 2 then up = true; break end
+            -- [V121] Никаких «успехов» по состоянию Humanoid'а: выходим ТОЛЬКО по
+            -- CharacterAdded (up ставится в обработчике выше). Именно ложный выход по
+            -- isUpAgain() и делал функцию пустышкой.
             task.wait(0.3)
         end
         if conn then conn:Disconnect() end
-        _respawnDiag = (via == "" and "no path: no Humanoid to revive"
-            or ("via " .. via .. (up and " -> OK" or " -> failed in 12s")))
+        _respawnDiag = (via == "" and "no path: no Humanoid / no neck joint found"
+            or ("via " .. via .. (up and " -> respawned" or " -> no CharacterAdded in 12s")))
         return up
     end
 
