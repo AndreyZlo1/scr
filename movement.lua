@@ -284,7 +284,7 @@ return function(Lib, Core)
         return dir.Unit
     end
 
-    -- ═══════════════════════════════ SPEED ══════════════════════════════════
+    -- ═════════════���═════════════════ SPEED ══════════════════════════════════
     -- CFrame  → shift the root by moveVec*speed*dt (positional, beats the WalkSpeed
     --           anti-cheat since WalkSpeed itself is untouched).
     -- Velocity→ set horizontal AssemblyLinearVelocity, keep gravity on Y.
@@ -846,7 +846,7 @@ return function(Lib, Core)
     --      (CombatConfig:120) против AttackDuration = 0.45 — это и есть «долгая» задержка
     --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
     --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
-    -- V112 закрывал только путь (1), поэтому путь (2) продолжал держ��ть комбо. Симптом
+    -- V112 закрывал только путь (1), поэтому путь (2) продолжал держ����ть комбо. Симптом
     -- «после последнего удара долгая задержка» описывал ровно это.
     --
     -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
@@ -1010,7 +1010,7 @@ return function(Lib, Core)
     -- Dodge Everywhere: driveDodge ставит атрибут OutnumberedEvasiveGrant = true, из него
     -- получается u51 (Evasive.lua:529-531). Итог: слайдер стоит на вани*льных 30, а дэш
     -- летит 30 × 1.5 = 45 studs/s и длится на 20% дольше. Никакой «утечки» скорости не
-    -- было — игра штатно применяла бонус «в меньшинстве», просто мы са��и его и включали.
+    -- было — игра штатно применяла бонус «в меньшинстве», просто мы ��а��и его и включали.
     -- Решение (выбрано пользователем): при активном Dodge зануляем множитель до 1.0, так
     -- что слайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
     --
@@ -1584,47 +1584,92 @@ return function(Lib, Core)
     -- Убить себя обычным способом тоже нельзя: Health серверный, а штатную кнопку
     -- Roblox Reset игра отключает (CoreGuiPolicy.lua:109 SetCore("ResetButtonCallback", false)).
     --
-    -- РАБОЧИЙ ПУТЬ — ПУСТОТА. Позиция персонажа, в отличие от здоровья, принадлежит
-    -- КЛИЕНТУ (physics ownership), и игра сама рассчитывает на смерть в пустоте:
-    --   SpawnServiceUtils.lua:19  GetVoidThresholdY() = workspace.FallenPartsDestroyHeight
-    --                                                   - VOID_MARGIN_STUDS (50)
-    --   SpawnServiceUtils.lua:16  VOID_CHECK_INTERVAL = 0.2
-    -- В клиентском дампе эти константы не читает НИКТО — значит монитор пустоты серверный
-    -- (серверных скриптов в дампе нет, это вывод из отсутствия клиентских читателей).
-    -- Плюс ниже FallenPartsDestroyHeight персонажа удаляет сам движок Roblox. Оба пути
-    -- ведут к настоящей, легальной для сервера смерти — после неё SpawnRequest принимается.
+    -- ═══════ [V114] ПУСТОТА БЫЛА НЕВЕРНЫМ ПОДХОДОМ — НУЖЕН ЭКСПЛОИТ ════════
+    -- V113 пытался «умереть по правилам игры»: телепорт ниже FallenPartsDestroyHeight, чтобы
+    -- сработал монитор пустоты. Не сработало, и это объяснимо — я опирался на вывод, а не на
+    -- факт. Порог пустоты (SpawnServiceUtils.lua:19) в клиентском дампе не читает никто, то
+    -- есть монитор серверный, и он вправе просто вернуть персонажа назад или вообще
+    -- игнорировать телепорт: серверу позиция клиента не указ, он её валидирует. Плюс это
+    -- медленно (интервал проверки 0.2с) — «моментально» так не получится.
     --
-    -- Поэтому «Respawn Now» теперь: мёртв → сразу ремоут; жив → падение в пустоту, ждём
-    -- признания смерти, затем ремоут. Никакого нового тумблера это не потребовало.
+    -- ПРАВИЛЬНЫЙ ПУТЬ — ЭКСПЛОИТ РЕПЛИКАЦИИ СИГНАЛА, а не механика игры.
+    -- У Roblox есть whitelist сигналов, которые КЛИЕНТ вправе поднять НА СЕРВЕРЕ. В нём
+    -- лежит `Player.Kill`. Документация Potassium (signal.md, replicatesignal) даёт ровно
+    -- наш случай как пример «Example without arguments»:
+    --        local player = game.Players.LocalPlayer
+    --        replicatesignal(player.Kill)   -- "This example will kill the LocalPlayer."
+    -- Это настоящая серверная смерть, мгновенная и не требующая ни урона, ни падения,
+    -- ни разрешения игры. Именно поэтому обходятся оба прежних тупика: и серверный Health,
+    -- и отключённая кнопка Reset (CoreGuiPolicy.lua:109).
+    --
+    -- ВАЖНО ПРО ПОРЯДОК: авто-респавна в игре НЕТ (в SpawnServiceClient нет ни одного
+    -- слушателя Humanoid.Died, ни CharacterAutoLoads), поэтому после смерти обязателен
+    -- SpawnRequest. Отсюда цепочка: Kill → ждём флаг Dead → SpawnRequest.
+    -- Ремоут дёргаем НАПРЯМУЮ, а не через _doRespawn: тот выходит, если нет UI смерти или
+    -- если уже _respawnInFlight (SpawnServiceClient.lua:401).
     local _respawnBusy = false
-    local function voidSelf()
-        local c = LocalPlayer.Character
-        local hrp = c and c:FindFirstChild("HumanoidRootPart")
-        if not hrp then return false end
-        -- Берём запас ниже ОБОИХ порогов: и порога пустоты игры, и высоты удаления частей
-        -- движком. 100 студов вниз от FallenPartsDestroyHeight перекрывает margin в 50.
-        local y = workspace.FallenPartsDestroyHeight - 100
-        local ok = pcall(function()
-            -- PivotTo двигает всю модель целиком; отдельная запись CFrame корня оставила бы
-            -- части сборки позади и падение могло не зарегистрироваться как смерть.
-            c:PivotTo(CFrame.new(hrp.Position.X, y, hrp.Position.Z))
-        end)
-        return ok
+
+    -- Достаём сигнал Kill безопасно: в отдельных версиях клиента свойства может не быть,
+    -- и тогда простое обращение LocalPlayer.Kill выбросит ошибку.
+    local function getKillSignal()
+        local ok, sig = pcall(function() return LocalPlayer.Kill end)
+        if ok and typeof(sig) == "RBXScriptSignal" then return sig end
+        return nil
     end
+
+    -- Есть ли рабочий эксплоит смерти. Проверяем ИМЕННО через cansignalreplicate: без него
+    -- мы бы гадали, лежит ли Kill в whitelist'е у этой сборки executor'а/Roblox.
+    -- Результат кэшируем: он не меняется в течение сессии (executor и whitelist Roblox
+    -- статичны), а Auto Respawn зовёт это каждый кадр — без кэша мы бы вызывали
+    -- cansignalreplicate 60 раз в секунду впустую.
+    local _canKill = nil
+    local function canKillSelf()
+        if _canKill ~= nil then return _canKill end
+        -- Пишем В КЭШ, а не просто return: иначе положительный результат терялся бы и
+        -- проверка выполнялась заново каждый кадр (ровно то, от чего кэш и заводился).
+        _canKill = false
+        if type(replicatesignal) ~= "function" then return _canKill end
+        local sig = getKillSignal()
+        if not sig then return _canKill end
+        if type(cansignalreplicate) == "function" then
+            local ok, res = pcall(cansignalreplicate, sig)
+            if ok then _canKill = (res == true); return _canKill end
+        end
+        -- cansignalreplicate может отсутствовать — тогда просто пробуем.
+        _canKill = true
+        return _canKill
+    end
+
+    local function killSelf()
+        local sig = getKillSignal()
+        if not sig then return false end
+        return (pcall(replicatesignal, sig))
+    end
+
     -- Единая точка входа. Возвращает true, если запрос реально начат.
     local function requestRespawn()
         if isDeadOrDowned() then return fireRespawn() end
         if _respawnBusy then return false end
         if not getSpawnRemote() then return false end
-        if not voidSelf() then return false end
+        -- Проверку ставим ДО killSelf: без неё Auto Respawn на executor'е без replicatesignal
+        -- звал бы pcall(replicatesignal, …) каждый кадр вхолостую. canKillSelf кэширован.
+        if not canKillSelf() then return false end
+        if not killSelf() then return false end
         _respawnBusy = true
         task.spawn(function()
-            -- Ждём, пока смерть подтвердится сервером. Интервал монитора пустоты 0.2с,
-            -- поэтому опрашиваем в том же темпе; 8с — потолок, чтобы не висеть вечно.
+            -- Смерть серверная, подтверждение приходит по репликации атрибута — это один
+            -- сетевой round-trip, поэтому опрашиваем часто (каждый кадр физики), чтобы
+            -- respawn ушёл в первый же возможный момент. 5с — потолок, чтобы не висеть.
             local t0 = os.clock()
-            while os.clock() - t0 < 8 do
-                if isDeadOrDowned() then fireRespawn(); break end
-                task.wait(0.2)
+            while os.clock() - t0 < 5 do
+                if isDeadOrDowned() then
+                    -- Сбрасываем троттлинг: fireRespawn держит паузу 3с между отправками,
+                    -- но здесь смерть только что случилась и запрос обязан уйти сразу.
+                    _lastRespawnFire = 0
+                    fireRespawn()
+                    break
+                end
+                PostStep:Wait()
             end
             _respawnBusy = false
         end)
@@ -2020,13 +2065,17 @@ return function(Lib, Core)
                 if not getSpawnRemote() then
                     notify("Respawn", "SpawnRequest remote not found"); return
                 end
-                -- [V113] requestRespawn: мёртв → ремоут, жив → пустота, затем ремоут.
+                -- [V114] Мёртв → сразу ремоут. Жив → эксплоит Player.Kill, затем ремоут.
+                -- Проверяем canKillSelf ОТДЕЛЬНО, чтобы не врать «отправлено», когда у
+                -- executor'а нет replicatesignal или Kill не в whitelist'е.
                 if isDeadOrDowned() then
-                    notify("Respawn", requestRespawn() and "Request sent"
+                    notify("Respawn", requestRespawn() and "Respawning"
                         or "Too soon, wait a couple of seconds")
+                elseif not canKillSelf() then
+                    notify("Respawn", "replicatesignal(Player.Kill) unavailable on this executor")
                 else
-                    notify("Respawn", requestRespawn() and "Dropping into the void, then respawning"
-                        or "Could not start, try again")
+                    notify("Respawn", requestRespawn() and "Killing, then respawning"
+                        or "Already in progress")
                 end
             end,
         })
@@ -2036,7 +2085,7 @@ return function(Lib, Core)
         slider(sResp, { Name = "HP Threshold", Flag = "MV_AutoRespawnHP",
             Default = Config.AutoRespawn_HP, Min = 0, Max = 99, Suffix = "%",
             Callback = function(v) Config.AutoRespawn_HP = v end })
-        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} alive respawn goes through the void" })
+        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} instant reset via replicatesignal(Player.Kill)" })
 
         uiReady = true
     end
