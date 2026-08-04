@@ -1,4 +1,5 @@
--- ИЗМЕНЕНО: 2026-07-17 02:21:20 UTC | AutoParry V74 | hitbox-driven dodge + Boxing M2 timing
+-- ИЗМЕНЕНО: 2026-08-04 UTC | AutoParry V140 | counter/dodge overlap, swing-anim guard, strict proof
+-- Версия для логов живёт в Config.Version (строка ~22) — правь ТАМ, шапка тут только для людей.
 -- AutoParry (Potassium) — combat autoparry / desync / boxing-counter
 -- Luraph macros: string-key PRELUDE only. Bare `function LPH_*` / `if not LPH_OBFUSCATED`
 -- aborts or miscompiles Luraph and leaves hot paths virtualized (50-200x slower → freeze).
@@ -19,6 +20,13 @@ do
 	end
 end
 local Config = {
+	-- [V140] ЕДИНСТВЕННЫЙ ИСТОЧНИК ВЕРСИИ. Раньше строка версии была захардкожена в шапке диага
+	-- ("===== AUTOPARRY V74 DIAG ====="), её никто не обновлял, и КАЖДЫЙ лог приходил помеченным
+	-- V74 независимо от реальной версии кода. Это не косметика: по такому логу невозможно
+	-- понять, воспроизведён баг до или после правки, и я сам на этом ошибся — принял свежий
+	-- лог за старый. Держим версию в Config и подставляем в диаг, чтобы расхождение было
+	-- невозможно физически.
+	Version       = "V140",
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
 
@@ -207,7 +215,7 @@ local Config = {
 	-- Дэш уже даёт i-frames [180,480] — передоджить во время дэша бессмысленно.
 	ExposedEscapeAttackOnly = true,
 	-- [V117] outnumbered-escape (бесплатный грант-эвейд в меньшинстве) НЕ жжём на ОДИНОЧНЫЙ
-	-- блокируемый уда�� �� его надёжнее спарировать. Грант тратим только если реально НЕ можем блокнуть
+	-- блокируемый у����а�� �� его надёжнее спарировать. Грант тратим только если реально НЕ можем блокнуть
 	-- ИЛИ это мультиугроза (2+ контакта в окне, одним блоком не покрыть).
 	OutnumberEscapePreferBlock = true,
 	DashSpeed     = 30,
@@ -357,7 +365,7 @@ local Config = {
 	AP_InterruptMargin= 0.055,  -- наш ожидаемый hit должен опередить вражеский минимум на 55мс
 	AP_InterruptNetK  = 0.50,   -- ServerCheck идёт к серверу примерно за половину RTT
 	AP_BaseReach      = 5.5,    -- базовый реч нашего M1 (ForwardOffset 4 + запас), студы
-	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по росту
+	AP_RefHeight      = 5.5,    -- эталон высоты модели для масштаба реча по ��осту
 	-- ── [V139] M2 В INTERRUPT ────────────────────────────────────────────────────────────────
 	-- Interrupt раньше знал ровно один инструмент — M1. Когда M1 не успевал, скрипт уходил в
 	-- парри, хотя M2 нередко была и доступна, и объективно лучше: BaseDamage 8.5 против 5,
@@ -370,6 +378,14 @@ local Config = {
 	-- Для M2 с i-frames гонку выигрывать НЕ надо: достаточно поднять неуязвимость до контакта,
 	-- поэтому дедлайн здесь — только сетевое плечо + этот запас, а не наш hitbox delay.
 	AP_M2IFrameMargin    = 0.035,
+	-- [V140] ЛОКАЛЬНЫЙ ГАРД ПЕРЕЗАПУСКА СВИНГ-АНИМАЦИИ. В норме повтор держит серверный атрибут
+	-- "M1" через canAttack, но при десинке/anti-autoparry сервер его не ставит, и трек
+	-- рестартился каждые 80мс → видимое дёрганье. Гард чисто клиентский, поэтому работает
+	-- именно там, где штатный гейт отваливается.
+	AP_AnimGuard    = true,
+	AP_AnimMinFrac  = 0.55,   -- доля длины трека, после которой перезапуск допустим
+	AP_AnimGuardCap = 0.30,   -- жёсткий потолок паузы (сек), чтобы не терять темп добивания
+	AP_AnimFallback = 0.45,   -- если длина трека недоступна: AttackDuration из дампа
 	-- [V107] РЕЙТ СВОЕГО M1. Раньше fireM1Custom слал через CombatRemoteClient.Fire, а тот держит
 	-- ClientSustainedMaxPerSecond["M1.ServerCheck"]=4 с ФРОНТ-ЛОАД окном: 4 свинга по 0.08с подряд,
 	-- потом ТИШИНА до конца 1-сек окна. Отсюда: (1) не быстрее 4/с, (2) ан��мация не успевает
@@ -462,6 +478,10 @@ local Config = {
 	-- are ignored while a genuine attack (whose attribute lands late) is still parried.
 	ServerProofGate = true,
 	ProofGraceSec   = 0.06,      -- press anyway once this close to contact, proven or not
+	-- [V140] Модельный атрибут M1/M2/CombatAttacking считается доказательством только если им
+	-- ещё не «владеет» другая живая угроза того же врага. Иначе одиночный фейк, подмешанный в
+	-- окно настоящего свинга, наследовал чужое доказательство и проезжал гейт.
+	ProofEdgeTrigger = true,
 	-- [V91.1] Parry timestamp spoof. Block.Activated carries a CLIENT-chosen server-time stamp
 	-- and nothing clamps it client-side, so a late parry can be back-dated into the 0.125s
 	-- perfect window. Off by default — flip it on and creep TimeShiftMs up.
@@ -535,7 +555,7 @@ local Config = {
 	FaceLerp      = 0.80,   -- [V70] быстрее трекинг между атакующими в замесе
 	FaceLeadWindow= 0.30,
 	FaceGoodDot   = 0.55,
-	-- [V91] ПРЕДИКТ РОТАЦИИ автофейса: целимся чуть НАПЕРЁД движения врага (ведём его
+	-- [V91] ПРЕДИКТ РОТАЦИИ автофейса: целимся чуть НАПЕРЁД движения в��ага (ведём его
 	-- позицию по скорости на FaceLead сек), чтобы facing не отставал от ст��ейфа/забегания
 	-- за спину. Держим предикт малым (иначе перелёт при резкой смене направления).
 	FaceLead      = 0.07,   -- сек упреждения по скорости врага
@@ -559,7 +579,7 @@ local Config = {
 	-- [V69] БЛОК НЕНАПРАВЛЕННЫЙ (доказано дампом: attacker M1 проверяет то��ько
 	-- атрибут Blocking жертвы; Block-модуль — только PerfectBlocking; VictimHitbox —
 	-- лишь попадание в бокс. НИГДЕ нет dot/LookVector/угла на стороне жертвы). Значит
-	-- один guard прикрывает всех атакующих со всех сторон, и доворачиваться к врагу
+	-- один guard прикрывает ��сех атакующих со всех сторон, и доворачиваться к врагу
 	-- РАДИ БЛОКА не нужно. Из этого:
 	--  1) мультитаргет: одно нажатие покрывает всех в окне — не теряем "перебитых EDF";
 	--  2) поворот: делаем дешёвый ЧАСТИЧНЫЙ доворот к центроиду угроз (не жёсткий снап
@@ -595,11 +615,14 @@ local Config = {
 	-- Drawing) = САМАЯ дорогая всегда-активная работа. Кап 60 → дровинги живут между апдейтами
 	-- (не скрываются), ESP визуально гладкий, а нагрузк�� на высоком fps падает вдвое+.
 	VizMaxFPS     = 60,
-	-- [V139] Авто-деградация ESP. VizMaxFPS режет нагрузку только когда игра БЫСТРЕЕ кэпа; при
+	-- [V139] Авто-��еградация ESP. VizMaxFPS режет нагрузку только когда игра БЫСТРЕЕ кэпа; при
 	-- просадке полная перерисовка платилась каждый кадр и усугубляла ту самую просадку.
 	VizAutoDegrade   = true,
 	VizFrameShare    = 1.5,   -- минимальный интервал перерисовки = frameDt · это (на 20 FPS ≈ 2 кадра)
 	VizSkipNearPress = 0.20,  -- сек до/после press-дедлайна: кадр отдаём защите, ESP не рисуем
+	-- [V140] Потолок ПОДРЯД идущих пропусков. Без него затяжное окно угроз (или залипшая метрика)
+	-- гасит ESP на неопределённый срок — визуалы «замерзают» на последнем кадре.
+	VizSkipMaxFrames = 2,
 	Debug         = true,
 
 	Key_Toggle    = Enum.KeyCode.K,
@@ -768,7 +791,7 @@ local Pending = {}
 -- [V139/PERF] Два независимых источника фриза «на сбросе кэша» жили ЗДЕСЬ:
 --   1) drop = cap/4 при cap=4000 → раз в 1000 пушей делался table.move ~3000 строк + 1000
 --      присваиваний nil. Это один длинный синхронный кусок работы ВНУТРИ боевого кадра: ровно
---      тот «фриз при сбросе кэша», который видно на глаз. Теперь сбрасываем ПОЛОВИНУ: та же
+--      тот «фри�� при сбросе кэша», который видно на глаз. Теперь сбрасываем ПОЛОВИНУ: та же
 --      амортизация O(1) на пуш, но событие реже (раз в cap/2) и сам move вдвое короче.
 --   2) DIAG_MAX=4000 + DESYNC_MAX=3000 = до 7000 отформатированных строк (~1.2МБ) висят в
 --      памяти ДО конца сессии и никогда не отдаются GC. Это и есть «мемори лик»: не утечка
@@ -888,6 +911,10 @@ local V93 = {
 	-- [V139] сколько времени осталось до ближайшего press-дедлайна (сек, из прошлого кадра).
 	-- Читает vizGate в RenderStepped: пока идёт защита, ESP не отбирает бюджет кадра.
 	nearPress = math.huge,
+	-- [V140] Клок последней записи nearPress. Значение пишется на Heartbeat, а читается на
+	-- RenderStepped — без метки возраста потребитель не может отличить «press реально рядом»
+	-- от «планировщик давно не обновлял метрику», и второй случай замораживал ESP навсегда.
+	nearPressStamp = 0,
 	vizLast   = 0,    -- клок последней перерисовки ESP
 	pingBuf   = {},   -- кольцевой буфер сырых сэмплов (сек)
 	pingBufN  = 0,    -- сколько сэмплов накоплено (≤ PingWindow)
@@ -940,7 +967,7 @@ local V93 = {
 -- устойчивый RTT: один спайк-кадр среди 24 сэмплов НЕ сдвигает медиану, а реально выросший пинг
 -- поднимает её за <1с. Это принципиальная оценка центральной тенденции, не костыль и не обучение.
 -- [V111] PERF: getPing() зовётся из uplink() (schedulerStep) И applyFacing (RenderStepped) каждый
--- кадр → мемоизируем: новый сырой сэмпл кладём не чаще PingSampleGap, медиану пересчитываем только
+-- кадр → мемоизируем: новый сырой сэмпл кладём не ча��е PingSampleGap, медиану пересчитываем только
 -- при добавлении сэмпла, между добавлениями отдаём кэш.
 local function getPing()
 	local nowc = os.clock()
@@ -984,7 +1011,7 @@ local function uplink()
 	return up
 end
 
--- [V116] Адаптивный корректор контакта УДАЛЁН. Отравлял между врагами: меди��на predErr копилась
+-- [V116] Ада��тивный корректор контакта УДАЛЁН. Отравлял между врагами: меди��на predErr копилась
 -- по (kind,style), но реальная ошибка доминируется ПИНГОМ конкретного игрока и выбросами (held-
 -- анимации) ���� обучившись на одном враге, скрипт ломал тайминг по вто��ому. Предикт снова чисто
 -- математический (таймлайн анимации + живой TimePosition), ResidByKS теперь только диагностика.
@@ -1447,7 +1474,7 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 			if latVec.Magnitude > latCap then latVec = latVec.Unit * latCap end
 			-- [V109] КОРЕНЬ High-бага «враг подходит и бьёт — скрипт не вовремя, как будто вне
 			-- радиуса»: closeAmt капился жёстко WillHitCloseCap(6.5). Реально ВБЕГАЮЩИЙ враг за
-			-- время замаха (tHit до ~0.45с при скорости бега 16-28 студ/с) закрывает 8-12 студов —
+			-- время замаха (tHit до ~0.45с при скорости бега 16-28 ст��д/с) закрывает 8-12 студов —
 			-- 6.5 обрезал → predA НЕ доводился до нас → geom-бокс мимо → willHitMe=false → NO-PRESS,
 			-- а когда враг физически в радиусе, контакт уже неминуем → LATE. Поднял cap до 12. НО
 			-- предикт НЕ должен «проскакивать» за нас (иначе центр бокса уедет за спину) → clamp
@@ -2123,7 +2150,7 @@ end
 --     т.е. атакующий ГАРАНТИРОВАННО доезжает вперёд ровно `studs` за время замаха.
 --   Вызовы: M1_ModuleScript ApplyM1StepForward(style, char, combo) на старте свинга,
 --           M2_ModuleScript ApplyM2StepForward(style, char).
---   Студы: GetStyleM1StepForwardStuds(style, comboIdx) / GetStyleM2StepForwardStuds(style).
+--   ��туды: GetStyleM1StepForwardStuds(style, comboIdx) / GetStyleM2StepForwardStuds(style).
 --   Ali: M1StepForwardStuds={[1]=1.5,[3]=1.5}, M2StepForwardStuds=2.
 -- Почему это ломало распознавание: willHitMe в High сравнивает dist2d <= forward+halfD+HighReachPad.
 -- forward брался ТОЛЬКО из GetStyleHitboxForwardOffset (Ali M1 = 4.3), а лунж не учитывался вовс��.
@@ -2581,7 +2608,7 @@ end
 --   id  = (deg == nil или -112.5 < deg <= 67.5) and "Left" or "Right"
 -- Т.е. вариант определяется НАПРАВЛЕНИЕМ ДВИЖЕНИЯ и считается одинаково на клиенте и сервере
 -- (в Fire("M2","ServerCheck") вариант НЕ передаётся — сервер резолвит его сам из
--- реплицированного Humanoid.MoveDirection). Значит мы можем его ВЫБИРАТЬ:
+-- реплицированного Humanoid.MoveDirection). Значит мы можем ег�� ВЫБИРАТЬ:
 --   Right (нужно deg>67.5): двигаться ВПРАВО → dir = HRP.RightVector (deg=+90)
 --   Left  (нужно deg<=67.5): двигаться ВПЕРЁД → dir = HRP.LookVector (deg=0)
 -- Humanoid:Move(dir, false) задаёт MoveDirection на кадр, поэтому переутверждаем его короткое
@@ -2748,11 +2775,28 @@ local function counterCandidate(now)
 		or (Config.BoxingCounterReach or 5.5)
 	local myPos = myHRP.Position
 	local best, bestDist
+	-- [V140/BUG] КОНТРА И ДОДЖ СРАБАТЫВАЛИ ОДНОВРЕМЕННО. Раньше этот перебор брал ЛЮБУЮ живую
+	-- угрозу, включая unblockable-грэбы (Wrestling M2 и прочий must-dodge список). Но такие
+	-- угрозы идут СВОИМ путём: ветка must-dodge на строке ~4700 обязана дать додж и СОЗНАТЕЛЬНО
+	-- не спрашивает counterPreemptsDodge («unblockable grabs still always dodge»). Итог в логе:
+	--   COUNTER t=17944.96 king_gng2 M2 dist=4.1 (instant M2)
+	--   DODGE   t=17945.23 must-dodge(unblockable→back) [GRANT]
+	-- то есть мы платили M2 (кулдаун ~7с) И тут же уходили в додж. Контра там бесполезна вдвойне:
+	-- у грэба M2GrantsHyperArmor, поэтому наш M2 его физически НЕ прерывает, а i-frames доджа
+	-- и так закрывают весь размен. Уводим must-dodge из кандидатов: у него есть свой обработчик.
+	local mustDodgeFn = State.isMustDodge
 	for i = 1, #Threats do
 		local th = Threats[i]
 		local aHRP = th.attackerHRP
 		-- «враг атаковал» = активная угроза (свинг задетекчен) и контакт ещё не прошёл давно.
+		-- [V140/BUG] ВТОРАЯ ПОЛОВИНА ТОЙ ЖЕ ПРОБЛЕМЫ — обратный порядок событий. Раньше здесь
+		-- стояло только `not th.dodged`, но при выдаче доджа угроза помечается `coveredByDodge`
+		-- (строки ~4788 и ~4812), а `dodged` там НЕ выставляется — его ставит лишь ветка 4284.
+		-- Поэтому угроза, уже закрытая i-frames доджа, оставалась валидным кандидатом на контру,
+		-- и мы били M2 поверх собственного уворота. Проверяем оба флага.
 		if aHRP and aHRP.Parent and not th.feinted and not th.dodged
+		   and not th.coveredByDodge
+		   and not (mustDodgeFn and mustDodgeFn(th))
 		   and (th.contactAbs - now) > -0.15 then
 			local dx, dz = myPos.X - aHRP.Position.X, myPos.Z - aHRP.Position.Z
 			local dist = math.sqrt(dx * dx + dz * dz)
@@ -2849,6 +2893,11 @@ local function isMustDodge(th)
 	end
 	return false
 end
+-- [V140] Публикуем на State, чтобы counterCandidate (объявлен ВЫШЕ) мог отфильтровать
+-- must-dodge угрозы. Через State, а не forward-declare: в этом чанке лимит Luau 200 локалов
+-- на функцию уже поджимает (см. комментарий про do-block у визуалов), новый top-level local
+-- добавлять нельзя.
+State.isMustDodge = isMustDodge
 
 -- ============================ AutoPlay addon (V99) ============================
 -- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Фа��ты из ��ампа (CombatConfig.ClientPredict.M1):
@@ -2889,7 +2938,7 @@ State.ap = {
 	getSpeed   = nil,    -- getFinalM1AnimSpeed(char, combo)
 	playSwing  = nil,    -- playM1SwingAnimation(char, combo, spd, false)
 	nextM1At   = 0,      -- анти-спам ПОЛЛА (сам tryM1 гейтит настоящий рей�� по AttackDuration 0.45с)
-	punishTgt  = nil,    -- модель врага, которого добиваем после ��арри
+	punishTgt  = nil,    -- модель врага, которого добива��м после ��арри
 	punishUntil= 0,      -- докуда действует окно добивания (по времени стана)
 	punishFresh= false,  -- первый post-parry свинг обходит sustained cadence, но не server min-gap
 	busyAttrs = {
@@ -2905,7 +2954,7 @@ State.ap = {
 -- и шлёт ServerCheck с ПРАВИЛЬНЫМ внутренним swingId u25. Никаких задержек/hold — мгновенно и легит.
 -- tryM1 возвращает true, если свинг реально прошёл (у н��с есть точный сигнал успеха).
 -- Прежний прямой ServerCheck с выдуманным id сервер игнорировал (нет анимации/сессии). Hold-эмуляция
--- тоже плоха — она ждёт серверный hold-хендшейк (встроенная задержка). Модули в Hidden →
+-- тоже плоха — она ждёт серверный hold-хендшейк (вст��оенная задержка). Модули в Hidden →
 -- (1) путь-require, (2) глубокий поиск, (3) filtergc по ключам. tryM1 достаём debug.getupvalue.
 function State.ap.getM1()
 	if State.ap.m1 then return State.ap.m1 end
@@ -2945,7 +2994,7 @@ function State.ap.getM1()
 			if type(fn) == "function" then State.ap.tryM1Fn = fn end
 		end)
 			-- [V105] РАЗМЕТКА через ЯКОРЬ CombatRemoteClient. Прежний поиск «первый int в [0,4]»
-			-- был НЕВЕРЕН: u32/u33 (parry/block-lockout timestamps) на старте = 0 → попадали под
+			-- был НЕВ��РЕН: u32/u33 (parry/block-lockout timestamps) на старте = 0 → попадали под
 			-- фильтр и comboIdx резолвился в u32, а от него все смещения съезжали → fireOK=false и
 			-- combo Fixed не работал. CombatRemoteClient — ЕДИНСТВЕННЫЙ upvalue-table с полем .Fire
 			-- (function), поэтому это надёжный якорь. О�� него все индексы — фиксированным смещением,
@@ -3045,12 +3094,26 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		if not ignoreRate then
 			local rate = math.max(1, Config.AP_MaxPerSec or 6)
 			-- Первый punish/interrupt не должен ждать равномерный sustained cadence. Он всё равно
-			-- соблюдает подтверждённый ServerMinInterval=80мс; последующие combo-свинги равномерные.
+			-- соблю��ает подтверждённый ServerMinInterval=80мс; последующие combo-свинги равномерные.
 			local gap = priority and (Config.AP_PunishFastGap or 0.08)
 				or math.max(Config.AP_MinSendGap or 0.09, (1 / rate) * 0.97)
 			if (now - (ap.m1SendLast or 0)) < gap then return end      -- ещё рано — не шлём
 			if (now - (ap.m1WinStart or 0)) >= 1 then ap.m1WinStart, ap.m1WinCount = now, 0 end
 			if (ap.m1WinCount or 0) >= rate then return end             -- server sustained-окно исчерпано
+		end
+		-- [V140/BUG] ДЁРГАНИЕ АНИМАЦИИ ПРИ ДЕСИНКЕ / ANTI-AUTOPARRY.
+		-- В норме повторный свинг держит canAttack: сервер ставит на нашем персонаже атрибут
+		-- "M1", и до его снятия мы не стреляем — анимация успевает проиграться целиком.
+		-- Но при десинке (или когда враг с anti-autoparry вынуждает сервер отклонять наши
+		-- ServerCheck) атрибут НЕ выставляется: canAttack остаётся true, рейт-гард пропускает
+		-- нас каждые AP_PunishFastGap=80мс, и playSwing РЕСТАРТИТ трек с tp=0. Анимация длиной
+		-- ~0.45с (AttackDuration) перезапускалась 5-6 раз, отсюда видимое дёрганье, которого
+		-- «при обычных атаках нет» — там гейтом служит серверный атрибут.
+		-- Ставим ЛОКАЛЬНЫЙ пол на перезапуск: он не зависит от серверных атрибутов и потому
+		-- работает именно в том режиме, где отваливается штатный гейт. Пропорция от реальной
+		-- длины трека, а не константа: скорость свинга зависит от стиля и aMult.
+		if Config.AP_AnimGuard ~= false and (now - (ap.swingAnimAt or 0)) < (ap.swingAnimMin or 0) then
+			return
 		end
 		local anims = ap.getAnims()
 		local v53   = anims and anims[combo] or nil
@@ -3062,6 +3125,18 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		local played = false
 		pcall(function() played = ap.playSwing(char, combo, spd, false) == true end)
 		if not played then return end
+		-- [V140] Запоминаем окно, внутри которого трек НЕ перезапускаем. Берём реальную длину
+		-- анимации, делённую на её скорость, и пускаем удар только после AP_AnimMinFrac от неё
+		-- (по умолчанию 55% — свинг уже прошёл фазу контакта, рестарт визуально не рвётся).
+		-- Верхний кламп держит темп: даже у длинного трека мы не простаиваем дольше AttackDuration.
+		do
+			local len = 0
+			pcall(function() len = (v53.Length or 0) / math.max(spd, 0.01) end)
+			if len <= 0 then len = Config.AP_AnimFallback or 0.45 end
+			ap.swingAnimAt  = now
+			ap.swingAnimMin = math.min(len * (Config.AP_AnimMinFrac or 0.55),
+				Config.AP_AnimGuardCap or 0.30)
+		end
 		if dropGuard and (State.blocking or char:GetAttribute("Blocking") == true) then
 			State.blocking, State.holdUntil = false, 0
 			stopBlockAnim()
@@ -3459,7 +3534,7 @@ function State.ap.fireM1(model, why, priority, dropGuard)
 	ap.snapTo(hrp)   -- серв��р строит хитбокс по нашему LookVector в момент ServerCheck
 	ap.nextM1At = now + (Config.AP_PollGap or 0)   -- троттл поллинга (0 = каждый кадр, макс. скорость)
 	-- [V105] ВСЕГДА свой билдер (обход троттла + Fixed-combo внутри fireM1Custom). Фолбэк на игровую
-	-- tryM1 только если разметка custom-fire не сошлась (fireOK=false) — тогда б��з обхода троттла.
+	-- tryM1 только если разметка custom-fire не сошлась (fireOK=false) �� тогда б��з обхода троттла.
 	local swung = false
 	if ap.fireOK then
 		local char = localChar()
@@ -3805,6 +3880,25 @@ local function serverHitboxProof(ownerName)
 	return false
 end
 
+-- [V140] ЯДРО ФИКСА ПО ФЕЙКАМ. Модельный атрибут M1/M2/CombatAttacking — это состояние ВРАГА
+-- («он сейчас в атаке»), а не свойство КОНКРЕТНОГО свинга. Он поднимается один раз на реальную
+-- атаку и висит всю её длительность, поэтому его нельзя выдавать более чем ОДНОЙ угрозе: вторая
+-- (фейковая) анимация, наложенная в то же окно, просто читала тот же true и получала доверие
+-- бесплатно. Здесь мы отвечаем на вопрос «этот атрибут уже кем-то занят?»: если да, для нового
+-- свинга он не доказательство. Пометка provenBy отличает угрозы, доверие которым построено
+-- ИМЕННО на атрибуте, от подтверждённых сильными пер-свинговыми источниками (живой хитбокс,
+-- VictimSwingId) — последние атрибут не занимают.
+State.attrProofTaken = function(name, exceptTh, nowc)
+	for i = 1, #Threats do
+		local o = Threats[i]
+		if o ~= exceptTh and o.name == name and o.serverProven and o.provenBy == "attr"
+		   and not o.feinted and not o.dodged and (o.contactAbs - nowc) > -0.35 then
+			return true
+		end
+	end
+	return false
+end
+
 local function onAttack(attackerHRP, info, model, id, track)
 	local myHRP = localHRP()
 	if not myHRP then return end
@@ -3871,6 +3965,33 @@ local function onAttack(attackerHRP, info, model, id, track)
 			cnt[name] = 1
 		end
 		sig[name] = nowc
+	end
+
+	-- [V140/BUG] РЕЗОЛВЕР ПРОПУСКАЛ ОДИНОЧНЫЕ ФЕЙКИ. suspect ставится только при БЫСТРОМ
+	-- ПОВТОРЕ (два свинга внутри AntiDecoyGap). Одиночная фейковая анимация повтором не была и
+	-- получала serverProven напрямую от serverAttackProof — а тот читает МОДЕЛЬНЫЕ атрибуты
+	-- M1/M2/CombatAttacking, которые описывают «враг сейчас в атаке», а НЕ «вот этот свинг
+	-- настоящий». Пока враг честно бьёт реальный удар, флаг висит true, и любая подмешанная
+	-- в это окно фейковая анимация проезжала proof-гейт бесплатно (это прямо признано в
+	-- комментарии V90 выше, но исправлено было только для suspect-ветки).
+	-- Делаем proof РЕБРО-ТРИГГЕРНЫМ: если тем же атакующим уже владеет живая угроза, которая
+	-- УЖЕ опирается на этот самый атрибут, то для нового свинга атрибут — не доказательство, а
+	-- унаследованное состояние. Такой свинг живёт как suspect и обязан подтвердиться
+	-- пер-свинговым VictimSwingId живого хитбокса.
+	local attrProof = serverAttackProof(model)
+	if attrProof and Config.ProofEdgeTrigger ~= false
+	   and State.attrProofTaken(name, nil, os.clock()) then
+		-- Атрибут уже «принадлежит» живому свингу этого врага → для нового он ничего не значит.
+		-- Свинг становится suspect и обязан подтвердиться пер-свинговой истиной (VictimSwingId
+		-- живого хитбокса), которую фейковая анимация создать не может.
+		attrProof    = false
+		suspectSwing = true
+		local nc = os.clock()
+		if (nc - (State.lastAntiDecoyLog or 0)) > 1 then
+			State.lastAntiDecoyLog = nc
+			aclog(("[resolver] %s from %s during a live attr-proven swing — proof already taken, SUSPECT")
+				:format(tostring(info.t), name))
+		end
 	end
 
 	local combo = (info.t == "M1") and (info.combo or nextCombo(name)) or 1
@@ -3942,7 +4063,13 @@ local function onAttack(attackerHRP, info, model, id, track)
 		suspect = suspectSwing,
 		-- [V90] Модельный атрибут НЕ считается доказательством для suspect-свинга: пока враг
 		-- реально бьёт, M1/M2/CombatAttacking = true, и фейк проезжал гейт «бесплатно».
-		serverProven = (not suspectSwing) and serverAttackProof(model) or false,
+		-- [V140] attrProof уже посчитан выше с ребро-триггером (одиночный фейк, подмешанный в
+		-- окно реального свинга, больше не наследует модельный атрибут как доказательство).
+		serverProven = (not suspectSwing) and attrProof or false,
+		-- [V140] ЧЕМ именно подтверждена угроза. Нужно, чтобы attrProofTaken() отличал доверие,
+		-- построенное на разделяемом модельном атрибуте (занимает его), от доверия на сильных
+		-- пер-свинговых источниках — хитбокс/VictimSwingId атрибут не занимают.
+		provenBy = ((not suspectSwing) and attrProof) and "attr" or nil,
 		serverProofClock = nil,
 	}
 	if th.serverProven then th.serverProofClock = nowClock end
@@ -4268,6 +4395,16 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		State.multiThreat = false
 		State.multiThreatN = 0
 		State.vizTarget = nil
+		-- [V140/BUG] ЗАМОРОЗКА ВИЗУАЛОВ. Этот idle-выход стоит ВЫШЕ строки `V93.nearPress =
+		-- math.huge`, поэтому nearPress сохранял значение последнего кадра боя. Сценарий:
+		-- враг замахнулся → nearPress стал маленьким (например 0.03) → угроза разрешилась и
+		-- Threats опустел → мы выходим ЗДЕСЬ и больше никогда не доходим до сброса. Значение
+		-- 0.03 залипает, а vizUpdate по нему решает «press-дедлайн рядом, кадр отдаём защите»
+		-- и выходит НАВСЕГДА, не вызывая LinePool:finish() — последний нарисованный кадр так и
+		-- висит на экране. Ровно то, что описано как «визуалы иногда замораживаются, вроде
+		-- из-за атаки врага». Сбрасываем метрику и здесь.
+		V93.nearPress = math.huge
+		V93.nearPressStamp = os.clock()
 		publishTarget(nil)   -- [V92] let the Visuals TargetHUD know combat ended
 		return
 	end
@@ -4296,7 +4433,13 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- удержание сильных ссылок на модели между кадрами. table.clear делает то же одним вызовом.
 	table.clear(V93.interruptSeen)
 	-- [V139] Обнуляем метрику близости press-дедлайна; заполнится ниже в цикле по угрозам.
+	-- [V140] Метка свежести. nearPress ПРОИЗВОДИТСЯ здесь (Heartbeat), а ПОТРЕБЛЯЕТСЯ в
+	-- vizUpdate (RenderStepped) — это разные циклы, и потребитель не имеет права доверять
+	-- значению без проверки возраста. Любой будущий ранний выход из schedulerStep (смерть,
+	-- respawn, отключение фичи, ошибка выше по стеку) снова оставил бы залипшее значение и
+	-- снова заморозил ESP. Со штампом visUpdate просто игнорирует несвежую метрику.
 	V93.nearPress = math.huge
+	V93.nearPressStamp = os.clock()
 
 		for i = #Threats, 1, -1 do
 			local th = Threats[i]
@@ -4332,7 +4475,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			-- отменённый/финтовый свинг с прошедшим контактом чистится, а delayed-M2 доживает до press.
 			elseif dt < -0.35 or noTrackExpired
 				or (trackGone and (now - th.detectClock) > 0.5 and dt < Config.PerfectLead) then
-			-- [V66] POST-MORTEM: угроза уходит. Если на неё ни разу не нажали и не
+			-- [V66] POST-MORTEM: угроз�� уходит. Если на неё ни разу не нажали и не
 			-- задоджили — это независимый пропуск. Логируем ТОЧН��Ю прич��ну, чтобы
 			-- закрыть "скрипт проёбывает атаку" по фактам, а не догадкам.
 			-- [V69] при ненаправленном блоке угроза, ��оше��шая в окно, покрыта поднятым
@@ -4457,16 +4600,30 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					-- пер-свинговая истина — claimed VictimSwingId живого хитбокса: игровой
 					-- VictimHitboxServiceClient шлёт VictimHitConfirm именно по нему, а фейковая
 					-- анимация парта в Workspace.Hitboxes НЕ создаёт.
-					if th.suspect then
-						if th.serverSwingId or (th.group and th.group.serverSwingId) then
+						if th.suspect then
+							if th.serverSwingId or (th.group and th.group.serverSwingId) then
+								th.serverProven, th.serverProofClock = true, now
+								th.suspect = false
+								-- [V140] VictimSwingId уникален для свинга → атрибут не занимает.
+								th.provenBy = "swingid"
+							end
+						-- [V140] ВТОРАЯ ПОЛОВИНА ФИКСА ПО ФЕЙКАМ. Правка на создании угрозы закрывала
+						-- только случай «фейк пришёл, когда атрибут УЖЕ поднят». Оставался обход с
+						-- обратным порядком: фейк детектится в тишине (атрибут false → угроза не
+						-- suspect, просто unproven), а через ~50мс враг начинает РЕАЛЬНЫЙ свинг и
+						-- поднимает атрибут — и вот этот цикл выдавал фейку доверие от чужой атаки.
+						-- Тот же владелец-тест решает и это; фейк остаётся неподтверждённым, а
+						-- реальный свинг получает своё доказательство как обычно.
+						elseif serverAttackProof(th.attackerModel)
+						   and not (Config.ProofEdgeTrigger ~= false
+						            and State.attrProofTaken(th.name, th, now)) then
 							th.serverProven, th.serverProofClock = true, now
-							th.suspect = false
+							th.provenBy = "attr"
+						elseif (th.contactAbs - now) < 0.18 and serverHitboxProof(th.name) then
+							-- Хитбокс — сильное пер-свинговое доказательство, атрибут не занимает.
+							th.serverProven, th.serverProofClock = true, now
+							th.provenBy = "hitbox"
 						end
-					elseif serverAttackProof(th.attackerModel) then
-						th.serverProven, th.serverProofClock = true, now
-					elseif (th.contactAbs - now) < 0.18 and serverHitboxProof(th.name) then
-						th.serverProven, th.serverProofClock = true, now
-					end
 				end
 
 				if now >= pressAtQ and now <= holdEnd then
@@ -5066,7 +5223,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 
 	-- [V100] AutoPlay: добивани�� застаненного врага — к��гда НЕТ угроз для блока. Убрали гейт
 	-- `not State.blocking`: step сам уронит guard первым кадром (враг застанен, угроз нет →
-	-- безопасно), а fireM1 самоге��тится на Blocking. Так добивание стартует ср��зу после парри,
+	-- безопасно), а fireM1 самоге��тится на Blocking. Т��к добивание стартует ср��зу после парри,
 	-- не дожидаясь истечения HoldAfter. Защита всё равно в приоритете: step идёт только при
 	-- #imminent==0 и not wantBlock, т.е. когда парировать/блокировать сейч��с нечего.
 	if Config.AutoPlay and not wantBlock and #imminent == 0 then
@@ -5420,7 +5577,7 @@ end)
 
 -- [V90.4] Серверный hitbox-reactor удалён: он срабатывал только по уже-приземлившемуся удару,
 -- из-за чего мог держать guard и мешать. Парри теперь
--- полностью предиктивный (willHitMe по анимации), как и раньше.
+-- полностью предиктивный (willHitMe по анимации), как и ра��ьше.
 
 local function acAvailable(name)
 	local ok, v = pcall(function()
@@ -6623,7 +6780,9 @@ local function summary()
 	local blockable = total - stateHits
 	local acc = blockable > 0 and (100 * ((t.PERFECT or 0) + (t.EARLY or 0)) / blockable) or 0
 	return table.concat({
-		"===== AUTOPARRY V74 DIAG =====",
+		-- [V140] Версия и время снятия дампа берутся из кода, а не из забытого литерала.
+		("===== AUTOPARRY %s DIAG =====  (dumped %s UTC)")
+			:format(tostring(Config.Version or "?"), os.date("!%Y-%m-%d %H:%M:%S")),
 		("player=%s  ping=%.0fms  uplink=%.0fms  mode=%s  autoface=%s"):format(LocalPlayer.Name, getPingRaw()*1000, uplink()*1000, Config.Mode, tostring(Config.AutoFace)),
 		("model: PURE anim timeline + live TimePosition (NO calibration) | ping=robust median; lead=%.0fms hold=%.0fms window=[%.0f,%.0f]ms")
 			:format(Config.PerfectLead*1000, Config.HoldAfter*1000, Config.PerfectMin*1000, Config.PerfectWindow*1000),
@@ -7019,10 +7178,20 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	-- [V139] ПРИОРИТЕТ ЗАЩИТЫ. Если press-дедлайн внутри VizSkipNearPress — кадр целиком
 	-- отдаётся парированию: ESP не рисуется вообще. Это те 1–2 кадра, где точность тайминга
 	-- решает исход, а полная перерисовка стоит больше, чем весь schedulerStep.
-	if (Config.VizSkipNearPress or 0.20) > 0
-	   and math.abs(V93.nearPress or math.huge) < (Config.VizSkipNearPress or 0.20) then
+	-- [V140] Пропуск теперь ОГРАНИЧЕН с двух сторон, иначе он превращается в вечную заморозку:
+	--   1) метрика обязана быть СВЕЖЕЙ — nearPress пишется на Heartbeat, а читается здесь, на
+	--      RenderStepped; несвежая (>0.2с) означает, что планировщик до неё не дошёл;
+	--   2) даже при свежей метрике подряд пропускаем не больше VizSkipMaxFrames кадров. Защита
+	--      получает свои 1–2 кадра, но затяжное окно угроз уже не может держать ESP погашенным.
+	local skipLim = Config.VizSkipNearPress or 0.20
+	if skipLim > 0
+	   and (nowc - (V93.nearPressStamp or 0)) < 0.20
+	   and math.abs(V93.nearPress or math.huge) < skipLim
+	   and (Viz.skipRun or 0) < (Config.VizSkipMaxFrames or 2) then
+		Viz.skipRun = (Viz.skipRun or 0) + 1
 		return
 	end
+	Viz.skipRun  = 0
 	Viz.lastDraw = nowc
 
 	LinePool:begin(); TriPool:begin()
@@ -7087,7 +7256,7 @@ local applyFacing = LPH_NO_VIRTUALIZE(function()
 	-- сервер валидирует по факт. позиции) — но это ломало facing на резко движущемся/рывкающем
 	-- враге (в логе face=0.14/-0.58 BACK! на LATE-мисс��х). Причина: на нашем экране другой игрок
 	-- отрисован в ПРОШЛОМ (интерп-лаг + ping), а ��ервер держит его ВПЕРЕДИ. При рывке рассинхрон
-	-- = vel*latency растёт → мы смотрим туда, где враг БЫЛ, сервер видит спину → блок отклонён.
+	-- = vel*latency растёт → мы смотрим туда, где враг БЫЛ, сервер видит спину → блок отклонё��.
 	-- Упреждаем: aim = pos + flatVel * (ping-based lead). Стоит на месте (vel≈0) �� lead≈0 → как
 	-- раньше (нет регресса на статичном боксинге). Рывок → смотрим на СЕРВЕРНУЮ позицию врага.
 	local aimPos = goalPos or goalHRP.Position
@@ -7306,6 +7475,11 @@ return function(_Lib, _Core)
 			Min = 20, Max = 150, Suffix = " ms",
 			Callback = function(v) Config.ProofGraceSec = v / 1000 end })
 		apMain:SubLabel({ Text = "this close to the hit we press anyway even if unconfirmed\nlower = harsher on fakes, higher = safer if server data is late" })
+		-- [V140] Ребро-триггер серверного доказательства.
+		boolToggle(apMain, "Strict Proof", "Strict Proof",
+			function() return Config.ProofEdgeTrigger ~= false end,
+			function(v) Config.ProofEdgeTrigger = v end)
+		apMain:SubLabel({ Text = "a fake anim thrown in while the enemy is mid real swing\ncant borrow that swings proof anymore" })
 		apMain:Divider()
 		apMain:Header({ Name = "Time Spoof" })
 		boolToggle(apMain, "Time Spoof", "Time Spoof",
@@ -7530,6 +7704,11 @@ return function(_Lib, _Core)
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
 	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
+	-- [V140] Гард перезапуска свинг-анимации (лечит дёрганье при десинке/anti-autoparry).
+	boolToggle(apPlay, "Smooth Swings", "Smooth Swings",
+		function() return Config.AP_AnimGuard ~= false end,
+		function(v) Config.AP_AnimGuard = v end)
+	apPlay:SubLabel({ Text = "stops the swing anim restarting mid-play when the server desyncs" })
 	boolToggle(apPlay, "Counter Interrupt", "Counter Interrupt",
 		function() return Config.AP_Interrupt ~= false end, function(v) Config.AP_Interrupt = v end)
 	apPlay:SubLabel({ Text = "if ur next hit lands first and enemy is in reach → hit now instead of parrying" })
