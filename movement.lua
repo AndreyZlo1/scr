@@ -846,7 +846,7 @@ return function(Lib, Core)
     --      (CombatConfig:120) против AttackDuration = 0.45 — это и есть «долгая» задержка
     --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
     --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
-    -- V112 закрывал только путь (1), поэтому путь (2) продолжал д��рж����ть комбо. Симптом
+    -- V112 закрывал только путь (1), поэтому путь (2) продол��ал д��рж����ть комбо. Симптом
     -- «после последнего удара долгая задержка» описывал ровно это.
     --
     -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
@@ -1109,7 +1109,7 @@ return function(Lib, Core)
     }
     local EV_DEADLINE_IDXS = { 4, 5, 6, 7, 8 }   -- u6, u5, u4, u7, u8 — метки os.clock
 
-    -- [V112] Персистентная обёртка записи атрибута (использу��тся обходом гейтов Dodge).
+    -- [V112] Персистентная обёртка записи атрибута (использу��тся обходом ��ейтов Dodge).
     -- Отдельная функция, а не замыкание на месте: обход выполняется на каждый дэш.
     local function _setAttr(inst, key, val) inst:SetAttribute(key, val) end
 
@@ -1344,7 +1344,7 @@ return function(Lib, Core)
             if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, _evCdBase) end
         end
         -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
-        -- выключения тумблера игра ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
+        -- выключения тумблера иг��а ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
         -- который сервер даёт честно, когда вас реально окружили.
         if _evMultBase and _evMultIdx then
             if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashSpeedMultiplier = _evMultBase end
@@ -1613,14 +1613,25 @@ return function(Lib, Core)
     -- в Downed, isDeadOrDowned говорил «мёртв», скрипт слал SpawnRequest, сервер молча
     -- отказывал (ты жив, ты просто лежишь) — и оставалось только штатное ожидание подъёма
     -- по HP. Downed — это состояние ЖИВОГО персонажа, а не смерть.
+    -- ═══════ [V116] ЭТА ФУНКЦИЯ И БЫЛА ЛОВУШКОЙ ═══════
+    -- В V115 здесь стояло «нет персонажа → значит мёртв» и «нет Humanoid → значит мёртв».
+    -- Вместе с destroySelf(), который уничтожал ЛОКАЛЬНУЮ копию персонажа, это давало
+    -- мгновенное ложное true: персонаж исчезал у меня на клиенте, функция объявляла смерть,
+    -- цикл ожидания в тот же кадр слал RespawnRE — а сервер в этот момент ещё считал меня
+    -- живым и запрос отбрасывал. После этого цикл делал break и больше НЕ повторял попытку.
+    -- Отсюда ровно твой симптом: «умираю, а зареспавниться не могу».
+    --
+    -- Теперь смерть определяем ТОЛЬКО так, как её определяет сама игра:
+    --   respawnstuff_LocalScript.lua:385  Character:GetAttributeChangedSignal("Dead")
+    -- Атрибут "Dead" ставит СЕРВЕР, поэтому это единственный авторитетный признак.
+    -- Отсутствие локальной модели больше смертью НЕ считается — это лишь потеря копии.
     local function isTrulyDead()
         local c = LocalPlayer.Character
         if LocalPlayer:GetAttribute("Dead") == true then return true end
         if c and c:GetAttribute("Dead") == true then return true end
-        -- Персонажа нет или он вынут из workspace — для сервера это тоже конец жизни.
-        if not c or not c.Parent then return true end
+        if not c then return false end
         local hum = c:FindFirstChildOfClass("Humanoid")
-        if not hum then return true end   -- Humanoid уничтожен → воскрешать нечего
+        if not hum then return false end
         -- HP<=0 считаем смертью ТОЛЬКО если это не Downed: в Downed игра держит 0 HP.
         return hum.Health <= 0 and c:GetAttribute("Downed") ~= true
     end
@@ -1644,7 +1655,7 @@ return function(Lib, Core)
     -- игнорировать телепорт: серверу позиция клиента не указ, он её валидирует. Плюс это
     -- медленно (интервал проверки 0.2с) — «моментально» так не получится.
     --
-    -- ПРАВИЛЬНЫЙ ПУТЬ — ЭКСПЛОИТ РЕПЛИКАЦИИ СИГНАЛА, а не механика игры.
+    -- ПРАВИЛЬНЫЙ ПУТЬ — ЭКСПЛОИТ РЕПЛИКАЦИИ ��ИГНАЛА, а не механика игры.
     -- У Roblox есть whitelist сигналов, которые КЛИЕНТ вправе поднять НА СЕРВЕРЕ. В нём
     -- лежит `Player.Kill`. Документация Potassium (signal.md, replicatesignal) даёт ровно
     -- наш случай как пример «Example without arguments»:
@@ -1722,56 +1733,59 @@ return function(Lib, Core)
     -- ПОЧЕМУ ЭТО МГНОВЕННО. Мы не ждём ни урона, ни монитора пустоты (0.2с), ни таймера
     -- подъёма по HP. Персонаж перестаёт существовать в этом же кадре, и SpawnRequest уходит
     -- по первому же появлению флага Dead — то есть за один сетевой round-trip.
-    local function destroySelf()
-        local c = LocalPlayer.Character
-        if not c then return false end
-        local hum = c:FindFirstChildOfClass("Humanoid")
-        local any = false
-        if hum then
-            -- Dead-стейт локально: это то, что штатно происходит при смерти, и оно
-            -- немедленно отключает контроллер движения.
-            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Dead) end)
-            pcall(function() hum.Health = 0 end)
-            any = true
+    -- ═══════ [V116] destroySelf УДАЛЁН — ИМЕННО ОН ЛОМАЛ РЕСПАВН ═══════
+    -- Идея «уничтожить персонажа» была неверной по механике репликации: модель персонажа
+    -- принадлежит СЕРВЕРУ, и Character:Destroy() / Humanoid:Destroy() с клиента удаляют
+    -- только МОЮ локальную копию. Сервер об этом не узнаёт и продолжает считать меня живым.
+    -- Побочные эффекты были хуже самой бесполезности:
+    --   1) isTrulyDead() мгновенно возвращал true (персонажа нет ЛОКАЛЬНО) → цикл в тот же
+    --      кадр слал RespawnRE, сервер отбрасывал его как «игрок жив», и цикл делал break —
+    --      повторной попытки не было вообще;
+    --   2) вместе с локальной моделью пропадала та копия, к которой игра подключила
+    --      watchchar (respawnstuff:385) → атрибут "Dead" уже некому было услышать, и экран
+    --      смерти не поднимался.
+    -- Оба пункта дают ровно твой симптом: «умираю, а зареспавниться не могу».
+    --
+    -- ПРАВИЛЬНАЯ СХЕМА, целиком по коду самой игры:
+    --   убить (replicatesignal(Player.Kill) — ты подтвердил, что это работает)
+    --   → дождаться СЕРВЕРНОГО атрибута "Dead" (respawnstuff:385 слушает именно его)
+    --   → бить RespawnRE:FireServer() ПОВТОРНО, пока не придёт CharacterAdded
+    --     (dorespawn ждёт именно его, respawnstuff:229).
+    -- Повторы принципиальны: один выстрел мог уйти на кадр раньше, чем сервер обработал
+    -- смерть, и тогда прежний код сдавался навсегда.
+    local function pushRespawnUntilAlive()
+        local alive = false
+        -- Подписываемся ДО первой отправки, иначе быстрый респавн проскочил бы мимо нас.
+        local conn = LocalPlayer.CharacterAdded:Connect(function() alive = true end)
+        _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
+        local t0 = os.clock()
+        while not alive and os.clock() - t0 < 10 do
+            -- Шлём только когда сервер согласен, что я мёртв: живому запрос отбросят.
+            if isTrulyDead() then fireRespawn() end
+            task.wait(0.5)              -- пауза больше троттлинга (1с) не нужна
         end
-        -- BreakJoints рвёт Motor6D по всей модели. Именно распад сборки сервер трактует
-        -- как невосстановимое сос��ояние персонажа.
-        pcall(function() c:BreakJoints() end)
-        if hum then pcall(function() hum:Destroy() end) end
-        -- Контрольный выстрел: без Humanoid модель уже не персонаж, убираем и её.
-        pcall(function() c:Destroy() end)
-        return any or true
+        if conn then conn:Disconnect() end
+        return alive
     end
 
     -- Единая точка входа. Возвращает true, если запрос реально начат.
     local function requestRespawn()
-        -- [V115] Проверяем isTrulyDead, а НЕ isDeadOrDowned: в Downed сервер отказывает,
-        -- и прежний код в этом состоянии просто слал запрос в пустоту вместо того, чтобы
-        -- разорвать Downed уничтожением персонажа. Это и был твой случай.
-        if isTrulyDead() then return fireRespawn() end
         if _respawnBusy then return false end
         -- [V116] Было getSpawnRemote() — проверялся не тот ремоут. Теперь достаточно любого
         -- из двух, а приоритет RespawnRE задан внутри fireRespawn.
         if not hasRespawnRemote() then return false end
-        -- Player.Kill оставляем как ДОПОЛНЕНИЕ, а не как основу: если он доступен, пусть
-        -- сервер получит и штатное событие смерти. Основную работу делает destroySelf.
-        if canKillSelf() then killSelf() end
-        if not destroySelf() then return false end
+        -- Если я жив, умереть нечем кроме Player.Kill — без него смысла начинать нет.
+        if not isTrulyDead() and not canKillSelf() then return false end
         _respawnBusy = true
         task.spawn(function()
-            -- Ждём подтверждения смерти (один round-trip) и сразу шлём SpawnRequest.
-            -- Опрос по Heartbeat, чтобы уйти в первый же возможный кадр.
-            local t0 = os.clock()
-            while os.clock() - t0 < 5 do
-                if isTrulyDead() then
-                    -- Сбрасываем троттлинг: fireRespawn держит паузу 3с между отправками,
-                    -- но здесь смерть только что случилась и запрос обязан уйти сразу.
-                    _lastRespawnFire = 0
-                    fireRespawn()
-                    break
-                end
-                PostStep:Wait()
+            if not isTrulyDead() then
+                killSelf()
+                -- Ждём ПОДТВЕРЖДЕНИЯ смерти от сервера (атрибут "Dead"), а не локальных
+                -- признаков. Это один round-trip, поэтому опрос по Heartbeat.
+                local t0 = os.clock()
+                while not isTrulyDead() and os.clock() - t0 < 5 do PostStep:Wait() end
             end
+            pushRespawnUntilAlive()
             _respawnBusy = false
         end)
         return true
@@ -1779,11 +1793,10 @@ return function(Lib, Core)
 
     local function driveAutoRespawn()
         if not Config.AutoRespawn_On then return end
-        -- [V115] Мёртв по-настоящему → достаточно ремоута.
-        if isTrulyDead() then fireRespawn(); return end
-        -- Downed — это НЕ смерть. Прежний код здесь звал fireRespawn(), сервер отказывал, и
-        -- ты лежал до штатного подъёма по HP. Теперь Downed рвём уничтожением персонажа:
-        -- именно для этого Auto Respawn и нужен — не ждать подъёма.
+        -- [V116] И при смерти, и при Downed идём через requestRespawn: он повторяет отправку
+        -- до реального CharacterAdded. Одиночный fireRespawn() здесь был ошибкой — если
+        -- сервер отбросил первый запрос, второй уже никто не посылал.
+        if isTrulyDead() then requestRespawn(); return end
         local c = LocalPlayer.Character
         if c and c:GetAttribute("Downed") == true then requestRespawn(); return end
         -- Порог HP: 0 = выключен (респавн только по смерти/Downed).
@@ -2170,10 +2183,12 @@ return function(Lib, Core)
                 if not hasRespawnRemote() then
                     notify("Respawn", "RespawnRE remote not found"); return
                 end
-                -- [V115] Мёртв по-настоящему → сразу ремоут. Иначе (жив ИЛИ лежишь в Downed)
-                -- уничтожаем персонажа и шлём ремоут. Проверку canKillSelf убрал из условия:
-                -- Player.Kill больше не основа метода, поэтому его отсутствие не повод
-                -- отказываться — destroySelf работает без него.
+                -- [V116] Жив → нужен Player.Kill, иначе умереть нечем и врать «отправлено»
+                -- нельзя. destroySelf удалён, поэтому обходного пути без него больше нет.
+                if not isTrulyDead() and not canKillSelf() then
+                    notify("Respawn", "replicatesignal(Player.Kill) unavailable on this executor")
+                    return
+                end
                 if isTrulyDead() then
                     notify("Respawn", requestRespawn() and "Respawning"
                         or "Too soon, wait a couple of seconds")
