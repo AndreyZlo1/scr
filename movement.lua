@@ -833,10 +833,52 @@ return function(Lib, Core)
     --     к No Delay они не относятся. Настройка «Clear Gate Attributes» удалена.
 
     -- [V112] Единственный драйвер No Delay: держим три гейта tryM1 открытыми.
+    -- ═════════ [V113] ПОЧЕМУ НЕ УБИРАЛАСЬ ЗАДЕРЖКА ПОСЛЕ КОМБО ═════════
+    -- Я УДАЛИЛ НУЖНЫЙ КОД, опираясь на неверное утверждение. В V112 я написал, что
+    -- «tryM1 не читает эти атрибуты вовсе», и выбросил очистку атрибутов. Дамп говорит
+    -- обратное: tryM1 проверяет их подряд и выходит по каждому (M1.lua:397-436):
+    --        M1Cooldown, M1, CombatAttacking, ParryAttackLockout, BlockAttackLockout,
+    --        Blocking, Greenzone, RpCombatLocked, CantAnything, GuardBroken, M2, PendingM2
+    -- Ни одного SetAttribute для них в клиентском дампе нет — их ставит СЕРВЕР. То есть
+    -- задержка после последнего удара комбо приходит ДВУМЯ независимыми путями:
+    --   1) клиентский гейт u21: scheduleM1SwingTimers (M1.lua:295-306) делает u21 = false и
+    --      task.delay(FinisherCooldown / spd) → u21 = true. FinisherCooldown = 1.25
+    --      (CombatConfig:120) против AttackDuration = 0.45 — это и есть «долгая» задержка
+    --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
+    --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
+    -- V112 закрывал только путь (1), поэтому путь (2) продолжал держ��ть комбо. Симптом
+    -- «после последнего удара долгая задержка» описывал ровно это.
+    --
+    -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
+    --   Blocking            — снятие сломало бы собственный блок;
+    --   Greenzone/RpCombatLocked — это безопасные зоны, ими занимается Dodge Everywhere;
+    --   CantAnything/GuardBroken/M2/PendingM2 — это состояния стана и M2, а не задержка;
+    --   Equip               — tryM1 ТРЕБУЕТ его истинным, снятие запретило бы удар вообще.
+    -- Отдельного тумблера для этого нет: это не выбор, а часть работы No Delay.
+    local M1_GATE_ATTRS = {
+        "M1Cooldown", "M1", "CombatAttacking", "ParryAttackLockout", "BlockAttackLockout",
+    }
+    local function _clearAttr(c, k) c:SetAttribute(k, nil) end
+    local function clearM1GateAttrs()
+        local c = LocalPlayer.Character
+        if not c then return end
+        for i = 1, #M1_GATE_ATTRS do
+            local k = M1_GATE_ATTRS[i]
+            -- Пишем только если атрибут реально стоит: запись в nil уже-пустого атрибута
+            -- бессмысленна, а лишние SetAttribute на кадр — та самая мелкая нагрузка.
+            if c:GetAttribute(k) ~= nil then pcall(_clearAttr, c, k) end
+        end
+    end
+
     -- Стоимость кадра: три чтения upvalue; запись — только если значение реально другое.
     local _ndNextTry = 0
     local function driveNoDelay()
         if not Config.NoDelay_On then return end
+        -- [V113] Чистим атрибуты ПЕРВЫМ делом: они серверные и не зависят от того, удалось ли
+        -- разрешить upvalue'ы M1. Ниже стоит ранний return по неудачному резолву — если
+        -- вызывать очистку после него, серверный кулдаун не снимался бы вообще, пока модуль
+        -- M1 не подгрузится.
+        clearM1GateAttrs()
         if not _tryM1 then
             -- Резолв может не удаться (модуль ещё не загружен). Без этого бэкоффа
             -- tryRequire дёргал бы FindFirstChild+require КАЖДЫЙ кадр — свой источник лагов.
@@ -968,7 +1010,7 @@ return function(Lib, Core)
     -- Dodge Everywhere: driveDodge ставит атрибут OutnumberedEvasiveGrant = true, из него
     -- получается u51 (Evasive.lua:529-531). Итог: слайдер стоит на вани*льных 30, а дэш
     -- летит 30 × 1.5 = 45 studs/s и длится на 20% дольше. Никакой «утечки» скорости не
-    -- было — игра штатно применяла бонус «в меньшинстве», просто мы сами его и включали.
+    -- было — игра штатно применяла бонус «в меньшинстве», просто мы са��и его и включали.
     -- Решение (выбрано пользователем): при активном Dodge зануляем множитель до 1.0, так
     -- что слайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
     --
@@ -1007,7 +1049,7 @@ return function(Lib, Core)
     -- Honest ceiling: i-frames/dash confirmation below ~1.5s are client-prediction; the server still
     -- owns the authoritative i-frame grant.
     --
-    -- DODGE-EVERYWHERE �� two layers, matching how Evasive() gates itself (verified Evasive.lua):
+    -- DODGE-EVERYWHERE ���� two layers, matching how Evasive() gates itself (verified Evasive.lua):
     --   1) OutnumberedEvasiveGrant=true → u51 bypass (line 529). When set, Evasive INTERNALLY
     --      zeroes cooldown deadlines (u5/u6/u7/u8=0, line 557-560) AND skips the `if not u51`
     --      gates: IFRAMECD / Stunned / GuardBroken / CantAnything (line 567-597). So "dodge when
@@ -1031,6 +1073,29 @@ return function(Lib, Core)
     local _appliedMult                     = nil        -- [V112] что уже записано в множитель
     local _evDeadlineIdxs = {}   -- numeric upvalue indices that may hold os.clock cooldown deadlines
     local _evFn           = nil  -- the real Evasive.Evasive closure (for upvalue access)
+
+    -- ═══════════════ [V113] ПОЧЕМУ DODGE ВСЁ ЕЩЁ БЫЛ БЫСТРЕЕ ═══════════════
+    -- Это НАСТОЯЩАЯ причина, а не та, что я назвал в V112. Обнуление множителя
+    -- OutnumberedDashSpeedMultiplier было верным по смыслу, но применялось НЕ К ТОМУ
+    -- ОБЪЕКТУ ФУНКЦИИ, поэтому не имело никакого эффекта — как и патч самого DashSpeed.
+    --
+    -- Документация Potassium (closure.md): «hookfunction(target, hook) — Hooks a Lua or C
+    -- function. Returns a COPY OF THE ORIGINAL function.» То есть после
+    --        _origEvasive = hookfunction(_evFn, наш_обработчик)
+    -- объект `_evFn` (он же поле `Evasive.Evasive`) СТАНОВИТСЯ нашим обработчиком, а
+    -- оригинальный код дэша живёт в возвращённой копии `_origEvasive` — и именно её мы
+    -- вызываем. Все debug.setupvalue(_evFn, 22, …) писали в upvalue'ы НАШЕГО замыкания
+    -- (Config, _origEvasive, …), а не в игровые DashSpeed / множители. Игровые константы
+    -- оставались вани*льными: DashSpeed = 30 и множитель = 1.5 → дэш 45 studs/s.
+    -- Именно поэтому симптом «додж быстрее, чем должен» пережил правку V112.
+    --
+    -- ЧТО ТЕПЕРЬ: все чтения и записи upvalue'ов идут через evTarget() — исполняемую
+    -- копию. До установки хука это ещё оригинал (_evFn), поэтому mapEvasive, которая
+    -- работает ДО хука, продолжает верно сверять значения с конфигом.
+    -- Список upvalue'ов подтверждён дампом (Evasive.lua:508), индексы 22/23/24/27 верны —
+    -- ошибка была только в объекте, а не в индексах.
+    local _evHooked, _origEvasive = false, nil
+    local function evTarget() return _origEvasive or _evFn end
     local _nextDodgeAllowed = 0  -- OUR client-authoritative cooldown deadline (os.clock)
 
     -- [V112] Точный порядок upvalue'ов функции Evasive (Evasive.lua:508). Держим таблицу
@@ -1110,11 +1175,12 @@ return function(Lib, Core)
     -- sooner than the game's 1.5s. Only os.clock-scale values (>60) are touched, so the small
     -- constants (DashSpeed/Cooldown/DashDuration/ServerConfirmTimeout) are never corrupted.
     local function zeroGameDeadlines()
-        if not (_evFn and hasDebugUpvalues()) then return end
+        if not (evTarget() and hasDebugUpvalues()) then return end
+        local tgt = evTarget()   -- [V113] исполняемая копия, а не подменённый объект
         for _, idx in ipairs(_evDeadlineIdxs) do
-            local ok, v = pcall(_getUp, _evFn, idx)
+            local ok, v = pcall(_getUp, tgt, idx)
             if ok and type(v) == "number" and v > 60 then
-                pcall(_setUp, _evFn, idx, 0)
+                pcall(_setUp, tgt, idx, 0)
             end
         end
     end
@@ -1127,7 +1193,8 @@ return function(Lib, Core)
     -- ROOT-CAUSE FIX: previously the Everywhere grant (OutnumberedEvasiveGrant→u51) zeroed
     -- u6/u5/u7/u8 every call (Evasive.lua:557-561), so cooldown vanished entirely regardless of
     -- the slider. Now the wrapper RE-IMPOSES the cooldown on top of the grant.
-    local _evHooked, _origEvasive = false, nil
+    -- [V113] _evHooked/_origEvasive объявлены выше (рядом с evTarget), т.к. zeroGameDeadlines
+    -- и driveDodge должны обращаться к исполняемой копии, а они определены раньше этой строки.
     local function installEvasiveHook()
         if _evHooked then return true end
         if type(hookfunction) ~= "function" then return false end
@@ -1187,6 +1254,12 @@ return function(Lib, Core)
             return _origEvasive(...)
         end))
         _evHooked = (_origEvasive ~= nil)
+        -- [V113] ОБЯЗАТЕЛЬНЫЙ СБРОС КЭШЕЙ. driveDodge пишет upvalue'ы только когда значение
+        -- «ещё не применено» (_appliedSpeed/_appliedCd/_appliedMult). Но цель патча только
+        -- что сменилась с _evFn на _origEvasive: без сброса кэш сказал бы «уже применено»,
+        -- и в новую (реально исполняемую) копию мы бы не записали НИЧЕГО. Это тот же класс
+        -- ошибки, что и сам баг V112 — молчаливый промах мимо объекта.
+        if _evHooked then _appliedSpeed, _appliedCd, _appliedMult = nil, nil, nil end
         return _evHooked
     end
     local function _setGrant(c) c:SetAttribute("OutnumberedEvasiveGrant", true) end
@@ -1194,16 +1267,20 @@ return function(Lib, Core)
     local function driveDodge()
         if not Config.Dodge_On then return end
         if not mapEvasive() then return end
-        local ev  = getEvasive()
+        -- [V113] Хук ставим ДО патчей, а не после них. Прежде он стоял в конце функции, из-за
+        -- чего на кадре установки все записи уходили в ещё-неподменённый _evFn, а на
+        -- следующем кадре кэши уже считали работу сделанной. Теперь цель патча (evTarget)
+        -- корректна с первой же записи.
+        if not _evHooked then installEvasiveHook() end
         local cfg = getCombatConfig()
         local wantSpeed = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
         if wantSpeed and wantSpeed ~= _appliedSpeed then
             if cfg and cfg.Evasive then cfg.Evasive.DashSpeed = wantSpeed end
-            if _evSpeedIdx and ev then pcall(_setUp, ev.Evasive, _evSpeedIdx, wantSpeed) end
+            if _evSpeedIdx then pcall(_setUp, evTarget(), _evSpeedIdx, wantSpeed) end
             _appliedSpeed = wantSpeed
         end
 
-        -- [V112] ИСПРАВЛЕНИЕ БАГА «скорость растёт сама»: зануляем множитель до 1.0.
+        -- [V112] ИСПРАВЛЕНИЕ БАГА «скорость растёт ��ама»: зануляем множитель до 1.0.
         -- Пока Dodge включён, ветка `if u51 then v63 = DashSpeed * Multiplier` (Evasive.lua:695)
         -- перестаёт менять результат, и слайдер означает РОВНО итоговые studs/s — в том числе
         -- на дефолте 30. Длительность тоже нормализуем (Evasive.lua:703), иначе дэш оставался
@@ -1214,8 +1291,8 @@ return function(Lib, Core)
                 cfg.Evasive.OutnumberedDashSpeedMultiplier    = 1
                 cfg.Evasive.OutnumberedDashDurationMultiplier = 1
             end
-            if _evMultIdx    then pcall(_setUp, _evFn, _evMultIdx, 1) end
-            if _evDurMultIdx then pcall(_setUp, _evFn, _evDurMultIdx, 1) end
+            if _evMultIdx    then pcall(_setUp, evTarget(), _evMultIdx, 1) end
+            if _evDurMultIdx then pcall(_setUp, evTarget(), _evDurMultIdx, 1) end
             _appliedMult = 1
         end
         -- CUSTOM COOLDOWN is enforced by the Evasive.Evasive wrapper (installEvasiveHook), whose
@@ -1225,12 +1302,12 @@ return function(Lib, Core)
         local base = _evCdBase or 1.5
         if base ~= _appliedCd then
             if cfg and cfg.Evasive then cfg.Evasive.Cooldown = base end
-            if _evCdIdx and ev then pcall(_setUp, ev.Evasive, _evCdIdx, base) end
+            if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, base) end
             _appliedCd = base
         end
         -- [PERF] installEvasiveHook was called on EVERY Heartbeat. It early-returns once hooked,
         -- but that's still a call + upvalue read every frame forever; latch it instead.
-        if not _evHooked then installEvasiveHook() end
+        -- [V113] Сам вызов перенесён в НАЧАЛО driveDodge (причина — в комментарии там же).
 
         -- DODGE EVERYWHERE — assert the game's own u51 bypass (skips the hit/stun/guard-broken/
         -- cant-anything gates internally). It ALSO zeroes the game's deadlines, but that no longer
@@ -1254,26 +1331,28 @@ return function(Lib, Core)
     local function restoreDodge()
         clearDodgeGrant()
         if not _evMapped then return end
-        local ev  = getEvasive()
+        -- [V113] Локальная `ev` убрана: после перехода на evTarget() она больше нигде не
+        -- использовалась, а её наличие подсказывало неверное «патчим ev.Evasive» — ровно то
+        -- заблуждение, из которого вырос баг со скоростью дэша.
         local cfg = getCombatConfig()
         if _evSpeedBase then
             if cfg and cfg.Evasive then cfg.Evasive.DashSpeed = _evSpeedBase end
-            if _evSpeedIdx and ev then pcall(_setUp, ev.Evasive, _evSpeedIdx, _evSpeedBase) end
+            if _evSpeedIdx then pcall(_setUp, evTarget(), _evSpeedIdx, _evSpeedBase) end
         end
         if _evCdBase then
             if cfg and cfg.Evasive then cfg.Evasive.Cooldown = _evCdBase end
-            if _evCdIdx and ev then pcall(_setUp, ev.Evasive, _evCdIdx, _evCdBase) end
+            if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, _evCdBase) end
         end
         -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
         -- выключения тумблера игра осталась бы БЕЗ легитимного бонуса «в меньшинстве»,
         -- который сервер даёт честно, когда вас реально окружили.
         if _evMultBase and _evMultIdx then
             if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashSpeedMultiplier = _evMultBase end
-            pcall(_setUp, _evFn, _evMultIdx, _evMultBase)
+            pcall(_setUp, evTarget(), _evMultIdx, _evMultBase)
         end
         if _evDurMultBase and _evDurMultIdx then
             if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashDurationMultiplier = _evDurMultBase end
-            pcall(_setUp, _evFn, _evDurMultIdx, _evDurMultBase)
+            pcall(_setUp, evTarget(), _evDurMultIdx, _evDurMultBase)
         end
         _appliedSpeed, _appliedCd, _appliedMult = nil, nil, nil
     end
@@ -1372,7 +1451,7 @@ return function(Lib, Core)
         return true
     end
 
-    -- Собственно подъём. Персистентные обёртки — без аллокации замыканий на кадр.
+    -- Собственно под��ём. Персистентные обёртки — без аллокации замыканий на кадр.
     local function _clearRagAttr(c) c:SetAttribute("Ragdoll", nil) end
     local function _forceGetup(hum)
         hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
@@ -1494,6 +1573,64 @@ return function(Lib, Core)
         return false
     end
 
+    -- ═══════════════ [V113] ПОЧЕМУ RESPAWN НЕ РАБОТАЛ ═══════════════
+    -- Ремоут и путь были верны — я это перепроверил по дампу:
+    --   ReplicatedStorage/Remotes/SpawnRequest.RE существует и это RemoteEvent
+    --   (_remotes_index.json: "ReplicatedStorage.Remotes.SpawnRequest").
+    -- Не работал не вызов, а СМЫСЛ: `SpawnRequest` — это не «заспавни меня», а «я мёртв,
+    -- верни меня в игру». Сервер обслуживает его только для мёртвого игрока
+    -- (IsDeathFlagged по атрибуту Dead, SpawnServiceUtils.lua:25). Живому игроку пустой
+    -- FireServer() отклоняется — снаружи это выглядит как «кнопка ничего не делает».
+    -- Убить себя обычным способом тоже нельзя: Health серверный, а штатную кнопку
+    -- Roblox Reset игра отключает (CoreGuiPolicy.lua:109 SetCore("ResetButtonCallback", false)).
+    --
+    -- РАБОЧИЙ ПУТЬ — ПУСТОТА. Позиция персонажа, в отличие от здоровья, принадлежит
+    -- КЛИЕНТУ (physics ownership), и игра сама рассчитывает на смерть в пустоте:
+    --   SpawnServiceUtils.lua:19  GetVoidThresholdY() = workspace.FallenPartsDestroyHeight
+    --                                                   - VOID_MARGIN_STUDS (50)
+    --   SpawnServiceUtils.lua:16  VOID_CHECK_INTERVAL = 0.2
+    -- В клиентском дампе эти константы не читает НИКТО — значит монитор пустоты серверный
+    -- (серверных скриптов в дампе нет, это вывод из отсутствия клиентских читателей).
+    -- Плюс ниже FallenPartsDestroyHeight персонажа удаляет сам движок Roblox. Оба пути
+    -- ведут к настоящей, легальной для сервера смерти — после неё SpawnRequest принимается.
+    --
+    -- Поэтому «Respawn Now» теперь: мёртв → сразу ремоут; жив → падение в пустоту, ждём
+    -- признания смерти, затем ремоут. Никакого нового тумблера это не потребовало.
+    local _respawnBusy = false
+    local function voidSelf()
+        local c = LocalPlayer.Character
+        local hrp = c and c:FindFirstChild("HumanoidRootPart")
+        if not hrp then return false end
+        -- Берём запас ниже ОБОИХ порогов: и порога пустоты игры, и высоты удаления частей
+        -- движком. 100 студов вниз от FallenPartsDestroyHeight перекрывает margin в 50.
+        local y = workspace.FallenPartsDestroyHeight - 100
+        local ok = pcall(function()
+            -- PivotTo двигает всю модель целиком; отдельная запись CFrame корня оставила бы
+            -- части сборки позади и падение могло не зарегистрироваться как смерть.
+            c:PivotTo(CFrame.new(hrp.Position.X, y, hrp.Position.Z))
+        end)
+        return ok
+    end
+    -- Единая точка входа. Возвращает true, если запрос реально начат.
+    local function requestRespawn()
+        if isDeadOrDowned() then return fireRespawn() end
+        if _respawnBusy then return false end
+        if not getSpawnRemote() then return false end
+        if not voidSelf() then return false end
+        _respawnBusy = true
+        task.spawn(function()
+            -- Ждём, пока смерть подтвердится сервером. Интервал монитора пустоты 0.2с,
+            -- поэтому опрашиваем в том же темпе; 8с — потолок, чтобы не висеть вечно.
+            local t0 = os.clock()
+            while os.clock() - t0 < 8 do
+                if isDeadOrDowned() then fireRespawn(); break end
+                task.wait(0.2)
+            end
+            _respawnBusy = false
+        end)
+        return true
+    end
+
     local function driveAutoRespawn()
         if not Config.AutoRespawn_On then return end
         if isDeadOrDowned() then fireRespawn(); return end
@@ -1503,7 +1640,9 @@ return function(Lib, Core)
         local c = LocalPlayer.Character
         local hum = c and c:FindFirstChildOfClass("Humanoid")
         if not hum or hum.MaxHealth <= 0 then return end
-        if (hum.Health / hum.MaxHealth) * 100 <= thr then fireRespawn() end
+        -- [V113] Было fireRespawn() — живому игроку сервер его отклонял, поэтому порог по HP
+        -- не срабатывал никогда. Теперь тот же путь через пустоту, что и у кнопки.
+        if (hum.Health / hum.MaxHealth) * 100 <= thr then requestRespawn() end
     end
 
     local function driveAntiRagdoll()
@@ -1735,16 +1874,16 @@ return function(Lib, Core)
                             if ok then break end
                             task.wait(0.4)
                         end
-                        notify("No Delay", ok and "ON (кулдауны M1 обнулены)"
+                        notify("No Delay", ok and "ON (M1 cooldowns cleared)"
                             or "нужен debug.getupvalue / модуль M1 не найден")
                     end)
                 else
                     notify("No Delay", "Disabled")
                 end
             end,
-            Desc = "обнуляет кулдауны M1 (0.45/1.25/1.55с)\nправкой upvalue'ов tryM1 — FX парирования не ломает",
+            Desc = "clears M1 cooldowns (0.45/1.25/1.55s) via tryM1 upvalues\nplus the server gate attributes, parry FX stays intact",
         })
-        sCbt:SubLabel({ Text = "Урон считает сервер — снимается только клиентское ожидание" })
+        sCbt:SubLabel({ Text = "Damage is server-side \u{00b7} only the client-side wait is removed" })
 
         -- ─────────────── Section 5: Sprint (Right) ───��───────────
         local sSpr = MV:Section({ Side = "Right" })
@@ -1813,7 +1952,7 @@ return function(Lib, Core)
                     -- гейтов делает обёртка Evasive (installEvasiveHook), а её ставит
                     -- сам тумблер Dodge. Требуем только её.
                     if not installEvasiveHook() then
-                        notify("Dodge Everywhere", "нужен hookfunction (обёртка Evasive не встала)")
+                        notify("Dodge Everywhere", "hookfunction required (Evasive wrapper failed)")
                         return
                     end
                     Config.Dodge_Everywhere = true
@@ -1841,15 +1980,15 @@ return function(Lib, Core)
             set = function(v)
                 Config.AntiRagdoll_On = v
                 -- [V112] Точечный хук sustainClientRagdoll вместо глобального __namecall.
-                -- Без него подъём всё равно работает, но игра может утаскивать назад в
+                -- ��ез него подъём всё равно работает, но игра может утаскивать назад в
                 -- рэгдолл (та самая гонка), поэтому предупреждаем честно.
                 if v and not installAntiRagdollHook() then
-                    notify("Anti-Ragdoll", "нужен hookfunction + debug.getupvalue (возможен рывок)")
+                    notify("Anti-Ragdoll", "hookfunction + debug.getupvalue required")
                 end
             end,
-            Desc = "поднимает из чужого рэгдолла\nглушит sustainClientRagdoll, carry/grip не ломает",
+            Desc = "forces getup out of ragdolls by muting sustainClientRagdoll\ncarry / grip / Downed are left alone",
         })
-        sAR:SubLabel({ Text = "Downed / переноска / добивание пропускаются — иначе сломался бы геймплей" })
+        sAR:SubLabel({ Text = "Downed / carry / finisher are skipped to keep gameplay intact" })
 
         -- ─────────────── [V112] Section: No Blur (Left) ───────────────
         local sBlur = MV:Section({ Side = "Left" })
@@ -1861,16 +2000,16 @@ return function(Lib, Core)
                 Config.NoBlur_On = v
                 if v then
                     if not installNoBlur() then
-                        notify("No Blur", "модуль ScreenEffects не найден")
+                        notify("No Blur", "ScreenEffects module not found")
                         Config.NoBlur_On = false
                         return
                     end
                     clearActiveBlur()   -- снять блюр, который уже висит на экране
                 end
             end,
-            Desc = "убирает боевой блюр: удары, Downed, захват,\nсмерть, Black Flash, падение",
+            Desc = "removes combat blur: hits, Downed, grip,\ndeath, Black Flash, falling",
         })
-        sBlur:SubLabel({ Text = "Блюр меню и панелей НЕ трогается — он часть обычного интерфейса" })
+        sBlur:SubLabel({ Text = "Menu and panel blur is untouched, it is part of the normal UI" })
 
         -- ─────────────── [V112] Section: Respawn (Left) ───────────────
         local sResp = MV:Section({ Side = "Left" })
@@ -1879,10 +2018,16 @@ return function(Lib, Core)
             Name = "Respawn Now",
             Callback = function()
                 if not getSpawnRemote() then
-                    notify("Respawn", "ремоут SpawnRequest не найден"); return
+                    notify("Respawn", "SpawnRequest remote not found"); return
                 end
-                notify("Respawn", fireRespawn() and "запрос отправлен"
-                    or "слишком часто — подожди пару секунд")
+                -- [V113] requestRespawn: мёртв → ремоут, жив → пустота, затем ремоут.
+                if isDeadOrDowned() then
+                    notify("Respawn", requestRespawn() and "Request sent"
+                        or "Too soon, wait a couple of seconds")
+                else
+                    notify("Respawn", requestRespawn() and "Dropping into the void, then respawning"
+                        or "Could not start, try again")
+                end
             end,
         })
         boolToggle(sResp, "Auto Respawn", "Auto Respawn",
@@ -1891,7 +2036,7 @@ return function(Lib, Core)
         slider(sResp, { Name = "HP Threshold", Flag = "MV_AutoRespawnHP",
             Default = Config.AutoRespawn_HP, Min = 0, Max = 99, Suffix = "%",
             Callback = function(v) Config.AutoRespawn_HP = v end })
-        sResp:SubLabel({ Text = "0% = только по смерти/Downed · решение о спавне принимает сервер" })
+        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} alive respawn goes through the void" })
 
         uiReady = true
     end
