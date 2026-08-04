@@ -1,2711 +1,1900 @@
-return function(Lib)
-    local Bridge    = Lib.Bridge
-    local CONFIG    = Lib.CONFIG
-    local State     = Lib.State
+-- ═══════════════════════════════════════════════════════════════════════════
+--  Movement — standalone module for the Syllinse loader (AutoParry game,
+--  UniverseId 9199655655 — the "so you're challenging me" combat game).
+--
+--  Loader contract:
+--    • file body returns function(Lib, Core) → returns a handle with
+--      optional start() and buildUI(ctx).
+--    • ctx gives: tabs (keyed by Tab.Key), flag(name), keybind(section,opts),
+--      notify(title,desc). Everything is built into ctx.tabs.Movement.
+--
+--  Everything below is derived from the game's OWN decompiled client, verified
+--  against the dump — no guessing:
+--
+--    • Speed / Fly are the vape-style CFrame/Velocity methods on PreSimulation,
+--      driven by Humanoid.MoveDirection (works on PC WASD + mobile thumbstick).
+--      Fly is camera-relative: thumbstick + camera pitch = full 3D (mobile
+--      friendly). Vertical keys are Space (up) / LeftControl (down) — NOT Shift,
+--      so it never fights Roblox shiftlock. Mobile jump button = ascend.
+--
+--    • No Delay — kills EVERY combat cooldown/reset wait at the SOURCE with a single
+--      direct hookfunction(task.delay). All combat delays funnel through task.delay in
+--      CombatSystemClient.Combat.Base.M1:
+--        u22 = task.delay((combo==4 and 1.25 or 0.45)/spd, ()->u21=true)  -- swing chain gate
+--        u20 = task.delay(ComboResetTime(1.55)/spd, resetCombo)           -- combo reset
+--        + StopAnim / fx delays (0.1, 0.2, 0.45)
+--      Our task.delay hook, while No Delay is on, collapses those combat cooldown values
+--      to ~0 so u21 re-opens instantly and the next swing fires with no wait. No upvalue
+--      hunting, no filtergc, no rawget — just the global hook. We ALSO clear the server-
+--      set gate attributes (M1Cooldown/M1/CantAnything/…) locally each frame. The server
+--      M1 rate still caps REAL damage — this removes the client-side stall/feel only.
+--
+--    • No Stun — hookfunction on StateHandler.SetStun(char, apply, dur, speed),
+--      found via filtergc {Name="SetStun"}. When it tries to APPLY a stun to us we
+--      never call the original, so it never writes our WalkSpeed/GroundSpeed down.
+--
+--    • AutoSprint — MovementServiceClient singleton (has _sprintInputDesired).
+--      ON  → SetSprintInputDesired(true) + StartSprint(); the game auto-resumes.
+--      OFF → SetSprintInputDesired(false) + StopSprint() → truly stops.
+--      Bypass Restrictions → hookfunction on the sprint gate predicates
+--      (_isLocked, _isLocomotionSuppressed, _isSprintBlockedByItem,
+--      ShouldApplyCombatBackpedal) so they report "clear" → sprint through combat
+--      locks / weapons / backpedal, without touching any server-read value.
+--      Sprint speed = 25, base walk = 12, needs HP ≥ 10.
+-- ═══════════════════════════════════════════════════════════════════════════
 
-    local Players    = game:GetService("Players")
-    local RunService = Bridge._RunService or game:GetService("RunService")
-    local UIS        = game:GetService("UserInputService")
-    local Workspace  = game:GetService("Workspace")
-    local LP         = Players.LocalPlayer
+return function(Lib, Core)
+    -- Luraph macro PRELUDE — string keys only (bare `function LPH_*` aborts Luraph).
+    -- Per-frame Connects, __namecall and combat hooks must stay native after obfuscation.
+    do
+        local _E = (getgenv and getgenv()) or _G
+        if not _E["LPH_NO_VIRTUALIZE"] then
+            local id, nop = function(f) return f end, function() end
+            _E["LPH_NO_VIRTUALIZE"] = id
+            _E["LPH_JIT_MAX"] = id
+            _E["LPH_JIT"] = id
+            _E["LPH_ENCFUNC"] = id
+            _E["LPH_NO_UPVALUES"] = id
+            _E["LPH_ENCSTR"] = id
+            _E["LPH_ENCNUM"] = id
+            _E["LPH_SKIP"] = id
+            _E["LPH_CRASH"] = nop
+        end
+    end
 
-    -- Console spam disabled: shadow the global `print` with a no-op for this whole
-    -- module. The diagnostic-file buffer (see log()/runDiagnostic) still records
-    -- lines; only console output is silenced. `warn` is left intact for real errors.
-    local print = function() end
+    local Players          = game:GetService("Players")
+    local RunService       = game:GetService("RunService")
+    local UserInputService  = game:GetService("UserInputService")
+    local Workspace        = game:GetService("Workspace")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-    local MOV = {
+    local LocalPlayer = Players.LocalPlayer
 
-        -- FIX: единственная фича, включённая по умолчанию. Скрипт стартовал с
-        -- уже активным Speed — игрок этого не просил и не ожидал.
-        Speed          = false,
-        SpeedToggleKey = Enum.KeyCode.X,
-        SpeedValue     = 24,
-        SprintKey      = Enum.KeyCode.LeftShift,
-        SprintSpeed    = 42,
-        AutoSprint     = false,
+    -- PreSimulation runs BEFORE physics (what the vape reference uses), so our
+    -- CFrame / velocity writes win the frame. Heartbeat runs AFTER the game's
+    -- combat WalkSpeed writes, so NoSlowdown re-asserts there and wins.
+    local PreStep   = RunService.PreSimulation or RunService.Stepped
+    local PostStep  = RunService.Heartbeat
 
-        FlyToggleKey   = Enum.KeyCode.G,
-        FlySpeed       = 28,
-        FlyUpKey       = Enum.KeyCode.Space,
-        FlyDownKey     = Enum.KeyCode.LeftControl,
-        FlyPersist     = true,
-        FlyTPBypass    = true,
+    -- Game constants (from MovementServiceUtils / CombatConfig).
+    local BASE_WALK   = 12
+    local SPRINT_WALK = 25
+    local SPEED_CAP   = 25    -- move anti-cheat authorises ≈ sprint + 1.35
 
-        -- v19.2: сохранять ВСЕ включённые фичи (fly/fakeangles/velocitydesync/
-        -- noclip/speed/invis/tp) после смерти — не нужно включать заново.
-        PreserveStateOnDeath = true,
+    -- ── Runtime config (MacLib restores flags through the config manager) ────
+    local Config = {
+        -- Speed (vape-style, method-based)
+        Speed_On    = false,
+        Speed_Mode  = "CFrame",   -- CFrame | Velocity
+        Speed_Value = 45,         -- studs/sec
 
-        StraferKey     = Enum.KeyCode.V,
+        -- Fly (vape-style, method-based, camera-relative)
+        Fly_On       = false,
+        Fly_Mode     = "CFrame",  -- CFrame | Velocity
+        Fly_Value    = 60,        -- horizontal studs/sec
+        Fly_Vertical = 60,        -- vertical studs/sec
+        Fly_Face     = true,      -- PlatformStand + move relative to camera pitch
 
-        SpeedStateKey   = Enum.KeyCode.C,
-        SpeedStateOrder = { "Skydiving", "Parachuting", "Proning" },
+        -- NoClip — CanCollide=false on our own parts each PreSimulation frame (before physics),
+        -- so we phase through walls/floors. Carry-aware: when we're carrying/gripping an enemy
+        -- (they're welded to us), their parts collide with the wall and would block/rubberband us,
+        -- so we un-collide the carried victim's parts too → pass through even with someone on our
+        -- shoulders. Restores original CanCollide on disable.
+        NoClip_On    = false,
+        NoClip_Carry = true,      -- also un-collide an enemy we're carrying/gripping
 
-        LeanLockKey    = Enum.KeyCode.L,
-        LeanLockValue  = 1,
+        -- No Slowdown (master + per-type) — hooks MovementServiceUtils.SetSpeed
+        NS_On     = false,
+        NS_Attack = true,         -- M1/M2/windup movement lock
+        NS_Block  = true,         -- Blocking / GuardBroken
+        NS_GetHit = true,         -- CantAnything / Stunned (lock from taking a hit)
+        NS_Speed  = 0,            -- restore target used ONLY during those states: 0 = game base (12/25), 1..25 = exact
 
-        InvisibleKey     = Enum.KeyCode.U,
-        InvisibleYOffset = -2.8,
-        InvisibleProne   = true,
-        InvisibleLean    = true,
-        InvisibleJitter  = 0,
+        -- No Delay (direct hookfunction(task.delay) → collapse combat cooldown/reset waits)
+        -- [V112] Ключи NoDelay_Attrs и NoDelay_Anim УДАЛЕНЫ. Первый чистил атрибуты,
+        -- которых tryM1 не читает вообще (isCombatInputBlocked проверяет другой набор),
+        -- второй был косметическим костылём под неработавший фикс. Лишние настройки =
+        -- признак ненайденной причины; причина найдена, настройки не нужны.
+        NoDelay_On    = false,
 
-        FakeAnglesKey      = Enum.KeyCode.J,
-        FakeAnglesJitter   = 2.8,   -- yaw swing (rad) per packet flip
-        FakeAnglesPitchAmp = 1.4,   -- pitch swing (rad) up/down
-        -- ⚠ КЛЮЧЕВОЕ (фикс «десинк меня / урон не регистрируется»):
-        --   Пакет ReplicateMovement несёт ОДИН набор углов, который сервер
-        --   отдаёт другим игрокам И использует для валидации ТВОИХ выстрелов:
-        --     a[6]=Orientation (yaw ТЕЛА) — что видят враги, для стрельбы НЕ важен.
-        --     a[9]=CameraX (yaw ПРИЦЕЛА), a[10]=CameraY (pitch ПРИЦЕЛА) — твой
-        --        реальный прицел; сервер по нему проверяет попадания. Если их
-        --        подменить — сервер считает выстрел невозможным → урон не идёт,
-        --        а античит откатывает позицию («телепорт назад»).
-        --   Поэтому по умолчанию крутим ТОЛЬКО тело (a[6]) и наклон (a[11]),
-        --   а ПРИЦЕЛ (a[9]/a[10]) оставляем настоящим. Враги всё равно
-        --   десинкаются по интерполяции тела, а ты стреляешь и стоишь как надо.
-        FakeAnglesYaw      = true,   -- крутить yaw ТЕЛА    (a[6])  — безопасно
-        FakeAnglesLean     = true,   -- крутить наклон      (a[11]) — безопасно
-        FakeAnglesAimYaw   = false,  -- крутить yaw ПРИЦЕЛА (a[9])  ⚠ ломает хитрег
-        FakeAnglesPitch    = false,  -- крутить pitch ПРИЦЕЛА (a[10]) ⚠ ломает хитрег
-        -- ⚠ ФИКС ФРИЗА (Jitter/Twitch/Break/Chaos): держим ВКЛ. Гарантирует, что
-        --   каждый пакет валиден (конечные углы, реальный HeightState, позиция не
-        --   тронута) → сервер не отбрасывает пакет → нет «стою на месте» и отката.
-        --   Выключай только если точно знаешь, что делаешь.
-        FakeAnglesClampSafe = true,
-        FakeAnglesSpinStep = 0.9,   -- yaw advance per packet in Spin mode
-        FakeAnglesGhost    = true,  -- show fake as a cloned model
-        FakeAnglesGhostTransparency = 0.5,
-        FakeAnglesGhostMaterial = Enum.Material.Glass,       -- «жидкое стекло»
-        FakeAnglesGhostColor    = Color3.fromRGB(120, 200, 255),
-        FakeAnglesGhostOutline  = Color3.fromRGB(180, 235, 255),
-        -- ── State-спуф: подменяем HeightState (a[8]) чтобы сервер думал что мы
-        --    сидим/лежим → десинк по высоте хитбокса.
-        -- ⚠ ПОЧЕМУ ПО УМОЛЧАНИЮ ВЫКЛ: если сервер думает что мы Proning/Crouching,
-        --    он применяет ограничения скорости этого стейта. Наша РЕАЛЬНАЯ скорость
-        --    бега выглядит невозможной для прона → сервер откатывает нас назад
-        --    (тот самый «телепорт при выключении»), а спуфнутый хитбокс ломает
-        --    регистрацию ударов. Чистый yaw-jitter (только a[6]) этого не вызывает.
-        --    Включай осознанно, если конкретный сервер это не валидирует.
-        FakeAnglesStateSpoof  = false,          -- чередовать стейты в любом фейк-режиме
-        FakeAnglesStateCycle  = { "Crouching", "Proning", "Standing" }, -- что чередовать
-        FakeAnglesStateHold   = 8,              -- пакетов на один стейт (медленнее = виднее)
-        FakeAnglesForceState  = nil,            -- "Crouching"/"Proning"/... — зафиксировать один
-        FakeAnglesCrouchDrop  = 1.4,            -- насколько опустить гост в Crouch (studs)
-        FakeAnglesProneDrop   = 2.4,            -- насколько опустить гост в Prone (studs)
-        FakeAnglesGhostFirstPersonHide = true,  -- прятать гост в 1-м лице
-        -- Порог первого лица: используем СОБСТВЕННЫЙ сигнал игры LocalActor.Zoom<=0
-        -- (CharacterCamera:154 v36 = Zoom>0 = третье лицо). Camera-дистанция — fallback.
-        FakeAnglesGhostFPZoom = 0.5,            -- Zoom < этого → первое лицо
-        FakeAnglesGhostFPDist = 1.5,            -- fallback: камера ближе → первое лицо
-        -- ── «Нереальные» тест-значения (Break/Chaos). ВНИМАНИЕ: транспорт —
-        --    HttpService:JSONEncode (Flux_client:104). JSON НЕ кодирует inf/NaN →
-        --    пакет бросает ошибку и НЕ уходит (= «стою на месте»). Поэтому шлём
-        --    экстремальные КОНЕЧНЫЕ значения, которые JSON закодирует.
-        FakeAnglesUnrealValue = 1e18,           -- «бесконечность» в конечном виде
-        FakeAnglesUnrealState = 1e9,            -- «нереальный» HeightState
+        -- Sprint
+        Sprint_On     = false,    -- AutoSprint (hold sprint on)
+        Sprint_Bypass = false,    -- keep sprint speed through combat locks (SetSpeed hook)
 
-        -- ── Способ отправки фейк-углов ────────────────────────────────────────
-        -- ВАЖНО (фикс «стою на месте»): раньше по умолчанию мы ГЛУШИЛИ штатный
-        -- 10Гц-пакет игры и слали свой из отдельного Sender'а. Если Sender не мог
-        -- прочитать живую позицию (ForceNextPosition обнулялся игрой, кэш
-        -- контроллера устаревал) — уходило НИЧЕГО, и сервер видел нас застывшими.
-        --
-        -- Теперь по умолчанию модифицируем ПАКЕТ ИГРЫ НА МЕСТЕ (in-place): игра
-        -- сама шлёт настоящую позицию каждые 0.1с, а мы лишь подменяем углы
-        -- (a[6]=Orientation, a[10]=CameraY, a[11]=Lean) и стейт (a[8]). Позиция
-        -- ВСЕГДА настоящая → jitter/unreal реально уходят на сервер.
-        FakeAnglesSender       = false, -- (опц.) отдельный высокочастотный Sender
-        FakeAnglesSendHz       = 22,    -- целевы��� Г�� Sender'а, если включён
-        FakeAnglesSendBurstCap = 3,     -- макс пакетов за кадр Sender'а
-        FakeAnglesSuppressGame = false, -- НЕ глушить штатный пакет (in-place десинк)
+        -- No Slowdown: respect "cannot move" states (grapple/ragdoll/carry/anchor).
+        -- FIX for the reported bug — while immobile, NONE of our speed writes fire, so we
+        -- never fight the game's HRP anchor/snap (that was the rubberband during grapples).
+        NS_RespectImmobile = true,
 
-        -- ── ДИАГНОСТИКА (жми K чтобы вкл/выкл лог) ────────────────────────────
-        -- Печатает первые FakeAnglesDiagCount ИСХОДЯЩИХ ReplicateMovement-пакетов:
-        -- РЕАЛЬНЫЕ X/Y/Z (позиция — должна совпадать с настоящей!) и ОТПРАВЛЕННЫЙ
-        -- Orientation/HeightState. Так видно: (1) пакеты реально уходят, (2) позиция
-        -- не тронута, (3) угол/стейт действительно подменяются. Смотри консоль.
-        FakeAnglesDiag      = false,
-        FakeAnglesDiagKey   = Enum.KeyCode.K,
-        FakeAnglesDiagCount = 20,       -- сколько пакетов залогировать после включения
+        -- Infinite Sprint — hold the client sprint singleton's _staminaSeenPositive at false.
+        -- Both stamina cutoffs (StartSprint + render loop) require that flag TRUE to stop
+        -- sprinting on Stamina<=0. Keeping it false = endless sprint. We NEVER touch the
+        -- Stamina attribute (server-authoritative, would be detectable) — pure client field.
+        InfStamina_On = false,
 
-        -- ── VelocityDesync ───────────────────────────────────────────────────
-        -- Смещаем ОТПРАВЛЯЕМУЮ позицию вдоль вектора скорости, чередуя знак
-        -- каждый пакет. Серверная модель «плывёт» по физике, локальный CFrame
-        -- остаётся корректным → классический velocity-десинк.
-        VelocityDesyncKey    = Enum.KeyCode.Y,  -- (V занят StraferKey)
-        VelocityDesyncAmp    = 3.0,    -- амплитуда смещения (studs)
-        VelocityDesyncUseVel = true,   -- масштабировать по скорости (иначе фикс. амп)
-        VelocityDesyncVertical = 0.0,  -- доп. вертикальное смещение (studs)
+        -- Dodge tweaks — applied to the game Evasive module (config field + module upvalue), so
+        -- the player's OWN natural dodges use these values. Defaults = the real in-game numbers,
+        -- so leaving the sliders alone behaves EXACTLY like vanilla (we only write when changed).
+        Dodge_On         = false,   -- master: resolve Evasive module + apply patches
+        Dodge_Everywhere = false,   -- dodge in ANY state (hook hides the action-lock attributes)
+        Dodge_Speed      = 30,      -- game default DashSpeed (studs/sec)
+        Dodge_Cooldown   = 1.5,     -- game default Evasive.Cooldown (seconds)
 
-        NoFallKey       = Enum.KeyCode.B,
+        -- Anti-Ragdoll / Auto-getup — force getup while Ragdoll is active and NOT a managed
+        -- ragdoll (Downed / carried / dead). Best-effort: server owns the real ragdoll state.
+        AntiRagdoll_On = false,
 
-        ThirdPersonKey       = Enum.KeyCode.T,
-        ThirdPersonDist      = 16,
-        ThirdPersonMax       = 25,
-        ThirdPersonWheelStep = 1.5,
-        ThirdPersonPinchSens = 10,
-        ThirdPersonMobileGui = true,
+        -- [V112] No Blur — глушим ТОЛЬКО боевой/эффектный блюр, подменяя поле
+        -- ScreenEffects.SetBlur. Блюр меню/интерфейса (Menu, PlayerList, Profile, Stats,
+        -- ServerList, Book, Rules, Reroll, RhythmResults, PanelKit) НЕ трогаем — он часть
+        -- нормального UI, и его снятие сделало бы меню визуально сломанным.
+        NoBlur_On = false,
 
-        NoClip    = false,
-        NoClipKey = Enum.KeyCode.N,
-
-        InfiniteJump = false,
-        BunnyHop     = false,
-        SuperJumpKey = Enum.KeyCode.H,
-        SuperJumpVel = 55,
-
-        SpinBotKey = Enum.KeyCode.Z,
-        SpinBotRPS = 6,
-
-        AntiVoid      = false,
-        AntiVoidY     = -50,
-        AntiVoidSafeY = 50,
-
-        LeanSprint = false,
-        LeanAngle  = 4,
-
-        DiagKey    = Enum.KeyCode.RightBracket,
-        DebugKey   = Enum.KeyCode.LeftBracket,
-        DumpNilKey = Enum.KeyCode.K,
+        -- [V112] Respawn / Auto Respawn. Порог HP в ПРОЦЕНТАХ от MaxHealth: 0 = только
+        -- по факту смерти/Downed, >0 = респавн при падении HP ниже порога.
+        AutoRespawn_On   = false,
+        AutoRespawn_HP   = 0,
     }
 
-    local function now() return os.clock() end
-    local function getCamera() return Workspace.CurrentCamera end
+    -- ═════════════════════════ Character helpers ═════════════════════�����══════
+    local function getChar()
+        local c = LocalPlayer.Character
+        if not c or not c.Parent then return nil end
+        return c
+    end
+    local function getParts()
+        local c = getChar(); if not c then return nil end
+        local hum  = c:FindFirstChildOfClass("Humanoid")
+        local root = c:FindFirstChild("HumanoidRootPart") or (hum and hum.RootPart)
+        if not hum or not root or hum.Health <= 0 then return nil end
+        return c, hum, root
+    end
 
-    local function isLiveInputActive()
-        if UIS:IsKeyDown(Enum.KeyCode.W) or UIS:IsKeyDown(Enum.KeyCode.A)
-        or UIS:IsKeyDown(Enum.KeyCode.S) or UIS:IsKeyDown(Enum.KeyCode.D) then
-            return true
+    -- ══════════════════������ IMMOBILE-STATE DETECTOR (NoSlowdown fix) ══════════�����═
+    -- The bug: during a grapple the game ANCHORS HumanoidRootPart and re-snaps its CFrame
+    -- every frame (RagdollService / Grapple.lua enforcePreAnimationAlignment), and combat
+    -- also carries/gits/ragdolls you. Our Speed / Fly CFrame writes and the SetSpeed hook's
+    -- speed restore fought that anchor → the "changes speed when it shouldn't" rubberband.
+    -- These are states where the player is NOT meant to move at all, verified in the dump:
+    --   • HRP.Anchored              → grapple root-lock (Grapple.lua)
+    --   • attr Grappling            → M2.lua wrestling/grapple gate
+    --   • attr Ragdoll / Downed     → RagdollServiceClient managed ragdoll
+    --   • States.BeingCarried / BeingGripped (Value ~= nil)  → carry / grip
+    --   • HRP.CarryWeld / GripWeld  → physical carry/grip weld (RagdollServiceClient.isCarriedOrGripped)
+    -- While ANY is active we suppress every speed write so the game's lock wins cleanly.
+    local IMMOBILE_ATTRS = { "Grappling", "Ragdoll", "Downed" }
+    -- The M2 wrestling GRAB (M2.lua applyWrestlingGrabNoCollision) welds you to the attacker and
+    -- creates NoCollisionConstraints named "WrestlingM2GrabNoCollide" across your parts, then the
+    -- server positions you — you are genuinely locked WITHOUT Anchored / the Grappling attribute /
+    -- a named Carry/Grip weld. That's the case the user hit: NS raised WalkSpeed but the server
+    -- held them in place → rubberband ("на месте для сервера"). This constraint is the reliable
+    -- marker for it. Scanning descendants is a bit heavy, so cache the whole isImmobile result for
+    -- one frame (both stepSpeed and the SetSpeed hook call it, sometimes many times per frame).
+    local _immCacheT, _immCacheV = 0, false
+
+    -- [V112] PERF: детект grab-констрейнта переведён со СКАНИРОВАНИЯ на СОБЫТИЯ.
+    -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ ТЯЖЁЛЫМ: hasGrabConstraint звал char:GetDescendants(), а это
+    -- аллокация НОВОЙ таблицы со ВСЕМИ потомками персонажа (у R15 с аксессуарами — сотни
+    -- инстансов) плюс :IsA на каждом. Кэш на 0.05с прятал частоту вызовов, но всё равно
+    -- давал ~20 полных обходов в секунду ПОСТОЯННО, даже когда нас никто не хватал. Это
+    -- ровно тот тип работы, что копит мусор и даёт просадки со временем.
+    -- КАК ТЕПЕРЬ: держим счётчик живых констрейнтов и правим его по DescendantAdded /
+    -- DescendantRemoving. Проверка становится сравнением числа с нулём — то есть бесплатной.
+    local _grabCount, _grabConns = 0, {}
+    local function isGrabConstraint(d)
+        return d:IsA("NoCollisionConstraint") and d.Name == "WrestlingM2GrabNoCollide"
+    end
+    local function bindGrabWatch(char)
+        for i = #_grabConns, 1, -1 do
+            pcall(function() _grabConns[i]:Disconnect() end)
+            _grabConns[i] = nil
         end
-        local ok, gp = pcall(function() return UIS:GetGamepadState(Enum.UserInputType.Gamepad1) end)
-        if ok and gp then
-            for _, s in ipairs(gp) do
-                if s.KeyCode == Enum.KeyCode.Thumbstick1 and s.Position.Magnitude > 0.15 then
+        _grabCount = 0
+        if not char then return end
+        -- Стартовый пересчёт делаем ОДИН раз на персонажа (а не каждый кадр): констрейнт
+        -- мог уже существовать до того, как мы подписались.
+        for _, d in ipairs(char:GetDescendants()) do
+            if isGrabConstraint(d) then _grabCount = _grabCount + 1 end
+        end
+        _grabConns[#_grabConns + 1] = char.DescendantAdded:Connect(function(d)
+            if isGrabConstraint(d) then _grabCount = _grabCount + 1 end
+        end)
+        _grabConns[#_grabConns + 1] = char.DescendantRemoving:Connect(function(d)
+            if isGrabConstraint(d) then
+                _grabCount = _grabCount - 1
+                if _grabCount < 0 then _grabCount = 0 end
+            end
+        end)
+    end
+    local function hasGrabConstraint()
+        return _grabCount > 0
+    end
+    local function isImmobile(char, root)
+        if not Config.NS_RespectImmobile then return false end
+        local now = os.clock()
+        if (now - _immCacheT) < 0.05 then return _immCacheV end
+        _immCacheT = now
+        char = char or getChar(); if not char then _immCacheV = false; return false end
+        if not root then
+            root = char:FindFirstChild("HumanoidRootPart")
+        end
+        local result = false
+        if root and root.Anchored then
+            result = true
+        else
+            for _, a in ipairs(IMMOBILE_ATTRS) do
+                if char:GetAttribute(a) == true then result = true; break end
+            end
+            if not result then
+                local states = char:FindFirstChild("States")
+                if states then
+                    local bc = states:FindFirstChild("BeingCarried")
+                    local bg = states:FindFirstChild("BeingGripped")
+                    if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then result = true end
+                end
+            end
+            if not result and root and (root:FindFirstChild("CarryWeld") or root:FindFirstChild("GripWeld")) then
+                result = true
+            end
+            -- being wrestled/grabbed (server-positioned, no anchor/attr) → the reported bug
+            if not result and hasGrabConstraint() then result = true end
+        end
+        _immCacheV = result
+        return result
+    end
+
+    -- ══════════════════════════ Move-vector math ════════════════════════════
+    -- MoveDirection is world-space horizontal input, already camera-relative
+    -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
+    -- camera basis so camera PITCH gives vertical movement → full 3D from a
+    -- single thumbstick (the mobile-friendly part).
+    local function cameraRelative(moveDir)
+        local cam = Workspace.CurrentCamera
+        if not cam or moveDir.Magnitude < 1e-3 then return moveDir end
+        local cf = cam.CFrame
+        local flatFwd   = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+        local flatRight = Vector3.new(cf.RightVector.X, 0, cf.RightVector.Z)
+        if flatFwd.Magnitude   < 1e-3 then return moveDir end
+        if flatRight.Magnitude < 1e-3 then return moveDir end
+        flatFwd, flatRight = flatFwd.Unit, flatRight.Unit
+        local f = moveDir:Dot(flatFwd)      -- forward / back amount
+        local r = moveDir:Dot(flatRight)    -- strafe amount
+        local dir = (cf.LookVector * f) + (cf.RightVector * r)
+        if dir.Magnitude < 1e-3 then return moveDir end
+        return dir.Unit
+    end
+
+    -- ═══════════════════════════════ SPEED ══════════════════════════════════
+    -- CFrame  → shift the root by moveVec*speed*dt (positional, beats the WalkSpeed
+    --           anti-cheat since WalkSpeed itself is untouched).
+    -- Velocity→ set horizontal AssemblyLinearVelocity, keep gravity on Y.
+    -- [LURAPH] per-frame speed step — kept native under Luraph.
+    local stepSpeed = LPH_NO_VIRTUALIZE(function(dt)
+        if not Config.Speed_On then return end
+        local char, hum, root = getParts(); if not hum then return end
+        -- FIX: never shove the root while the game has us locked/anchored (grapple, ragdoll,
+        -- carry, grip) — that write-fight was the erratic speed the user reported.
+        if isImmobile(char, root) then return end
+        local moveDir = hum.MoveDirection
+        if moveDir.Magnitude < 1e-3 then return end
+        local speed = Config.Speed_Value
+        if Config.Speed_Mode == "Velocity" then
+            local y = root.AssemblyLinearVelocity.Y
+            root.AssemblyLinearVelocity = (moveDir * speed) + Vector3.new(0, y, 0)
+        else -- CFrame
+            root.CFrame = root.CFrame + (moveDir * speed * dt)
+        end
+    end)
+
+    -- ════════════════════════════════ FLY ═══════════════════════════════════
+    local flyUp, flyDown = 0, 0        -- vertical input state
+    local flyConns = {}                -- input connections active only while flying
+
+    local function clearFlyInput()
+        for _, c in ipairs(flyConns) do pcall(function() c:Disconnect() end) end
+        table.clear(flyConns)
+        flyUp, flyDown = 0, 0
+    end
+
+    local function bindFlyInput()
+        clearFlyInput()
+        -- PC: Space = up, LeftControl = down (Shift avoided → no shiftlock clash).
+        for _, ev in ipairs({ "InputBegan", "InputEnded" }) do
+            flyConns[#flyConns + 1] = UserInputService[ev]:Connect(function(input, gpe)
+                if gpe then return end
+                local began = (ev == "InputBegan")
+                if input.KeyCode == Enum.KeyCode.Space then
+                    flyUp = began and 1 or 0
+                elseif input.KeyCode == Enum.KeyCode.LeftControl then
+                    flyDown = began and -1 or 0
+                end
+            end)
+        end
+        -- Mobile: watch the touch jump button (ImageRectOffset.X == 146 while held).
+        if UserInputService.TouchEnabled then
+            pcall(function()
+                local jb = LocalPlayer:WaitForChild("PlayerGui", 5)
+                    :WaitForChild("TouchGui"):WaitForChild("TouchControlFrame"):WaitForChild("JumpButton")
+                flyConns[#flyConns + 1] = jb:GetPropertyChangedSignal("ImageRectOffset"):Connect(function()
+                    flyUp = (jb.ImageRectOffset.X == 146) and 1 or 0
+                end)
+            end)
+        end
+    end
+
+    local flyActive = false
+    local function stopFlyPhysics()
+        local _, hum = getParts()
+        if hum then pcall(function() hum.PlatformStand = false end) end
+        flyActive = false
+    end
+
+    -- [LURAPH] per-frame fly step — kept native under Luraph.
+    local stepFly = LPH_NO_VIRTUALIZE(function(dt)
+        if not Config.Fly_On then
+            if flyActive then stopFlyPhysics(); clearFlyInput() end
+            return
+        end
+        local char, hum, root = getParts()
+        if not hum then return end
+        -- FIX: while grappled/ragdolled/carried the game anchors us; don't fly-fight it.
+        if isImmobile(char, root) then return end
+        if not flyActive then flyActive = true; bindFlyInput() end
+
+        -- Face-camera: PlatformStand + look along camera (also gives 3D via pitch).
+        if Config.Fly_Face then
+            hum.PlatformStand = true
+            root.RotVelocity = Vector3.zero
+            local cam = Workspace.CurrentCamera
+            if cam then
+                root.CFrame = CFrame.lookAlong(root.Position, cam.CFrame.LookVector)
+            end
+        end
+
+        local moveDir = hum.MoveDirection
+        local dir = Config.Fly_Face and cameraRelative(moveDir) or moveDir
+        local horizontal = dir * Config.Fly_Value
+        local vertical   = Vector3.new(0, (flyUp + flyDown) * Config.Fly_Vertical, 0)
+
+        if Config.Fly_Mode == "Velocity" then
+            root.AssemblyLinearVelocity = horizontal + vertical
+        else -- CFrame (no rubberbanding — velocity zeroed each frame)
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = root.CFrame + ((horizontal + vertical) * dt)
+        end
+    end)
+
+    -- ═══════════════════════════════ NOCLIP ═════════════════════════════════
+    -- Standard client noclip: force CanCollide=false on our parts every PreSimulation frame
+    -- (before physics resolves), so the world can't stop us. We remember each part's original
+    -- CanCollide so disabling NoClip restores it exactly (HRP is normally false, Torso/Head true).
+    --
+    -- [V130] PERF: the old version called model:GetDescendants() EVERY FRAME (allocates a fresh
+    -- table + walks the whole instance tree, ~20 parts) → constant GC churn = stutter. Now we CACHE
+    -- the BasePart list per model and only rebuild it on a throttle (parts almost never change mid-
+    -- life). Per frame we just walk a plain array and write CanCollide=false (cheap, no allocation).
+    local _noclipTouched = {}     -- [BasePart] = originalCanCollide (for restore)
+    local _partCache     = {}     -- [Model]   = { parts = {BasePart...}, t = lastScan }
+    local PART_RESCAN    = 1.0     -- seconds between descendant rescans per model
+    local function collideParts(model)
+        local entry = _partCache[model]
+        local now = os.clock()
+        if not entry or (now - entry.t) >= PART_RESCAN then
+            local parts = entry and entry.parts or {}
+            table.clear(parts)
+            for _, d in ipairs(model:GetDescendants()) do
+                if d:IsA("BasePart") then parts[#parts + 1] = d end
+            end
+            entry = { parts = parts, t = now }
+            _partCache[model] = entry
+        end
+        return entry.parts
+    end
+    local function unCollide(model)
+        if not model then return end
+        local parts = collideParts(model)
+        for i = 1, #parts do
+            local d = parts[i]
+            if d.Parent then
+                if _noclipTouched[d] == nil then _noclipTouched[d] = d.CanCollide end
+                if d.CanCollide then d.CanCollide = false end
+            end
+        end
+    end
+    -- [PERF] persistent wrapper: the pcall below allocated a closure PER PART (~10 per call),
+    -- and restoreCollide fires on every noclip toggle AND every ragdoll start/end — a burst of
+    -- allocations at exactly the worst moment for frame time.
+    local function _setCollide(p, v) p.CanCollide = v end
+    local function restoreCollide()
+        for part, orig in pairs(_noclipTouched) do
+            if typeof(part) == "Instance" and part.Parent then
+                pcall(_setCollide, part, orig)
+            end
+        end
+        table.clear(_noclipTouched)
+        table.clear(_partCache)
+    end
+
+    -- Find an enemy character we are CARRYING/GRIPPING (they're welded to us). The carry/grip
+    -- weld lives under the VICTIM's HRP (CarryWeld/GripWeld — RagdollServiceClient.isCarriedOrGripped),
+    -- and one of its Part0/Part1 belongs to OUR character. Cached ~0.25s (carry state rarely
+    -- flips) so we don't scan every player every frame.
+    --
+    -- Detection (verified against KnockedService): a downed victim being carried/gripped has an
+    -- ObjectValue States.BeingCarried / States.BeingGripped whose .Value is set (line 80/86 confirm
+    -- IsA("ObjectValue")). We match the victim to US two ways, name-independent so it survives
+    -- whatever the server names the weld:
+    --   1) the ObjectValue .Value references our character/HRP/player (authoritative link), OR
+    --   2) ANY weld/Motor6D under the victim connects Part0/Part1 to our character (physical link).
+    -- The old code only checked a hard-coded "CarryWeld"/"GripWeld" name under HRP → it missed the
+    -- real weld and Carry-Aware never fired. This is the fix.
+    local function refsMe(inst, myChar)
+        if not inst then return false end
+        if inst == myChar or inst == LocalPlayer then return true end
+        if typeof(inst) == "Instance" then
+            if inst:IsA("Player") then return inst.Character == myChar end
+            local ok, desc = pcall(function() return inst:IsDescendantOf(myChar) end)
+            if ok and desc then return true end
+        end
+        return false
+    end
+    local function weldLinksMe(char, myChar)
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+                local p0, p1 = d.Part0, d.Part1
+                if (p0 and p0:IsDescendantOf(myChar)) or (p1 and p1:IsDescendantOf(myChar)) then
                     return true
                 end
             end
         end
-        if UIS.TouchEnabled then
-            local okT, touches = pcall(function() return UIS:GetTouches() end)
-            if okT and touches and #touches > 0 then return true end
+        return false
+    end
+    local _carryCacheT, _carryVictim = 0, nil
+    local function getCarriedVictim(myChar)
+        local now = os.clock()
+        if (now - _carryCacheT) < 0.25 then
+            return (_carryVictim and _carryVictim.Parent) and _carryVictim or nil
+        end
+        _carryCacheT = now
+        _carryVictim = nil
+        for _, pl in ipairs(Players:GetPlayers()) do
+            local oc = pl.Character
+            if oc and oc ~= myChar then
+                local states = oc:FindFirstChild("States")
+                local bc = states and states:FindFirstChild("BeingCarried")
+                local bg = states and states:FindFirstChild("BeingGripped")
+                local carried = (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil)
+                if carried then
+                    -- carried by SOMEONE; is it me? (authoritative value ref OR physical weld)
+                    if refsMe(bc and bc.Value, myChar) or refsMe(bg and bg.Value, myChar)
+                       or weldLinksMe(oc, myChar) then
+                        _carryVictim = oc
+                        break
+                    end
+                end
+            end
+        end
+        return _carryVictim
+    end
+
+    -- Are WE currently ragdolled / downed? While ragdolled the physics ragdoll needs real
+    -- collisions (otherwise you clip through the floor and the game's get-up can break/desync),
+    -- so NoClip must PAUSE for the whole ragdoll and auto-resume once it clears.
+    -- Robust ragdoll/knock detection. The Ragdoll/Downed ATTRIBUTES are correct (that's what the
+    -- game reads everywhere), BUT they get set a frame or two AFTER the physics ragdoll engages —
+    -- and in that gap our per-frame CanCollide=false makes the loose body fall through the floor.
+    -- So we ALSO watch signals that flip at the very start of the ragdoll:
+    --   • Humanoid.PlatformStand == true  (game uses this as a ragdoll signal — SmoothShiftLock:792)
+    --   • Humanoid state Physics / FallingDown / Ragdoll / GettingUp / Seated
+    --   • RagdollLaunchApplied attribute (the cinematic knockback fling)
+    local RAGDOLL_STATES = {
+        [Enum.HumanoidStateType.Physics]     = true,
+        [Enum.HumanoidStateType.FallingDown] = true,
+        [Enum.HumanoidStateType.Ragdoll]     = true,
+        [Enum.HumanoidStateType.GettingUp]   = true,
+        [Enum.HumanoidStateType.Seated]      = true,
+    }
+    local function _humGetState(h) return h:GetState() end
+    local function selfRagdolled(char)
+        if char:GetAttribute("Ragdoll") == true or char:GetAttribute("Downed") == true
+           or char:GetAttribute("RagdollLaunchApplied") == true then
+            return true
+        end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            if hum.PlatformStand == true then return true end
+            -- [PERF] pcall with an inline closure allocated a fresh closure EVERY PreSimulation
+            -- frame while noclip was on. Persistent wrapper → zero allocation.
+            local ok, st = pcall(_humGetState, hum)
+            if ok and RAGDOLL_STATES[st] then return true end
         end
         return false
     end
 
-    local knownGoodLA = nil
-
-    local activeCtrlRef = nil
-
-    local liveCtrl, liveCtrlT = nil, -999
-    local liveCam,  liveCamT  = nil, -999
-    local LIVE_TTL = 0.5  -- self считается "живым", если Update дёргал его < 0.5с назад (~30 кадров)
-
-    local hooksSetup    = false
-    local camHooksSetup = false
-
-    local logBuf = {}
-    local function log(...)
-        local p = {}; for _, v in ipairs({...}) do p[#p+1] = tostring(v) end
-        local line = table.concat(p, "\t"); logBuf[#logBuf+1] = line; print(line)
-    end
-    local function flushLog(f)
-        local c = table.concat(logBuf, "\n")
-        if type(writefile)    == "function" then pcall(writefile,    f, c) end
-        if type(setclipboard) == "function" then pcall(setclipboard, c) end
-        print("[MOV] Диагностика → " .. f); logBuf = {}
-    end
-
-    local function isCtrl(t)
-        if type(t) ~= "table" then return false end
-        if type(rawget(t,"MoveSpeed"))       ~= "number"  then return false end
-        if type(rawget(t,"VelocityGravity")) ~= "number"  then return false end
-        if type(rawget(t,"TrySprinting"))    ~= "boolean" then return false end
-        if type(rawget(t,"IsGrounded"))      ~= "boolean" then return false end
-        if type(rawget(t,"IsSprinting"))     ~= "boolean" then return false end
-        local la = rawget(t, "_localActor")
-        if type(la) ~= "table" then return false end
-
-        local alive = rawget(la, "Alive")
-        if alive == false then return false end
-
-        local ilp = rawget(la, "IsLocalPlayer")
-        if ilp == false then return false end
-
-        local backRef = rawget(la, "Controller")
-        if type(backRef) == "table" and not rawequal(backRef, t) then
-            return false
+    local RAGDOLL_GRACE = 0.5     -- keep collisions this long AFTER ragdoll clears (let get-up finish)
+    local _noclipActive, _ragdollClearedAt = false, 0
+    -- [LURAPH] per-frame noclip step — kept native under Luraph.
+    local stepNoClip = LPH_NO_VIRTUALIZE(function()
+        if not Config.NoClip_On then
+            if _noclipActive then restoreCollide(); _noclipActive = false end
+            return
         end
+        local char = getChar(); if not char then return end
+        -- Ragdoll pause: restore real collisions and wait until we're fully out of ragdoll +
+        -- a short grace window (so the get-up animation settles on the floor, not through it).
+        if selfRagdolled(char) then
+            _ragdollClearedAt = os.clock() + RAGDOLL_GRACE
+            if _noclipActive then restoreCollide(); _noclipActive = false end
+            return
+        end
+        if os.clock() < _ragdollClearedAt then
+            if _noclipActive then restoreCollide(); _noclipActive = false end
+            return
+        end
+        _noclipActive = true
+        unCollide(char)
+        -- carry-aware: also phase the enemy we're carrying so their body can't wedge on the wall
+        if Config.NoClip_Carry then
+            local victim = getCarriedVictim(char)
+            if victim then unCollide(victim) end
+        end
+    end)
 
+    -- ══════════��════════ HOOK-BASED FEATURES ════════��════���════════════��═════
+    -- filtergc by CONSTANTS (string literals baked into the proto) — reliable even
+    -- when the production bytecode ships with stripped function debug-names, which
+    -- is why {Name=...} lookups silently returned nil before.
+    -- PERF: ALWAYS filterOne = true. The old fallback filtergc(...,false) collected
+    -- EVERY matching object on the heap into a table on every call — that full-heap
+    -- sweep was the 10-second freeze. filterOne stops at the first match.
+    local function findFn(constants, upvals)
+        if type(filtergc) ~= "function" then return nil end
+        local opts = { IgnoreExecutor = true }
+        if constants then opts.Constants = constants end
+        if upvals   then opts.Upvalues  = upvals   end
+        local ok, res = pcall(filtergc, "function", opts, true)  -- filterOne = true
+        if ok and type(res) == "function" then return res end
+        return nil
+    end
+
+    local notifyFn  -- set inside buildUI so hooks can report status
+
+    -- ---- No Slowdown / Get-Hit: hook MovementServiceUtils.SetSpeed(inst, speed) --
+    -- THE REAL ROOT CAUSE (finally): the client _setSpeed pipeline does NOTHING while
+    -- IsLocked is true (it early-returns), so hooking IsLocked never affected combat
+    -- speed. The slowdowns are written DIRECTLY by the combat scripts themselves:
+    --   M2  startCapoeiraRootLock → MovementServiceUtils.SetSpeed(humanoid, 0) EVERY Heartbeat
+    --   M2  windup                → SetSpeed(humanoid, 0)
+    --   Block engage/hold         → SetSpeed(humanoid, <reduced>)
+    -- Every path funnels through MovementServiceUtils.SetSpeed, which sets
+    -- Humanoid.WalkSpeed + ControllerManager GroundSpeed. So we hook SetSpeed itself:
+    -- when the target is OUR humanoid and the requested speed is a slowdown, we
+    -- substitute our desired speed instead of letting the write through. Because the
+    -- combat scripts call SetSpeed LAST every frame, our hook always wins the race —
+    -- no PostStep write-fight, no fling. IsMoveSpeedAuthorized skips the anti-cheat
+    -- while locked, so raising speed during a combat lock is safe.
+    -- Found by its unique constants "GroundSpeed" + "WalkSpeed".
+    -- resolve the character that owns whatever instance SetSpeed was handed
+    local function ownerChar(inst)
+        if typeof(inst) ~= "Instance" then return nil end
+        if inst:IsA("Humanoid") or inst:IsA("ControllerManager") then
+            local m = inst.Parent
+            return (m and m:IsA("Model")) and m or nil
+        end
+        if inst:IsA("Model") then return inst end
+        return nil
+    end
+    -- the speed we should move at WHILE a slowdown is being suppressed:
+    -- NS_Speed>0 forces an exact value (capped), else the game's natural base.
+    local function naturalSpeed()
+        return Config.Sprint_On and SPRINT_WALK or BASE_WALK
+    end
+    local function restoreTarget()
+        if Config.NS_Speed and Config.NS_Speed > 0 then
+            return math.clamp(Config.NS_Speed, 1, SPEED_CAP)
+        end
+        return naturalSpeed()
+    end
+
+    local setSpeedHooked = false
+    local function installSetSpeedHook()
+        if setSpeedHooked then return true end
+        if type(hookfunction) ~= "function" then return false end
+        local fn = findFn({ "GroundSpeed", "WalkSpeed" })
+        if not fn then return false end
+        local orig
+        orig = hookfunction(fn, LPH_NO_VIRTUALIZE(function(inst, speed, ...)
+            -- FIX: only ever act while an actual combat-lock STATE is active on us, so
+            -- the Restore Speed value can NEVER leak into normal walking. When idle we
+            -- do nothing and the game's own speed writes pass straight through.
+            if type(speed) == "number" and (Config.NS_On or Config.Sprint_Bypass) then
+                local char = ownerChar(inst)
+                if char and char == LocalPlayer.Character then
+                    -- FIX: if the game has us in a no-move state (grapple/ragdoll/carry/anchor),
+                    -- let its speed write through UNTOUCHED. Restoring speed here is exactly what
+                    -- made movement go weird during grapples — suppress our override instead.
+                    if isImmobile(char, nil) then
+                        return orig(inst, speed, ...)
+                    end
+                    -- which slowdown-causing state is active right now?
+                    local inAttack = char:GetAttribute("M1") == true or char:GetAttribute("M2") == true
+                        or char:GetAttribute("M1Hold") == true or char:GetAttribute("PendingM2") == true
+                        or char:GetAttribute("CombatAttacking") == true
+                    local inBlock  = char:GetAttribute("Blocking") == true or char:GetAttribute("GuardBroken") == true
+                    local inGetHit = char:GetAttribute("CantAnything") == true or char:GetAttribute("Stunned") == true
+
+                    local suppress
+                    if Config.Sprint_Bypass then
+                        suppress = inAttack or inBlock or inGetHit
+                    elseif Config.NS_On then
+                        suppress = (inAttack and Config.NS_Attack)
+                                or (inBlock and Config.NS_Block)
+                                or (inGetHit and Config.NS_GetHit)
+                    else
+                        suppress = false
+                    end
+
+                    if suppress then
+                        local want = restoreTarget()
+                        -- only raise an actual slowdown; never lower a legit higher speed
+                        if speed < want - 0.05 then
+                            return orig(inst, want, ...)
+                        end
+                    end
+                end
+            end
+            return orig(inst, speed, ...)
+        end))
+        setSpeedHooked = true
         return true
     end
 
-    local function isCam(t)
-        if type(t) ~= "table" then return false end
-        if rawget(t,"_zoomLimit")   == nil then return false end
-        if rawget(t,"_shoulderLerp") == nil then return false end
-        if rawget(t,"_lastWalkAngle") == nil then return false end
-        local la = rawget(t, "_localActor")
-        if type(la) ~= "table" then return false end
-        if knownGoodLA ~= nil and not rawequal(la, knownGoodLA) then
-            return false
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- COMBAT MODULE RESOLVERS — require the game's OWN cached modules → LIVE upvalues
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- require() on a ModuleScript the game already required returns the SAME cached table,
+    -- so Evasive.Evasive / M1.OnM1Activated are the live functions and debug.setupvalue
+    -- patches the very upvalues the combat system reads. No filtergc heap sweep needed.
+    -- [V112] ПЕРЕНЕСЕНО СЮДА (было ниже, после Dodge). Причина строго техническая:
+    -- mapNoDelay/mapEvasive вызывают tryRequire и hasDebugUpvalues, а Lua связывает
+    -- local-функцию по ЛЕКСИЧЕСКОЙ позиции. Пока объявление стояло ниже, замыкание
+    -- захватывало глобальный nil → вызов падал в pcall и фича «просто не работала».
+    local function tryRequire(pathParts)
+        local node = ReplicatedStorage
+        for _, name in ipairs(pathParts) do
+            if not node then return nil end
+            node = node:FindFirstChild(name)
         end
-        return true
+        if not node then return nil end
+        local ok, mod = pcall(require, node)
+        return ok and mod or nil
     end
-
-    local function isNetObj(v)
-        if type(v) ~= "table" then return false end
-        local code=rawget(v,"_code"); local key=rawget(v,"_key"); local evts=rawget(v,"_events")
-        if not (type(code)=="string" and #code>4 and type(key)=="table" and type(evts)=="table") then return false end
-        local ok, fs = pcall(function() return v.FireServer end)
-        return ok and type(fs)=="function"
-    end
-
-    local nilCache, nilCacheT = nil, -999
-    local function getNilInstances()
-        local t = now()
-        if nilCache and t-nilCacheT < 2.5 then return nilCache end
-        if type(getnilinstances) ~= "function" then return nil end
-        local ok, nils = pcall(getnilinstances)
-        if not ok or type(nils) ~= "table" then return nil end
-        nilCache=nils; nilCacheT=t; return nils
-    end
-
-    local function scanScriptForNet(inst)
-        if type(getscriptclosure) ~= "function" then return nil end
-        local ok, fn = pcall(getscriptclosure, inst)
-        if not ok or type(fn) ~= "function" then return nil end
-        for i = 1, 512 do
-            local ou, _, uv = pcall(debug.getupvalue, fn, i)
-            if not ou or uv == nil then break end
-            if isNetObj(uv) then return uv end
+    local _evasiveMod, _combatConfig
+    local function getEvasive()
+        if _evasiveMod == nil then
+            _evasiveMod = tryRequire({ "CombatSystemClient", "Combat", "Base", "Evasive" }) or false
         end
-        return nil
+        return _evasiveMod or nil
     end
-
-    local function findNetworkObj()
-        if type(State.networkModule)=="table" and isNetObj(State.networkModule) then
-            return State.networkModule
+    local function getCombatConfig()
+        if _combatConfig == nil then
+            _combatConfig = tryRequire({ "Shared", "Config", "CombatConfig" }) or false
         end
-        if type(filtergc)=="function" then
-            local ok, gc = pcall(filtergc,"table",{Keys={"_code","_key","_events","_functions"}})
-            if ok and type(gc)=="table" then
-                for _, v in ipairs(gc) do
-                    if isNetObj(v) then State.networkModule=v; return v end
-                end
-            end
-        end
-        local nils = getNilInstances()
-        if nils then
-            for _, inst in ipairs(nils) do
-                local okC, cls = pcall(function() return inst.ClassName end)
-                if okC and (cls=="LocalScript" or cls=="ModuleScript") then
-                    local net = scanScriptForNet(inst)
-                    if net then State.networkModule=net; return net end
-                end
-            end
-        end
-        return nil
+        return _combatConfig or nil
+    end
+    local function hasDebugUpvalues()
+        return type(debug) == "table" and type(debug.getupvalues) == "function"
+            and type(debug.setupvalue) == "function"
+            and type(debug.getupvalue) == "function"
     end
 
-    local function findCtrlViaFiltergc()
-        if type(filtergc) ~= "function" then return nil end
-        if hooksSetup then return nil end
-        local ok, gc = pcall(filtergc,"table",{
-            Keys={"MoveSpeed","VelocityGravity","TrySprinting","IsGrounded","IsSprinting"}
-        })
-        if not ok or type(gc) ~= "table" then return nil end
-        for _, v in ipairs(gc) do if isCtrl(v) then return v end end
-        return nil
-    end
-
-    local lastExpensiveScanT = -999
-    local EXPENSIVE_SCAN_CD = 0.75
-
-    local function findCtrlViaGetgc()
-        if type(getgc) ~= "function" then return nil end
-        if hooksSetup then return nil end
-        local t = now()
-        if t - lastExpensiveScanT < EXPENSIVE_SCAN_CD then return nil end
-        lastExpensiveScanT = t
-        local ok, gc = pcall(getgc, true)
-        if not ok or type(gc) ~= "table" then return nil end
-        for _, fn in ipairs(gc) do
-            if type(fn) ~= "function" then continue end
-            for i = 1, 64 do
-                local ou, _, uv = pcall(debug.getupvalue, fn, i)
-                if not ou or uv==nil then break end
-                if isCtrl(uv) then return uv end
-            end
-        end
-        return nil
-    end
-
-    local function findCamViaFiltergc()
-        if type(filtergc) ~= "function" then return nil end
-        if camHooksSetup then return nil end
-        local ok, gc = pcall(filtergc,"table",{
-            Keys={"_zoomLimit","_shoulderLerp","_lastWalkAngle"}
-        })
-        if not ok or type(gc) ~= "table" then return nil end
-        for _, v in ipairs(gc) do if isCam(v) then return v end end
-        return nil
-    end
-
-    local function findCamViaGetgc()
-        if type(getgc) ~= "function" then return nil end
-        if camHooksSetup then return nil end
-        local t = now()
-        if t - lastExpensiveScanT < EXPENSIVE_SCAN_CD then return nil end
-        lastExpensiveScanT = t
-        local ok, gc = pcall(getgc, true)
-        if not ok or type(gc) ~= "table" then return nil end
-        for _, fn in ipairs(gc) do
-            if type(fn) ~= "function" then continue end
-            for i = 1, 64 do
-                local ou, _, uv = pcall(debug.getupvalue, fn, i)
-                if not ou or uv==nil then break end
-                if isCam(uv) then return uv end
-            end
-        end
-        return nil
-    end
-
-    local flyActive      = false
-    local wantFly        = false
-    local straferActive  = false
-    local tpActive       = false
-    local spinBotActive  = false
-    local spinPhase      = 0
-    local bhopPrevGrounded = false
-    local speedStateMode  = 0
-    local speedU18        = nil
-    local hsEnumByName    = nil   -- { ["Skydiving"]=enumVal, ["Proning"]=enumVal, ... }
-    local forcedHS        = nil
-    local proneHS         = nil
-    local leanLockActive  = false
-    local invisActive     = false
-    local fakeAngMode     = 0
-    local fakeAngPhase    = 0
-    local faFakeLean      = 0
-    local invPhase        = 0
-    local noFallActive    = false
-    local nfFalling       = false
-    local nfGroundHS      = nil
-    local faPacket        = 0
-    local faRealYaw       = 0
-    local faFakeYaw       = 0        -- a[6]  Orientation (body yaw), radians
-    local faFakeAimYaw    = 0        -- a[9]  CameraX (aim yaw), radians
-    local faRealPitch     = 0
-    local faFakePitch     = 0        -- a[10] CameraY (pitch), radians
-    local faFakeHS        = nil      -- a[8]  спуфнутый HeightState (для виза)
-    local faFakeHSName    = nil      -- имя спуфнутого стейта ("Crouching"/...)
-    local faStatePkt      = 0        -- счётчик для чередования стейтов
-    local faDiagLeft      = 0        -- сколько диаг-пакетов ещё залогировать
-    local faGhostModel    = nil
-    local faGhostHidden   = false    -- скрыт ли гост (первое лицо)
-    local faGhostHL       = nil
-    local faGhostRoot     = nil      -- PrimaryPart/HRP клона
-    local faGhostHead     = nil      -- голова клона (для показа aim yaw/pitch)
-    local faGhostHeadOff  = nil      -- нейтральный оффсет головы относительно root
-    local faGhostTorsoM   = nil      -- Motor6D UpperTorso (lean-roll как в игре)
-    local faGhostHeadM    = nil      -- Motor6D Head (pitch как в игре)
-    local lastMoveInputT = 0
-
-    -- ── Sender / VelocityDesync state ──
-    local velDesyncActive = false
-    local faUid           = nil      -- uid из штатных пакетов игры (a[2])
-    local faSenderAccum   = 0        -- аккумулятор для целевой частоты
-    local faSenderFlip    = -1       -- знак флипа углов на каждый Sender-пакет
-    local faSenderPkt     = 0
-    local faLastPos       = nil      -- для численной оценки скорости
-    local faLastPosT      = 0
-    local faVelEst        = Vector3.zero
-    local faSenderLastSendT = -999   -- когда Sender реально отправил пакет
-    local faSenderArgs    = {}       -- переиспользуемая таблица пакета (0 аллокаций)
-    local faRealState     = nil      -- реальный HeightState (a[8]) до подмены
-
-    -- ── ФИКС ДЕСИНКА СЕБЯ (Jitter/Twitch/Break/Chaos) ─────────────────────────
-    -- Причина фриза: сервер валидирует пакет ReplicateMovement ЦЕЛИКОМ. Если
-    -- углы = мусор (1e18) или HeightState (a[8]) невалиден (1e9) — сервер
-    -- ОТБРАСЫВАЕТ весь пакет, включая твою реальную позицию (a[3..5]). Позиция
-    -- перестаёт обновляться на сервере → «стою на месте» → откат при выключении.
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хука task.delay
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
+    -- (M1_ModuleScript.lua + CombatConfig). Прежний подход фильтровал задержки по их
+    -- ЧИСЛОВОМУ ЗНАЧЕНИЮ — и именно это его и погубило:
     --
-    -- Решение: перед отправкой ГАРАНТИРУЕМ, что пакет всегда валиден:
-    --   • углы — конечные и в разумном диапазоне (yaw/lean оборачиваем, pitch
-    --     клампим) — враги всё равно видят «сломанную» ориентацию, но пакет
-    --     принимается;
-    --   • a[8] — всегда РЕАЛЬНЫЙ enum HeightState (никогда 1e9);
-    --   • позицию (a[3..5]) НЕ трогаем — она уходит настоящей → нет отката.
-    local TWO_PI = math.pi * 2
-    local function wrapPi(x)          -- в диапазон [-π, π]
-        if type(x) ~= "number" then return x end
-        if x ~= x or x == math.huge or x == -math.huge then return 0 end  -- NaN/inf → 0
-        x = x % TWO_PI
-        if x > math.pi then x = x - TWO_PI end
-        return x
+    -- 1) ОСНОВНЫЕ ЗАДЕРЖКИ — ЭТО ВООБЩЕ НЕ task.delay, поэтому хук их не видел.
+    --    Гейт свинга в tryM1 (M1.lua:356 и 362) выглядит так:
+    --        if os.clock() < u32 then u29 = false; return false end   -- lockout после парирования
+    --        if os.clock() < u33 then u29 = false; return false end   -- lockout после блока
+    --    u32/u33 — это ДЕДЛАЙНЫ-ЧИСЛА, их ставят напрямую:
+    --        M1.lua:656-657  u32 = math.max(u32, os.clock() + LocalParryAttackLockoutSeconds)
+    --        M1.lua:629-630  u33 = math.max(u33, os.clock() + LocalBlockAttackLockoutSeconds)
+    --        M1.lua:645-646  u33 = math.max(u33, os.clock() + LocalBlockAttackLockoutSeconds)
+    --    (оба Lockout = 0.15с, CombatConfig:120-121). Ни одного task.delay здесь нет →
+    --    хук ФИЗИЧЕСКИ не мог их снять. Это и есть «микро задержки не убираются вовсе».
+    --
+    -- 2) ПЕРЕЗАРЯДКА ПОСЛЕ КОМБО НЕ СНИМАЛАСЬ ИЗ-ЗА АРИФМЕТИКИ ФИЛЬТРА.
+    --    Игра пишет task.delay(FinisherCooldown/spd, …), FinisherCooldown = 1.25
+    --    (CombatConfig:119). Фильтр сравнивал значение с {0.45,1.25,1.55}, допуск 0.12.
+    --    При spd = 1.2 → 1.25/1.2 = 1.0417, а |1.0417 − 1.25| = 0.208 > 0.12 →
+    --    задержка НЕ распознавалась и оставалась целой. Ровно симптом «основная задержка
+    --    после окончания комбо (перезарядка) не убирается».
+    --
+    -- 3) ЭФФЕКТ ПАРИРОВАНИЯ ЛОМАЛ САМ ХУК. В v1.PerfectBlocked затухание FX сделано так:
+    --        M1.lua:699  task.delay(0.44999999999999996, function() … end)
+    --        M1.lua:713  task.delay(0.44999999999999996, function() … end)
+    --    0.45 — это AttackDuration (CombatConfig:118), то есть РОВНО одно из значений
+    --    фильтра, отличие 0.0. Хук схлопывал его в 0 → искры/PerfectBlockFX умирали в том
+    --    же кадре, в котором родились. Отсюда «��ффе��т парирования какой-то сломанный».
+    --
+    -- КОРЕНЬ ВСЕГО: по числовому значению кулдаун боя и таймер визуального эффекта
+    -- НЕОТЛИЧИМЫ (оба 0.45). Значит фильтровать по значению нельзя в принципе.
+    -- Поэтому task.delay больше НЕ ХУКАЕТСЯ ВООБЩЕ — FX остаются целыми сами собой,
+    -- и заодно исчезает глобальный хук на каждом task.delay игры (это ещё и лаги).
+    --
+    -- КАК СДЕЛАНО ТЕПЕРЬ: правим ровно те три переменные, которые tryM1 читает как гейт.
+    -- Список upvalue'ов tryM1 (M1.lua:322) в точном порядке даёт индексы:
+    --        [4] = u21  (boolean «можно бить»)   [5] = u32   [6] = u33
+    --   u21 = true → снимает и кулдаун свинга, и перезарядку после комбо: её ставит
+    --                scheduleM1SwingTimers как `u21 = false` + task.delay(…, ()->u21=true),
+    --                так что открытый гейт делает саму задержку бессмысленной.
+    --   u32 = 0    → снимает 0.15с lockout после парирования.
+    --   u33 = 0    → снимает 0.15с lockout после блока.
+    -- Сама tryM1 достаётся честно и без filtergc: у v1.OnM1Activated (M1.lua:494) ровно
+    -- ОДИН upvalue — это и есть tryM1.
+    -- Честный предел: серверный рейт M1 по-прежнему ограничивает РЕАЛЬНЫЙ урон; мы
+    -- убираем только клиентский стопор/ощущение задержки.
+
+    -- [V112] Резолвер M1 → tryM1 → индексы гейтов. Выполняется ОДИН раз (ленивая карта).
+    local _tryM1 = nil
+    local _ndGateIdx, _ndParryIdx, _ndBlockIdx = nil, nil, nil
+    -- Персистентные обёртки для pcall — БЕЗ аллокации замыкания на кадр.
+    local function _getUp(fn, i) return debug.getupvalue(fn, i) end
+    local function _setUp(fn, i, v) return debug.setupvalue(fn, i, v) end
+
+    local function mapNoDelay()
+        if _tryM1 then return true end
+        if not hasDebugUpvalues() then return false end
+        local m1 = tryRequire({ "CombatSystemClient", "Combat", "Base", "M1" })
+        if not m1 or type(m1.OnM1Activated) ~= "function" then return false end
+        -- OnM1Activated замыкает ровно одну функцию — tryM1. Ищем по типу, а не по индексу,
+        -- чтобы правка игрой порядка upvalue'ов ничего не сломала.
+        local ok, ups = pcall(debug.getupvalues, m1.OnM1Activated)
+        if not (ok and type(ups) == "table") then return false end
+        local fn
+        for _, v in pairs(ups) do
+            if type(v) == "function" then fn = v; break end
+        end
+        if not fn then return false end
+        -- Проверяем ОЖИДАЕМУЮ подпись из дампа: [4] boolean, [5] и [6] числа.
+        -- Если совпало — берём эти индексы. Если игра сдвинула upvalue'ы, ищем ту же
+        -- подпись сканированием (первый boolean + два числа сразу за ним).
+        local okS, g = pcall(_getUp, fn, 4)
+        local okP, p = pcall(_getUp, fn, 5)
+        local okB, b = pcall(_getUp, fn, 6)
+        if okS and okP and okB and type(g) == "boolean" and type(p) == "number" and type(b) == "number" then
+            _ndGateIdx, _ndParryIdx, _ndBlockIdx = 4, 5, 6
+        else
+            local info = select(2, pcall(debug.getinfo, fn))
+            local n = (type(info) == "table" and tonumber(info.nups)) or 32
+            for i = 1, n - 2 do
+                local o1, v1u = pcall(_getUp, fn, i)
+                local o2, v2u = pcall(_getUp, fn, i + 1)
+                local o3, v3u = pcall(_getUp, fn, i + 2)
+                if o1 and o2 and o3 and type(v1u) == "boolean"
+                   and type(v2u) == "number" and type(v3u) == "number" then
+                    _ndGateIdx, _ndParryIdx, _ndBlockIdx = i, i + 1, i + 2
+                    break
+                end
+            end
+        end
+        if not _ndGateIdx then return false end
+        _tryM1 = fn
+        return true
     end
-    local function isValidHS(v)       -- v входит в набор валидных HeightState?
-        if type(v) ~= "number" or not hsEnumByName then return false end
-        for _, hv in pairs(hsEnumByName) do if hv == v then return true end end
+
+    -- [V112] УДАЛЕНО ЦЕЛИКОМ: extractId / buildM1Ids / onAnimPlayed / hookAnimator,
+    -- хук task.delay (installNoDelayHook) и список GATE_ATTRS.
+    -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН И ПОЧЕМУ ОН ЖЕ ДАВАЛ ЛАГИ:
+    --
+    --   • Хук task.delay — разобран выше: фильтр по числовому значению не мог отличить
+    --     кулдаун боя от таймера визуального эффекта (у обоих 0.45), поэтому одновременно
+    --     ЛОМАЛ эффект парирования (M1.lua:699/713) и НЕ ЛОВИЛ перезарядку после комбо
+    --     (1.25/spd не попадала в допуск). Плюс это глобальный хук: он выполнялся на
+    --     КАЖДЫЙ task.delay всей игры, а не только на боевые.
+    --
+    --   • Слайдер «Anim Speed» был КОСТЫЛЁМ под неработающий No Delay — он ускорял
+    --     анимацию, чтобы быстрая серия хотя бы «выглядела» быстрой. Он же был одним из
+    --     источников накопительных лагов: на КАЖДЫЙ свинг запускался task.spawn с циклом
+    --     `while os.clock() - t0 < 0.3 do … task.wait() end` — это ~18 итераций по два
+    --     pcall каждая, и при быстрых комбо несколько таких циклов жили одновременно.
+    --     Теперь гейт открыт по-настоящему, анимация идёт со своей скоростью, костыль и
+    --     его настройка удалены (лишняя настройка = признак ненайденной причины).
+    --
+    --   • GATE_ATTRS чистился КАЖДЫЙ Heartbeat — и это была работа полностью впустую.
+    --     Атрибуты tryM1 читает ровно одним вызовом isCombatInputBlocked (M1.lua:131-133),
+    --     а она проверяет только Downed / Ragdoll / Stunned / GrappleWinnerStun /
+    --     Grappling / CantAnything. Ни M1Cooldown, ни ComboCooldown, ни Attacking, ни
+    --     Casting, ни CannotAttack там не упоминаются ВООБЩЕ — 5 из 8 атрибутов не влияли
+    --     ни на что. Оставшиеся — это СОСТОЯНИЯ (лежишь/схвачен), а не задержки, поэтому
+    --     к No Delay они не относятся. Настройка «Clear Gate Attributes» удалена.
+
+    -- [V112] Единственный драйвер No Delay: держим три гейта tryM1 открытыми.
+    -- Стоимость кадра: три чтения upvalue; запись — только если значение реально другое.
+    local _ndNextTry = 0
+    local function driveNoDelay()
+        if not Config.NoDelay_On then return end
+        if not _tryM1 then
+            -- Резолв может не удаться (модуль ещё не загружен). Без этого бэкоффа
+            -- tryRequire дёргал бы FindFirstChild+require КАЖДЫЙ кадр — свой источник лагов.
+            local nowc = os.clock()
+            if nowc < _ndNextTry then return end
+            _ndNextTry = nowc + 1.0
+            if not mapNoDelay() then return end
+        end
+        local okG, g = pcall(_getUp, _tryM1, _ndGateIdx)
+        if okG and g ~= true then pcall(_setUp, _tryM1, _ndGateIdx, true) end
+        local okP, p = pcall(_getUp, _tryM1, _ndParryIdx)
+        if okP and type(p) == "number" and p ~= 0 then pcall(_setUp, _tryM1, _ndParryIdx, 0) end
+        local okB, b = pcall(_getUp, _tryM1, _ndBlockIdx)
+        if okB and type(b) == "number" and b ~= 0 then pcall(_setUp, _tryM1, _ndBlockIdx, 0) end
+    end
+    -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs крутится
+    -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
+    -- атрибут = до 8 closure/кадр = лишний GC. Персистентная fn не аллоциру��т ничего.
+    -- [V112] Комментарий [V111] выше относился к clearGateAttrs — она удалена (разбор
+    -- причины см. выше), поэтому её персистентная обёртка _clearAttr тоже больше не нужна.
+    -- Комментарий оставлен как история решений.
+
+    -- [V112] Вместо installAnimHook — простой резолв карты upvalue'ов No Delay.
+    -- Хуков здесь больше НЕТ: ни task.delay, ни Animator-коннекта. Респавн ничего не
+    -- ломает — upvalue'ы принадлежат МОДУЛЮ M1 (он живёт всю сессию), а не персонажу,
+    -- поэтому переподключение после CharacterAdded не требуется.
+    local noDelayMapped = false
+    local function installNoDelay()
+        if noDelayMapped then return true end
+        noDelayMapped = mapNoDelay()
+        return noDelayMapped
+    end
+
+    -- ---- Background bootstrap ---------------------------------------------------
+    -- All heavy scans run ONCE here, spread across frames with task.wait(), while
+    -- every Config flag is still false (hooks are inert passthroughs). Toggles then
+    -- only set a boolean → zero scanning on click → no freeze.
+    local bootstrapStarted = false
+    local function bootstrapHooks()
+        if bootstrapStarted then return end
+        bootstrapStarted = true
+        task.spawn(function()
+            installSetSpeedHook()
+            task.wait()
+            installNoDelay()   -- [V112] было installAnimHook (хук task.delay + Animator)
+        end)
+    end
+    local function combatHooksReady()
+        bootstrapHooks()
+        return type(hookfunction) == "function"
+    end
+
+    -- ══════════════════════════ AUTO SPRINT ══════════��══════════════════════
+    local sprintSingleton
+    -- [V97/PERF] RATE-LIMITED MISS. filterOne stops at the first HIT, but a MISS still walks the
+    -- whole heap — and getSprint is called from THREE per-frame drivers (InfStamina, the sprint
+    -- re-assert, setSprint). Before the singleton exists (menu, respawn, or a game that simply has
+    -- no sprint controller) that meant a full heap sweep EVERY FRAME, forever. That is the movement
+    -- stutter. Now a failed lookup backs off for a second, so the miss path costs one compare.
+    local _sprintNextTry = 0
+    local function getSprint()
+        if sprintSingleton then return sprintSingleton end
+        if type(filtergc) ~= "function" then return nil end
+        local nowc = os.clock()
+        if nowc < _sprintNextTry then return nil end
+        _sprintNextTry = nowc + 1.0
+        -- filterOne = true: grab the first table carrying _sprintInputDesired instead
+        -- of collecting every matching table on the heap (the old full sweep froze).
+        local ok, res = pcall(filtergc, "table", { Keys = { "_sprintInputDesired" } }, true)
+        if ok and type(res) == "table" and rawget(res, "_sprintInputDesired") ~= nil then
+            sprintSingleton = res
+        end
+        return sprintSingleton
+    end
+    -- [V111] PERF: персистентные fn для pcall БЕЗ аллокации замыкания. _assertDesired крутится
+    -- КАЖДЫЙ Heartbeat пока Sprint включён — прежний `pcall(function() ... end)` = closure/кадр.
+    local function _desireOn(s)  s:SetSprintInputDesired(true)  end
+    local function _desireOff(s) s:SetSprintInputDesired(false) end
+    local function _startSprint(s) s:StartSprint() end
+    local function _stopSprint(s)  s:StopSprint()  end
+    local function setSprint(on)
+        local s = getSprint(); if not s then return false end
+        if on then
+            pcall(_desireOn, s)
+            pcall(_startSprint, s)
+        else
+            pcall(_desireOff, s)
+            -- StopSprint(self, playCooldown, fromCancel); no extra args = clean stop
+            pcall(_stopSprint, s)
+        end
+        return true
+    end
+
+    -- [V112] Прежний driveNoDelay вызывал clearGateAttrs() — удалён вместе с ним, см.
+    -- разбор в блоке NO DELAY: тот список атрибутов tryM1 вообще не читает.
+    -- Резолверы боевых модулей ПЕРЕНЕСЕНЫ ВЫШЕ (перед блоком NO DELAY): mapNoDelay
+    -- использует tryRequire/hasDebugUpvalues, а в Lua local-функция обязана быть
+    -- объявлена ЛЕКСИЧЕСКИ раньше места использования — иначе замыкание захватило бы
+    -- глобальный nil вместо нашей функции, и No Delay молча не работал бы.
+
+    -- ══════════════════ INFINITE SPRINT (stamina, client field) ═════════════
+    -- The game only STOPS sprint on Stamina<=0 when the sprint singleton's
+    -- _staminaSeenPositive is TRUE (StartSprint gate @ line 2072 + render loop @ 2170).
+    -- Held at false → sprint never dies. Written on Heartbeat (after the game's RenderStep,
+    -- which only re-latches it true when Stamina>0), so on a drained frame it stays false.
+    -- We NEVER touch the Stamina ATTRIBUTE (server-authoritative → detectable). Pure client.
+    local function _clearStaminaSeen(s) s._staminaSeenPositive = false end
+    local function driveInfStamina()
+        if not Config.InfStamina_On then return end
+        local s = getSprint(); if not s then return end
+        if rawget(s, "_staminaSeenPositive") ~= false then
+            pcall(_clearStaminaSeen, s)   -- reused fn ref → no per-frame closure allocation
+        end
+    end
+
+    -- Cached local character — updated on CharacterAdded. Used by the combat __namecall hook so
+    -- the hot path is a cheap pointer compare instead of an Instance property index per call.
+    local _myChar = LocalPlayer.Character
+
+    -- ══════════════════════════ DODGE TWEAKS ═══════════════════════════════
+    -- [V112] БАГ «СКОРОСТЬ DODGE РАСТЁТ ДАЖЕ НА ДЕФОЛТНОМ ЗНАЧЕНИИ» — НАЙДЕН И ИСПРАВЛЕН.
+    --
+    -- КОРЕНЬ. Игра сама умножает скорость дэша, когда активен grant. Evasive.lua:693-697:
+    --        if u51 then  v63 = DashSpeed * OutnumberedDashSpeedMultiplier
+    --        else         v63 = DashSpeed
+    -- и то же для длительности (Evasive.lua:701-705, OutnumberedDashDurationMultiplier).
+    -- Множители в CombatConfig: OutnumberedDashSpeedMultiplier = 1.5,
+    -- OutnumberedDashDurationMultiplier = 1.2. А u51 взводится ровно нашим же тумблером
+    -- Dodge Everywhere: driveDodge ставит атрибут OutnumberedEvasiveGrant = true, из него
+    -- получается u51 (Evasive.lua:529-531). Итог: слайдер стоит на вани*льных 30, а дэш
+    -- летит 30 × 1.5 = 45 studs/s и длится на 20% дольше. Никакой «утечки» скорости не
+    -- было — игра штатно применяла бонус «в меньшинстве», просто мы сами его и включали.
+    -- Решение (выбрано пользователем): при активном Dodge зануляем множитель до 1.0, так
+    -- что слайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
+    --
+    -- ВТОРОЙ БАГ, НАЙДЕННЫЙ ЗДЕСЬ ЖЕ: КАРТА UPVALUE'ОВ БЫЛА НЕДЕТЕРМИНИРОВАННОЙ.
+    -- Прежний mapEvasive искал upvalue'ы ПО ЗНАЧЕНИЮ и обходил их через `pairs(ups)`.
+    -- Две фатальные проблемы:
+    --   • `pairs` по таблице НЕ ГАРАНТИРУЕТ порядок обхода. Порядок мог отличаться между
+    --     запусками, то есть баг был плавающим.
+    --   • Cooldown = 1.5 и OutnumberedDashSpeedMultiplier = 1.5 — ОДНО И ТО ЖЕ ЧИСЛО.
+    --     Поиск «первое число, равное 1.5» с равной вероятностью попадал в множитель
+    --     вместо кулдауна, после чего driveDodge писал 1.5 не туда, а настоящий кулдаун
+    --     уезжал в список «дедлайнов».
+    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся на точный порядок upvalue'ов из
+    -- дампа (Evasive.lua:508), проверяя ожидаемые значения по конфигу. Индексы:
+    --   [15] ServerConfirmTimeout  [16] DashDuration  [22] DashSpeed
+    --   [23] OutnumberedDashSpeedMultiplier  [24] OutnumberedDashDurationMultiplier
+    --   [27] Cooldown              [4,5,6,7,8] = u6/u5/u4/u7/u8 — дедлайны os.clock
+    --
+    -- ТРЕТЬЕ: ЗАПИСЬ В CombatConfig БЫЛА БЕСПОЛЕЗНОЙ. Прежний комментарий утверждал, что
+    -- дэш читает «и upvalue, и поле конфига». Это неверно: Evasive.lua:20-24 КОПИРУЕТ
+    -- значения конфига в локальные переменные ОДИН РАЗ при загрузке модуля, и дальше
+    -- CombatConfig.Evasive не читается вообще ни разу. Значит работал только патч
+    -- upvalue; запись в конфиг оставлена лишь как безвредная страховка на случай, если
+    -- модуль будет перезагружен (тогда он подхватит наши значения при копировании).
+    --
+    -- COOLDOWN — client-authoritative, exactly like infinite sprint: the server validates a real
+    -- dodge ~once/1.5s, but nothing stops us driving the CLIENT dash at our own rate. Every prior
+    -- attempt (patching the Cooldown const / clamping deadline upvalues per-frame / clamping the
+    -- EvasiveCooldownRemaining attribute) fought the game's own logic and lost — and the Everywhere
+    -- grant (u51) zeroes u5/u6/u7/u8 EVERY call (Evasive.lua:557-561), wiping the cooldown entirely
+    -- regardless of the slider (that was the "removed immediately even at 1.5s" bug).
+    -- Fix: WRAP Evasive.Evasive (hookfunction) and make OUR `_nextDodgeAllowed` deadline the single
+    -- source of truth (installEvasiveHook). It swallows dodges inside the window and, when reducing
+    -- below vanilla, zeroes the game's native deadline gate so a faster re-dodge goes through. Works
+    -- for ANY value in [0, 1.5] and RE-IMPOSES the cooldown on top of the Everywhere grant.
+    -- Honest ceiling: i-frames/dash confirmation below ~1.5s are client-prediction; the server still
+    -- owns the authoritative i-frame grant.
+    --
+    -- DODGE-EVERYWHERE �� two layers, matching how Evasive() gates itself (verified Evasive.lua):
+    --   1) OutnumberedEvasiveGrant=true → u51 bypass (line 529). When set, Evasive INTERNALLY
+    --      zeroes cooldown deadlines (u5/u6/u7/u8=0, line 557-560) AND skips the `if not u51`
+    --      gates: IFRAMECD / Stunned / GuardBroken / CantAnything (line 567-597). So "dodge when
+    --      HIT / stunned / guard-broken" works via the game's OWN bypass — no global attribute
+    --      spoof needed for those (which would leak into other systems). driveDodge asserts it.
+    --   2) The remaining gates are OUTSIDE the u51 guard (line 599-617): Ragdoll / Blocking /
+    --      CombatAttacking / Greenzone / RpCombatLocked. Ragdoll is handled by anti-ragdoll;
+    --      the other four we hide via the __namecall GetAttribute hook (synchronous, no race).
+    -- [V112] Гейты, которые лежат ВНЕ обхода u51 (Evasive.lua:605-618) и потому не
+    -- покрываются grant'ом. Раньше их прятал глобальный __namecall-спуф GetAttribute;
+    -- теперь снимаем их СИНХРОННО внутри обёртки Evasive — см. installEvasiveHook.
+    -- Список — именно порядковый, чтобы восстанавливать ровно то, что сняли.
+    local DODGE_GATE_ATTRS = { "Blocking", "CombatAttacking", "Greenzone", "RpCombatLocked" }
+    -- Map Evasive base values ONCE: config-table defaults + (if debug API present) the upvalue
+    -- indices for DashSpeed / Cooldown (Evasive.lua:506 upvalue list).
+    local _evMapped, _evSpeedIdx, _evCdIdx = false, nil, nil
+    local _evMultIdx, _evDurMultIdx        = nil, nil   -- [V112] индексы множителей outnumbered
+    local _evSpeedBase, _evCdBase          = nil, nil
+    local _evMultBase, _evDurMultBase      = nil, nil   -- [V112] вани*льные 1.5 / 1.2 для restore
+    local _appliedSpeed, _appliedCd        = nil, nil
+    local _appliedMult                     = nil        -- [V112] что уже записано в множитель
+    local _evDeadlineIdxs = {}   -- numeric upvalue indices that may hold os.clock cooldown deadlines
+    local _evFn           = nil  -- the real Evasive.Evasive closure (for upvalue access)
+    local _nextDodgeAllowed = 0  -- OUR client-authoritative cooldown deadline (os.clock)
+
+    -- [V112] Точный порядок upvalue'ов функции Evasive (Evasive.lua:508). Держим таблицу
+    -- ИМЕНОВАННОЙ и упорядоченной: индекс → ожидаемое значение из конфига. Так привязка
+    -- детерминирована и коллизия «Cooldown 1.5 против множителя 1.5» невозможна в принципе.
+    local EV_UPV = {
+        SpeedIdx   = 22,   -- DashSpeed
+        MultIdx    = 23,   -- OutnumberedDashSpeedMultiplier
+        DurMultIdx = 24,   -- OutnumberedDashDurationMultiplier
+        CdIdx      = 27,   -- Cooldown
+    }
+    local EV_DEADLINE_IDXS = { 4, 5, 6, 7, 8 }   -- u6, u5, u4, u7, u8 — метки os.clock
+
+    -- [V112] Персистентная обёртка записи атрибута (использу��тся обходом гейтов Dodge).
+    -- Отдельная функция, а не замыкание на месте: обход выполняется на каждый дэш.
+    local function _setAttr(inst, key, val) inst:SetAttribute(key, val) end
+
+    local function mapEvasive()
+        if _evMapped then return true end
+        local ev = getEvasive(); if not ev or type(ev.Evasive) ~= "function" then return false end
+        _evFn = ev.Evasive
+        local cfg = getCombatConfig()
+        local ev2 = cfg and cfg.Evasive
+        _evSpeedBase   = ev2 and type(ev2.DashSpeed) == "number" and ev2.DashSpeed or nil
+        _evCdBase      = ev2 and type(ev2.Cooldown)  == "number" and ev2.Cooldown  or nil
+        _evMultBase    = ev2 and type(ev2.OutnumberedDashSpeedMultiplier) == "number"
+                         and ev2.OutnumberedDashSpeedMultiplier or nil
+        _evDurMultBase = ev2 and type(ev2.OutnumberedDashDurationMultiplier) == "number"
+                         and ev2.OutnumberedDashDurationMultiplier or nil
+        if hasDebugUpvalues() then
+            -- ВЕРИФИКАЦИЯ, а не угадывание: берём upvalue по ожидаемому индексу и сверяем с
+            -- значением из конфига. Совпало — привязка верна. Не совпало (игра обновилась и
+            -- порядок поехал) — ищем по значению, но УПОРЯДОЧЕННО (i = 1..n) и с учётом
+            -- того, что множитель лежит РАНЬШЕ кулдауна, поэтому одинаковые 1.5 больше не
+            -- путаются: первое совпадение 1.5 — множитель, второе — Cooldown.
+            local function probe(idx, want)
+                if not (idx and want) then return false end
+                local ok, v = pcall(_getUp, _evFn, idx)
+                return ok and type(v) == "number" and math.abs(v - want) < 1e-4
+            end
+            if probe(EV_UPV.SpeedIdx, _evSpeedBase) and probe(EV_UPV.CdIdx, _evCdBase)
+               and probe(EV_UPV.MultIdx, _evMultBase) then
+                _evSpeedIdx   = EV_UPV.SpeedIdx
+                _evCdIdx      = EV_UPV.CdIdx
+                _evMultIdx    = EV_UPV.MultIdx
+                if probe(EV_UPV.DurMultIdx, _evDurMultBase) then _evDurMultIdx = EV_UPV.DurMultIdx end
+            else
+                local info = select(2, pcall(debug.getinfo, _evFn))
+                local n = (type(info) == "table" and tonumber(info.nups)) or 40
+                for i = 1, n do
+                    local ok, v = pcall(_getUp, _evFn, i)
+                    if ok and type(v) == "number" then
+                        if _evSpeedBase and not _evSpeedIdx and math.abs(v - _evSpeedBase) < 1e-4 then
+                            _evSpeedIdx = i
+                        elseif _evMultBase and not _evMultIdx and math.abs(v - _evMultBase) < 1e-4 then
+                            _evMultIdx = i          -- множитель встречается ПЕРВЫМ
+                        elseif _evDurMultBase and not _evDurMultIdx and math.abs(v - _evDurMultBase) < 1e-4 then
+                            _evDurMultIdx = i
+                        elseif _evCdBase and not _evCdIdx and math.abs(v - _evCdBase) < 1e-4 then
+                            _evCdIdx = i            -- и только потом Cooldown
+                        end
+                    end
+                end
+            end
+            -- Дедлайны больше НЕ «все прочие числа»: берём заранее известные индексы. Прежний
+            -- код мог случайно записать в список сам Cooldown или множитель.
+            for _, idx in ipairs(EV_DEADLINE_IDXS) do
+                _evDeadlineIdxs[#_evDeadlineIdxs + 1] = idx
+            end
+        end
+        _evMapped = true
+        return true
+    end
+
+    -- Zero the game's own cooldown deadline upvalues (u6/u7/u8 = os.clock timestamps) so the
+    -- native `os.clock() < u6` gate (Evasive.lua:573-581) won't reject a re-dodge that comes
+    -- sooner than the game's 1.5s. Only os.clock-scale values (>60) are touched, so the small
+    -- constants (DashSpeed/Cooldown/DashDuration/ServerConfirmTimeout) are never corrupted.
+    local function zeroGameDeadlines()
+        if not (_evFn and hasDebugUpvalues()) then return end
+        for _, idx in ipairs(_evDeadlineIdxs) do
+            local ok, v = pcall(_getUp, _evFn, idx)
+            if ok and type(v) == "number" and v > 60 then
+                pcall(_setUp, _evFn, idx, 0)
+            end
+        end
+    end
+
+    -- ── CUSTOM DODGE COOLDOWN — client-authoritative, like infinite sprint ──────────────────
+    -- The server validates a real dodge ~once per 1.5s, but nothing stops us from driving the
+    -- CLIENT dash at our own rate. We wrap Evasive.Evasive and make OUR `_nextDodgeAllowed`
+    -- deadline the single source of truth. This works WITH the Everywhere grant (which zeroes
+    -- the game's deadlines) AND without it, and enforces ANY value in [0, base] — not just 0/1.5.
+    -- ROOT-CAUSE FIX: previously the Everywhere grant (OutnumberedEvasiveGrant→u51) zeroed
+    -- u6/u5/u7/u8 every call (Evasive.lua:557-561), so cooldown vanished entirely regardless of
+    -- the slider. Now the wrapper RE-IMPOSES the cooldown on top of the grant.
+    local _evHooked, _origEvasive = false, nil
+    local function installEvasiveHook()
+        if _evHooked then return true end
+        if type(hookfunction) ~= "function" then return false end
+        if not mapEvasive() then return false end
+        _origEvasive = hookfunction(_evFn, LPH_NO_VIRTUALIZE(function(...)
+            if not Config.Dodge_On then return _origEvasive(...) end
+            local base  = _evCdBase or 1.5
+            local effCd = math.clamp(Config.Dodge_Cooldown or base, 0, base)
+            local custom = effCd < base - 1e-4          -- reducing below vanilla?
+            -- If we're NOT reducing AND the Everywhere grant isn't nuking the native cooldown,
+            -- let the game own the cooldown entirely (pure vanilla — including its correct
+            -- "don't arm cooldown on a state-rejected dodge" behaviour).
+            if not custom and not Config.Dodge_Everywhere then
+                return _origEvasive(...)
+            end
+            local now = os.clock()
+            if now < _nextDodgeAllowed then
+                return                                  -- still on OUR custom cooldown → swallow
+            end
+            if custom then
+                zeroGameDeadlines()                     -- allow a faster-than-vanilla re-dodge
+            end
+            _nextDodgeAllowed = now + effCd             -- arm our client-side cooldown
+
+            -- [V112] DODGE EVERYWHERE без глобального хука. Гейты Blocking /
+            -- CombatAttacking / Greenzone / RpCombatLocked читаются на Evasive.lua:605-618
+            -- обычным GetAttribute. Единственный yield во всей функции до этих проверок —
+            -- строка 510 (`LocalPlayer.Character or CharacterAdded:Wait()`), и он не
+            -- срабатывает, когда персонаж есть. Значит снять атрибуты, вызвать оригинал и
+            -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чтением игрой
+            -- никакой другой код исполниться не может — гонки нет by design.
+            -- Записи локальные (на сервер не репл*ицируются), а сами гейты проверяются на
+            -- клиенте, поэтому этого достаточно.
+            if Config.Dodge_Everywhere then
+                local c = _myChar
+                if c then
+                    local saved
+                    for i = 1, #DODGE_GATE_ATTRS do
+                        local k = DODGE_GATE_ATTRS[i]
+                        local v = c:GetAttribute(k)
+                        if v ~= nil then
+                            saved = saved or {}
+                            saved[k] = v
+                            pcall(_setAttr, c, k, nil)
+                        end
+                    end
+                    -- pcall вокруг оригинала обязателен: без него ошибка внутри Evasive
+                    -- оставила бы атрибуты снятыми навсегда и сломала блок/грин-зону.
+                    local okE, r1, r2 = pcall(_origEvasive, ...)
+                    if saved then
+                        for k, v in pairs(saved) do pcall(_setAttr, c, k, v) end
+                    end
+                    if okE then return r1, r2 end
+                    return
+                end
+            end
+            return _origEvasive(...)
+        end))
+        _evHooked = (_origEvasive ~= nil)
+        return _evHooked
+    end
+    local function _setGrant(c) c:SetAttribute("OutnumberedEvasiveGrant", true) end
+    -- Cheap per-frame keeper: writes only when the desired value actually changed.
+    local function driveDodge()
+        if not Config.Dodge_On then return end
+        if not mapEvasive() then return end
+        local ev  = getEvasive()
+        local cfg = getCombatConfig()
+        local wantSpeed = (Config.Dodge_Speed and Config.Dodge_Speed > 0) and Config.Dodge_Speed or _evSpeedBase
+        if wantSpeed and wantSpeed ~= _appliedSpeed then
+            if cfg and cfg.Evasive then cfg.Evasive.DashSpeed = wantSpeed end
+            if _evSpeedIdx and ev then pcall(_setUp, ev.Evasive, _evSpeedIdx, wantSpeed) end
+            _appliedSpeed = wantSpeed
+        end
+
+        -- [V112] ИСПРАВЛЕНИЕ БАГА «скорость растёт сама»: зануляем множитель до 1.0.
+        -- Пока Dodge включён, ветка `if u51 then v63 = DashSpeed * Multiplier` (Evasive.lua:695)
+        -- перестаёт менять результат, и слайдер означает РОВНО итоговые studs/s — в том числе
+        -- на дефолте 30. Длительность тоже нормализуем (Evasive.lua:703), иначе дэш оставался
+        -- бы на 20% длиннее вани*льного, то есть тем же «незапрошенным бонусом», только в
+        -- другой величине. Запись — только при фактическом изменении.
+        if _appliedMult ~= 1 then
+            if cfg and cfg.Evasive then
+                cfg.Evasive.OutnumberedDashSpeedMultiplier    = 1
+                cfg.Evasive.OutnumberedDashDurationMultiplier = 1
+            end
+            if _evMultIdx    then pcall(_setUp, _evFn, _evMultIdx, 1) end
+            if _evDurMultIdx then pcall(_setUp, _evFn, _evDurMultIdx, 1) end
+            _appliedMult = 1
+        end
+        -- CUSTOM COOLDOWN is enforced by the Evasive.Evasive wrapper (installEvasiveHook), whose
+        -- `_nextDodgeAllowed` gate is the single source of truth for ANY value in [0, base]. We
+        -- keep the Cooldown constant / config field at the vanilla base (the game scales it per
+        -- style; corrupting it caused the old "stuck at 0" bug) — the wrapper does the real work.
+        local base = _evCdBase or 1.5
+        if base ~= _appliedCd then
+            if cfg and cfg.Evasive then cfg.Evasive.Cooldown = base end
+            if _evCdIdx and ev then pcall(_setUp, ev.Evasive, _evCdIdx, base) end
+            _appliedCd = base
+        end
+        -- [PERF] installEvasiveHook was called on EVERY Heartbeat. It early-returns once hooked,
+        -- but that's still a call + upvalue read every frame forever; latch it instead.
+        if not _evHooked then installEvasiveHook() end
+
+        -- DODGE EVERYWHERE — assert the game's own u51 bypass (skips the hit/stun/guard-broken/
+        -- cant-anything gates internally). It ALSO zeroes the game's deadlines, but that no longer
+        -- wipes the cooldown because the Evasive wrapper re-imposes `_nextDodgeAllowed` on top.
+        -- The __namecall hook covers the remaining Blocking/CombatAttacking/Greenzone/RpCombatLocked.
+        if Config.Dodge_Everywhere then
+            local c = _myChar
+            if c and c:GetAttribute("OutnumberedEvasiveGrant") ~= true then
+                pcall(_setGrant, c)   -- [PERF] persistent wrapper, was a closure per Heartbeat
+            end
+        end
+    end
+    -- Clear the u51 grant we asserted (called when Everywhere / Dodge is toggled off).
+    local function clearDodgeGrant()
+        local c = _myChar
+        if c and c:GetAttribute("OutnumberedEvasiveGrant") == true then
+            pcall(function() c:SetAttribute("OutnumberedEvasiveGrant", nil) end)
+        end
+    end
+    -- Restore the game's own numbers (called when Dodge is toggled off).
+    local function restoreDodge()
+        clearDodgeGrant()
+        if not _evMapped then return end
+        local ev  = getEvasive()
+        local cfg = getCombatConfig()
+        if _evSpeedBase then
+            if cfg and cfg.Evasive then cfg.Evasive.DashSpeed = _evSpeedBase end
+            if _evSpeedIdx and ev then pcall(_setUp, ev.Evasive, _evSpeedIdx, _evSpeedBase) end
+        end
+        if _evCdBase then
+            if cfg and cfg.Evasive then cfg.Evasive.Cooldown = _evCdBase end
+            if _evCdIdx and ev then pcall(_setUp, ev.Evasive, _evCdIdx, _evCdBase) end
+        end
+        -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
+        -- выключения тумблера игра осталась бы БЕЗ легитимного бонуса «в меньшинстве»,
+        -- который сервер даёт честно, когда вас реально окружили.
+        if _evMultBase and _evMultIdx then
+            if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashSpeedMultiplier = _evMultBase end
+            pcall(_setUp, _evFn, _evMultIdx, _evMultBase)
+        end
+        if _evDurMultBase and _evDurMultIdx then
+            if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashDurationMultiplier = _evDurMultBase end
+            pcall(_setUp, _evFn, _evDurMultIdx, _evDurMultBase)
+        end
+        _appliedSpeed, _appliedCd, _appliedMult = nil, nil, nil
+    end
+
+    -- ═══════════════════════ ANTI-RAGDOLL / AUTO-GETUP ══════════════════════
+    -- Verified in RagdollServiceClient: while attr Ragdoll==true the game runs a Heartbeat that
+    -- calls sustainClientRagdoll (GettingUp=false + ChangeState(Ragdoll) + PlatformStand=true).
+    -- Clearing the attribute from our own loop LOSES the race — the server re-replicates
+    -- Ragdoll=true and their Heartbeat re-sustains the same frame → flicker.
+    --
+    -- Robust fix: a __namecall hook on GetAttribute that reports Ragdoll as nil on OUR character,
+    -- synchronously with every read the ragdoll code makes. onRagdollChanged / the sustain
+    -- Heartbeat / isManagedRagdoll then all see "no ragdoll" → the game runs its OWN clean getup
+    -- (u7) and never re-sustains, even if the server keeps the attribute set. We EXEMPT managed
+    -- ragdolls (Downed / carried / gripped / dead) so carry & downed states are untouched.
+    local function isManagedRagdoll(char, hum)
+        if char:GetAttribute("Downed") == true then return true end
+        local states = char:FindFirstChild("States")
+        if states then
+            local bc = states:FindFirstChild("BeingCarried")
+            local bg = states:FindFirstChild("BeingGripped")
+            if (bc and bc.Value ~= nil) or (bg and bg.Value ~= nil) then return true end
+        end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root and (root:FindFirstChild("CarryWeld") or root:FindFirstChild("GripWeld")) then
+            return true
+        end
+        hum = hum or char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then return true end
         return false
     end
-    -- Финализатор: делает пакет гарантированно принимаемым сервером.
-    local function sanitizeFakePacket(a, n)
-        if MOV.FakeAnglesClampSafe == false then return end   -- можно отключить
-        if type(a[6])  == "number" then a[6]  = wrapPi(a[6]) end
-        if type(a[9])  == "number" then a[9]  = wrapPi(a[9]) end   -- yaw прицела (если крутим)
-        if type(a[10]) == "number" then                            -- pitch: реальные пределы камеры
-            local p = a[10]
-            if p ~= p or p == math.huge or p == -math.huge then p = 0 end
-            a[10] = math.clamp(p, -1.4, 1.4)
-        end
-        if n >= 11 and type(a[11]) == "number" then                -- lean: [-1, 1]
-            local l = a[11]
-            if l ~= l or l == math.huge or l == -math.huge then l = 0 end
-            a[11] = math.clamp(l, -1, 1)
-        end
-        if n >= 8 and type(a[8]) == "number" and not isValidHS(a[8]) then
-            -- невалидный стейт → возвращаем реальный (или Standing как fallback)
-            a[8] = (isValidHS(faRealState) and faRealState)
-                or (hsEnumByName and hsEnumByName.Standing)
-                or faRealState
-        end
-    end
+    -- ── [V112] ГЛОБАЛЬНЫЙ __namecall-ХУК УДАЛЁН — ЭТО И БЫЛ ГЛАВНЫЙ ИСТОЧНИК ЛАГОВ ──
+    -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН (по стоимости, не по логике — логика работала):
+    -- hookmetamethod(game, "__namecall") ставит наш Lua-обработчик на КАЖДЫЙ вызов метода
+    -- ЛЮБОГО объекта во всей игре: каждый :FindFirstChild, :IsA, :GetAttribute, :Connect,
+    -- :FireServer — десятки тысяч вызовов в секунду. Даже «дешёвый» путь (сравнение
+    -- self == _myChar) платится на всём этом трафике, а сам переход C→Lua на каждый
+    -- namecall не бесплатен. Хук ставился НАВСЕГДА (_combatHookDone) и не снимался даже
+    -- когда обе фичи выключены, то есть налог шёл всю сессию. Ровно это и даёт
+    -- «накапливающиеся лаги» и падения: чем дольше сессия и чем больше объектов, тем
+    -- больше namecall-трафика через наш обработчик.
+    -- Ниже — два ТОЧЕЧНЫХ решения, каждое стоит ноль на холостом ходу.
 
-    -- Применяет текущий режим FakeAngles к args-пакету (a[6]=Orientation,
-    -- a[9]=CameraX, a[10]=CameraY, a[11]=LeanGoal). Общий код для штатного
-    -- хука и для высокочастотного Sender'а — единый источник истины.
-    local function applyFakeAnglesToArgs(a, n, flip)
-        if type(a[6])  == "number" then faRealYaw   = a[6]  end
-        if type(a[10]) == "number" then faRealPitch = a[10] end
-        if type(a[8])  == "number" and isValidHS(a[8]) then faRealState = a[8] end
-        local realYaw = faRealYaw or (type(a[6]) == "number" and a[6]) or 0
-        local jit  = MOV.FakeAnglesJitter or 2.8
-        local pAmp = MOV.FakeAnglesPitchAmp or 1.4
-        local TAU  = math.pi * 2
-        if fakeAngMode == 1 then          -- Instant: max-rate flip
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = a[6] + flip * jit end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = a[9] + flip * jit end
-            if MOV.FakeAnglesPitch  and type(a[10]) == "number" then a[10] = flip * pAmp end
-            if MOV.FakeAnglesLean  and n >= 11                  then a[11] = flip end
-        elseif fakeAngMode == 2 then      -- Spin
-            fakeAngPhase = (fakeAngPhase + (MOV.FakeAnglesSpinStep or 0.9)) % TAU
-            if type(a[6]) == "number" then a[6] = fakeAngPhase end
-            if MOV.FakeAnglesAimYaw and type(a[9]) == "number" then a[9] = fakeAngPhase end
-            if MOV.FakeAnglesPitch and type(a[10]) == "number" then a[10] = pAmp * 0.6 end
-            if MOV.FakeAnglesLean  and n >= 11                  then a[11] = flip end
-        elseif fakeAngMode == 3 then      -- Random
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = math.random() * TAU end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = math.random() * TAU end
-            if MOV.FakeAnglesPitch and type(a[10]) == "number" then a[10] = (math.random() * 2 - 1) * pAmp end
-            if MOV.FakeAnglesLean  and n >= 11                  then a[11] = math.random() * 2 - 1 end
-        elseif fakeAngMode == 4 then      -- Backwards: статичный разворот на 180°
-            -- Самый БЛАТАНТНЫЙ: враги видят строго вашу спину, тело не дёргается.
-            local back = realYaw + math.pi
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = back end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = back end
-            if MOV.FakeAnglesPitch and type(a[10]) == "number" then a[10] = -pAmp * 0.5 end
-            if MOV.FakeAnglesLean  and n >= 11                  then a[11] = 0 end
-        elseif fakeAngMode == 5 then      -- Jitter: ВЧ-тряска ±180° вокруг реального
-            -- Блатантно и максимально сложно попасть: каждый пакет — новый угол.
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = realYaw + (math.random() * 2 - 1) * math.pi end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = realYaw + (math.random() * 2 - 1) * math.pi end
-            if MOV.FakeAnglesPitch and type(a[10]) == "number" then a[10] = (math.random() * 2 - 1) * pAmp end
-            if MOV.FakeAnglesLean  and n >= 11                  then a[11] = math.random() * 2 - 1 end
-        elseif fakeAngMode == 6 then      -- Twitch (LBY-breaker): снап реал↔180°
-            -- Модель телепорт-щёлкает между «лицом» и «спиной» каждый пакет —
-            -- на сервере угол не устаканивается → десинк-брейкер как в CS.
-            local yaw = (flip > 0) and realYaw or (realYaw + math.pi)
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = yaw end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = yaw end
-            if MOV.FakeAnglesPitch  and type(a[10]) == "number" then a[10] = flip * pAmp end
-            if MOV.FakeAnglesLean  and n >= 11                  then a[11] = flip end
-        elseif fakeAngMode == 7 then      -- Break: макс. десинк тела ВАЛИДНЫМИ углами
-            -- Раньше слал 1e18 → сервер отбрасывал пакет вместе с позицией (фриз).
-            -- Теперь — предельные, но КОНЕЧНЫЕ и принимаемые углы: тело вывернуто
-            -- на 180° + макс. наклон. Прицел (a[9]/a[10]) не трогаем (own hitreg),
-            -- если только явно не включён FakeAnglesAimYaw.
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = realYaw + math.pi end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = realYaw + math.pi end
-            if MOV.FakeAnglesPitch  and type(a[10]) == "number" then a[10] = -pAmp end
-            if MOV.FakeAnglesLean   and n >= 11                  then a[11] = flip end
-        elseif fakeAngMode == 8 then      -- Chaos: случайные ВАЛИДНЫЕ углы + валидный стейт
-            -- Раньше слал 1e18 и a[8]=1e9 (мусорный стейт) → пакет отбрасывался.
-            -- Теперь — случайный полный круг для ТЕЛА и случайный РЕАЛЬНЫЙ стейт;
-            -- всё проходит финализатор → с��рвер принимает, позиция не теряется.
-            if MOV.FakeAnglesYaw    and type(a[6])  == "number" then a[6]  = math.random() * TAU end
-            if MOV.FakeAnglesAimYaw and type(a[9])  == "number" then a[9]  = math.random() * TAU end
-            if MOV.FakeAnglesPitch  and type(a[10]) == "number" then a[10] = (math.random() * 2 - 1) * pAmp end
-            if MOV.FakeAnglesLean   and n >= 11                  then a[11] = math.random() * 2 - 1 end
-            if n >= 8 and hsEnumByName then   -- случайный, но ВАЛИДНЫЙ HeightState
-                local pool = {}
-                for _, hv in pairs(hsEnumByName) do pool[#pool + 1] = hv end
-                if #pool > 0 then a[8] = pool[math.random(#pool)] end
-            end
-        end
-        -- ── State-спуф: чередуем HeightState (сидим/лежим/стоим) ──
-        -- Работает во ВСЕХ фейк-режимах (кроме Chaos, который сам мусорит a[8]).
-        -- FakeAnglesForceState фиксирует один стейт; иначе циклим StateCycle,
-        -- держа каждый FakeAnglesStateHold пакетов (чтобы поза была ЗАМЕТНА).
-        if fakeAngMode ~= 8 and n >= 8 and hsEnumByName then
-            local wantName
-            if MOV.FakeAnglesForceState then
-                wantName = MOV.FakeAnglesForceState
-            elseif MOV.FakeAnglesStateSpoof then
-                local cyc  = MOV.FakeAnglesStateCycle or { "Crouching", "Proning", "Standing" }
-                local hold = math.max(1, MOV.FakeAnglesStateHold or 8)
-                faStatePkt = faStatePkt + 1
-                wantName = cyc[(math.floor(faStatePkt / hold) % #cyc) + 1]
-            end
-            if wantName then
-                local hv = hsEnumByName[wantName]
-                if hv ~= nil then
-                    a[8] = hv
-                    faFakeHS = hv; faFakeHSName = wantName
-                else
-                    faFakeHS = nil; faFakeHSName = nil
+    -- [V112] ANTI-RAGDOLL: точечный хук ОДНОЙ функции вместо слежки за GetAttribute.
+    -- Дамп RagdollServiceClient показывает, ЧТО именно держит нас лежащим —
+    -- sustainClientRagdoll (строки 67-80) делает ровно три вещи:
+    --      Humanoid:SetStateEnabled(GettingUp, false)
+    --      if GetState() ~= Ragdoll then ChangeState(Ragdoll) end
+    --      Humanoid.PlatformStand = true
+    -- и её зовёт Heartbeat через stepClientRagdollSustain (строка 116). Поэтому прежний
+    -- комментарий «мы проигрываем гонку» был верен по факту: сколько бы мы ни поднимали
+    -- персонажа, эта функция возвращала его в рэгдолл в тот же кадр.
+    -- Решение: хукнуть саму sustainClientRagdoll. Функция локальная, но она лежит
+    -- upvalue'ом #5 у экспортированной u1.Init (список upvalue'ов, строка 295:
+    -- Players, CombatRemote, isManagedRagdoll, Workspace, sustainClientRagdoll, …).
+    -- ВАЖНО: правим не upvalue, а САМ ОБЪЕКТ ФУНКЦИИ через hookfunction — копии upvalue
+    -- в разных замыканиях (stepClientRagdollSustain, Init, _bindCharacter) ссылаются на
+    -- ОДИН объект, поэтому одного hookfunction достаточно для всех вызывающих. Патч
+    -- отдельного upvalue у Init не сработал бы: у stepClientRagdollSustain своя копия.
+    -- Managed-рэгдоллы (Downed / carry / grip / смерть) пропускаем к оригиналу, чтобы не
+    -- сломать переноску и добивание.
+    local _ragHooked, _origSustain = false, nil
+    local function installAntiRagdollHook()
+        if _ragHooked then return true end
+        if type(hookfunction) ~= "function" or not hasDebugUpvalues() then return false end
+        local rag = tryRequire({ "Shared", "Services", "RagdollService", "RagdollServiceClient" })
+        if not rag or type(rag.Init) ~= "function" then return false end
+        -- Берём upvalue #5 и ПРОВЕРЯЕМ, что это функция; если игра сдвинула порядок —
+        -- ищем перебором ту, у которой нет upvalue'ов (sustainClientRagdoll их не имеет,
+        -- в отличие от isManagedRagdoll/stepClientRagdollSustain).
+        local fn
+        local ok5, v5 = pcall(_getUp, rag.Init, 5)
+        if ok5 and type(v5) == "function" then
+            fn = v5
+        else
+            local info = select(2, pcall(debug.getinfo, rag.Init))
+            local n = (type(info) == "table" and tonumber(info.nups)) or 12
+            for i = 1, n do
+                local oki, vi = pcall(_getUp, rag.Init, i)
+                if oki and type(vi) == "function" then
+                    local inf = select(2, pcall(debug.getinfo, vi))
+                    if type(inf) == "table" and tonumber(inf.nups) == 0 then fn = vi; break end
                 end
-            else
-                faFakeHS = nil; faFakeHSName = nil
             end
-        else
-            faFakeHS = nil; faFakeHSName = nil
         end
-        -- ГАРАНТИЯ валидности пакета (углы конечные/в диапазоне, a[8] реальный
-        -- HeightState, позиция a[3..5] нетронута) → сервер всегда принимает пакет,
-        -- позиция уходит настоящей, нет фриза/отката при выключении фейк-углов.
-        sanitizeFakePacket(a, n)
-        if type(a[6])  == "number" then faFakeYaw    = a[6]  end
-        if type(a[9])  == "number" then faFakeAimYaw = a[9]  end
-        if type(a[10]) == "number" then faFakePitch  = a[10] end
-        if n >= 11 and type(a[11]) == "number" then faFakeLean = a[11] end
-    end
-
-    -- VelocityDesync: смещает отправляемую позицию (a[3..5]) вдоль вектора
-    -- скорости, чередуя знак — серверная модель «плывёт», клиентский CFrame ок.
-    local function applyVelocityDesyncToArgs(a, n, flip)
-        if not velDesyncActive then return end
-        if type(a[3]) ~= "number" or type(a[4]) ~= "number" or type(a[5]) ~= "number" then return end
-        local amp = MOV.VelocityDesyncAmp or 3.0
-        local dir
-        if MOV.VelocityDesyncUseVel and faVelEst.Magnitude > 0.1 then
-            dir = faVelEst.Unit
-            amp = amp * math.clamp(faVelEst.Magnitude / 16, 0.35, 2.5)
-        else
-            local yaw = (type(a[6]) == "number") and a[6] or (faRealYaw or 0)
-            dir = Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
-        end
-        local off = dir * (amp * flip)
-        a[3] = a[3] + off.X
-        a[4] = a[4] + off.Y + (MOV.VelocityDesyncVertical or 0) * flip
-        a[5] = a[5] + off.Z
-    end
-
-    local origAccelerate, origDecelerate, origProcessNP, origJump, origCtrlUpdate = nil, nil, nil, nil, nil
-    local origStateActor, hookedNet, hookedMt = nil, nil, nil
-    local origFireUnrel = nil
-    local noClipParts   = {}
-
-    local origCamUpdate, hookedCamMt, hookedCamObj = nil, nil, nil
-
-    local tpZoom = MOV.ThirdPersonDist
-
-    local function currentZoomMax()
-        if type(camCache) == "table" then
-            local ok, zl = pcall(rawget, camCache, "_zoomLimit")
-            if ok and type(zl) == "number" and zl > 0 then return zl end
-        end
-        return MOV.ThirdPersonMax
-    end
-
-    local function adjustTPZoom(delta)
-        tpZoom = math.clamp(tpZoom + delta, 0, currentZoomMax())
-    end
-
-    local tpGui, tpGuiMinus, tpGuiPlus
-    local function ensureTPGui()
-        if tpGui or not MOV.ThirdPersonMobileGui then return end
-        if not UIS.TouchEnabled then return end
-        local ok = pcall(function()
-            local sg = Instance.new("ScreenGui")
-            sg.Name = "MOV_TPZoomGui"
-            sg.ResetOnSpawn = false
-            sg.IgnoreGuiInset = true
-            sg.DisplayOrder = 999
-            sg.Enabled = false
-
-            local function mkBtn(text, offsetX)
-                local b = Instance.new("TextButton")
-                b.Size = UDim2.new(0, 48, 0, 48)
-                b.AnchorPoint = Vector2.new(1, 1)
-                b.Position = UDim2.new(1, offsetX, 1, -160)
-                b.Text = text
-                b.TextScaled = true
-                b.Font = Enum.Font.GothamBold
-                b.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-                b.BackgroundTransparency = 0.3
-                b.TextColor3 = Color3.new(1, 1, 1)
-                b.AutoButtonColor = true
-                b.Parent = sg
-                return b
+        if not fn then return false end
+        local okh, ref = pcall(hookfunction, fn, LPH_NO_VIRTUALIZE(function(char, ...)
+            if Config.AntiRagdoll_On and char and not isManagedRagdoll(char) then
+                return    -- глушим удержание рэгдолла: наш getup ниже теперь выигрывает гонку
             end
-
-            tpGuiMinus = mkBtn("-", -64)
-            tpGuiPlus  = mkBtn("+", -8)
-
-            local parent = (type(gethui) == "function" and gethui()) or LP:WaitForChild("PlayerGui")
-            sg.Parent = parent
-            tpGui = sg
-
-            tpGuiMinus.MouseButton1Click:Connect(newcclosure(function()
-                adjustTPZoom(-MOV.ThirdPersonWheelStep)
-            end))
-            tpGuiPlus.MouseButton1Click:Connect(newcclosure(function()
-                adjustTPZoom(MOV.ThirdPersonWheelStep)
-            end))
-        end)
-        if not ok then warn("[MOV] TP GUI: не удалось создать") end
+            return _origSustain(char, ...)
+        end))
+        if not okh or not ref then return false end
+        _origSustain = ref
+        _ragHooked = true
+        return true
     end
 
-    local function setTPGuiVisible(v)
-        if tpGui then pcall(function() tpGui.Enabled = v end) end
+    -- Собственно подъём. Персистентные обёртки — без аллокации замыканий на кадр.
+    local function _clearRagAttr(c) c:SetAttribute("Ragdoll", nil) end
+    local function _forceGetup(hum)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+        hum.PlatformStand = false
+        local st = hum:GetState()
+        if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown
+           or st == Enum.HumanoidStateType.Physics then
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+    end
+    -- ══════════════════════════ [V112] NO BLUR ══════════════════════════════
+    -- ЧТО ИМЕННО МЫЛИТ ЭКРАН. В игре ровно ОДИН BlurEffect: ScreenEffects создаёт его
+    -- сам (ScreenEffects.lua:166-171 — Instance.new("BlurEffect"), Name =
+    -- "ScreenEffectsBlur", Parent = Lighting) и держит в upvalue u6. Все источники
+    -- работают слоями: SetBlur(key, size, …) кладёт слой в таблицу u32, а
+    -- applyCompositeBlur (ScreenEffects.lua:247-273) берёт МАКСИМУМ по слоям и пишет
+    -- u6.Size / u6.Enabled. То есть единая воронка — душить надо её, а не искать блюры
+    -- по Lighting.
+    --
+    -- ПОЧЕМУ НЕ НУЖЕН hookfunction. Все 20+ мест вызывают его как
+    -- `ScreenEffects.SetBlur("HealthHit", …)` — то есть ИНДЕКСИРУЮТ таблицу модуля в
+    -- момент вызова, и ни один потребитель не кэширует функцию в local (проверено
+    -- поиском по всему дампу). Внутренние вызовы самого модуля тоже идут через `u1.SetBlur`
+    -- (ScreenEffects.lua:474) — а `u1` и есть возвращаемая таблица. Значит достаточно
+    -- подменить ПОЛЕ таблицы: работает на любом executor'е, без хуков и без слежки за
+    -- namecall. require() отдаёт тот же кэшированный объект, что и у игры.
+    --
+    -- ПОЧЕМУ ФИЛЬТР ПО КЛЮЧУ, А НЕ «ВЫКЛЮЧИТЬ ВСЁ». key — первый аргумент SetBlur, и по
+    -- нему видно природу блюра. Боевой/эффектный блюр (удары, Downed, захват, смерть,
+    -- Black Flash, падение) мешает играть — его глушим. Блюр меню и панелей — часть
+    -- нормального UI, его снятие сделало бы интерфейс визуально сломанным, поэтому он
+    -- проходит к оригиналу. Отдельная настройка для этого не нужна: разделение выводится
+    -- из самих данных игры.
+    local BLUR_BLOCK_KEYS = {
+        HealthHit = true, HealthDowned = true, HealthGripped = true, GlassesMissing = true,
+        Death = true, HakariBlackFlash = true, __Impact = true, Fall = true,
+    }
+    local _blurPatched, _origSetBlur, _screenFx = false, nil, nil
+    local function installNoBlur()
+        if _blurPatched then return true end
+        _screenFx = tryRequire({ "Packages", "ScreenEffects" })
+        if not _screenFx or type(_screenFx.SetBlur) ~= "function" then return false end
+        _origSetBlur = _screenFx.SetBlur
+        _screenFx.SetBlur = function(key, ...)
+            if Config.NoBlur_On and BLUR_BLOCK_KEYS[key] then
+                -- Слой не регистрируем вовсе → applyCompositeBlur не увидит его в максимуме.
+                -- Симметричный ClearBlur НЕ подменяем: он просто не найдёт слой и выйдет,
+                -- а на UI-ключах продолжит работать штатно.
+                return
+            end
+            return _origSetBlur(key, ...)
+        end
+        _blurPatched = true
+        return true
+    end
+    -- Мгновенно убрать блюр, который уже висит на экране в момент включения тумблера.
+    -- Зовём штатный ClearBlur(key, 0) — так же, как это делает сама игра при сбросе
+    -- (HealthServiceClient.lua:1462-1463, 1493-1494), поэтому состояние слоёв остаётся
+    -- согласованным и игра потом не «вспомнит» старый размер.
+    local function clearActiveBlur()
+        if not _screenFx or type(_screenFx.ClearBlur) ~= "function" then return end
+        for key in pairs(BLUR_BLOCK_KEYS) do
+            pcall(_screenFx.ClearBlur, key, 0)
+        end
     end
 
-    local tpWheelConn = UIS.InputChanged:Connect(newcclosure(function(input)
-        if not tpActive then return end
-        if input.UserInputType == Enum.UserInputType.MouseWheel then
-            local z = input.Position.Z
-            local sign = z > 0 and 1 or (z < 0 and -1 or 0)
-            adjustTPZoom(-sign * MOV.ThirdPersonWheelStep)
+    -- ══════════════════ [V112] RESPAWN / AUTO RESPAWN ═══════════════════════
+    -- КАК РЕСПАВН УСТРОЕН В ИГРЕ (проверено по дампу, не по догадке):
+    --   SpawnServiceUtils.lua:11  REMOTE_NAME      = "SpawnRequest"
+    --   SpawnServiceUtils.lua:12  PLAYER_DEAD_ATTR = "Dead"
+    --   SpawnServiceClient.lua:410  _spawnRemote:FireServer()   ← весь респавн это ОДИН
+    --                                                             пустой FireServer
+    --   SpawnServiceClient.lua:596  remote = ReplicatedStorage.Remotes["SpawnRequest"]
+    -- Поэтому мы шлём ровно тот же ремоут напрямую. Через клиентский модуль (_doRespawn)
+    -- идти НЕЛЬЗЯ: он в первой же строке выходит, если нет UI смерти (_light/_main) или
+    -- если _respawnInFlight — то есть кнопка работала бы только на экране смерти.
+    --
+    -- ЧЕСТНЫЙ ПРЕДЕЛ, О КОТОРОМ НАДО ЗНАТЬ: решение о респавне принимает СЕРВЕР. Здоровье
+    -- тоже серверное, поэтому «респавн при низком HP» физически не может убить персонажа с
+    -- клиента — он лишь отправляет запрос. Если сервер разрешает спавн только мёртвым
+    -- (флаг Dead / IsDeathFlagged, SpawnServiceUtils.lua:25), то при живом персонаже
+    -- запрос будет отклонён. Никакого обхода этого с клиента нет и я его не изобретаю.
+    local _spawnRemote = nil
+    local function getSpawnRemote()
+        if _spawnRemote and _spawnRemote.Parent then return _spawnRemote end
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local re = remotes and remotes:FindFirstChild("SpawnRequest")
+        if re and re:IsA("RemoteEvent") then _spawnRemote = re end
+        return _spawnRemote
+    end
+    local _lastRespawnFire = 0
+    -- Персистентная обёртка вместо замыкания на каждый вызов.
+    local function _fireRe(re) re:FireServer() end
+    -- ВАЖНО: здесь НЕЛЬЗЯ звать notify — она объявлена локально внутри M.buildUI и на этом
+    -- уровне разрешилась бы в глобальный nil (падение при первом же вызове). Функция
+    -- возвращает результат, а уведомляет пусть вызывающая сторона из UI.
+    local function fireRespawn()
+        local re = getSpawnRemote()
+        if not re then return false end
+        -- Троттлинг обязателен: сервер ставит респавн «в полёт» не мгновенно, а спам
+        -- ремоута — верный путь к кику за флуд. 65с — это таймаут ожидания самого клиента
+        -- (_waitForRespawnCharacter(65), SpawnServiceClient.lua:415), но столько ждать не
+        -- нужно; берём 3с как безопасный минимум между попытками.
+        local now = os.clock()
+        if now - _lastRespawnFire < 3 then return false end
+        _lastRespawnFire = now
+        return (pcall(_fireRe, re))
+    end
+
+    -- Мёртв/сбит по тем же флагам, что читает сама игра (SpawnServiceClient.lua:97-101).
+    local function isDeadOrDowned()
+        local c = LocalPlayer.Character
+        if LocalPlayer:GetAttribute("Dead") == true then return true end
+        if c and c:GetAttribute("Dead") == true then return true end
+        if c and c:GetAttribute("Downed") == true then return true end
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then return true end
+        return false
+    end
+
+    local function driveAutoRespawn()
+        if not Config.AutoRespawn_On then return end
+        if isDeadOrDowned() then fireRespawn(); return end
+        -- Порог HP: 0 = выключен (респавн только по смерти/Downed).
+        local thr = Config.AutoRespawn_HP or 0
+        if thr <= 0 then return end
+        local c = LocalPlayer.Character
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.MaxHealth <= 0 then return end
+        if (hum.Health / hum.MaxHealth) * 100 <= thr then fireRespawn() end
+    end
+
+    local function driveAntiRagdoll()
+        if not Config.AntiRagdoll_On then return end
+        local char, hum = getParts()
+        if not hum then return end
+        -- [V112] Дешёвый выход: пока мы не в рэгдолле, кадр не стоит ничего (одно чтение
+        -- атрибута). Прежняя версия при активном хуке возвращалась ещё раньше, но тогда
+        -- подъёмом занимался сам GetAttribute-спуф; теперь работу делаем мы.
+        if char:GetAttribute("Ragdoll") ~= true then return end
+        if isManagedRagdoll(char, hum) then return end
+        pcall(_clearRagAttr, char)
+        pcall(_forceGetup, hum)
+    end
+
+    -- ═════════════════════════ MASTER LOOPS ═════════════════════════════════
+    PreStep:Connect(LPH_NO_VIRTUALIZE(function(dt)
+        dt = (typeof(dt) == "number" and dt > 0) and dt or (1 / 60)
+        pcall(stepSpeed, dt)
+        pcall(stepFly, dt)
+        pcall(stepNoClip)
+    end))
+    -- [V112] ЛЕНИВЫЙ PostStep. Прежде все драйверы вызывались КАЖДЫЙ кадр безусловно, и
+    -- каждый сам решал, работать ему или нет — то есть на выключенных фичах мы всё равно
+    -- платили за 4 вызова функций на кадр. Теперь проверяем флаги ДО вызова: пока фичи
+    -- выключены, тело цикла — это несколько сравнений булевых полей.
+    -- driveDodge вызывается только при Dodge_On (внутри он и так первым делом это проверял),
+    -- driveAutoRespawn — новый драйвер респавна по порогу HP.
+    PostStep:Connect(LPH_NO_VIRTUALIZE(function()
+        if Config.NoDelay_On      then driveNoDelay() end
+        if Config.InfStamina_On   then driveInfStamina() end   -- _staminaSeenPositive=false
+        if Config.Dodge_On        then driveDodge() end        -- патч DashSpeed/Cooldown
+        if Config.AntiRagdoll_On  then driveAntiRagdoll() end  -- подъём из чужого рэгдолла
+        if Config.AutoRespawn_On  then driveAutoRespawn() end
+        -- keep sprint desired asserted (game clears it after combat cancels)
+        if Config.Sprint_On then
+            local s = getSprint()
+            if s and rawget(s, "_sprintInputDesired") ~= true then
+                pcall(_desireOn, s)
+            end
         end
     end))
 
-    local tpPinchConn = (UIS.TouchPinch and UIS.TouchPinch:Connect(newcclosure(function(_, scale, _, state)
-        if not tpActive then return end
-        if state == Enum.UserInputState.Change then
-            adjustTPZoom(-(scale - 1) * MOV.ThirdPersonPinchSens)
-        end
-    end))) or nil
-
-    local function unlockMt(mt)
-        if type(setreadonly)    == "function" then pcall(setreadonly,    mt, false)
-        elseif type(make_writeable) == "function" then pcall(make_writeable, mt) end
-    end
-
-    local function setCharPartsCollide(ctrl, enabled)
-        local la = rawget(ctrl, "_localActor")
-        if type(la) ~= "table" then return end
-        local ok_c, char = pcall(function() return la.Character end)
-        if not ok_c or not char then return end
-        local ok, desc = pcall(function() return char:GetDescendants() end)
-        if not ok then return end
-        for _, p in ipairs(desc) do
-            local okC, isBP = pcall(function() return p:IsA("BasePart") end)
-            if okC and isBP then
-                if not enabled then
-                    local wasCC = p.CanCollide
-                    noClipParts[p] = wasCC
-                    pcall(function() p.CanCollide = false end)
-                else
-                    local was = noClipParts[p]
-                    if was ~= nil then
-                        pcall(function() p.CanCollide = was end)
-                        noClipParts[p] = nil
-                    end
-                end
-            end
-        end
-    end
-
-    local function teardownHooks(ctrl)
-        if not hooksSetup then return end
-        local mt = hookedMt
-        if mt then
-            unlockMt(mt)
-            if origAccelerate  then rawset(mt,"_accelerate",        origAccelerate)  end
-            if origDecelerate  then rawset(mt,"_decelerate",        origDecelerate)  end
-            if origProcessNP   then rawset(mt,"_processNewPosition", origProcessNP)  end
-            if origJump        then rawset(mt,"Jump",                origJump)        end
-            if origCtrlUpdate  then rawset(mt,"Update",              origCtrlUpdate)  end
-        end
-        if hookedNet and origFireUnrel then
-            pcall(function() rawset(hookedNet, "FireUnreliableServer", nil) end)
-            origFireUnrel = nil
-        end
-        if hookedNet and origStateActor then
-            local evts = rawget(hookedNet,"_events")
-            if type(evts)=="table" then rawset(evts,"StateActor",origStateActor) end
-        end
-        if ctrl then pcall(setCharPartsCollide, ctrl, true) end
-        origAccelerate=nil; origDecelerate=nil; origProcessNP=nil; origJump=nil; origCtrlUpdate=nil
-        origStateActor=nil; hookedNet=nil; hookedMt=nil; hooksSetup=false
-        print("[MOV] Хуки контроллера сняты")
-    end
-
-    local function setupHooks(ctrl, net)
-        local mt = (type(getrawmetatable)=="function" and getrawmetatable(ctrl))
-                or getmetatable(ctrl)
-        if not mt then warn("[MOV] setupHooks: metatable не найдена") return end
-
-        if hooksSetup and mt == hookedMt then return end
-        if hooksSetup and mt ~= hookedMt then
-            pcall(teardownHooks, nil)
-        end
-
-        unlockMt(mt)
-        hookedMt = mt
-
-        local oAcc = rawget(mt, "_accelerate")
-        if type(oAcc)=="function" then
-            origAccelerate = oAcc
-            rawset(mt, "_accelerate", newcclosure(function(self, dt, inputMag)
-                if flyActive then self.MoveSpeed = 0; return end
-
-                if MOV.Speed then
-                    local live = isLiveInputActive()
-                    if live then
-                        lastMoveInputT = now()
-                        local sprint = MOV.AutoSprint or UIS:IsKeyDown(MOV.SprintKey)
-                        self.TrySprinting = sprint
-                        self.IsSprinting  = sprint
-                        self.MoveSpeed    = sprint and MOV.SprintSpeed or MOV.SpeedValue
-                    else
-                        self.MoveSpeed = 0
-                        pcall(function() self._lastMovement = Vector2.new(0, 0) end)
-                        pcall(function() self._groundedInputDirection = Vector3.new(0, 0, 0) end)
-                    end
-                else
-                    oAcc(self, dt, inputMag)
-                end
-            end))
-            print("[MOV] Hook: _accelerate ✓")
-        end
-
-        local oDecel = rawget(mt, "_decelerate")
-        if type(oDecel)=="function" then
-            origDecelerate = oDecel
-            rawset(mt, "_decelerate", newcclosure(function(self, dt)
-                if MOV.Speed then
-                    self.MoveSpeed = 0
-                else
-                    oDecel(self, dt)
-                end
-            end))
-            print("[MOV] Hook: _decelerate ✓")
-        end
-
-        local oPNP = rawget(mt, "_processNewPosition")
-        if type(oPNP)=="function" then
-            origProcessNP = oPNP
-            rawset(mt, "_processNewPosition", newcclosure(function(self, newPos)
-                if MOV.NoClip then
-                    return newPos, true, Vector3.new(0,1,0), nil
-                end
-                return oPNP(self, newPos)
-            end))
-            print("[MOV] Hook: _processNewPosition ✓")
-        end
-
-        local oJump = rawget(mt, "Jump")
-        if type(oJump)=="function" then
-            origJump = oJump
-            rawset(mt, "Jump", newcclosure(function(self)
-                oJump(self)
-            end))
-            print("[MOV] Hook: Jump ✓")
-        end
-
-        local oUpdate = rawget(mt, "Update")
-        if type(oUpdate) == "function" then
-            origCtrlUpdate = oUpdate
-            if not speedU18 then
-                pcall(function()
-                    local function isU18(t)
-                        if type(t) ~= "table" then return false end
-                        local count = 0
-                        for _, v in pairs(t) do
-                            if type(v) == "table"
-                               and type(rawget(v, "SPEED_MULT")) == "number"
-                               and type(rawget(v, "HEIGHT")) == "number" then
-                                count = count + 1
-                                if count >= 3 then return true end
-                            end
-                        end
-                        return false
-                    end
-
-                    local function searchUpvalues(fn, depth)
-                        if depth > 4 then return nil end
-                        local ok, uvs = pcall(debug.getupvalues, fn)
-                        if ok and type(uvs) == "table" then
-                            if isU18(uvs["u18"]) then return uvs["u18"] end
-                            for name, val in pairs(uvs) do
-                                if isU18(val) then
-                                    print("[MOV] u18 найден по структуре, upvalue:", name)
-                                    return val
-                                end
-                            end
-                        end
-                        local ok2, protos = pcall(debug.getprotos, fn)
-                        if ok2 and type(protos) == "table" then
-                            for _, proto in ipairs(protos) do
-                                if type(proto) == "function" then
-                                    local res = searchUpvalues(proto, depth + 1)
-                                    if res then return res end
-                                end
-                            end
-                        end
-                        return nil
-                    end
-
-                    local found = searchUpvalues(oUpdate, 0)
-                    if not found then
-                        for _, mfn in pairs(mt) do
-                            if type(mfn) == "function" then
-                                found = searchUpvalues(mfn, 0)
-                                if found then break end
-                            end
-                        end
-                    end
-
-                    if not found then
-                        local nils = getNilInstances()
-                        if nils then
-                            for _, inst in ipairs(nils) do
-                                local okC, cls = pcall(function() return inst.ClassName end)
-                                if okC and cls == "ModuleScript" then
-                                    local okF, fn = pcall(getscriptclosure, inst)
-                                    if okF and type(fn) == "function" then
-                                        found = searchUpvalues(fn, 0)
-                                        if found then break end
-                                    end
-                                end
-                            end
-                        end
-                    end
-
-                    if found then
-                        speedU18 = found
-                        hsEnumByName = {}
-                        for enumKey, v in pairs(speedU18) do
-                            if type(v) == "table" then
-                                local sm = rawget(v, "SPEED_MULT")
-                                local h  = rawget(v, "HEIGHT")
-                                local ns = rawget(v, "NO_SPECIAL")
-                                if     sm == 10  then hsEnumByName.Skydiving   = enumKey
-                                elseif sm == 4   then hsEnumByName.Parachuting = enumKey
-                                elseif sm == 0.3 then hsEnumByName.Proning     = enumKey
-                                elseif sm == 0.8 then hsEnumByName.Swimming    = enumKey
-                                elseif sm == 0.6 then hsEnumByName.Crouching   = enumKey
-                                elseif sm == 1 and h == 6 and not ns then
-                                    hsEnumByName.Standing = enumKey
-                                end
-                            end
-                        end
-                        proneHS = hsEnumByName.Proning
-                        local names = {}
-                        for n in pairs(hsEnumByName) do names[#names+1] = n end
-                        print("[MOV] SpeedState: u18 найдена, стейты:", table.concat(names, ","))
-                    else
-                        warn("[MOV] SpeedState: u18 не найдена — SpeedState не будет работать")
-                    end
-                end)
-            end
-            rawset(mt, "Update", newcclosure(function(self, ...)
-                liveCtrl  = self
-                liveCtrlT = now()
-                if not proneHS then
-                    local hh = rawget(self, "_hullHeight")
-                    if hh == 3 then
-                        local hs = rawget(self, "HeightState")
-                        if hs ~= nil then
-                            proneHS = hs
-                            print("[MOV] proneHS снят из Update (_hullHeight==3):", hs)
-                        end
-                    end
-                end
-                if flyActive and (self == activeCtrlRef or self == ctrlCache or self == liveCtrl) then
-                    self.VelocityGravity = 0
-                    self.IsGrounded = true
-                    return
-                end
-
-                if straferActive then
-                    local input = ...
-                    if typeof(input) == "Vector2" then
-                        self._lastMovement = input
-                        self._groundedInputDirection = input
-                    end
-                end
-
-                if forcedHS ~= nil then
-                    pcall(function() self.HeightState = forcedHS end)
-                end
-
-                local ok, r1, r2, r3 = pcall(oUpdate, self, ...)
-                if not ok then
-                    warn("[MOV] CharacterController.Update: ошибка перехвачена (не критично):", r1)
-                    return
-                end
-                return r1, r2, r3
-            end))
-            print("[MOV] Hook: Update (controller) ✓")
-        end
-
-        if net then
-            local evts = rawget(net, "_events")
-            if type(evts)=="table" then
-                local oSA = rawget(evts, "StateActor")
-                if type(oSA)=="function" then
-                    origStateActor = oSA; hookedNet = net
-                    rawset(evts, "StateActor", newcclosure(function(p76,p77,p78,p79)
-                        if MOV.FlyTPBypass and (flyActive or MOV.NoClip) and p79 then
-                            return
-                        end
-                        return oSA(p76,p77,p78,p79)
-                    end))
-                    print("[MOV] Hook: StateActor ✓")
-                end
-            end
-
-            local oFU = rawget(net, "FireUnreliableServer")
-            if type(oFU) ~= "function" then
-                local nmt = getmetatable(net)
-                if type(nmt) == "table" then
-                    oFU = rawget(nmt, "FireUnreliableServer")
-                          or (nmt.__index and rawget(nmt.__index, "FireUnreliableServer"))
-                end
-            end
-            if type(oFU) == "function" then
-                origFireUnrel = oFU
-                rawset(net, "FireUnreliableServer", newcclosure(function(self, ...)
-                    local isRM = (...) == "ReplicateMovement"
-                    -- Всегда захватываем uid из штатных пакетов — нужен Sender'у.
-                    if isRM then
-                        local u = select(2, ...)
-                        if u ~= nil then faUid = u end
-                    end
-                    local anyPacketFx = leanLockActive
-                        or invisActive or noFallActive or (fakeAngMode ~= 0)
-                        or velDesyncActive
-                    if not anyPacketFx or not isRM then
-                        return oFU(self, ...)
-                    end
-                    -- Если активен высокочастотный Sender и включено подавление —
-                    -- глушим штатный 10Гц-пакет (Sender шлёт свой на макс частоте).
-                    -- Safety: подавляем только если Sender реально слал недавно.
-                    if MOV.FakeAnglesSender and MOV.FakeAnglesSuppressGame
-                       and (fakeAngMode ~= 0 or velDesyncActive)
-                       and (now() - faSenderLastSendT) < 0.2 then
-                        return  -- drop
-                    end
-                    local n = select("#", ...)
-                    local a = table.pack(...)
-                    if noFallActive and n >= 8 then
-                        if nfFalling then
-                            if nfGroundHS ~= nil then a[8] = nfGroundHS end
-                        else
-                            nfGroundHS = a[8]
-                        end
-                    end
-                    if invisActive then
-                        if type(a[4]) == "number" then
-                            a[4] = a[4] + (MOV.InvisibleYOffset or -2.8)
-                        end
-                        if MOV.InvisibleProne and proneHS ~= nil then
-                            a[8] = proneHS
-                        end
-                        if MOV.InvisibleLean and n >= 11 then
-                            a[11] = (invPhase % 2 < 1) and 1 or -1
-                        end
-                        local jit = MOV.InvisibleJitter or 0
-                        if jit > 0 and type(a[3]) == "number" and type(a[5]) == "number" then
-                            a[3] = a[3] + (math.random() * 2 - 1) * jit
-                            a[5] = a[5] + (math.random() * 2 - 1) * jit
-                        end
-                    end
-                    local flip
-                    if fakeAngMode ~= 0 then
-                        faPacket = faPacket + 1
-                        flip = (faPacket % 2 == 0) and 1 or -1
-                        applyFakeAnglesToArgs(a, n, flip)
-                    elseif leanLockActive and n >= 11 then
-                        a[11] = MOV.LeanLockValue
-                    end
-                    -- VelocityDesync смещает позицию (независимо от FakeAngles)
-                    applyVelocityDesyncToArgs(a, n, flip or ((faPacket % 2 == 0) and 1 or -1))
-                    -- ── ДИАГНОСТИКА: печатаем что реально уходит на сервер ──
-                    if MOV.FakeAnglesDiag and faDiagLeft > 0 then
-                        faDiagLeft = faDiagLeft - 1
-                        local function f(v) return type(v)=="number" and string.format("%.2f", v) or tostring(v) end
-                        print(string.format(
-                            "[FA-DIAG] pos=(%s, %s, %s) orient=%s state=%s camY=%s lean=%s  [позиция=РЕАЛЬНАЯ, менять НЕ должны]",
-                            f(a[3]), f(a[4]), f(a[5]), f(a[6]), f(a[8]), f(a[10]), f(a[11])))
-                        if faDiagLeft == 0 then print("[FA-DIAG] — конец лога (жми K для нового) —") end
-                    end
-                    return oFU(self, table.unpack(a, 1, n))
-                end))
-                print("[MOV] Hook: FireUnreliableServer (Invisible/FakeAngles/NoFall/Lean) ✓")
-            end
-        end
-
-        if not proneHS then
-            pcall(function()
-                local sh = rawget(getrenv and getrenv() or {}, "shared")
-                        or rawget(getgenv and getgenv() or {}, "shared")
-                if type(sh) ~= "table" then return end
-                local en = rawget(sh, "Enum") or (type(sh.import) == "function"
-                           and pcall(sh.import, "Enum") and nil)
-                if type(en) ~= "table" then return end
-                local chs = rawget(en, "CharacterHeightState")
-                if type(chs) ~= "table" then return end
-                local prone = rawget(chs, "Proning")
-                if prone ~= nil then
-                    proneHS = prone
-                    print("[MOV] proneHS через shared.Enum ✓:", prone)
-                end
-            end)
-        end
-
-        hooksSetup = true
-        print("[MOV] Все хуки контроллера установлены")
-    end
-
-    local _camLastT = now()
-    local function camDt()
-        local t = now()
-        local d = t - _camLastT
-        _camLastT = t
-        if d <= 0 or d > 0.5 then d = 1/60 end
-        return d
-    end
-
-    local function teardownCamHooks()
-        if not camHooksSetup then return end
-        if hookedCamMt and origCamUpdate then
-            unlockMt(hookedCamMt)
-            rawset(hookedCamMt, "Update", origCamUpdate)
-        end
-        origCamUpdate=nil; hookedCamMt=nil; hookedCamObj=nil; camHooksSetup=false
-        print("[MOV] Хук камеры снят")
-    end
-
-    local function setupCamHooks(cam)
-        if type(cam) ~= "table" then return end
-
-        local mt = (type(getrawmetatable)=="function" and getrawmetatable(cam))
-                or getmetatable(cam)
-        if not mt then warn("[MOV] setupCamHooks: metatable камеры не найдена") return end
-
-        if camHooksSetup and mt == hookedCamMt then return end
-        if camHooksSetup and mt ~= hookedCamMt then
-            pcall(teardownCamHooks)
-        end
-
-        unlockMt(mt)
-        hookedCamMt  = mt
-        hookedCamObj = cam
-
-        local oUpd = rawget(mt, "Update")
-        if type(oUpd) ~= "function" then
-            warn("[MOV] setupCamHooks: Update не найден")
-            return
-        end
-        origCamUpdate = oUpd
-
-        local function forceCamState()
-            if not (tpActive or spinBotActive) then return end
-            local camObj = liveCam
-            if type(camObj) ~= "table" then camObj = hookedCamObj end
-            if type(camObj) ~= "table" then return end
-            local la = rawget(camObj, "_localActor")
-            if type(la) ~= "table" then return end
-            if tpActive then
-                local zl = rawget(camObj, "_zoomLimit")
-                local z = tpZoom
-                if type(zl) == "number" and zl > 0 then
-                    z = math.clamp(z, 0, zl)
-                else
-                    z = math.max(z, 0)
-                end
-                la.Zoom          = z
-                la.Focused       = z <= 0.01
-                camObj._zoomLerp = z
-            end
-            if spinBotActive then
-                la.Orientation = spinPhase
-            end
-        end
-
-        rawset(mt, "Update", newcclosure(function(self, ...)
-            liveCam  = self
-            liveCamT = now()
-            local ok, a, b, c = pcall(oUpd, self, ...)
-            if not ok then
-                warn("[MOV] CharacterCamera.Update: ошибка перехвачена (не критично):", a)
-                pcall(forceCamState)
-                return
-            end
-
-            if spinBotActive then
-                spinPhase = spinPhase + camDt() * MOV.SpinBotRPS * math.pi * 2
-            end
-            pcall(forceCamState)
-
-            return a, b, c
-        end))
-
-        camHooksSetup = true
-        print("[MOV] Hook: CharacterCamera.Update ✓")
-    end
-
-    local ctrlCache, findLastT, FIND_CD = nil, -999, 2.5
-    local camCache,  findCamLastT, FIND_CAM_CD = nil, -999, 2.5
-
-    local _findCtrl = newcclosure(function()
-        local c = findCtrlViaFiltergc()
-        if c then print("[MOV] ctrl → filtergc"); return c end
-        local c2 = findCtrlViaGetgc()
-        if c2 then print("[MOV] ctrl → getgc"); return c2 end
-        warn("[MOV] ctrl не найден — P для диагностики")
-        return nil
+    -- Reset transient state on respawn.
+    LocalPlayer.CharacterAdded:Connect(function(char)
+        _myChar = char       -- keep the hook's fast-path pointer compare valid after respawn
+        flyActive = false
+        clearFlyInput()
+        table.clear(_noclipTouched)   -- old parts are gone; new char re-uncollides while NoClip on
+        table.clear(_partCache)       -- [PERF/leak] the part cache is keyed by the character MODEL
+                                      -- with strong keys, so without this the previous character
+                                      -- (and its part list) stayed referenced for the whole session
+        _carryVictim, _carryCacheT = nil, 0
+        _noclipActive = Config.NoClip_On
+        -- [V112] Перепривязываем событийный счётчик grab-констрейнтов: подписки жили на
+        -- СТАРОМ персонаже, после респавна они мертвы, а счётчик остался бы с прошлым
+        -- значением (в т.ч. «нас держат», если нас схватили перед смертью).
+        bindGrabWatch(char)
+        task.wait(0.5)
+        if Config.Sprint_On then setSprint(true) end
     end)
 
-    local _findCam = newcclosure(function()
-        local c = findCamViaFiltergc()
-        if c then print("[MOV] cam → filtergc"); return c end
-        local c2 = findCamViaGetgc()
-        if c2 then print("[MOV] cam → getgc"); return c2 end
-        warn("[MOV] cam не найдена (TP/SpinBot недоступны)")
-        return nil
-    end)
+    -- ═════════���═════════���══════════�� UI ══���══════════════════════════════════
+    local M = {}
 
-    -- ── ДЕШЁВЫЙ ГЕЙТ «Я В МАШИНЕ» ─────────────────────────────────────────────
-    -- В транспорте игра уничтожает CharacterController и ставит LocalActor.Controller
-    -- на GroundController/HelicopterController/PassengerController (у них есть поля
-    -- _solver/_vehicle/_tune вместо MoveSpeed/IsGrounded). Наш isCtrl их отвергает →
-    -- _findCtrl каждые FIND_CD сек впустую гоняет filtergc/getgc (просадка + «Ctrl
-    -- убирается»). Проверяем Controller живого актора — это чтение полей, без сканов.
-    --
-    -- Раньше опирались ТОЛЬКО на knownGoodLA (ставится лишь когда найден персонажный
-    -- ctrl при жизни) — в машине он часто nil/устаревал → проверка не работала.
-    -- Теперь берём актора из нескольких источников, включая камеру (её Update
-    -- крутится и в транспорте), поэтому актор всегда свежий.
-    local function getLiveLA()
-        if type(knownGoodLA) == "table" then return knownGoodLA end
-        -- камера обновляется каждый кадр даже в машине
-        if type(liveCam) == "table" and (now() - liveCamT) < 1.0 then
-            local la = rawget(liveCam, "_localActor")
-            if type(la) == "table" then return la end
-        end
-        if type(activeCtrlRef) == "table" then
-            local la = rawget(activeCtrlRef, "_localActor")
-            if type(la) == "table" then return la end
-        end
-        return nil
-    end
-    -- точная проверка: это контроллер ТРАНСПОРТА? (совпадает с логикой visuals)
-    local function isVehicleCtrl(c)
-        return type(c) == "table"
-            and type(rawget(c, "_solver"))  == "table"
-            and type(rawget(c, "_vehicle")) == "table"
-            and type(rawget(c, "_tune"))    == "table"
-    end
-    local function inVehicleNow()
-        local la = getLiveLA()
-        if type(la) ~= "table" then return false end
-        return isVehicleCtrl(rawget(la, "Controller"))
+    function M.start()
+        Config.Speed_On, Config.Fly_On = false, false
+        Config.NS_On, Config.NoDelay_On = false, false
+        Config.Sprint_On, Config.Sprint_Bypass = false, false
+        -- [V112] Auto Respawn гасим на старте принудительно. Если он приедет включённым из
+        -- сохранённого конфига MacLib, скрипт начнёт слать SpawnRequest сразу после
+        -- инжекта — то есть будет убивать сессию до того, как игрок вообще увидит меню.
+        Config.AutoRespawn_On = false
+        -- Warm up the hooks in the background now, so toggling a feature later never
+        -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
+        bootstrapHooks()
+        -- [V112] Первичная привязка событийного счётчика grab-констрейнтов для персонажа,
+        -- который УЖЕ существует на момент запуска (CharacterAdded для него не сработает).
+        bindGrabWatch(LocalPlayer.Character)
     end
 
-    local function getCtrl()
-        if liveCtrl ~= nil and (now() - liveCtrlT) < LIVE_TTL and isCtrl(liveCtrl) then
-            if not rawequal(ctrlCache, liveCtrl) then
-                ctrlCache = liveCtrl
-                activeCtrlRef = liveCtrl
-                if not hooksSetup then
-                    local net = findNetworkObj()
-                    setupHooks(liveCtrl, net)
+    function M.buildUI(ctx)
+        local uiReady = false
+        local function notify(title, body)
+            if uiReady then pcall(ctx.notify, title, body) end
+        end
+        notifyFn = notify
+
+        -- notify-exactly-once boolean feature (Header + "Enabled" toggle + Keybind)
+        local function feature(section, o)
+            local guard, togEl = false, nil
+            local function commit(val)
+                val = val and true or false
+                o.set(val)
+                notify(o.Title, val and "Enabled" or "Disabled")
+                guard = true
+                if togEl then pcall(function() togEl:UpdateState(val) end) end
+                guard = false
+            end
+            togEl = section:Toggle({
+                Name = "Enabled", Default = o.get(),
+                Callback = function(v) if guard then return end commit(v) end,
+            }, ctx.flag(o.Flag))
+            if o.Desc then section:SubLabel({ Text = o.Desc }) end
+            ctx.keybind(section, {
+                Name = "Keybind",
+                Flag = ctx.flag(o.Flag .. "_KB"),
+                Toggle = function() commit(not o.get()) end,
+            })
+            return { commit = commit }
+        end
+
+        local function boolToggle(section, name, title, get, set)
+            section:Toggle({
+                Name = name, Default = get(),
+                Callback = function(v)
+                    set(v and true or false)
+                    notify(title, v and "Enabled" or "Disabled")
+                end,
+            }, ctx.flag(name:gsub("%s+", "") .. "_T"))
+        end
+
+        local function slider(section, o)
+            section:Slider({
+                Name = o.Name, Default = o.Default, Minimum = o.Min, Maximum = o.Max,
+                Precision = o.Precision or 0, Suffix = o.Suffix, Callback = o.Callback,
+            }, ctx.flag(o.Flag))
+        end
+
+        local MV = ctx.tabs.Movement
+
+        -- ─────────────── Section 1: Speed (Left) ───────────────
+        local sSpeed = MV:Section({ Side = "Left" })
+        sSpeed:Header({ Name = "Speed" })
+        feature(sSpeed, {
+            Title = "Speed", Flag = "MV_Speed",
+            get = function() return Config.Speed_On end,
+            set = function(v) Config.Speed_On = v end,
+            Desc = "cframe/velocity speedhack\ndriven by ur move input",
+        })
+        sSpeed:Dropdown({
+            Name = "Method", Options = { "CFrame", "Velocity" },
+            Default = Config.Speed_Mode,
+            Callback = function(v) Config.Speed_Mode = v; notify("Speed Method", v) end,
+        }, ctx.flag("MV_SpeedMode"))
+        sSpeed:SubLabel({ Text = "CFrame uhhhh · Velocity is smoother." })
+        slider(sSpeed, { Name = "Speed", Flag = "MV_SpeedVal", Default = Config.Speed_Value,
+            Min = 16, Max = 150, Suffix = " studs", Callback = function(v) Config.Speed_Value = v end })
+
+        -- ─────────��───── Section 2: Fly (Left) ───────────────
+        local sFly = MV:Section({ Side = "Left" })
+        sFly:Header({ Name = "Fly" })
+        feature(sFly, {
+            Title = "Fly", Flag = "MV_Fly",
+            get = function() return Config.Fly_On end,
+            set = function(v) Config.Fly_On = v end,
+            Desc = "space = up, left ctrl = down (no shiftlock clash)\nmobile: jump button = up",
+        })
+        sFly:Dropdown({
+            Name = "Method", Options = { "CFrame", "Velocity" },
+            Default = Config.Fly_Mode,
+            Callback = function(v) Config.Fly_Mode = v; notify("Fly Method", v) end,
+        }, ctx.flag("MV_FlyMode"))
+        boolToggle(sFly, "Face Camera", "Fly Face Camera",
+            function() return Config.Fly_Face end, function(v) Config.Fly_Face = v end)
+        sFly:SubLabel({ Text = "Face Camera makes the body follow your aim." })
+        slider(sFly, { Name = "Horizontal Speed", Flag = "MV_FlyVal", Default = Config.Fly_Value,
+            Min = 10, Max = 250, Suffix = " studs", Callback = function(v) Config.Fly_Value = v end })
+        slider(sFly, { Name = "Vertical Speed", Flag = "MV_FlyVert", Default = Config.Fly_Vertical,
+            Min = 10, Max = 250, Suffix = " studs", Callback = function(v) Config.Fly_Vertical = v end })
+
+        -- ─────────────── Section: NoClip (Left) ───────────────
+        local sNoClip = MV:Section({ Side = "Left" })
+        sNoClip:Header({ Name = "NoClip" })
+        feature(sNoClip, {
+            Title = "NoClip", Flag = "MV_NoClip",
+            get = function() return Config.NoClip_On end,
+            set = function(v) Config.NoClip_On = v end,
+            Desc = "phase through walls/floors",
+        })
+        boolToggle(sNoClip, "Carry-Aware", "NoClip Carry-Aware",
+            function() return Config.NoClip_Carry end, function(v) Config.NoClip_Carry = v end)
+        sNoClip:SubLabel({ Text = "u can carry someone w noclip" })
+
+        -- ─────────────── Section 3: No Slowdown (Right) ───────────────
+        local sNS = MV:Section({ Side = "Right" })
+        sNS:Header({ Name = "No Slowdown" })
+        feature(sNS, {
+            Title = "No Slowdown", Flag = "MV_NS",
+            get = function() return Config.NS_On end,
+            set = function(v)
+                Config.NS_On = v
+                if v and not combatHooksReady() then
+                    notify("No Slowdown", "needs hookfunction + filtergc")
+                    Config.NS_On = false
                 end
-            end
-            return liveCtrl
-        end
-        if ctrlCache and isCtrl(ctrlCache) then return ctrlCache end
-        -- В машине персонажного контроллера НЕ существует → не сканируем вообще.
-        if inVehicleNow() then return nil end
-        local t = now()
-        if t - findLastT < FIND_CD then return nil end
-        findLastT = t
-        local c = _findCtrl()
-        if c then
-            ctrlCache = c
-            activeCtrlRef = c
-            if not hooksSetup then
-                local net = findNetworkObj()
-                setupHooks(c, net)
-            end
-        end
-        return c
-    end
-
-    local function getCam()
-        if liveCam ~= nil and (now() - liveCamT) < LIVE_TTL and isCam(liveCam) then
-            if not rawequal(camCache, liveCam) then
-                camCache = liveCam
-                if not camHooksSetup then
-                    setupCamHooks(liveCam)
-                end
-            end
-            return liveCam
-        end
-        if camCache and isCam(camCache) then return camCache end
-        local t = now()
-        if t - findCamLastT < FIND_CAM_CD then return nil end
-        findCamLastT = t
-        local c = _findCam()
-        if c then
-            camCache = c
-            if not camHooksSetup then
-                setupCamHooks(c)
-            end
-        end
-        return c
-    end
-
-    local function resetCtrlCache() ctrlCache=nil; activeCtrlRef=nil; findLastT=-999 end
-
-    local function doJump(ctrl, velocityGravity, speedOverride)
-        ctrl.IsGrounded = true
-        local la = rawget(ctrl, "_localActor")
-        if la then pcall(function() la:Jump() end) end
-        local net = State.networkModule
-        if net then pcall(function() net:FireServer("DoJump") end) end
-        if speedOverride then ctrl.MoveSpeed = speedOverride end
-        ctrl.VelocityGravity = velocityGravity or 25
-    end
-
-    local function applySpeedState()
-        if speedStateMode == 0 then
-            forcedHS = nil
-            return true
-        end
-        if not hsEnumByName then return false end
-        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
-        local name  = order[speedStateMode]
-        local enumKey = name and hsEnumByName[name]
-        if enumKey == nil then
-            warn("[MOV] SpeedState: стейт '"..tostring(name).."' не найден в u18")
-            forcedHS = nil
-            return false
-        end
-        forcedHS = enumKey
-        return true
-    end
-
-    local function destroyFakeGhost()
-        faGhostHidden = false
-        if faGhostModel then pcall(function() faGhostModel:Destroy() end); faGhostModel = nil end
-        if faGhostHL    then pcall(function() faGhostHL:Destroy()    end); faGhostHL = nil end
-        faGhostRoot    = nil
-        faGhostHead    = nil
-        faGhostHeadOff = nil
-        faGhostTorsoM  = nil
-        faGhostHeadM   = nil
-    end
-
-    -- v19.3: набор валидных имён частей R15. Всё, что НЕ входит сюда
-    -- (аксессуары, шапки, оружие/Tool, gear-меши, hitbox'ы), в гост НЕ попадает.
-    local R15_PARTS = {
-        HumanoidRootPart = true, Head = true, UpperTorso = true, LowerTorso = true,
-        LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
-        RightUpperArm = true, RightLowerArm = true, RightHand = true,
-        LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
-        RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
-    }
-
-    local function buildFakeGhost(char)
-        local ok, clone = pcall(function() return char:Clone() end)
-        if not ok or not clone then return end
-        -- v19.2 FIX Lean: в игре lean — это РОЛЛ Motor6D UpperTorso (см. дамп
-        -- ActorClass:2704), а не наклон всего тела. Чтобы Motor6D работали,
-        -- нельзя якорить ВСЕ части (у якорёных Transform игнорируется). Якорим
-        -- ТОЛЬКО root — остальные держатся на суставах, а мы крутим torso/head.
-        local root = clone:FindFirstChild("HumanoidRootPart")
-                     or clone:FindFirstChild("LowerTorso") or clone.PrimaryPart
-
-        -- v19.3 «жидкое стекло»: оставляем ТОЛЬКО R15-меши/части тела, остальное
-        -- (Accessory, Tool, одежда, декали, лишние MeshPart) вырезаем; телу даём
-        -- полупрозрачный Glass-материал.
-        local mat = MOV.FakeAnglesGhostMaterial or Enum.Material.Glass
-        local tr  = MOV.FakeAnglesGhostTransparency or 0.5
-        local col = MOV.FakeAnglesGhostColor or Color3.fromRGB(120, 200, 255)
-        for _, d in ipairs(clone:GetDescendants()) do
-            if d:IsA("BasePart") then
-                if R15_PARTS[d.Name] then
-                    d.Anchored    = (d == root)   -- якорим только root
-                    d.CanCollide  = false
-                    d.CanQuery    = false
-                    d.CastShadow  = false
-                    d.Material     = mat
-                    d.Transparency = tr
-                    d.Reflectance  = 0.12          -- лёгкий «стеклянный» блик
-                    d.Color        = col
-                    pcall(function() d.Massless = true end)
-                    -- убираем «лицо»/текстуры/спец-меши, оставляя чистую геометрию
-                    for _, s in ipairs(d:GetChildren()) do
-                        if s:IsA("Decal") or s:IsA("Texture") or s:IsA("SurfaceAppearance")
-                            or s:IsA("SpecialMesh") then
-                            pcall(function() s:Destroy() end)
-                        end
-                    end
-                else
-                    -- не-R15 часть (шляпа/меш аксессуара/gear/оружие) — вон
-                    pcall(function() d:Destroy() end)
-                end
-            elseif d:IsA("Accessory") or d:IsA("Tool") or d:IsA("Clothing")
-                or d:IsA("Shirt") or d:IsA("Pants") or d:IsA("ShirtGraphic")
-                or d:IsA("Animator") or d:IsA("Humanoid") or d:IsA("Script")
-                or d:IsA("LocalScript") or d:IsA("ModuleScript") or d:IsA("Sound")
-                or d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Trail")
-                or d:IsA("Decal") or d:IsA("Texture") or d:IsA("SurfaceAppearance") then
-                pcall(function() d:Destroy() end)
-            elseif d:IsA("Motor6D") then
-                pcall(function() d.Transform = CFrame.identity end)  -- нейтральная поза
-            end
-        end
-        clone.Name = "_faGhost"
-        pcall(function() clone.Parent = workspace end)
-        faGhostModel = clone
-        faGhostRoot  = root
-        faGhostHead  = clone:FindFirstChild("Head")
-        -- Находим суставы по Part1 (сустав именуется по ведомой части в R15).
-        for _, m in ipairs(clone:GetDescendants()) do
-            if m:IsA("Motor6D") and m.Part1 then
-                if m.Part1.Name == "UpperTorso" then faGhostTorsoM = m
-                elseif m.Part1.Name == "Head"    then faGhostHeadM  = m end
-            end
-        end
-        if faGhostRoot and faGhostHead then
-            pcall(function()
-                faGhostHeadOff = faGhostRoot.CFrame:Inverse() * faGhostHead.CFrame
-            end)
-        end
-        -- Тонкая стеклянная окантовка (не заливка) — подчёркивает силуэт.
-        local ok2, hl = pcall(function()
-            local h = Instance.new("Highlight")
-            h.FillColor = col
-            h.FillTransparency = math.clamp(tr + 0.35, 0, 1)
-            h.OutlineColor = MOV.FakeAnglesGhostOutline or Color3.fromRGB(180, 235, 255)
-            h.OutlineTransparency = 0
-            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            h.Adornee = clone
-            h.Parent = clone
-            return h
-        end)
-        if ok2 then faGhostHL = hl end
-    end
-
-    -- Прячет/показывает гост локально. Вынесено из tickFakeGhost, потому что
-    -- скрывать его нужно и на путях РАННЕГО ВЫХОДА (нет контроллера, нет
-    -- персонажа, первое лицо) — раньше в этих случаях функция просто
-    -- возвращалась, и клон навсегда оставался висеть в последней позе.
-    local function setGhostHidden(hide)
-        if not faGhostModel then return end
-        if faGhostHidden == hide then return end
-        faGhostHidden = hide
-        local ghostTr = MOV.FakeAnglesGhostTransparency or 0.5
-        for _, d in ipairs(faGhostModel:GetDescendants()) do
-            if d:IsA("BasePart") then
-                pcall(function() d.Transparency = hide and 1 or ghostTr end)
-            end
-        end
-        if faGhostHL then pcall(function() faGhostHL.Enabled = not hide end) end
-    end
-
-    -- Определение первого лица. Собственный сигнал игры — LocalActor.Zoom
-    -- (CharacterCamera: Zoom > 0 = третье лицо). Дистанция до головы — fallback.
-    local function isFirstPersonNow(la, char)
-        local zoom = la and rawget(la, "Zoom")
-        if type(zoom) ~= "number" and la then
-            local okZ, z = pcall(function() return la.Zoom end)
-            if okZ and type(z) == "number" then zoom = z end
-        end
-        if type(zoom) == "number" then
-            return zoom <= (MOV.FakeAnglesGhostFPZoom or 0.5)
-        end
-        local cam = workspace.CurrentCamera
-        local realHead = char and char:FindFirstChild("Head")
-        if cam and realHead and realHead:IsA("BasePart") then
-            return (cam.CFrame.Position - realHead.Position).Magnitude
-                < (MOV.FakeAnglesGhostFPDist or 1.5)
-        end
-        return false
-    end
-
-    local function tickFakeGhost()
-        if fakeAngMode == 0 or not MOV.FakeAnglesGhost then
-            if faGhostModel then destroyFakeGhost() end
-            return
-        end
-        -- FIX (гост не исчезал при переходе в первое лицо): ниже три ранних
-        -- return. Если контроллер/актор/персонаж на кадр недоступны — а это
-        -- ровно то, что происходит при смене камеры, респавне и посадке в
-        -- транспорт — функция выходила, НЕ тронув клон. Он оставался видимым
-        -- там, где стоял. Теперь на любом раннем выходе гост прячем.
-        local ctrl = ctrlCache
-        if not ctrl then setGhostHidden(true) return end
-        local la = rawget(ctrl, "_localActor")
-        if not la then setGhostHidden(true) return end
-        local char = rawget(la, "Character")
-        if typeof(char) ~= "Instance" or not char.Parent then
-            setGhostHidden(true) return
-        end
-        if not faGhostModel or not faGhostModel.Parent then
-            destroyFakeGhost()
-            -- FIX: destroyFakeGhost resets faGhostHidden=false; buildFakeGhost
-            -- creates fresh parts at ghostTr so the firstPerson re-check below
-            -- will correctly apply hide/show on the very first tick.
-            pcall(buildFakeGhost, char)
-            if not faGhostModel then return end
-        end
-        -- ── Прячем гост от 1-го лица (клон только у нас, скрываем локально) ──
-        -- Сигнал самой игры: LocalActor.Zoom <= 0 → первое лицо
-        -- (дамп CharacterCamera:158 `_localActor.Zoom <= 0`). Дистанция до
-        -- головы — fallback, если поля Zoom нет.
-        --
-        -- ВАЖНО: эта проверка идёт ДО резолва base. Раньше она стояла ПОСЛЕ, а
-        -- между ними был `if typeof(base) ~= "Vector3" then return end` —
-        -- выход БЕЗ скрытия. В первом лице игра нередко не отдаёт
-        -- Position/SimulatedPosition (актор не симулируется), поэтому функция
-        -- выходила именно там и гост застывал видимым. Это и был баг.
-        if MOV.FakeAnglesGhostFirstPersonHide ~= false then
-            local firstPerson = isFirstPersonNow(la, char)
-            setGhostHidden(firstPerson)
-            if firstPerson then return end   -- в 1-м лице не двигаем/не рисуем
-        else
-            setGhostHidden(false)
-        end
-
-        local base = rawget(la, "Position") or rawget(la, "SimulatedPosition")
-                     or rawget(ctrl, "_correctedPosition") or rawget(ctrl, "_position")
-        if typeof(base) ~= "Vector3" then
-            -- позиции нет — рисовать негде, прячем вместо тихого выхода
-            setGhostHidden(true)
-            return
-        end
-
-        -- v19.2 — воспроизводим РОВНО игровую позу (дамп ActorClass):
-        --   root(HRP)        = CFrame.new(pos) * CFrame.Angles(0, Orientation, 0)  -- body yaw a[6]
-        --   UpperTorso.Motor = Angles(0, -aimΔ, -rad(Lean*25)) * Angles(pitch/2, aimΔ, 0)  (2704)
-        --   Head.Motor       = Angles(pitch/2, ...)                                 (2697)
-        -- Тело НЕ наклоняется целиком: lean — это роль сустава торса, ноги стоят.
-        local yaw   = faFakeYaw    or 0
-        local lean  = faFakeLean   or 0
-        local pitch = faFakePitch  or 0
-        local aimDelta = (faFakeAimYaw or yaw) - yaw     -- взгляд относительно тела
-
-        -- Отражаем спуфнутый стейт: сервер думает что мы сидим/лежим → показываем
-        -- позу. Crouch: гост ниже; Prone: ниже + тело кладём горизонтально.
-        local stateY, proneTilt = 0, 0
-        local hsN = faFakeHSName
-        if hsN == "Crouching" then
-            stateY = -(MOV.FakeAnglesCrouchDrop or 1.4)
-        elseif hsN == "Proning" then
-            stateY = -(MOV.FakeAnglesProneDrop or 2.4)
-            proneTilt = -math.rad(80)                 -- кладём тело на «живот»
-        end
-
-        -- 1) корпус: yaw тела + смещение/наклон по стейту (root анкорён → PivotTo)
-        local bodyCF = CFrame.new(base + Vector3.new(0, stateY, 0))
-            * CFrame.Angles(0, yaw, 0) * CFrame.Angles(proneTilt, 0, 0)
-        pcall(function() faGhostModel:PivotTo(bodyCF) end)
-
-        -- 2) lean-роль + твист на суставе UpperTorso (как строка 2704)
-        if faGhostTorsoM then
-            pcall(function()
-                faGhostTorsoM.Transform =
-                    CFrame.Angles(0, -aimDelta, -math.rad(lean * 25))
-                    * CFrame.Angles(pitch * 0.5, aimDelta, 0)
-            end)
-        end
-        -- 3) pitch головы на суставе Head (как строка 2697)
-        if faGhostHeadM then
-            pcall(function()
-                faGhostHeadM.Transform = CFrame.Angles(pitch * 0.5, aimDelta, 0)
-            end)
-        elseif faGhostHead and faGhostHead.Parent and faGhostHeadOff and faGhostRoot then
-            -- fallback: если сустав головы не найден — крутим часть напрямую
-            local rootCF = faGhostRoot.CFrame
-            pcall(function()
-                faGhostHead.CFrame = rootCF * faGhostHeadOff
-                    * CFrame.Angles(0, aimDelta, 0) * CFrame.Angles(pitch, 0, 0)
-            end)
-        end
-    end
-
-    -- Читает ЖИВЫЕ данные LocalActor (тот же объект, что шлёт репликатор) и
-    -- обновляет численную оценку скорости для VelocityDesync.
-    local function readLiveActorPacket()
-        local ctrl = ctrlCache or liveCtrl
-        if not ctrl then return nil end
-        local la = rawget(ctrl, "_localActor")
-        if type(la) ~= "table" then return nil end
-        local pos = rawget(la, "ForceNextPosition") or rawget(la, "SimulatedPosition")
-        if typeof(pos) ~= "Vector3" then return nil end
-        -- оценка скорости ��з дельты позиции
-        local t = now()
-        if faLastPos and t > faLastPosT then
-            local dt = t - faLastPosT
-            if dt > 0 then
-                local v = (pos - faLastPos) / dt
-                -- сглаживание, чтобы не дёргалось
-                faVelEst = faVelEst:Lerp(v, 0.35)
-            end
-        end
-        faLastPos, faLastPosT = pos, t
-        return la, pos
-    end
-
-    -- Высокочастотный Sender: шлёт ReplicateMovement напрямую через оригинальный
-    -- FireUnreliableServer (в обход хука), с живой позицией + фейк-углами +
-    -- velocity-десинком. Флипает углы КАЖДЫЙ пакет → на 60+ Гц это настоящий
-    -- десинк, а не редкий 10Гц-джиттер.
-    local function tickSender(dt)
-        if not MOV.FakeAnglesSender then return end
-        if fakeAngMode == 0 and not velDesyncActive then return end
-        if not (hooksSetup and origFireUnrel and hookedNet and faUid ~= nil) then return end
-
-        -- Кол-во отправок за этот кадр. hz=0 → одна на Heartbeat (~макс без фл����да).
-        -- hz>fps → burst (несколько пакетов за кадр, «ускоряя» реплиацию), cap 8.
-        local hz = MOV.FakeAnglesSendHz or 0
-        local cap = MOV.FakeAnglesSendBurstCap or 3
-        local sends = 1
-        if hz > 0 then
-            faSenderAccum = faSenderAccum + (dt or 0)
-            local period = 1 / hz
-            if faSenderAccum < period then return end
-            sends = math.clamp(math.floor(faSenderAccum / period), 1, cap)
-            faSenderAccum = faSenderAccum - sends * period
-        end
-
-        local la, pos = readLiveActorPacket()
-        if not la or not pos then return end
-
-        -- FPS FIX: переиспользуем ОДНУ таблицу args (без аллокаций каждый кадр).
-        -- Базовые значения кэширу��м в локалы, т.к. applyFakeAngles мутирует a[]
-        -- (в Instant-режиме через +=) → на burst-итерациях надо сбрасывать базу.
-        local bOri  = rawget(la, "Orientation") or 0
-        local bCamX = rawget(la, "CameraX") or 0
-        local bCamY = rawget(la, "CameraY") or 0
-        local bLean = rawget(la, "LeanGoal") or 0
-        local a = faSenderArgs
-        a[1] = "ReplicateMovement"; a[2] = faUid
-        a[7]  = rawget(la, "Sprinting")
-        a[8]  = rawget(la, "HeightState")
-        a[12] = rawget(la, "Platform")
-        local n = 12
-
-        for _ = 1, sends do
-            -- сбро�� базы каждую итерацию (позиция + углы), десинк/фейк меняют их
-            a[3], a[4], a[5] = pos.X, pos.Y, pos.Z
-            a[6], a[9], a[10], a[11] = bOri, bCamX, bCamY, bLean
-            faSenderPkt  = faSenderPkt + 1
-            faSenderFlip = -faSenderFlip
-            if fakeAngMode ~= 0 then
-                applyFakeAnglesToArgs(a, n, faSenderFlip)
-            end
-            applyVelocityDesyncToArgs(a, n, faSenderFlip)
-            local ok = pcall(origFireUnrel, hookedNet, table.unpack(a, 1, n))
-            if ok then faSenderLastSendT = now() end
-        end
-    end
-
-    local function tickSpeedWatchdog(ctrl)
-        if not MOV.Speed then return end
-        if flyActive then return end
-
-        if not isLiveInputActive() then
-            ctrl.MoveSpeed = 0
-            pcall(function() ctrl._lastMovement = Vector2.new(0, 0) end)
-            pcall(function() ctrl._groundedInputDirection = Vector3.new(0, 0, 0) end)
-        end
-    end
-
-    local flyLastPos = nil
-
-    local function flyReadInputDir()
-        local cam = getCamera()
-        local dir = Vector3.zero
-        if cam then
-            local lk, rg = cam.CFrame.LookVector, cam.CFrame.RightVector
-            if UIS:IsKeyDown(Enum.KeyCode.W) then dir += lk end
-            if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= lk end
-            if UIS:IsKeyDown(Enum.KeyCode.D) then dir += rg end
-            if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= rg end
-        end
-        if UIS:IsKeyDown(MOV.FlyUpKey)   then dir += Vector3.yAxis end
-        if UIS:IsKeyDown(MOV.FlyDownKey) then dir -= Vector3.yAxis end
-        return dir
-    end
-
-    local function flyResetState(ctrl)
-
-        local la = ctrl and rawget(ctrl, "_localActor")
-        if type(la) == "table" then
-            local okR, rp = pcall(function() return la.RootPart end)
-            if okR and typeof(rp) == "Instance" then
-                local okP, pos = pcall(function() return rp.Position end)
-                if okP and typeof(pos) == "Vector3" and pos.Magnitude > 0.1 then
-                    flyLastPos = pos
-                    return
-                end
-            end
-        end
-
-        if type(la) == "table" then
-            local ok, pos = pcall(function() return la.Position end)
-            if ok and typeof(pos) == "Vector3" and pos.Magnitude > 0.1 then
-                flyLastPos = pos
-                return
-            end
-        end
-
-        if ctrl then
-            local ok, pos = pcall(function() return ctrl._position end)
-            if ok and typeof(pos) == "Vector3" and pos.Magnitude > 0.1 then
-                flyLastPos = pos
-            end
-        end
-    end
-
-    local function tickFly(ctrl, dt)
-        if not flyActive then flyLastPos = nil; return end
-        -- В машине персонажного ctrl нет → флай неприменим; не трогаем ввод (Ctrl),
-        -- чтобы не мешать управлению транспортом.
-        if inVehicleNow() then flyLastPos = nil; return end
-        if not ctrl then return end
-
-        ctrl.VelocityGravity = 0
-        ctrl.IsGrounded      = true
-        ctrl.MoveSpeed       = 0
-
-        pcall(function() ctrl._startPhysics = nil end)
-
-        local la = rawget(ctrl, "_localActor")
-
-        if flyLastPos == nil then
-            flyResetState(ctrl)
-            if flyLastPos == nil then return end
-        end
-
-        local dir = flyReadInputDir()
-        local newPos = flyLastPos
-        if dir.Magnitude > 0 then
-            newPos = flyLastPos + dir.Unit * MOV.FlySpeed * dt
-        end
-        flyLastPos = newPos
-
-        local curYaw = 0
-        if type(la) == "table" then
-            local okY, yaw = pcall(rawget, la, "Orientation")
-            if okY and type(yaw) == "number" then curYaw = yaw end
-        end
-        local newCFrame = CFrame.new(newPos) * CFrame.Angles(0, curYaw, 0)
-
-        pcall(function() ctrl:Teleport(newCFrame) end)
-        pcall(function() ctrl._position = newPos end)
-
-        pcall(function()
-            local cyl = rawget(ctrl, "_cylinder")
-            local hullH = rawget(ctrl, "_hullHeight") or 6
-            if typeof(cyl) == "Instance" then
-                cyl.CFrame = CFrame.new(newPos, newPos + Vector3.new(0, 1, 0))
-                            * CFrame.Angles(0, math.pi / 2, 0)
-                cyl.Size = Vector3.new(hullH - 3, 3, 3)
-            end
-        end)
-        pcall(function() ctrl._lastSafePosition = newPos end)
-
-        if type(la) == "table" then
-            pcall(function()
-                la.SimulatedPosition = newPos
-                la.ForceNextPosition = newPos
-                la.Position          = newPos
-                la.CFrame            = newCFrame
-                la._lastCFrame       = newCFrame
-                la.Direction         = Vector2.new(0, 0)
-            end)
-        end
-
-        if type(la) == "table" then
-            local okR, rp = pcall(function() return la.RootPart end)
-            if okR and typeof(rp) == "Instance" then
-                pcall(function()
-                    rp.CFrame = newCFrame
-                end)
-            end
-        end
-    end
-
-    local function tickBunnyHop(ctrl)
-        if not MOV.BunnyHop then bhopPrevGrounded=ctrl.IsGrounded; return end
-        local grounded = ctrl.IsGrounded
-        if not bhopPrevGrounded and grounded then
-            doJump(ctrl, 25, nil)
-        end
-        bhopPrevGrounded = grounded
-    end
-
-    local ijConn = nil
-    local function setupInfiniteJump()
-        if ijConn then ijConn:Disconnect() end
-        ijConn = UIS.JumpRequest:Connect(newcclosure(function()
-            if not MOV.InfiniteJump then return end
-            local ctrl = getCtrl()
-            if ctrl then ctrl.IsGrounded=true end
-        end))
-    end
-
-    local function tickAntiVoid(ctrl)
-        if not MOV.AntiVoid then return end
-        local pos = rawget(ctrl,"_position")
-        if typeof(pos)=="Vector3" and pos.Y < MOV.AntiVoidY then
-            local safe = Vector3.new(pos.X, MOV.AntiVoidSafeY, pos.Z)
-            ctrl._position=safe; ctrl.VelocityGravity=0
-            local la = rawget(ctrl,"_localActor")
-            if la then la.SimulatedPosition=safe end
-        end
-    end
-
-    local leanCur = 0
-    local function tickLean(ctrl, dt)
-        if not MOV.LeanSprint then leanCur=0; return end
-        local cam=getCamera(); if not cam then return end
-        local gid = rawget(ctrl,"_groundedInputDirection")
-        local moving = gid and gid.Magnitude > 0.05 or false
-        local target = (ctrl.IsSprinting and moving) and MOV.LeanAngle or 0
-        leanCur = leanCur + (target-leanCur)*math.clamp(dt*12,0,1)
-        if math.abs(leanCur)>0.02 then
-            cam.CFrame = cam.CFrame * CFrame.Angles(0,0,math.rad(leanCur))
-        end
-    end
-
-    local function runDiagnostic()
-        logBuf = {}
-        log("[DIAG] ═══════════════════════════════════════")
-        log("[DIAG] os.clock:", now(), "| hooksSetup:", hooksSetup, "| camHooksSetup:", camHooksSetup)
-        log("[DIAG] fly:", flyActive, "wantFly:", wantFly, "| NoClip:", MOV.NoClip,
-            "| spinBot:", spinBotActive, "| tp:", tpActive)
-        log("[DIAG] Speed:", MOV.Speed, MOV.SpeedValue, "/", MOV.SprintSpeed,
-            "AutoSprint:", MOV.AutoSprint)
-        log("[DIAG] net:", type(State.networkModule),
-            isNetObj(State.networkModule) and "✓" or "✗")
-        if type(filtergc)=="function" then
-            local ok, gc = pcall(filtergc,"table",{Keys={"MoveSpeed","VelocityGravity","TrySprinting","IsGrounded","IsSprinting"}})
-            if ok and gc then
-                log("[DIAG] filtergc кандидатов ctrl:", #gc)
-                for i, v in ipairs(gc) do
-                    local okLa, la = pcall(rawget, v, "_localActor")
-                    if not okLa or type(la) ~= "table" then la = nil end
-                    log(("[DIAG]   [%d] isCtrl=%s alive=%s GID=%s Zoom=%s"):format(
-                        i, tostring(isCtrl(v)),
-                        la and tostring(rawget(la,"Alive")) or "?",
-                        typeof(rawget(v,"_groundedInputDirection")),
-                        la and tostring(rawget(la,"Zoom")) or "?"))
-                end
-            end
-            local okC, gcC = pcall(filtergc,"table",{Keys={"_zoomLimit","_shoulderLerp","_lastWalkAngle"}})
-            if okC and gcC then
-                log("[DIAG] filtergc кандидатов cam:", #gcC)
-                for i, v in ipairs(gcC) do
-                    log(("[DIAG]   [%d] isCam=%s"):format(i, tostring(isCam(v))))
-                end
-            end
-        end
-        local ctrl = ctrlCache
-        log("[DIAG] ctrlCache:", ctrl~=nil and isCtrl(ctrl) or false)
-        if ctrl then
-            log("[DIAG]   MoveSpeed:", ctrl.MoveSpeed,
-                "IsGrounded:", ctrl.IsGrounded, "VG:", ctrl.VelocityGravity)
-            local la = rawget(ctrl,"_localActor")
-            log("[DIAG]   la.Zoom:", la and rawget(la,"Zoom") or "?",
-                "la.Orientation:", la and rawget(la,"Orientation") or "?",
-                "la.Alive:", la and rawget(la,"Alive") or "?")
-            if hookedMt then
-                log("[DIAG]   _accelerate:", type(rawget(hookedMt,"_accelerate")),
-                    "| _decelerate:", type(rawget(hookedMt,"_decelerate")),
-                    "| _pNP:", type(rawget(hookedMt,"_processNewPosition")))
-            end
-
-            if type(la) == "table" then
-                log("[DIAG]   ── ПОЛНЫЙ ДАМП ПОЛЕЙ _localActor ──")
-                local okIter, err = pcall(function()
-                    local seen = {}
-                    for k, v in next, la do
-                        seen[k] = true
-                        local tv = type(v)
-                        local sv = (tv=="table") and ("<table>") or tostring(v)
-                        log(("[DIAG]     %s = %s (%s)"):format(tostring(k), sv, tv))
-                    end
-                    for k, v in pairs(la) do
-                        if not seen[k] then
-                            local tv = type(v)
-                            local sv = (tv=="table") and ("<table>") or tostring(v)
-                            log(("[DIAG]     [pairs-only] %s = %s (%s)"):format(tostring(k), sv, tv))
-                        end
-                    end
-                end)
-                if not okIter then
-                    log("[DIAG]   дамп полей упал:", tostring(err))
-                end
-                log("[DIAG]   ── КОНЕЦ ДАМП�� ──")
-            end
-        end
-        log("[DIAG] camCache:", camCache~=nil and isCam(camCache) or false)
-        if hookedCamMt then
-            log("[DIAG]   cam.Update hooked:", type(rawget(hookedCamMt,"Update")))
-        end
-        if type(camCache) == "table" then
-            log("[DIAG]   ── ПОЛНЫЙ ДАМП ПОЛЕЙ cam-ОБЪЕКТА ──")
-            local okIter, err = pcall(function()
-                local seen = {}
-                for k, v in next, camCache do
-                    seen[k] = true
-                    local tv = type(v)
-                    local sv = (tv=="table") and ("<table>") or tostring(v)
-                    log(("[DIAG]     %s = %s (%s)"):format(tostring(k), sv, tv))
-                end
-                for k, v in pairs(camCache) do
-                    if not seen[k] then
-                        local tv = type(v)
-                        local sv = (tv=="table") and ("<table>") or tostring(v)
-                        log(("[DIAG]     [pairs-only] %s = %s (%s)"):format(tostring(k), sv, tv))
-                    end
-                end
-            end)
-            if not okIter then log("[DIAG]   дамп камеры упал:", tostring(err)) end
-            log("[DIAG]   ─��� КОНЕЦ ДАМПА cam ──")
-        end
-        log("[DIAG] ══════════════════════════════════════")
-        flushLog("brm5_diag.txt")
-    end
-
-    local function dumpNilInstances()
-        local nils=getNilInstances(); if not nils then return end
-        local lines={("Всего: %d"):format(#nils)}
-        for i, inst in ipairs(nils) do
-            local okC,cls=pcall(function() return inst.ClassName end)
-            local okN,nm =pcall(function() return inst.Name end)
-            lines[#lines+1]=("[%d] %s | %s"):format(i, okC and cls or "?", okN and nm or "?")
-        end
-        local c=table.concat(lines,"\n")
-        if type(writefile)    =="function" then pcall(writefile,    "brm5_nilinstances_dump.txt",c) end
-        if type(setclipboard) =="function" then pcall(setclipboard, c) end
-        print("[MOV] Дамп → brm5_nilinstances_dump.txt")
-    end
-
-    local crAddedCount, crRemovingCount   = 0, 0
-    local watchdogDeathCount, watchdogRecoverCount = 0, 0
-    local wasCtrlAliveLastFrame = false
-    local lastKnownCtrl = nil
-    local knownGoodCtrl = nil
-    local recovering = false
-    local attemptRecovery
-
-    local function handleLocalDeath(oldCtrl)
-        -- v19.2 FIX «настройки сбрасываются п��сле смерти»:
-        -- Раньше здесь обнулялись ВСЕ intent-флаги (flyActive, fakeAngMode,
-        -- velDesyncActive, invisActive, NoClip …) → после респавна ��сё надо было
-        -- включать заново. Теперь по умолчанию НАМЕРЕНИЕ пользователя сохраняется:
-        -- tick-петля сама переприменит фичи, как только liveCtrl появится вновь.
-        -- Сбрасываем только ТРАНЗИТНОЕ состояние, привязанное к мёртвому инстансу.
-        if MOV.PreserveStateOnDeath == false then
-            flyActive=false; straferActive=false; spinBotActive=false
-            speedStateMode=0
-            fakeAngMode=0; noFallActive=false
-            velDesyncActive=false
-            leanLockActive=false
-            invisActive=false
-            tpActive=false; MOV.NoClip=false
-        end
-        -- ��р��нзит (всегда): физ-якоря, кэш коллизий, клон, оценка скорости
-        pcall(applySpeedState)
-        fakeAngPhase=0; faPacket=0
-        nfFalling=false; nfGroundHS=nil
-        faLastPos=nil; faVelEst=Vector3.zero
-        pcall(destroyFakeGhost)   -- клон ссылался на мёртвого чара → пересоберётся
-        noClipParts={}
-        flyLastPos = nil
-        -- v19.1: хуки на ОБЩЕЙ метатаблице класса → переживают респавн. Не трогаем,
-        -- лишь инвалидируем ссылки на мёртвый инстанс. Хукнутый Update нового
-        -- контроллера сам заполнит liveCtrl в первом кадре — без getgc-сканов.
-        ctrlCache      = nil
-        activeCtrlRef  = nil
-        liveCtrl       = nil
-        liveCtrlT      = -999
-        camCache       = nil
-        liveCam        = nil
-        liveCamT       = -999
-        print("[MOV] Death detected -> инстанс сброшен, настройки сохранены (preserve="
-              ..tostring(MOV.PreserveStateOnDeath ~= false)..")")
-        if not recovering then
-            task.spawn(attemptRecovery)
-        end
-    end
-
-    attemptRecovery = function()
-        if recovering then return end
-        recovering = true
-
-        local ok, err = pcall(function()
-            noClipParts = {}
-            setupInfiniteJump()
-
-            -- Хуки живут на метатаблице → просто ждём, пока Update нового
-            -- контроллера сам заполнит liveCtrl. Это дёшево (проверка ссылки
-            -- раз в 50мс) и НЕ вызывает getgc/filtergc-сканы.
-            local ctrl = nil
-            for attempt = 1, 60 do
-                if hooksSetup and liveCtrl ~= nil and isCtrl(liveCtrl) then
-                    ctrl = liveCtrl
-                    ctrlCache     = liveCtrl
-                    activeCtrlRef = liveCtrl
-                    print("[MOV] Respawn: liveCtrl подхвачен за попытку", attempt, "(без скана)")
-                    break
-                end
-                task.wait(0.05)
-            end
-
-            -- Фолбэк (редкий): хуки реально слетели или mt пересоздалась —
-            -- один раз восстанавливаем через скан.
-            if not ctrl then
-                print("[MOV] Respawn: liveCtrl не появился — фолбэк на скан")
-                resetCtrlCache()
-                ctrl = getCtrl()
-                getCam()
-                if ctrl and not hooksSetup then
-                    pcall(setupHooks, ctrl, findNetworkObj())
-                end
-            end
-
-            if not ctrl then
-                warn("[MOV] Respawn: ctrl так и не найден!")
-            else
-                watchdogRecoverCount = watchdogRecoverCount + 1
-            end
-
-            if MOV.FlyPersist and wantFly then
-                flyActive = true
-                flyLastPos = nil
-                print("[MOV] Fly восстановлен после респавна")
-            end
-
-            -- v19.2: переприменяем сохранённые настройки на НОВЫЙ контроллер.
-            -- Флаги не сбрасывались (PreserveStateOnDeath), но часть фич требует
-            -- явного повторного применения к новому инстансу.
-            if ctrl and MOV.PreserveStateOnDeath ~= false then
-                pcall(applySpeedState)
-                if MOV.NoClip then pcall(setCharPartsCollide, ctrl, false) end
-                faLastPos = nil; faVelEst = Vector3.zero   -- чистая оценка скорости
-                faUid = faUid  -- uid переустановится из первых же пакетов игры
-                print("[MOV] Настройки переприменены: fly="..tostring(flyActive)
-                      .." fakeAng="..tostring(fakeAngMode).." velDesync="..tostring(velDesyncActive)
-                      .." noclip="..tostring(MOV.NoClip).." speedState="..tostring(speedStateMode))
-            end
-        end)
-        if not ok then
-            warn("[MOV] attemptRecovery: ОШИБКА (перехвачена, recovering всё равно сброшен):", err)
-        end
-        recovering = false
-    end
-
-    local function onInput(input, processed)
-        if processed then return end
-        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-        local kc = input.KeyCode
-
-        if kc == MOV.SpeedToggleKey then
-            MOV.Speed = not MOV.Speed
-            print("[MOV] Speed:", MOV.Speed, "→", MOV.SpeedValue, "/", MOV.SprintSpeed)
-        end
-
-        if kc == MOV.FlyToggleKey then
-            flyActive = not flyActive
-            wantFly = flyActive
-            if not flyActive then
-                local ctrl = getCtrl()
-                if ctrl then ctrl.VelocityGravity = -10 end
-            end
-            print("[MOV] Fly:", flyActive)
-        end
-
-        if kc == MOV.StraferKey then
-            straferActive = not straferActive
-            print("[MOV] Strafer (free strafe):", straferActive)
-        end
-
-        if kc == MOV.SpeedStateKey then
-            local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
-            speedStateMode = (speedStateMode + 1) % (#order + 1)
-            if not hooksSetup then
-                local ctrl = getCtrl()
-                if ctrl then setupHooks(ctrl, findNetworkObj()) end
-            end
-            local applied = applySpeedState()
-            if speedStateMode == 0 then
-                print("[MOV] SpeedState: OFF")
-            else
-                local nm = order[speedStateMode]
-                local mult = ({ Skydiving="x10", Parachuting="x4", Proning="x0.3",
-                                Swimming="x0.8", Crouching="x0.6", Standing="x1" })[nm] or "?"
-                print("[MOV] SpeedState:", nm, mult,
-                      applied and "" or "(u18 ещё не найден — нажми ещё раз через кадр)")
-            end
-        end
-
-        if kc == MOV.FakeAnglesKey then
-            fakeAngMode = (fakeAngMode + 1) % 9
-            fakeAngPhase = 0
-            faPacket = 0
-            faStatePkt = 0
-            if fakeAngMode == 0 then pcall(destroyFakeGhost) end
-            if fakeAngMode ~= 0 and not hooksSetup then
-                local ctrl = getCtrl()
-                if ctrl then setupHooks(ctrl, findNetworkObj()) end
-            end
-            local names = { [0]="OFF", [1]="Instant", [2]="Spin", [3]="Random",
-                            [4]="Backwards", [5]="Jitter", [6]="Twitch",
-                            [7]="Break(1e18 TEST)", [8]="Chaos(rand TEST)" }
-            print("[MOV] FakeAngles:", names[fakeAngMode])
-        end
-
-        if kc == (MOV.FakeAnglesDiagKey or Enum.KeyCode.K) then
-            MOV.FakeAnglesDiag = not MOV.FakeAnglesDiag
-            faDiagLeft = MOV.FakeAnglesDiag and (MOV.FakeAnglesDiagCount or 20) or 0
-            print("[MOV] FakeAngles ДИАГНОСТИКА:", MOV.FakeAnglesDiag and "ВКЛ" or "выкл",
-                  "— смотри [FA-DIAG] в консоли (pos должна быть РЕАЛЬНОЙ)")
-        end
-
-        if kc == MOV.VelocityDesyncKey then
-            velDesyncActive = not velDesyncActive
-            faLastPos = nil; faVelEst = Vector3.zero
-            if velDesyncActive and not hooksSetup then
-                local ctrl = getCtrl()
-                if ctrl then setupHooks(ctrl, findNetworkObj()) end
-            end
-            print("[MOV] VelocityDesync:", velDesyncActive,
-                  "(amp="..tostring(MOV.VelocityDesyncAmp)..")")
-        end
-
-        if kc == MOV.LeanLockKey then
-            leanLockActive = not leanLockActive
-            if leanLockActive and not hooksSetup then
-                local ctrl = getCtrl()
-                if ctrl then setupHooks(ctrl, findNetworkObj()) end
-            end
-            print("[MOV] LeanLock:", leanLockActive, "(LeanGoal="..tostring(MOV.LeanLockValue)..")")
-        end
-
-        if kc == MOV.InvisibleKey then
-            invisActive = not invisActive
-            if invisActive and not hooksSetup then
-                local ctrl = getCtrl()
-                if ctrl then setupHooks(ctrl, findNetworkObj()) end
-            end
-            print("[MOV] Invisible:", invisActive,
-                  "(Y offset "..tostring(MOV.InvisibleYOffset)..")")
-        end
-
-        if kc == MOV.SpinBotKey then
-            spinBotActive = not spinBotActive; spinPhase = 0
-            if spinBotActive and not camHooksSetup then
-                local cam = getCam()
-                if not cam then warn("[MOV] SpinBot: камера не ��айдена, повтори через ��екунду") end
-            end
-            print("[MOV] SpinBot:", spinBotActive)
-        end
-
-        if kc == MOV.ThirdPersonKey then
-            tpActive = not tpActive
-            if tpActive then
-                if tpZoom <= 0.01 then
-                    tpZoom = MOV.ThirdPersonDist
-                end
-                if not camHooksSetup then
-                    local cam = getCam()
-                    if not cam then warn("[MOV] ForceThirdPerson: камера не найдена, повтори через секунду") end
-                end
-                ensureTPGui()
-                setTPGuiVisible(true)
-            else
-                setTPGuiVisible(false)
-                local ctrl = getCtrl()
-                if ctrl then
-                    local la = rawget(ctrl,"_localActor")
-                    if type(la)=="table" then pcall(function() la.Zoom=0 end) end
-                end
-            end
-            print("[MOV] ForceThirdPerson:", tpActive, "| zoom:", tpZoom, "/", currentZoomMax())
-        end
-
-        if kc == MOV.NoClipKey then
-            MOV.NoClip = not MOV.NoClip
-            local ctrl = getCtrl()
-            if ctrl then
-                if not hooksSetup then
-                    setupHooks(ctrl, findNetworkObj())
-                end
-                setCharPartsCollide(ctrl, not MOV.NoClip)
-            end
-            print("[MOV] NoClip:", MOV.NoClip)
-        end
-
-        if kc == MOV.NoFallKey then
-            noFallActive = not noFallActive
-            nfFalling = false; nfGroundHS = nil
-            if noFallActive and not hooksSetup then
-                local ctrl = getCtrl()
-                if ctrl then setupHooks(ctrl, findNetworkObj()) end
-            end
-            print("[MOV] NoFall:", noFallActive, "(HeightState spoof)")
-        end
-
-        if kc == MOV.DumpNilKey  then dumpNilInstances() end
-        if kc == MOV.DiagKey     then task.spawn(runDiagnostic) end
-
-        if kc == MOV.DebugKey then
-            local ctrl = getCtrl()
-            print("━━━━━━━━ [MOV DIAG v29] ━━━━━━━━")
-
-            print("  [HOOKS] hooksSetup:", hooksSetup, "| camHooksSetup:", camHooksSetup)
-            if hookedMt then
-                local curUpd = rawget(hookedMt, "Update")
-                local hookInstalled = (curUpd ~= nil and curUpd ~= origCtrlUpdate)
-                print("  [HOOKS] hookedMt: OK | ctrl.Update хук:", hookInstalled and "НАШ ✓" or "ОРИГИНАЛ ✗")
-            else
-                print("  [HOOKS] hookedMt: nil → setupHooks не вызывался или teardown случился")
-            end
-
-            print("  [CTRL] найден:", ctrl~=nil, "| ctrlCache:", ctrlCache~=nil,
-                          "| identity:", ctrl and tostring(ctrl):match("0x%x+") or "nil")
-            if ctrl then
-                local la = rawget(ctrl, "_localActor")
-                print("  [CTRL] la:", la~=nil, "| la type:", type(la))
-                if type(la) == "table" then
-                    local okLP  = LP.Character ~= nil
-                    local okChr, char = pcall(function() return rawget(la,"Character") end)
-                    local okRoot, root = pcall(function() return rawget(la,"RootPart") end)
-                    local okIlp, ilp = pcall(function() return rawget(la,"IsLocalPlayer") end)
-                    print("  [CTRL] LP.Character~=nil (ожидаем false):", okLP)
-                    print("  [CTRL] la.Character:", okChr and tostring(char) or "ERR",
-                                "| la.RootPart:", okRoot and tostring(root) or "ERR")
-                    print("  [CTRL] la.IsLocalPlayer (новый фильтр isCtrl):", okIlp and tostring(ilp) or "ERR")
-                    print("  [CTRL] la.Zoom:", rawget(la,"Zoom"),
-                                "la.Alive:", rawget(la,"Alive"),
-                                "la.Focused:", rawget(la,"Focused"))
-                    print("  [CTRL] la.ADS:", rawget(la,"ADS"),
-                                "la.CQB:", rawget(la,"CQB"),
-                                "la.Downed:", rawget(la,"Downed"))
-                end
-                print("  [CTRL] MoveSpeed:", ctrl.MoveSpeed,
-                              "VelocityGravity:", ctrl.VelocityGravity,
-                              "IsGrounded:", ctrl.IsGrounded)
-                local okCyl, cylCF = pcall(function() return ctrl._cylinder.CFrame end)
-                if okCyl and type(la) == "table" then
-                    local okPos, pos = pcall(function() return la.Position end)
-                    if okPos then
-                        local dist = (cylCF.Position - pos).Magnitude
-                        print("  [CTRL] |_cylinder - la.Position| =", math.floor(dist*100)/100,
-                                    dist > 5 and "⚠ РАССИНХРОН" or "OK")
-                    end
-                end
-            end
-
-            print("  [CAM] camCache:", camCache~=nil,
-                          "| identity:", camCache and tostring(camCache):match("0x%x+") or "nil")
-            if camCache then
-                local cam = camCache
-                local la  = rawget(cam, "_localActor")
-                print("  [CAM] la:", la~=nil)
-                if la then
-                    local okZ, zoomVal = pcall(function() return la.Zoom end)
-                    local okF, focVal  = pcall(function() return la.Focused end)
-                    local okA, adsVal  = pcall(function() return la.ADS end)
-                    print("  [CAM] la.Zoom:", okZ and tostring(zoomVal) or "ERR",
-                                "la.Focused:", okF and tostring(focVal) or "ERR",
-                                "la.ADS:", okA and tostring(adsVal) or "ERR")
-                    print("  [CAM] _zoomLerp:", cam._zoomLerp,
-                                "_zoomLimit:", cam._zoomLimit)
-                end
-            end
-            print("  [CAM] tpActive:", tpActive, "| tpZoom:", tpZoom, "/", currentZoomMax())
-            print("  [CAM] liveCam:", liveCam ~= nil,
-                        "| свежесть:", liveCam and string.format("%.2fs", now() - liveCamT) or "n/a")
-
-            print("  [FLY] flyActive:", flyActive, "| wantFly:", wantFly,
-                          "| flyLastPos:", flyLastPos ~= nil and tostring(flyLastPos) or "nil")
-
-            print("  [RESPAWN] watchdogDeathCount:", watchdogDeathCount,
-                        "| watchdogRecoverCount:", watchdogRecoverCount,
-                        "| recovering:", recovering)
-            print("  [RESPAWN] LP.CharacterRemoving выстрелов:", crRemovingCount,
-                        "| LP.CharacterAdded выстрелов:", crAddedCount,
-                        (crRemovingCount == 0 and crAddedCount == 0)
-                            and "⚠ ПОДТВЕРЖДЕНО: события Character* не стреляют в этой игре"
-                            or "")
-
-            print("  [MISC] Speed:", MOV.Speed, "| strafer:", straferActive,
-                          "| spinBot:", spinBotActive, "| NoClip:", MOV.NoClip)
-            print("  [MISC] InfJump:", MOV.InfiniteJump, "| BunnyHop:", MOV.BunnyHop)
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━��")
-        end
-    end
-
-    local function onJumpInput(input, _processed)
-        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-        local kc = input.KeyCode
-
-        if kc == MOV.SuperJumpKey then
-            local ctrl = getCtrl()
-            if ctrl then
-                doJump(ctrl, MOV.SuperJumpVel, nil)
-                print("[MOV] SuperJump ↑", MOV.SuperJumpVel)
-            end
-        end
-
-    end
-
-    local conns = {}
-
-    local function tick(dt)
-        if not State.running then return end
-        local ctrl = getCtrl()
-        getCam()
-
-        -- В машине персонажного контроллера НЕТ (ctrl == nil), но мы ЖИВЫ. Без этой
-        -- ветки tick принимал вход в транспорт за смерть (ctrl исчез) и дёргал
-        -- handleLocalDeath → сброс ��ич/ложный «респавн». Считаем себя живыми, не
-        -- трогаем персонажные тики и НЕ меняем wasCtrlAliveLastFrame (чтобы выход
-        -- из машины тоже не читался как смерть).
-        if ctrl == nil and inVehicleNow() then
-            return
-        end
-
-        local aliveNow = ctrl ~= nil
-        local la = aliveNow and rawget(ctrl, "_localActor") or nil
-
-        local identitySwapped = aliveNow and knownGoodLA ~= nil and not rawequal(la, knownGoodLA)
-
-        local ctrlSwapped = aliveNow and knownGoodCtrl ~= nil and not rawequal(ctrl, knownGoodCtrl)
-
-        if (wasCtrlAliveLastFrame and not aliveNow) or identitySwapped or ctrlSwapped then
-            watchdogDeathCount = watchdogDeathCount + 1
-            pcall(handleLocalDeath, lastKnownCtrl)
-        end
-        wasCtrlAliveLastFrame = aliveNow
-        if aliveNow then lastKnownCtrl = ctrl; knownGoodLA = la; knownGoodCtrl = ctrl end
-
-        if not aliveNow or identitySwapped or ctrlSwapped then return end
-        tickFly(ctrl, dt)
-        if invisActive then invPhase = invPhase + dt * 12 end
-        if noFallActive then
-            local vg = ctrl.VelocityGravity
-            local gr = ctrl.IsGrounded
-            nfFalling = (gr == false) and type(vg) == "number" and vg < -18
-        end
-        tickSpeedWatchdog(ctrl)
-        tickBunnyHop(ctrl)
-        tickAntiVoid(ctrl)
-    end
-
-    local function renderTick(dt)
-        if not State.running then return end
-        if MOV.LeanSprint then
-            local ctrl = ctrlCache
-            if ctrl and isCtrl(ctrl) then tickLean(ctrl, dt) end
-        end
-        pcall(tickFakeGhost)
-    end
-
-    local _M = {}
-    _M.CONFIG = MOV
-
-    function _M.start()
-        for k, v in pairs(MOV) do CONFIG[k] = v end
-
-        conns[1] = RunService.Heartbeat:Connect(newcclosure(function(dt)
-            pcall(tick, dt)
-            pcall(tickSender, dt)   -- высокочастотный FakeAngles/VelocityDesync Sender
-        end))
-        conns[2] = RunService.RenderStepped:Connect(newcclosure(function(dt)
-            pcall(renderTick, dt)
-        end))
-        -- NOTE: physical toggle-hotkeys are intentionally NOT connected here.
-        -- All features are driven from the UI (toggles) and via user-assigned
-        -- MacLib keybinds (empty by default, set in the Movement tab). onInput /
-        -- onJumpInput remain as the shared dispatch used by _M.doAction / _M.superJump.
-        -- Held movement keys (Sprint/FlyUp/FlyDown) are polled via IsKeyDown and are
-        -- unaffected. To restore old always-on physical keys, reconnect them here.
-
-        conns[5] = LP.CharacterRemoving:Connect(newcclosure(function()
-            crRemovingCount = crRemovingCount + 1
-            print("[MOV] LP.CharacterRemoving выстрелил (счётчик:", crRemovingCount, ")")
-            handleLocalDeath(ctrlCache)
-        end))
-
-        conns[6] = LP.CharacterAdded:Connect(newcclosure(function()
-            crAddedCount = crAddedCount + 1
-            print("[MOV] LP.CharacterAdded выстрелил (счётчик:", crAddedCount, ")")
-            task.spawn(attemptRecovery)
-        end))
-
-        setupInfiniteJump()
-
-        local ctrl = getCtrl()
-        getCam()
-        if ctrl then
-            print("[MOV v19.0] ✓ | hooks:", hooksSetup, "| camHooks:", camHooksSetup)
-            local la = rawget(ctrl,"_localActor")
-            if la then
-                print("[MOV]   la.Zoom:", rawget(la,"Zoom"),
-                      "| Alive:", rawget(la,"Alive"))
-            end
-        else
-            warn("[MOV v19.0] ctrl не найден — P → brm5_diag.txt")
-        end
-        print("[MOV] G=Fly | V=Strafer | Z=SpinBot | T=TP | N=NoClip | X=Speed | C=SpeedState | L=LeanLock | J=FakeAngles | U=Invisible | H=SuperJump | B=NoFall")
-    end
-
-    function _M.stop()
-        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-        conns = {}
-        if ijConn then ijConn:Disconnect(); ijConn=nil end
-        flyActive=false; wantFly=false; straferActive=false; spinBotActive=false
-        tpActive=false; MOV.NoClip=false
-        noFallActive=false; fakeAngMode=0; leanLockActive=false; invisActive=false
-        nfFalling=false; nfGroundHS=nil
-        pcall(destroyFakeGhost)
-        teardownHooks(ctrlCache)
-        teardownCamHooks()
-        if ctrlCache then
-            local la = rawget(ctrlCache,"_localActor")
-            if type(la)=="table" then pcall(function() la.Zoom=0 end) end
-        end
-        print("[MOV] stopped")
-    end
-
-    -- Прогоняем синтетический input через onInput → переиспользуем ВСЮ логику
-    -- тумблеров (fly/invis/fakeangles/…) вместе с их сайд-эффектами (setupHooks и т.п.).
-    function _M.simulateKey(kc)
-        if not kc then return end
-        onInput({ UserInputType = Enum.UserInputType.Keyboard, KeyCode = kc }, false)
-    end
-
-    -- ── UI state bridge ─────────────────────────────────────────────────────
-    -- Toggle-state lives in module upvalues (flyActive, invisActive, …) and in a
-    -- couple of MOV fields (Speed, NoClip). These helpers let buildUI read the
-    -- real state and set it IDEMPOTENTLY (only fire the toggle key when the value
-    -- actually needs to change), so UI toggles and keybinds never desync.
-    local FEATURE_KEY = {
-        Speed = MOV.SpeedToggleKey, Fly = MOV.FlyToggleKey, NoClip = MOV.NoClipKey,
-        Strafer = MOV.StraferKey, Invisible = MOV.InvisibleKey,
-        VelDesync = MOV.VelocityDesyncKey, LeanLock = MOV.LeanLockKey,
-        SpinBot = MOV.SpinBotKey, NoFall = MOV.NoFallKey, ThirdPerson = MOV.ThirdPersonKey,
-    }
-    function _M.isActive(name)
-        if name == "Speed" then return MOV.Speed == true end
-        if name == "NoClip" then return MOV.NoClip == true end
-        if name == "Fly" then return flyActive end
-        if name == "Strafer" then return straferActive end
-        if name == "Invisible" then return invisActive end
-        if name == "VelDesync" then return velDesyncActive end
-        if name == "LeanLock" then return leanLockActive end
-        if name == "SpinBot" then return spinBotActive end
-        if name == "NoFall" then return noFallActive end
-        if name == "ThirdPerson" then return tpActive end
-        return false
-    end
-    function _M.setFeature(name, want)
-        want = want and true or false
-        if _M.isActive(name) ~= want then
-            _M.simulateKey(FEATURE_KEY[name])
-        end
-    end
-    function _M.getSpeedStateMode() return speedStateMode end
-    function _M.getFakeAngMode() return fakeAngMode end
-    -- Cycle-based setters (SpeedState / FakeAngles advance by one per key press).
-    function _M.setSpeedStateMode(target)
-        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
-        local n = #order + 1
-        for _ = 1, n do
-            if speedStateMode == target % n then break end
-            _M.simulateKey(MOV.SpeedStateKey)
-        end
-    end
-    function _M.setFakeAngMode(target)
-        for _ = 1, 9 do
-            if fakeAngMode == target % 9 then break end
-            _M.simulateKey(MOV.FakeAnglesKey)
-        end
-    end
-    function _M.superJump()
-        onJumpInput({ UserInputType = Enum.UserInputType.Keyboard, KeyCode = MOV.SuperJumpKey }, false)
-    end
-
-    -- ─────────────────────────────────────────────────────────────────────
-    -- UI-интеграция (MacLib). Movement-таб.
-    --   Числовые настройки (SpeedValue/SprintSpeed/FlySpeed) читаются в рантайме
-    --     из MOV → пишем прямо в MOV.
-    --   Стейтовые тумблеры (fly/invis/…) переключаются через simulateKey, чтобы
-    --     не дублировать логику onInput. UI-состояние стартует из фактического.
-    -- ─────────────────────────────────────────────────────────────────────
-    function _M.buildUI(ui)
-        local tab = ui.tabs and ui.tabs.Movement
-        if not tab then return end
-        local dtab = ui.tabs and ui.tabs.Debug
-        local K = Bridge.makeUiKit(ui)
-
-        -- Фича модуля: состояние живёт в upvalue-флагах, читается через
-        -- _M.isActive и меняется через _M.setFeature (идемпотентно).
-        -- noHeader=true, когда заголовок уже нарисован через K.group — иначе
-        -- получается дубль вида «Fly» / «Fly» (K.group рисует Header, и
-        -- K.feature по умолчанию рисует свой).
-        -- noHeader=true → заголовок уже нарисован через K.group, свой не нужен.
-        --
-        -- ВАЖНО: тернарник `noHeader and false or nil` здесь НЕ РАБОТАЕТ и был
-        -- причиной дубля «Fly / Fly»: (true and false) = false, затем
-        -- (false or nil) = nil — то есть Header всегда получался nil, и kit
-        -- рисовал второй заголовок. В Lua нельзя протащить false через `or`.
-        -- Поэтому строим таблицу и выставляем поле явным присваиванием.
-        local function movFeature(section, title, name, desc, noHeader)
-            local opts = {
-                Title = title, Flag = name,
-                get = function() return _M.isActive(name) end,
-                set = function(v) _M.setFeature(name, v) end,
-                Desc = desc,
-            }
-            if noHeader then opts.Header = false end
-            return K.feature(section, opts)
-        end
-
-        -- ═══ LEFT: перемещение ═════════════════════════════════════════
-        local L = tab:Section({ Side = "Left" })
-
-        movFeature(L, "Speed", "Speed", "overrides ur walk n sprint speed")
-        K.slider(L, { Name = "Walk Speed", Flag = "SpeedValue",
-            Default = MOV.SpeedValue, Min = 16, Max = 120,
-            Callback = function(v) MOV.SpeedValue = v end,
-            Desc = "16 = stock. past ~40 it gets obvious" })
-        K.slider(L, { Name = "Sprint Speed", Flag = "SprintSpeed",
-            Default = MOV.SprintSpeed, Min = 16, Max = 200,
-            Callback = function(v) MOV.SprintSpeed = v end })
-        K.toggle(L, { Name = "Auto Sprint", Flag = "AutoSprint", Title = "Auto Sprint",
-            get = function() return MOV.AutoSprint end,
-            set = function(v) MOV.AutoSprint = v end,
-            Desc = "always sprint without holding shift" })
-
-        K.group(L, "Fly")
-        movFeature(L, "Fly", "Fly", "free-cam flight\nspace = up, ctrl = down", true)
-        K.slider(L, { Name = "Fly Speed", Flag = "FlySpeed",
-            Default = MOV.FlySpeed, Min = 8, Max = 200,
-            Callback = function(v) MOV.FlySpeed = v end })
-        K.toggle(L, { Name = "TP Bypass", Flag = "FlyTPBypass", Title = "Fly TP Bypass",
-            get = function() return MOV.FlyTPBypass ~= false end,
-            set = function(v) MOV.FlyTPBypass = v end,
-            Desc = "keeps the server position in sync so u dont get\nrubber-banded or kicked mid flight" })
-
-        K.group(L, "No Clip")
-        movFeature(L, "No Clip", "NoClip", "walk thru walls n objects", true)
-
-        K.group(L, "Jump")
-        K.toggle(L, { Name = "Infinite Jump", Flag = "InfJump", Title = "Infinite Jump",
-            get = function() return MOV.InfiniteJump end,
-            set = function(v) MOV.InfiniteJump = v end })
-        K.toggle(L, { Name = "Bunny Hop", Flag = "Bhop", Title = "Bunny Hop",
-            get = function() return MOV.BunnyHop end,
-            set = function(v) MOV.BunnyHop = v end,
-            Desc = "auto-jumps while u hold space" })
-        K.slider(L, { Name = "Super Jump Power", Flag = "SJVel",
-            Default = MOV.SuperJumpVel, Min = 20, Max = 200,
-            Callback = function(v) MOV.SuperJumpVel = v end })
-        if ui.keybind then
-            ui.keybind(L, { Name = "Super Jump Keybind",
-                Flag = (ui.flag or tostring)("SuperJump_KB"),
-                Toggle = function()
-                    _M.superJump()
-                    K.notify("Super Jump", "Fired")
-                end })
-        end
-
-        K.group(L, "No Fall")
-        movFeature(L, "No Fall", "NoFall", "spoofs height state so u take no fall dmg", true)
-
-        K.group(L, "Strafer")
-        movFeature(L, "Strafer", "Strafer", "free air-strafe, turn without input", true)
-
-        -- ═══ RIGHT: камера и десинк ════════════════════════════════════
-        local R = tab:Section({ Side = "Right" })
-
-        movFeature(R, "Third Person", "ThirdPerson", "forces the camera out to third person")
-        K.slider(R, { Name = "Camera Distance", Flag = "TPDist",
-            Default = MOV.ThirdPersonDist, Min = 5, Max = 40,
-            Callback = function(v) MOV.ThirdPersonDist = v end,
-            Desc = "scroll wheel also works in game" })
-
-        K.group(R, "Spin Bot")
-        movFeature(R, "Spin Bot", "SpinBot", "spins ur model for everyone else", true)
-        K.slider(R, { Name = "Spin Speed", Flag = "SpinRPS",
-            Default = MOV.SpinBotRPS, Min = 1, Max = 30, Suffix = " rps",
-            Callback = function(v) MOV.SpinBotRPS = v end })
-
-        K.group(R, "Velocity Desync")
-        movFeature(R, "Velocity Desync", "VelDesync", "jitters replicated velocity to break their prediction", true)
-        K.slider(R, { Name = "Amplitude", Flag = "VelAmp",
-            Default = math.floor((MOV.VelocityDesyncAmp or 1) * 10), Min = 5, Max = 100,
-            Callback = function(v) MOV.VelocityDesyncAmp = v / 10 end,
-            Desc = "10 = 1 stud. higher = harder to hit but more visible" })
-
-        K.group(R, "Lean")
-        movFeature(R, "Lean Lock", "LeanLock", "locks ur lean at a fixed angle", true)
-        K.slider(R, { Name = "Lean Value", Flag = "LeanVal",
-            Default = math.floor((MOV.LeanLockValue or 0) * 100) + 100, Min = 0, Max = 200,
-            Callback = function(v) MOV.LeanLockValue = (v - 100) / 100 end,
-            Desc = "100 = straight, 0 = full left, 200 = full right" })
-        K.toggle(R, { Name = "Lean on Sprint", Flag = "LeanSprint", Title = "Lean on Sprint",
-            get = function() return MOV.LeanSprint end,
-            set = function(v) MOV.LeanSprint = v end })
-        K.slider(R, { Name = "Sprint Lean Angle", Flag = "LeanAngle",
-            Default = MOV.LeanAngle, Min = 0, Max = 20, Suffix = "°",
-            Callback = function(v) MOV.LeanAngle = v end })
-
-        K.group(R, "Speed State")
-        local order = MOV.SpeedStateOrder or { "Skydiving", "Parachuting", "Proning" }
-        local ssOpts = { "Off" }
-        for _, n in ipairs(order) do ssOpts[#ssOpts + 1] = n end
-        K.dropdown(R, { Name = "State", Flag = "SpeedState",
-            Options = ssOpts,
-            Default = ssOpts[(_M.getSpeedStateMode() or 0) + 1] or "Off",
-            Callback = function(n)
-                local idx = table.find(ssOpts, n)
-                if idx then _M.setSpeedStateMode(idx - 1) end
             end,
-            Desc = "movement-state multiplier\nSkydiving is the fastest one" })
-        if ui.keybind then
-            ui.keybind(R, { Name = "Cycle Keybind",
-                Flag = (ui.flag or tostring)("SSCycle_KB"),
-                Toggle = function()
-                    _M.simulateKey(MOV.SpeedStateKey)
-                    K.notify("Speed State", "Cycled")
-                end })
-        end
+            Desc = "hooks slowdowns \nno longer force ur WalkSpeed down during actions",
+        })
+        boolToggle(sNS, "Attack", "NoSlow Attack",
+            function() return Config.NS_Attack end, function(v) Config.NS_Attack = v end)
+        boolToggle(sNS, "Block", "NoSlow Block",
+            function() return Config.NS_Block end, function(v) Config.NS_Block = v end)
+        boolToggle(sNS, "Get Hit", "NoSlow GetHit",
+            function() return Config.NS_GetHit end, function(v) Config.NS_GetHit = v end)
+        slider(sNS, { Name = "Restore Speed", Flag = "MV_NSSpeed", Default = Config.NS_Speed,
+            Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
+        sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default (12)" })
 
-        -- ═══ LEFT #2: Fake Angles — своя секция, фича большая ══════════
-        local FA = tab:Section({ Side = "Left" })
-        FA:Header({ Name = "Fake Angles" })
-        local FA_MODES = { "Instant", "Spin", "Random", "Backwards", "Jitter", "Twitch" }
-        local faGuard, faTog = false, nil
-        local function faCommit(on)
-            if on then
-                if _M.getFakeAngMode() == 0 then _M.setFakeAngMode(1) end
-            else
-                _M.setFakeAngMode(0)
-            end
-            K.notify("Fake Angles", on and "Enabled" or "Disabled")
-            faGuard = true
-            if faTog then pcall(function() faTog:UpdateState(on) end) end
-            faGuard = false
-        end
-        faTog = FA:Toggle({ Name = "Enabled", Default = _M.getFakeAngMode() ~= 0,
-            Callback = function(v)
-                if faGuard then return end
-                faCommit(v and true or false)
-            end }, (ui.flag or tostring)("FAEnabled"))
-        FA:SubLabel({ Text = "spoofs the body angles others see\ndoesnt touch ur own aim or shots" })
-        if ui.keybind then
-            ui.keybind(FA, { Name = "Keybind", Flag = (ui.flag or tostring)("FA_KB"),
-                Toggle = function() faCommit(_M.getFakeAngMode() == 0) end })
-        end
-        K.dropdown(FA, { Name = "Mode", Flag = "FAMode",
-            Options = FA_MODES,
-            Default = FA_MODES[math.max(1, _M.getFakeAngMode())] or "Instant",
-            Callback = function(n)
-                local idx = table.find(FA_MODES, n)
-                if idx then
-                    _M.setFakeAngMode(idx)
-                    faGuard = true
-                    if faTog then pcall(function() faTog:UpdateState(true) end) end
-                    faGuard = false
+        -- ────────��────── Section 4: Combat exploits (Right) ��──────────────
+        local sCbt = MV:Section({ Side = "Right" })
+        sCbt:Header({ Name = "No Delay" })
+        feature(sCbt, {
+            Title = "No Delay", Flag = "MV_NoDelay",
+            get = function() return Config.NoDelay_On end,
+            set = function(v)
+                Config.NoDelay_On = v
+                if v then
+                    -- [V112] Прежний код ждал флаг `_delayHooked` — переменную удалённого
+                    -- хука task.delay. После удаления хука она стала ГЛОБАЛЬНЫМ nil, то есть
+                    -- условие всегда ложно и тумблер врал «hookfunction unavailable» даже
+                    -- когда No Delay реально работал. Теперь ждём настоящий признак —
+                    -- успешный резолв карты upvalue'ов tryM1 (installNoDelay).
+                    bootstrapHooks()
+                    task.spawn(function()
+                        local ok = false
+                        for _ = 1, 8 do
+                            ok = installNoDelay()
+                            if ok then break end
+                            task.wait(0.4)
+                        end
+                        notify("No Delay", ok and "ON (кулдауны M1 обнулены)"
+                            or "нужен debug.getupvalue / модуль M1 не найден")
+                    end)
+                else
+                    notify("No Delay", "Disabled")
                 end
-            end })
-        K.slider(FA, { Name = "Yaw Jitter", Flag = "FAJitter",
-            Default = math.floor((MOV.FakeAnglesJitter or 2.8) * 100), Min = 0, Max = 628,
-            Callback = function(v) MOV.FakeAnglesJitter = v / 100 end,
-            Desc = "how far the body snaps each packet" })
-        K.slider(FA, { Name = "Pitch Amount", Flag = "FAPitch",
-            Default = math.floor((MOV.FakeAnglesPitchAmp or 1.4) * 100), Min = 0, Max = 314,
-            Callback = function(v) MOV.FakeAnglesPitchAmp = v / 100 end })
-        K.slider(FA, { Name = "Spin Step", Flag = "FASpin",
-            Default = math.floor((MOV.FakeAnglesSpinStep or 0.9) * 100), Min = 10, Max = 314,
-            Callback = function(v) MOV.FakeAnglesSpinStep = v / 100 end,
-            Desc = "only used by Spin mode" })
+            end,
+            Desc = "обнуляет кулдауны M1 (0.45/1.25/1.55с)\nправкой upvalue'ов tryM1 — FX парирования не ломает",
+        })
+        sCbt:SubLabel({ Text = "Урон считает сервер — снимается только клиентское ожидание" })
 
-        K.group(FA, "Ghost")
-        K.toggle(FA, { Name = "Show Ghost", Flag = "FAGhost", Title = "Ghost Model",
-            get = function() return MOV.FakeAnglesGhost end,
-            set = function(v) MOV.FakeAnglesGhost = v end,
-            Desc = "draws where others think u are\nonly u can see it" })
-        K.toggle(FA, { Name = "Hide in First Person", Flag = "FAGhostFP",
-            Title = "Ghost FP Hide",
-            get = function() return MOV.FakeAnglesGhostFirstPersonHide ~= false end,
-            set = function(v) MOV.FakeAnglesGhostFirstPersonHide = v end,
-            Desc = "off = ghost stays visible even in first person" })
-        K.color(FA, { Name = "Ghost Color", Flag = "FAGhostCol",
-            Default = MOV.FakeAnglesGhostColor,
-            Callback = function(c) MOV.FakeAnglesGhostColor = c end })
-        K.slider(FA, { Name = "Ghost Transparency", Flag = "FAGhostTr",
-            Default = math.floor((MOV.FakeAnglesGhostTransparency or 0.5) * 100),
-            Min = 0, Max = 100, Suffix = "%",
-            Callback = function(v) MOV.FakeAnglesGhostTransparency = v / 100 end })
+        -- ─────────────── Section 5: Sprint (Right) ───��───────────
+        local sSpr = MV:Section({ Side = "Right" })
+        sSpr:Header({ Name = "Sprint" })
+        feature(sSpr, {
+            Title = "Auto Sprint", Flag = "MV_Sprint",
+            get = function() return Config.Sprint_On end,
+            set = function(v)
+                Config.Sprint_On = v
+                if not setSprint(v) and v then
+                    notify("Auto Sprint", "sprint controller not found yet")
+                end
+            end,
+            Desc = "holds sprint on. needs HP ≥ 10.\nturning off truly stops sprinting",
+        })
+        boolToggle(sSpr, "Bypass Restrictions", "Sprint Bypass",
+            function() return Config.Sprint_Bypass end,
+            function(v)
+                Config.Sprint_Bypass = v
+                if v and not combatHooksReady() then
+                    notify("Sprint Bypass", "applied?")
+                    Config.Sprint_Bypass = false
+                end
+            end)
+        sSpr:SubLabel({ Text = "Keeps sprint speed through combat locks" })
 
-        -- ═══ DEBUG ═════════════════════════════════════════════════════
-        if dtab then
-            local D = dtab:Section({ Side = "Right" })
-            D:Header({ Name = "Movement" })
-            K.slider(D, { Name = "Ghost Update Rate", Flag = "DbgFAHz",
-                Default = MOV.FakeAnglesSendHz or 22, Min = 5, Max = 60, Suffix = " Hz",
-                Callback = function(v) MOV.FakeAnglesSendHz = v end })
-            K.slider(D, { Name = "State Hold", Flag = "DbgFAHold",
-                Default = MOV.FakeAnglesStateHold or 8, Min = 1, Max = 30,
-                Callback = function(v) MOV.FakeAnglesStateHold = v end,
-                Desc = "packets per spoofed state" })
-            K.toggle(D, { Name = "Clamp Safe Angles", Flag = "DbgFAClamp",
-                Title = "Clamp Safe Angles",
-                get = function() return MOV.FakeAnglesClampSafe end,
-                set = function(v) MOV.FakeAnglesClampSafe = v end })
-            K.toggle(D, { Name = "Suppress Game Packet", Flag = "DbgFASuppress",
-                Title = "Suppress Game Packet",
-                get = function() return MOV.FakeAnglesSuppressGame end,
-                set = function(v) MOV.FakeAnglesSuppressGame = v end })
+        -- ─────────────── Section: Infinite Stamina (Right) ───────────────
+        local sStam = MV:Section({ Side = "Right" })
+        sStam:Header({ Name = "Infinite Stamina" })
+        feature(sStam, {
+            Title = "Infinite Stamina", Flag = "MV_InfStamina",
+            get = function() return Config.InfStamina_On end,
+            set = function(v) Config.InfStamina_On = v end,
+            Desc = "wow is this inf stamina??",
+        })
+        sStam:SubLabel({ Text = "inf stamina (ud)" })
 
-            K.group(D, "Logging")
-            D:SubLabel({ Text = "console spam, keep off for normal play" })
-            K.toggle(D, { Name = "Fake Angles Diag", Flag = "DbgFADiag",
-                Title = "Fake Angles Diagnostics",
-                get = function() return MOV.FakeAnglesDiag end,
-                set = function(v) MOV.FakeAnglesDiag = v end })
-            K.slider(D, { Name = "Diag Packet Count", Flag = "DbgFADiagN",
-                Default = MOV.FakeAnglesDiagCount or 20, Min = 5, Max = 100,
-                Callback = function(v) MOV.FakeAnglesDiagCount = v end })
-            K.button(D, { Name = "Run Diagnostic", Flag = "DbgRunDiag",
-                Title = "Movement",
-                Callback = function()
-                    task.spawn(runDiagnostic)
-                    return "running, check console"
-                end })
-        end
+        -- ─────────────── Section 6: Dodge (Left) ───────────────
+        local sDodge = MV:Section({ Side = "Left" })
+        sDodge:Header({ Name = "Dodge" })
+        feature(sDodge, {
+            Title = "Dodge", Flag = "MV_Dodge",
+            get = function() return Config.Dodge_On end,
+            set = function(v)
+                if v then
+                    if not getEvasive() then
+                        notify("Dodge", "Evasive module not found yet"); Config.Dodge_On = false; return
+                    end
+                    Config.Dodge_On = true
+                    if not installEvasiveHook() then
+                        notify("Dodge", "custom cooldown needs hookfunction (speed still works)")
+                    end
+                    driveDodge()          -- apply current slider values immediately
+                else
+                    Config.Dodge_On = false
+                    restoreDodge()        -- put the game's own numbers back
+                end
+            end,
+            Desc = "tweaks ur OWN dodge",
+        })
+        boolToggle(sDodge, "Dodge Everywhere", "Dodge Everywhere",
+            function() return Config.Dodge_Everywhere end,
+            function(v)
+                if v then
+                    -- [V112] Больше не требуется hookmetamethod/getnamecallmethod: обход
+                    -- гейтов делает обёртка Evasive (installEvasiveHook), а её ставит
+                    -- сам тумблер Dodge. Требуем только её.
+                    if not installEvasiveHook() then
+                        notify("Dodge Everywhere", "нужен hookfunction (обёртка Evasive не встала)")
+                        return
+                    end
+                    Config.Dodge_Everywhere = true
+                    driveDodge()          -- assert the grant immediately
+                else
+                    Config.Dodge_Everywhere = false
+                    clearDodgeGrant()     -- drop the bypass → cooldown/gates return to normal
+                end
+            end)
+        sDodge:SubLabel({ Text = "Enable it to set cooldown (hook startup)" })
+        slider(sDodge, { Name = "Dodge Speed", Flag = "MV_DodgeSpeed", Default = Config.Dodge_Speed,
+            Min = 1, Max = 150, Suffix = " studs", Callback = function(v)
+                Config.Dodge_Speed = v; driveDodge() end })
+        slider(sDodge, { Name = "Cooldown", Flag = "MV_DodgeCD", Default = Config.Dodge_Cooldown,
+            Min = 0, Max = 1.5, Precision = 2, Suffix = " s", Callback = function(v)
+                Config.Dodge_Cooldown = v; driveDodge() end })
+        sDodge:SubLabel({ Text = "client-side cooldown" })
 
-        K.ready()
+        -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
+        local sAR = MV:Section({ Side = "Right" })
+        sAR:Header({ Name = "Anti-Ragdoll" })
+        feature(sAR, {
+            Title = "Anti-Ragdoll", Flag = "MV_AntiRagdoll",
+            get = function() return Config.AntiRagdoll_On end,
+            set = function(v)
+                Config.AntiRagdoll_On = v
+                -- [V112] Точечный хук sustainClientRagdoll вместо глобального __namecall.
+                -- Без него подъём всё равно работает, но игра может утаскивать назад в
+                -- рэгдолл (та самая гонка), поэтому предупреждаем честно.
+                if v and not installAntiRagdollHook() then
+                    notify("Anti-Ragdoll", "нужен hookfunction + debug.getupvalue (возможен рывок)")
+                end
+            end,
+            Desc = "поднимает из чужого рэгдолла\nглушит sustainClientRagdoll, carry/grip не ломает",
+        })
+        sAR:SubLabel({ Text = "Downed / переноска / добивание пропускаются — иначе сломался бы геймплей" })
+
+        -- ─────────────── [V112] Section: No Blur (Left) ───────────────
+        local sBlur = MV:Section({ Side = "Left" })
+        sBlur:Header({ Name = "No Blur" })
+        feature(sBlur, {
+            Title = "No Blur", Flag = "MV_NoBlur",
+            get = function() return Config.NoBlur_On end,
+            set = function(v)
+                Config.NoBlur_On = v
+                if v then
+                    if not installNoBlur() then
+                        notify("No Blur", "модуль ScreenEffects не найден")
+                        Config.NoBlur_On = false
+                        return
+                    end
+                    clearActiveBlur()   -- снять блюр, который уже висит на экране
+                end
+            end,
+            Desc = "убирает боевой блюр: удары, Downed, захват,\nсмерть, Black Flash, падение",
+        })
+        sBlur:SubLabel({ Text = "Блюр меню и панелей НЕ трогается — он часть обычного интерфейса" })
+
+        -- ─────────────── [V112] Section: Respawn (Left) ───────────────
+        local sResp = MV:Section({ Side = "Left" })
+        sResp:Header({ Name = "Respawn" })
+        sResp:Button({
+            Name = "Respawn Now",
+            Callback = function()
+                if not getSpawnRemote() then
+                    notify("Respawn", "ремоут SpawnRequest не найден"); return
+                end
+                notify("Respawn", fireRespawn() and "запрос отправлен"
+                    or "слишком часто — подожди пару секунд")
+            end,
+        })
+        boolToggle(sResp, "Auto Respawn", "Auto Respawn",
+            function() return Config.AutoRespawn_On end,
+            function(v) Config.AutoRespawn_On = v end)
+        slider(sResp, { Name = "HP Threshold", Flag = "MV_AutoRespawnHP",
+            Default = Config.AutoRespawn_HP, Min = 0, Max = 99, Suffix = "%",
+            Callback = function(v) Config.AutoRespawn_HP = v end })
+        sResp:SubLabel({ Text = "0% = только по смерти/Downed · решение о спавне принимает сервер" })
+
+        uiReady = true
     end
 
-    return _M
+    return M
 end
