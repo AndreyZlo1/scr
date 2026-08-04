@@ -708,7 +708,7 @@ return function(Lib, Core)
             and type(debug.getupvalue) == "function"
     end
 
-    -- ═══════════════════════════��═══════════════════════════════════════════════
+    -- ═══════════════════════════����═══════════════════════════════════════════════
     -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хука task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
@@ -1225,7 +1225,7 @@ return function(Lib, Core)
             -- строка 510 (`LocalPlayer.Character or CharacterAdded:Wait()`), и он не
             -- срабатывает, когда персонаж есть. Значит снять атрибуты, вызвать оригинал и
             -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чтением игрой
-            -- никакой другой код исполниться не может — гонки нет by design.
+            -- никакой другой код ��сполниться не может — гонки нет by design.
             -- Записи локальные (на сервер не репл*ицируются), а сами гейты проверяются на
             -- клиенте, поэтому этого достаточно.
             if Config.Dodge_Everywhere then
@@ -1344,7 +1344,7 @@ return function(Lib, Core)
             if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, _evCdBase) end
         end
         -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
-        -- выключения тумблера игра осталась бы БЕЗ легитимного бонуса «в меньшинстве»,
+        -- выключения тумблера игра ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
         -- который сервер даёт честно, когда вас реально окружили.
         if _evMultBase and _evMultIdx then
             if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashSpeedMultiplier = _evMultBase end
@@ -1530,18 +1530,51 @@ return function(Lib, Core)
     -- идти НЕЛЬЗЯ: он в первой же строке выходит, если нет UI смерти (_light/_main) или
     -- если _respawnInFlight — то есть кнопка работала бы только на экране смерти.
     --
-    -- ЧЕСТНЫЙ ПРЕДЕЛ, О КОТОРОМ НАДО ЗНАТЬ: решение о респавне принимает СЕРВЕР. Здоровье
-    -- тоже серверное, поэтому «респавн при низком HP» физически не может убить персонажа с
-    -- клиента — он лишь отправляет запрос. Если сервер разрешает спавн только мёртвым
-    -- (флаг Dead / IsDeathFlagged, SpawnServiceUtils.lua:25), то при живом персонаже
-    -- запрос будет отклонён. Никакого обхода этог�� с клиента нет и я его не изобретаю.
-    local _spawnRemote = nil
+    -- ═══════ [V116] НАСТОЯЩАЯ ПРИЧИНА: Я ВСЁ ВРЕМЯ ДЁРГАЛ НЕ ТОТ РЕМОУТ ═══════
+    -- Ты сказал «убивает, но респавна нет» — и это ровно то, что должно было происходить.
+    -- Смерть работала, а respawn я отправлял в `Remotes.SpawnRequest`, который к экрану
+    -- смерти отношения не имеет. В дампе нашёлся ОТДЕЛЬНЫЙ скрипт респавна:
+    --   dumped/PlayerScripts/respawnstuff_LocalScript.lua
+    --     :15   local RespawnRE = ReplicatedStorage:WaitForChild("RespawnRE")
+    --     :385  Character:GetAttributeChangedSignal("Dead") → startdeath()
+    --     :303  u4.Text = "RESTART YOUR HEART"       ← тот самый экран смерти
+    --     :354  if u10 >= 7 then dorespawn() end     ← нужно СЕМЬ нажатий по сердцу
+    --     :227  dorespawn(): RespawnRE:FireServer()  ← и только тут реальный респавн
+    -- То есть возрождение делает `ReplicatedStorage.RespawnRE`, а не SpawnRequest. Игра
+    -- гейтит его семью кликами по кнопке, между которыми ещё и анимация с task.wait(0.6)
+    -- (:339-353) — суммарно около пяти секунд «ожидания», которое ты и описывал.
+    --
+    -- ЭКСПЛОИТ: шлём RespawnRE:FireServer() напрямую, минуя счётчик кликов u10. Аргументов
+    -- у него нет (:227 — вызов пустой), поэтому подделывать нечего.
+    --
+    -- ВАЖНО про порядок: экран смерти поднимается по атрибуту "Dead" на ПЕРСОНАЖЕ (:385),
+    -- и respawn имеет смысл только после смерти. Поэтому цепочка: убить → дождаться Dead →
+    -- RespawnRE. Респавн даёт полное HP, т.к. сервер создаёт персонажа заново
+    -- (dorespawn ждёт именно LocalPlayer.CharacterAdded, :229).
+    --
+    -- RespawnRE В ДАМПЕ ОТСУТСТВУЕТ в списке ReplicatedStorage — его создаёт сервер в
+    -- рантайме (клиентский скрипт ждёт его через WaitForChild). Поэтому резолвим лениво и
+    -- терпимо к отсутствию, а SpawnRequest оставляем запасным вариантом.
+    local _respawnRemote, _spawnRemote = nil, nil
+    -- Главный ремоут возрождения (кнопка "RESTART YOUR HEART").
+    local function getRespawnRemote()
+        if _respawnRemote and _respawnRemote.Parent then return _respawnRemote end
+        local re = ReplicatedStorage:FindFirstChild("RespawnRE")
+        if re and re:IsA("RemoteEvent") then _respawnRemote = re end
+        return _respawnRemote
+    end
+    -- Запасной: ремоут спавн-сервиса. Оставлен на случай, если RespawnRE ещё не
+    -- отреплицировался — но основную работу делает именно RespawnRE.
     local function getSpawnRemote()
         if _spawnRemote and _spawnRemote.Parent then return _spawnRemote end
         local remotes = ReplicatedStorage:FindFirstChild("Remotes")
         local re = remotes and remotes:FindFirstChild("SpawnRequest")
         if re and re:IsA("RemoteEvent") then _spawnRemote = re end
         return _spawnRemote
+    end
+    -- Есть ли вообще чем возрождаться.
+    local function hasRespawnRemote()
+        return (getRespawnRemote() or getSpawnRemote()) ~= nil
     end
     local _lastRespawnFire = 0
     -- Персистентная обёртка вместо замыкания на каждый вызов.
@@ -1550,14 +1583,14 @@ return function(Lib, Core)
     -- уровне разрешилась бы в глобальный nil (падение при первом же вызове). Функция
     -- возвращает результат, а уведомляет пусть вызывающая сторона из UI.
     local function fireRespawn()
-        local re = getSpawnRemote()
+        -- [V116] СНАЧАЛА RespawnRE — это и есть респавн. SpawnRequest только как запасной.
+        local re = getRespawnRemote() or getSpawnRemote()
         if not re then return false end
-        -- Троттлинг обязателен: сервер ставит респавн «в полёт» не мгновенно, а спам
-        -- ремоута — верный путь к кику за флуд. 65с — это таймаут ожидания самого клиента
-        -- (_waitForRespawnCharacter(65), SpawnServiceClient.lua:415), но столько ждать не
-        -- нужно; берём 3с как безопасный минимум между попытками.
+        -- Троттлинг обязателен: спам ремоута — верный путь к кику за флуд. Но 3с было
+        -- слишком много: игра сама позволяет нажать кнопку повторно примерно раз в 0.7с
+        -- (:353 task.wait(0.6) + твины), поэтому 1с безопасно и не мешает «моментально».
         local now = os.clock()
-        if now - _lastRespawnFire < 3 then return false end
+        if now - _lastRespawnFire < 1 then return false end
         _lastRespawnFire = now
         return (pcall(_fireRe, re))
     end
@@ -1645,7 +1678,7 @@ return function(Lib, Core)
     local function canKillSelf()
         if _canKill ~= nil then return _canKill end
         -- Пишем В КЭШ, а не просто return: иначе положительный результат терялся бы и
-        -- проверка выполнялась заново каждый кадр (ровно то, от чего кэш и заводился).
+        -- проверка вы��олнялась заново каждый кадр (ровно то, от чего кэш и заводился).
         _canKill = false
         if type(replicatesignal) ~= "function" then return _canKill end
         local sig = getKillSignal()
@@ -1702,7 +1735,7 @@ return function(Lib, Core)
             any = true
         end
         -- BreakJoints рвёт Motor6D по всей модели. Именно распад сборки сервер трактует
-        -- как невосстановимое состояние персонажа.
+        -- как невосстановимое сос��ояние персонажа.
         pcall(function() c:BreakJoints() end)
         if hum then pcall(function() hum:Destroy() end) end
         -- Контрольный выстрел: без Humanoid модель уже не персонаж, убираем и её.
@@ -1717,7 +1750,9 @@ return function(Lib, Core)
         -- разорвать Downed уничтожением персонажа. Это и был твой случай.
         if isTrulyDead() then return fireRespawn() end
         if _respawnBusy then return false end
-        if not getSpawnRemote() then return false end
+        -- [V116] Было getSpawnRemote() — проверялся не тот ремоут. Теперь достаточно любого
+        -- из двух, а приоритет RespawnRE задан внутри fireRespawn.
+        if not hasRespawnRemote() then return false end
         -- Player.Kill оставляем как ДОПОЛНЕНИЕ, а не как основу: если он доступен, пусть
         -- сервер получит и штатное событие смерти. Основную работу делает destroySelf.
         if canKillSelf() then killSelf() end
@@ -2131,8 +2166,9 @@ return function(Lib, Core)
         sResp:Button({
             Name = "Respawn Now",
             Callback = function()
-                if not getSpawnRemote() then
-                    notify("Respawn", "SpawnRequest remote not found"); return
+                -- [V116] Проверяем RespawnRE (главный), а не только SpawnRequest.
+                if not hasRespawnRemote() then
+                    notify("Respawn", "RespawnRE remote not found"); return
                 end
                 -- [V115] Мёртв по-настоящему → сразу ремоут. Иначе (жив ИЛИ лежишь в Downed)
                 -- уничтожаем персонажа и шлём ремоут. Проверку canKillSelf убрал из условия:
@@ -2153,7 +2189,7 @@ return function(Lib, Core)
         slider(sResp, { Name = "HP Threshold", Flag = "MV_AutoRespawnHP",
             Default = Config.AutoRespawn_HP, Min = 0, Max = 99, Suffix = "%",
             Callback = function(v) Config.AutoRespawn_HP = v end })
-        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} instant reset via replicatesignal(Player.Kill)" })
+        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} fires RespawnRE directly, skips the 7 heart clicks" })
 
         uiReady = true
     end
