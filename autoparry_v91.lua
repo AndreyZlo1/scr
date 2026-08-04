@@ -26,7 +26,7 @@ local Config = {
 	-- понять, воспроизведён баг до или после правки, и я сам на этом ошибся — принял свежий
 	-- лог за старый. Держим версию в Config и подставляем в диаг, чтобы расхождение было
 	-- невозможно физически.
-	Version       = "V140",
+	Version       = "V141",
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
 
@@ -282,7 +282,7 @@ local Config = {
 	LiveM1SpeedFloor  = 0.45,   -- пол скорости для M1 выше (короткий трек → агрессивнее гасим шум)
 
 	-- [V66] ЭКСТРЕННЫЙ ДОДЖ дв����х угроз. ��сли 2-й ко��такт прилетает раньше, чем мы
-	-- физически успеваем развернуться к нему + перевзвести перфект, блок 2-г��
+	-- физическ�� успеваем развернуться к нему + перевзвести перфект, блок 2-г��
 	-- нев��змо��ен → доджим оба ���разу (iframes покрывают обоих). Порог = реальное
 	-- время разв��рота (по угловой скорости) + запас на перевзвод.
 	EmergencyDualDodge = true,
@@ -356,7 +356,7 @@ local Config = {
 	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физичес��и ничего ����е даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
 	SA_BlatantDodge   = false,
-	SA_BlatantWindow  = 0.32,   -- сек до контакта: в этом окне срабатывает форс-додж
+	SA_BlatantWindow  = 0.32,   -- сек до контакта: в этом окне сра��атывает форс-додж
 
 	-- [V97] AutoPlay addon — автоатака. По умолчанию ВЫКЛ (агрессивное поведение).
 	AutoPlay          = false,  -- мастер-тумблер аддона
@@ -482,6 +482,14 @@ local Config = {
 	-- ещё не «владеет» другая живая угроза того же врага. Иначе одиночный фейк, подмешанный в
 	-- окно настоящего свинга, наследовал чужое доказательство и проезжал гейт.
 	ProofEdgeTrigger = true,
+	-- [V141] РЕПУТАЦИОННЫЙ ГЕЙТ. Байпас по ProofGraceSec больше не безусловный: враг, у которого
+	-- доля свингов БЕЗ серверного доказательства выше RepFakeRate, теряет право на байпас, если
+	-- конкретный свинг не доигран до зоны удара. Это единственный признак, который брейкер не
+	-- может подделать — атрибуты и хитбоксы ставит только сервер (проверено по дампу игры).
+	RepGate        = true,
+	RepMinSamples  = 6,     -- меньше — статистики нет, гейт не вмешивается
+	RepFakeRate    = 0.55,  -- доля неподтверждённых свингов, выше которой врагу нет доверия
+	RepWindow      = 24,    -- скользящее окно: старые наблюдения затухают вдвое
 	-- [V91.1] Parry timestamp spoof. Block.Activated carries a CLIENT-chosen server-time stamp
 	-- and nothing clamps it client-side, so a late parry can be back-dated into the 0.125s
 	-- perfect window. Off by default — flip it on and creep TimeShiftMs up.
@@ -606,7 +614,7 @@ local Config = {
 	RotationMethod = "LookAt",
 	AimLockLerp    = 0.35,   -- how hard AimLock pulls the camera (1 = instant snap)
 	VizHitbox     = true,   -- бокс хитбокса цели
-	VizRestrict   = true,   -- зона ограничения (keep-out)
+	VizRestrict   = true,   -- з��на ограничения (keep-out)
 	VizRingSpeed  = 1.0,    -- множитель скорости анимации кольца (0.1–3.0)
 	VizRingScale  = 1.0,    -- множител�� радиуса кольца (0.4–2.5)
 	VizRange      = 100,    -- дальность (студы), на которой ищется/рисуется цель
@@ -740,7 +748,7 @@ local State = {
 	dodgeCount   = 0,
 	grantEscapes = 0,
 	selfBusyUntil= 0,
-	attackBusyUntil = 0,   -- [V117] busy ТОЛЬКО из-за нашей АТАКИ (не из-за дэша) — для exposed-escape
+	attackBusyUntil = 0,   -- [V117] busy ТОЛЬКО из-за наше�� АТАКИ (не из-за дэша) — для exposed-escape
 	kicksBlocked   = 0,
 	reportsBlocked = 0,
 	acMuted        = 0,
@@ -902,7 +910,7 @@ local V93 = {
 	-- сколько времени смотрим вперёд при сравнении с дедлайном (пересчитывается раз в кадр).
 	frameDt   = 1/60,
 	lookahead = 0,
-	-- [V139] ЗАТУХАЮЩИЙ ПИК дельты кадра. EMA описывает средний кадр, а промах происходит на
+	-- [V139] ЗАТУХАЮЩИЙ ПИК дельты кадра. EMA описывает средний кадр, а промах про��сходит на
 	-- конкретном ДЛИННОМ: пик ловит его с первого раза и отпускает за FrameLookaheadPeakDecay.
 	frameDtPeak = 1/60,
 	-- [V139] EMA собственной стоимости schedulerStep (сек). `now` берётся в начале Heartbeat, а
@@ -2860,7 +2868,7 @@ local function isMustDodge(th)
 	-- кэш держим на GameData, детект инлайн). Командный грэб/слэм (Wrestling, Kure, …) проходит
 	-- СКВОЗЬ блок и на попада��ии выруба��т парри (M2SlamParryWindowDisableDuration) → т��лько додж.
 	-- Опознаём стиль по конфигу: любой M2Grab*/M2Slam*-атрибут ⇒ M2 этого стиля = грэб. Так новые
-	-- грэб-стили ловятся без ручного пополнения MustDodgeStyles.
+	-- грэб-стили ловятся ��ез ручного пополнения MustDodgeStyles.
 	if th.kind == "M2" and Config.MustDodgeAutoGrab ~= false and st ~= "" then
 		GameData.grabCache = GameData.grabCache or {}
 		local cached = GameData.grabCache[st]
@@ -3272,7 +3280,7 @@ end
 
 -- Предсказать момент НАШЕЙ M2 тем же hitTimeline, что считает вражеские угрозы (значит вариант,
 -- momentum и множитель роста учтены той же математикой — без второй копии логики).
--- Для interrupt выбираем САМЫЙ БЫСТРЫЙ доступный вариант: это гонка, а не размен урона.
+-- Для interrupt выбираем САМ��Й БЫСТРЫЙ доступный вариант: это гонка, а не размен урона.
 -- Ali: Left 0.53 против Right 0.67 — 140мс форы, которые и решают, успеваем ли мы вообще.
 -- Возвращает (delaySec, variantId|nil).
 function State.ap.ownM2Delay()
@@ -3453,7 +3461,7 @@ function State.ap.tryInterrupt(now, th, threatCount)
 		if m1Hit and m1Hit + baseMargin >= enemyLeft then m1Hit = nil end   -- не успеваем
 	end
 
-	-- ── [V139] КАНДИДАТ M2 ───────────────────────────────────────────────────────────────────
+	-- ── [V139] КАНДИДАТ M2 ──���────────────────────────────────────────────────────────────────
 	-- Отдельный реч (свой ForwardOffset + лунж) и отдельный гейт готовности (кулдаун 7с).
 	local m2Hit, m2Var, m2Iframes = nil, nil, false
 	if Config.AP_InterruptM2 ~= false and ap.m2Ready()
@@ -3888,6 +3896,70 @@ end
 -- свинга он не доказательство. Пометка provenBy отличает угрозы, доверие которым построено
 -- ИМЕННО на атрибуте, от подтверждённых сильными пер-свинговыми источниками (живой хитбокс,
 -- VictimSwingId) — последние атрибут не занимают.
+-- ═══════════════ [V141] РЕПУТАЦИЯ АТАКУЮЩЕГО (настоящий анти-breaker) ═══════════════
+-- Почему прежние эвристики не ловили брейкер. Все они опирались на признаки, которые атакующий
+-- контролирует и может подогнать под норму:
+--   • AntiDecoyGap=0.12 — интервал повтора. Диаг 614203 прямо показал поток с медианой 170мс,
+--     то есть брейкер шёл РОВНО над порогом (это признано в комментарии к DecoyRefireSec).
+--   • DecoySpeedTol — track.Speed. Достаточно играть на 1.00.
+--   • DecoyRefireSec — повтор того же animId. Достаточно чередовать id комбо.
+-- Инвариант, который атакующий подделать НЕ может (подтверждено дампом игры): атрибуты
+-- "M1"/"M2"/"CombatAttacking" на его модели ставит СЕРВЕР — в клиентском дампе для них есть
+-- только GetAttribute и ни одного SetAttribute. Хитбокс-парт с VictimSwingId тоже создаёт сервер.
+-- Значит у РЕАЛЬНОЙ атаки рано или поздно появляется хотя бы одно из двух доказательств, а у
+-- фейка — никогда. Копим это по КАЖДОМУ врагу: доля свингов, дошедших до контакта совсем без
+-- доказательства. Высокая доля = у врага работает брейкер, и его неподтверждённые свинги
+-- перестают получать grace-байпас. Один честный игрок с лагом даёт 1-2 таких свинга и порога
+-- не достигает; брейкер выдаёт их десятками.
+State.rep = {}
+State.repOf = function(name)
+	local r = State.rep[name]
+	if not r then r = { real = 0, fake = 0 }; State.rep[name] = r end
+	return r
+end
+-- Итог жизни угрозы: была ли она подтверждена сервером хоть чем-то.
+State.repNote = function(th)
+	if not th or not th.name or th.repNoted then return end
+	th.repNoted = true
+	local r = State.repOf(th.name)
+	local proven = th.serverProven or th.serverSwingId
+		or (th.group and th.group.serverSwingId) or false
+	if proven then r.real = r.real + 1 else r.fake = r.fake + 1 end
+	-- Затухание: игрок мог перезапустить брейкер или наоборот выключить его. Держим окно
+	-- скользящим, иначе репутация «залипает» на всю сессию (ровно та ошибка, что была у
+	-- clusterHeavy — состояние прошлого боя влияло на текущий).
+	local cap = Config.RepWindow or 24
+	if (r.real + r.fake) > cap then
+		r.real, r.fake = r.real * 0.5, r.fake * 0.5
+	end
+end
+-- Заработан ли grace-байпас. Требуем ЛЮБОЕ из двух: у врага чистая репутация, ИЛИ конкретно
+-- этот свинг выглядит доведённым (трек играет и дошёл до FeintFrac). Фейк брейкера обычно
+-- отменяется/стопится до этого, поэтому такой байпас он не получает.
+State.graceAllowed = function(th)
+	if Config.RepGate == false then return true end
+	local r = State.rep[th.name]
+	local n = r and (r.real + r.fake) or 0
+	if n >= (Config.RepMinSamples or 6) then
+		local fakeRate = r.fake / math.max(n, 1)
+		if fakeRate >= (Config.RepFakeRate or 0.55) then
+			-- Враг систематически шлёт неподтверждаемые свинги. Байпас только если ЭТОТ свинг
+			-- реально доигран до зоны удара — иначе блок не жжём.
+			local reached = (th.maxTP or th.initTP or 0)
+			return th.trackPlaying == true
+			   and reached >= (th.hitTL or 0) * (Config.FeintFrac or 0.80)
+		end
+	end
+	return true
+end
+State.repText = function(name)
+	local r = State.rep[name]
+	if not r then return "new" end
+	local n = r.real + r.fake
+	if n <= 0 then return "new" end
+	return ("%.0f%%fake(n=%.0f)"):format(r.fake / n * 100, n)
+end
+
 State.attrProofTaken = function(name, exceptTh, nowc)
 	for i = 1, #Threats do
 		local o = Threats[i]
@@ -3969,7 +4041,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 
 	-- [V140/BUG] РЕЗОЛВЕР ПРОПУСКАЛ ОДИНОЧНЫЕ ФЕЙКИ. suspect ставится только при БЫСТРОМ
 	-- ПОВТОРЕ (два свинга внутри AntiDecoyGap). Одиночная фейковая анимация повтором не была и
-	-- получала serverProven напрямую от serverAttackProof — а тот читает МОДЕЛЬНЫЕ атрибуты
+	-- получала serverProven ��апрямую от serverAttackProof — а тот читает МОДЕЛЬНЫЕ атрибуты
 	-- M1/M2/CombatAttacking, которые описывают «враг сейчас в атаке», а НЕ «вот этот свинг
 	-- настоящий». Пока враг честно бьёт реальный удар, флаг висит true, и любая подмешанная
 	-- в это окно фейковая анимация проезжала proof-гейт бесплатно (это прямо признано в
@@ -4484,6 +4556,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local coveredByGuard = th.coveredByHeldGuard == true
 				or (Config.OmniBlock and State.blocking and th.enteredWindow
 					and th.contactAbs <= (State.holdUntil or 0) + 0.05)
+			-- [V141] Фиксируем итог свинга в репутации врага ДО его удаления. Считаем только
+			-- свинги, которые нас реально касались (everThreatened) — чужие драки в 20 студах
+			-- не должны портить статистику: сервер не обязан присылать нам их хитбокс.
+			if th.everThreatened then State.repNote(th) end
 			if th.coveredByDodge then
 				-- Explicitly serviced by the cluster iframe; not a miss and not guard coverage.
 			elseif coveredByGuard then
@@ -4502,6 +4578,13 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				else
 					reason = ("no-window (maxTP=%.0f%% hitTL, feint-grace?)"):format((th.maxTP or 0)/math.max(th.hitTL,0.001)*100)
 				end
+				-- [V141] Проof-состояние в каждой MISS-строке. Без него по логу нельзя было
+				-- отличить «промах по таймингу» от «резолвер сознательно держал нажатие»,
+				-- и именно поэтому работу гейта невозможно было проверить.
+				reason = reason .. (" | proof=%s%s rep=%s"):format(
+					th.serverProven and ("yes/" .. tostring(th.provenBy or "?")) or "NO",
+					th.pressHeldForProof and " HELD-BY-GATE" or "",
+					State.repText(th.name))
 				diagPush(("MISS!  t=%.2f  %s  %s(%s)  contact0=%.0fms  height=%s bodyScale=%s modelY=%s aMult=%.2f  → %s")
 					:format(now, th.name, th.kind, th.style or "?", (th.contact0 or 0)*1000,
 						th.heightAttr and ("%.3f"):format(th.heightAttr) or "?",
@@ -4619,6 +4702,16 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 						            and State.attrProofTaken(th.name, th, now)) then
 							th.serverProven, th.serverProofClock = true, now
 							th.provenBy = "attr"
+							-- [V141] ЗАМЕР, которого не было: когда именно приходит серверный
+							-- атрибут относительно детекта и контакта. Это единственный способ
+							-- подобрать ProofGraceSec по факту, а не на глаз.
+							if Config.DeepDiag and not th.proofLogged then
+								th.proofLogged = true
+								diagPush(("TRACE-PROOF t=%.3f %s %s PROVEN by=attr +%.0fms after detect, %+.0fms to contact")
+									:format(now, tostring(th.name), tostring(th.kind),
+										(now - th.detectClock) * 1000,
+										(th.contactAbs - now) * 1000))
+							end
 						elseif (th.contactAbs - now) < 0.18 and serverHitboxProof(th.name) then
 							-- Хитбокс — сильное пер-свинговое доказательство, атрибут не занимает.
 							th.serverProven, th.serverProofClock = true, now
@@ -4640,10 +4733,25 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					-- нельзя, иначе уходим в BlockCooldown=0.5с ровно к приходу настоящего удара.
 					-- Реальный свинг всегда создаёт парт в Workspace.Hitboxes, поэтому честную
 					-- атаку этот гейт не режет.
-					if Config.ServerProofGate and not th.serverProven
-					   and (th.suspect or (th.contactAbs - now) > (Config.ProofGraceSec or 0.06)) then
+					-- [V141] КОРЕНЬ «резолвер не работает»: байпас по ProofGraceSec был БЕЗУСЛОВНЫМ.
+					-- Гейт лишь ОТКЛАДЫВАЛ нажатие до 60мс до контакта, а потом жал всё равно.
+					-- Одиночный фейк на нормальной скорости (не быстрый повтор → не suspect,
+					-- Speed=1.00 → не decoy) не отсекался НИЧЕМ и всегда получал блок.
+					-- Теперь байпас должен быть ЗАРАБОТАН: см. State.graceAllowed ниже.
+					local graceOK = (th.contactAbs - now) <= (Config.ProofGraceSec or 0.06)
+					              and not th.suspect
+					              and State.graceAllowed(th)
+					if Config.ServerProofGate and not th.serverProven and not graceOK then
 						if not th.baitHeldLogged then
 							th.baitHeldLogged = true
+							th.proofHoldClock = now
+							-- В diagPush, а НЕ только в aclog: aclog уходит в status-фид, которого
+							-- нет в дампе, поэтому решения резолвера были невидимы в логах.
+							diagPush(("TRACE-PROOF t=%.3f %s %s HOLD unproven%s | dt=%+.0fms rep=%s")
+								:format(now, tostring(th.name), tostring(th.kind),
+									th.suspect and " SUSPECT(no swing-id)" or "",
+									(th.contactAbs - now) * 1000,
+									State.repText(th.name)))
 							aclog(("[resolver] %s %s unproven%s — holding press (bait?)")
 								:format(tostring(th.name), tostring(th.kind),
 									th.suspect and " (SUSPECT: no swing-id)" or " by server"))
@@ -4945,7 +5053,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			-- Evasive при CombatAttacking. canDodgeNow() этого НЕ ловит (не проверяет CombatAttacking), поэтому
 			-- НЕфорсированный додж здесь ВСЕГДА глотается сервером: анимация есть, i-frames нет → удар съедается
 			-- (лог: exposed-escape → hit INSIDE i-frame window → LATE/NOT-BLOCKED). Пробить лок атаки можно
-			-- Т��ЛЬКО форс-дэш-инпутом — а это по замыслу режим Blatant Dodge. Поэтому exposed-escape теперь:
+			-- Т��ЛЬКО форс-дэш-инпутом — а это по замысл�� режим Blatant Dodge. Поэтому exposed-escape теперь:
 			--   1) разрешён ТОЛЬКО при включённом SA_BlatantDodge (в легит-режиме больше не палит впустую);
 			--   2) исполняется через force=true (как ветка blatant-override), иначе и в блатанте был бы фантомным.
 			local blatantOn = Config.SkillAddon and Config.SA_BlatantDodge
@@ -6112,11 +6220,11 @@ local function toggleDesyncTest()
 		-- снова (иначе обсерв��р показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
 		-- Держим трек доминирующим только пока движок ��ам не перебил его walk'ом. Важно:
-		-- полностью уд����жать чужую картину клиентски НЕЛЬЗЯ — анимация реплицируется
+		-- полностью уд����жать чужую картину клиентски НЕЛЬЗ�� — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
 		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
 		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно пок��зывал
-		-- Movement/Core weight=0 и locomotion исчезала. Decoy продолжает реплицироваться
+		-- Movement/Core weight=0 и locomotion исчезала. Decoy продо��жает реплицироваться
 		-- через свой Play/Stop цикл, не уничтожая реальные анимации персонажа.
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end) end
 		-- [V82] интервал переигрывания = длина анимации атаки (fallback 0.5с). З��цикленный
@@ -6603,7 +6711,7 @@ task.spawn(function()
 					State.selfBusyUntil = now + Config.SelfBusyDur
 					State.attackBusyUntil = now + Config.SelfBusyDur   -- [V117] busy из-за АТАКИ
 				-- FIREDELAY/PRERUN: задер����ваем САМ боевой паке�� (ServerCheck), анимацию не
-				-- трогаем. Гейт стро��о по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
+				-- трогаем. Г��йт стро��о по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
 				-- трогаем — иначе рассинхрон чарджа). Перехват на RemoteEvent Remotes.Server —
 				-- он доступен (в отличие от модуля CombatRemoteClient, который может лежать в Hidden).
 				local func = a1.Func
@@ -6792,6 +6900,20 @@ local function summary()
 			:format(hits, stateHits, realMiss),
 		("BLOCKABLE accuracy = %.1f%%  (%d/%d attacks we were allowed to block landed as block/perfect)")
 			:format(acc, blockable - realMiss, blockable),
+		-- [V141] Кто из врагов шлёт неподтверждаемые свинги. Сразу видно, работает ли брейкер и
+		-- на кого именно сработал репутационный гейт.
+		(function()
+			local parts, n = {}, 0
+			for nm, r in pairs(State.rep or {}) do
+				local tot = r.real + r.fake
+				if tot >= 3 and (r.fake / tot) >= 0.34 then
+					n = n + 1
+					parts[n] = ("%s %.0f%%fake(n=%.0f)"):format(nm, r.fake / tot * 100, tot)
+				end
+			end
+			return n > 0 and ("unproven-swing offenders: " .. table.concat(parts, ", "))
+				or "unproven-swing offenders: none"
+		end)(),
 		("accuracy mode: %s  |  off-target swings rejected=%d  |  boxing-counter fired=%d")
 			:format(Config.AccuracyMode or "Low", State.offTargetRej or 0, State.counterCount or 0),
 		"=============================",
@@ -7480,6 +7602,11 @@ return function(_Lib, _Core)
 			function() return Config.ProofEdgeTrigger ~= false end,
 			function(v) Config.ProofEdgeTrigger = v end)
 		apMain:SubLabel({ Text = "a fake anim thrown in while the enemy is mid real swing\ncant borrow that swings proof anymore" })
+		-- [V141] Репутационный гейт — главный анти-breaker.
+		boolToggle(apMain, "Track Fakers", "Track Fakers",
+			function() return Config.RepGate ~= false end,
+			function(v) Config.RepGate = v end)
+		apMain:SubLabel({ Text = "learns who sends swings the server never confirms\nthose stop getting the last-moment press bypass" })
 		apMain:Divider()
 		apMain:Header({ Name = "Time Spoof" })
 		boolToggle(apMain, "Time Spoof", "Time Spoof",
