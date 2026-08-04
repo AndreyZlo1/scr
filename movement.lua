@@ -708,7 +708,7 @@ return function(Lib, Core)
             and type(debug.getupvalue) == "function"
     end
 
-    -- ═══════════════════════════����═══════════════════════════════════════════════
+    -- ═══════════════════════════�����═══════════════════════════════════════════════
     -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хука task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
@@ -846,7 +846,7 @@ return function(Lib, Core)
     --      (CombatConfig:120) против AttackDuration = 0.45 — это и есть «долгая» задержка
     --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
     --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
-    -- V112 закрывал только путь (1), поэтому путь (2) продол��ал д��рж����ть комбо. Симптом
+    -- V112 закрывал только путь (1), поэтому путь (2) продол����ал д��рж����ть комбо. Симптом
     -- «после последнего удара долгая задержка» описывал ровно это.
     --
     -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
@@ -1421,7 +1421,7 @@ return function(Lib, Core)
         local rag = tryRequire({ "Shared", "Services", "RagdollService", "RagdollServiceClient" })
         if not rag or type(rag.Init) ~= "function" then return false end
         -- Берём upvalue #5 и ПРОВЕРЯЕМ, что это функция; если игра сдвинула порядок —
-        -- ищем перебором ту, у которой нет upvalue'ов (sustainClientRagdoll их не имеет,
+        -- ищем перебором ту, у которой нет upvalue'ов (sustainClientRagdoll их н�� имеет,
         -- в отличие от isManagedRagdoll/stepClientRagdollSustain).
         local fn
         local ok5, v5 = pcall(_getUp, rag.Init, 5)
@@ -1644,7 +1644,7 @@ return function(Lib, Core)
     -- верни меня в игру». Сервер обслуживает его только для мёртвого игрока
     -- (IsDeathFlagged по атрибуту Dead, SpawnServiceUtils.lua:25). Живому игроку пустой
     -- FireServer() отклоняется — снаружи это выглядит как «кнопка ничего не делает».
-    -- Убить себя обычным способом тоже нельзя: Health серверный, а штатную кнопку
+    -- Убить себя обычным способом тоже нель��я: Health серверный, а штатную кнопку
     -- Roblox Reset игра отключает (CoreGuiPolicy.lua:109 SetCore("ResetButtonCallback", false)).
     --
     -- ═══════ [V114] ПУСТОТА БЫЛА НЕВЕРНЫМ ПОДХОДОМ — НУЖЕН ЭКСПЛОИТ ════════
@@ -1709,50 +1709,93 @@ return function(Lib, Core)
         return (pcall(replicatesignal, sig))
     end
 
-    -- ═══════ [V115] ПОЧЕМУ Player.Kill ДАВАЛ DOWNED, А НЕ РЕСПАВН ═══════
-    -- Ты описал точный симптом: «падаю на землю и жду, пока HP не станет больше 5».
-    -- Это не смерть, а Downed-система игры (атрибут Downed, анимации Animations/Knocked,
-    -- ремоуты Revive.RE и KnockedCarryConsent.RE — всё есть в дампе). Она СЕРВЕРНАЯ и
-    -- перехватывает событие смерти: игра не даёт умереть, она сбивает в «лежачего».
-    -- Значит любой метод, который просто наносит смерть (Player.Kill, урон, пустота),
-    -- ВСЕГДА будет уходить в Downed. Гонку с этой системой не выиграть.
+    -- ═══════ [V117] ПОЧЕМУ БЫЛО «ПРОСТО ПОДЫХАЮ» БЕЗ РЕСПАВНА ═══════
+    -- Проверил дамп, а не предположил:
+    --     grep 'SetAttribute("Dead"' по ВСЕМУ клиентскому дампу → НИ ОДНОГО совпадения.
+    -- Значит атрибут "Dead" ставит исключительно СЕРВЕР, в своём обработчике смерти.
+    -- Убийство через движковый replicatesignal(Player.Kill) идёт МИМО боевой логики игры,
+    -- поэтому серверный обработчик может этот атрибут и не выставить. А я в V116 поставил
+    -- отправку RespawnRE под условие `if isTrulyDead()`, которое читает ровно этот атрибут.
+    -- Итог: персонаж умирает, атрибут не приходит, условие никогда не истинно, RespawnRE
+    -- не отправляется ВООБЩЕ. Ровно то, что ты описал: «просто подыхаю».
+    -- Гейт убран: RespawnRE шлём безусловно и повторно. Лишний запрос сервер просто
+    -- проигнорирует, а вот пропущенный стоит нам всего респавна.
     --
-    -- ЧТО ДЕЛАЮТ ДЮП/РЕАНИМАЦИЯ-СКРИПТЫ. Они не «убивают», а УНИЧТОЖАЮТ персонажа.
-    -- Downed нельзя применить к тому, кого нет: сервер обнаруживает, что модель персонажа
-    -- пропала, и помечает игрока мёртвым — минуя всю боевую логику. Ключевой момент в том,
-    -- ЧТО именно рвать: Character:Destroy() рвёт локальную копию, но модель принадлежит
-    -- серверу и он вправе её вернуть. Надёжная точка — HUMANOID и связка костей:
-    --   • Humanoid:ChangeState(Dead) — переводит стейт-машину в Dead локально;
-    --   • Character:BreakJoints()    — рвёт все Motor6D, сборка распадается;
-    --   • Humanoid:Destroy()         — без Humanoid персонаж перестаёт быть персонажем,
-    --                                  и Downed-логике (она работает через Humanoid) не за
-    --                                  что зацепиться.
-    -- Порядок важен: сначала стейт и джойнты, затем уничтожение Humanoid — иначе
-    -- ChangeState на уже удалённом объекте выбросит ошибку.
+    -- ПРО РЕПЛИКАЦИЮ, где я был неправ, а где нет. Ты прав, что удалять персонажа — тупик,
+    -- и destroySelf я удалил ещё в V116. Но причина другая: Instance:Destroy() с клиента НЕ
+    -- реплицируется на сервер (репликация Instance-операций односторонняя, server→client;
+    -- клиент авторитетно шлёт серверу только физику своих собственных частей и ремоуты).
+    -- Поэтому для остальных игроков персонаж НЕ исчезал — он исчезал только у меня, и это
+    -- было даже хуже: я терял ту модель, за которой следит watchchar (respawnstuff:385).
     --
-    -- ПОЧЕМУ ЭТО МГНОВЕННО. Мы не ждём ни урона, ни монитора пустоты (0.2с), ни таймера
-    -- подъёма по HP. Персонаж перестаёт существовать в этом же кадре, и SpawnRequest уходит
-    -- по первому же появлению флага Dead — то есть за один сетевой round-trip.
-    -- ═══════ [V116] destroySelf УДАЛЁН — ИМЕННО ОН ЛОМАЛ РЕСПАВН ═══════
-    -- Идея «уничтожить персонажа» была неверной по механике репликации: модель персонажа
-    -- принадлежит СЕРВЕРУ, и Character:Destroy() / Humanoid:Destroy() с клиента удаляют
-    -- только МОЮ локальную копию. Сервер об этом не узнаёт и продолжает считать меня живым.
-    -- Побочные эффекты были хуже самой бесполезности:
-    --   1) isTrulyDead() мгновенно возвращал true (персонажа нет ЛОКАЛЬНО) → цикл в тот же
-    --      кадр слал RespawnRE, сервер отбрасывал его как «игрок жив», и цикл делал break —
-    --      повторной попытки не было вообще;
-    --   2) вместе с локальной моделью пропадала та копия, к которой игра подключила
-    --      watchchar (respawnstuff:385) → атрибут "Dead" уже некому было услышать, и экран
-    --      смерти не поднимался.
-    -- Оба пункта дают ровно твой симптом: «умираю, а зареспавниться не могу».
+    -- ТВОЯ ПОДСКАЗКА ПРО СИГНАЛ РЕСПАВНА — реализована как ПОИСК, а не как догадка.
+    -- signal.md даёт getsignalwhitelist(): он возвращает список всех сигналов, которые
+    -- Roblox разрешает реплицировать на сервер (поля Parent и Event). Перечисляем его в
+    -- рантайме и ищем что-либо respawn/spawn/load-подобное на LocalPlayer. Имя сигнала не
+    -- выдумываем — берём из списка, который вернул сам executor.
     --
-    -- ПРАВИЛЬНАЯ СХЕМА, целиком по коду самой игры:
-    --   убить (replicatesignal(Player.Kill) — ты подтвердил, что это работает)
-    --   → дождаться СЕРВЕРНОГО атрибута "Dead" (respawnstuff:385 слушает именно его)
-    --   → бить RespawnRE:FireServer() ПОВТОРНО, пока не придёт CharacterAdded
-    --     (dorespawn ждёт именно его, respawnstuff:229).
-    -- Повторы принципиальны: один выстрел мог уйти на кадр раньше, чем сервер обработал
-    -- смерть, и тогда прежний код сдавался навсегда.
+    -- ПЛЮС ГЛАВНОЕ: ты видел, как враг исчезал и появлялся с полным HP — это штатная
+    -- dorespawn() игры. Её можно вызвать НАПРЯМУЮ: filtergc ищет функцию по upvalue'ам
+    -- (environment.md: поле Upvalues), а у dorespawn ремоут RespawnRE лежит именно в
+    -- upvalue (respawnstuff:224). Вызов игровой функции надёжнее ручного FireServer:
+    -- вместе с ремоутом она возвращает CoreGui, курсор и снимает эффекты смерти (:232-255).
+    local _doRespawnFn, _doRespawnTried = nil, false
+    local function findGameDoRespawn()
+        if _doRespawnTried then return _doRespawnFn end
+        _doRespawnTried = true
+        if type(filtergc) ~= "function" then return nil end
+        local re = getRespawnRemote()
+        if not re then return nil end
+        -- Ищем функции, у которых RespawnRE в upvalue'ах. Кандидатов может быть несколько
+        -- (dorespawn и onclick), поэтому берём список, а не filterOne.
+        local ok, res = pcall(filtergc, "function", { Upvalues = { re }, IgnoreExecutor = true }, false)
+        if not ok or type(res) ~= "table" then return nil end
+        for _, fn in ipairs(res) do
+            -- dorespawn не принимает аргументов и вызывает FireServer сама. Отбираем по
+            -- числу параметров: onclick навешан на MouseButton1Click и тоже без аргументов,
+            -- поэтому дополнительно требуем, чтобы среди upvalue'ов был RespawnRE — это уже
+            -- обеспечено фильтром. Берём первую подходящую и проверяем её при вызове.
+            if type(fn) == "function" then _doRespawnFn = fn; break end
+        end
+        return _doRespawnFn
+    end
+
+    -- Поиск сигнала возрождения в whitelist'е Roblox (по подсказке пользователя).
+    local _respawnSignal, _respawnSignalTried = nil, false
+    local function findRespawnSignal()
+        if _respawnSignalTried then return _respawnSignal end
+        _respawnSignalTried = true
+        if type(getsignalwhitelist) ~= "function" or type(replicatesignal) ~= "function" then
+            return nil
+        end
+        local ok, list = pcall(getsignalwhitelist)
+        if not ok or type(list) ~= "table" then return nil end
+        for _, info in ipairs(list) do
+            local ev = tostring(info and info.Event or "")
+            local parent = tostring(info and info.Parent or "")
+            -- Нас интересуют сигналы игрока, отвечающие за появление/загрузку персонажа.
+            if parent == "Player" and (ev:find("[Rr]espawn") or ev:find("[Ss]pawn")
+                or ev:find("LoadCharacter") or ev:find("[Rr]eset")) then
+                local got = pcall(function() _respawnSignal = LocalPlayer[ev] end)
+                if got and _respawnSignal then return _respawnSignal end
+                _respawnSignal = nil
+            end
+        end
+        return nil
+    end
+
+    -- Одна попытка возрождения ВСЕМИ доступными путями. Порядок — от самого «родного»
+    -- к самому грубому, чтобы по возможности отработала штатная логика игры.
+    local function tryRespawnOnce()
+        local any = false
+        local fn = findGameDoRespawn()
+        if fn then any = pcall(fn) or any end          -- 1) игровая dorespawn()
+        if fireRespawn() then any = true end            -- 2) RespawnRE:FireServer()
+        local sig = findRespawnSignal()
+        if sig then any = pcall(replicatesignal, sig) or any end  -- 3) сигнал из whitelist
+        return any
+    end
+
     local function pushRespawnUntilAlive()
         local alive = false
         -- Подписываемся ДО первой отправки, иначе быстрый респавн проскочил бы мимо нас.
@@ -1760,9 +1803,9 @@ return function(Lib, Core)
         _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
         local t0 = os.clock()
         while not alive and os.clock() - t0 < 10 do
-            -- Шлём только когда сервер согласен, что я мёртв: живому запрос отбросят.
-            if isTrulyDead() then fireRespawn() end
-            task.wait(0.5)              -- пауза больше троттлинга (1с) не нужна
+            -- [V117] БЕЗ гейта по isTrulyDead(): именно он и блокировал отправку.
+            tryRespawnOnce()
+            task.wait(0.4)
         end
         if conn then conn:Disconnect() end
         return alive
@@ -1780,10 +1823,17 @@ return function(Lib, Core)
         task.spawn(function()
             if not isTrulyDead() then
                 killSelf()
-                -- Ждём ПОДТВЕРЖДЕНИЯ смерти от сервера (атрибут "Dead"), а не локальных
-                -- признаков. Это один round-trip, поэтому опрос по Heartbeat.
+                -- [V117] Ждём смерть КОРОТКО и не требуем атрибута "Dead": ждём того, что
+                -- видно клиенту — HP<=0 либо исчезновение Humanoid. Атрибут может не прийти
+                -- вовсе (его ставит только сервер и только в своём обработчике), а раньше
+                -- мы из-за него зависали на все 5 секунд и уходили ни с чем.
                 local t0 = os.clock()
-                while not isTrulyDead() and os.clock() - t0 < 5 do PostStep:Wait() end
+                while os.clock() - t0 < 1 do
+                    local c = LocalPlayer.Character
+                    local hum = c and c:FindFirstChildOfClass("Humanoid")
+                    if isTrulyDead() or not hum or hum.Health <= 0 then break end
+                    PostStep:Wait()
+                end
             end
             pushRespawnUntilAlive()
             _respawnBusy = false
@@ -1827,7 +1877,7 @@ return function(Lib, Core)
         pcall(stepFly, dt)
         pcall(stepNoClip)
     end))
-    -- [V112] ЛЕНИВЫЙ PostStep. Прежде все драйверы вызывались КАЖДЫЙ кадр безусловно, и
+    -- [V112] ЛЕНИВЫЙ PostStep. Преж��е все драйверы вызывались КАЖДЫЙ кадр безусловно, и
     -- каждый сам решал, работать ему или нет — то есть на выключенных фичах мы всё равно
     -- платили за 4 вызова функций на кадр. Теперь проверяем флаги ДО вызова: пока фичи
     -- выключены, тело цикла — это несколько сравнений булевых полей.
@@ -2133,7 +2183,7 @@ return function(Lib, Core)
                 Config.Dodge_Cooldown = v; driveDodge() end })
         sDodge:SubLabel({ Text = "client-side cooldown" })
 
-        -- ─────────────── Section: Anti-Ragdoll (Right) ───────────────
+        -- ─────────────── Section: Anti-Ragdoll (Right) ���──────────────
         local sAR = MV:Section({ Side = "Right" })
         sAR:Header({ Name = "Anti-Ragdoll" })
         feature(sAR, {
