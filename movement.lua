@@ -284,7 +284,7 @@ return function(Lib, Core)
         return dir.Unit
     end
 
-    -- ═════════════���═════════════════ SPEED ══════════════════════════════════
+    -- ═════════════�����═════════════════ SPEED ══════════════════════════════════
     -- CFrame  → shift the root by moveVec*speed*dt (positional, beats the WalkSpeed
     --           anti-cheat since WalkSpeed itself is untouched).
     -- Velocity→ set horizontal AssemblyLinearVelocity, keep gravity on Y.
@@ -1010,8 +1010,8 @@ return function(Lib, Core)
     -- Dodge Everywhere: driveDodge ставит атрибут OutnumberedEvasiveGrant = true, из него
     -- получается u51 (Evasive.lua:529-531). Итог: слайдер стоит на вани*льных 30, а дэш
     -- летит 30 × 1.5 = 45 studs/s и длится на 20% дольше. Никакой «утечки» скорости не
-    -- было — игра штатно применяла бонус «в мен��шинстве», про��то мы ��а��и его и включали.
-    -- Решение (выбрано пользователем): при активном Dodge зануляем множитель до 1.0, так
+    -- было — игра штатно применяла бонус «в м��н��шинстве», про��то мы ��а��и его и включали.
+    -- Решение (выбрано пользователем): при активном Dodge зануляе�� множитель до 1.0, так
     -- что ��лайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
     --
     -- ВТОРОЙ БАГ, НАЙДЕННЫЙ ЗДЕСЬ ЖЕ: КАРТА UPVALUE'ОВ БЫЛА НЕДЕТЕРМИНИРОВАННОЙ.
@@ -1344,7 +1344,7 @@ return function(Lib, Core)
             if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, _evCdBase) end
         end
         -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
-        -- выключения тумбле��а иг��а ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
+        -- выключения ��умбле��а иг��а ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
         -- который сервер даёт честно, когда вас реально окружили.
         if _evMultBase and _evMultIdx then
             if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashSpeedMultiplier = _evMultBase end
@@ -1636,6 +1636,56 @@ return function(Lib, Core)
         return hum.Health <= 0 and c:GetAttribute("Downed") ~= true
     end
 
+    -- ═══════ [V119] РАЗОБРАЛ ТВОЙ УНИВЕРСАЛЬНЫЙ RESET — Я БЫЛ НЕПРАВ ВЕЗДЕ ═══════
+    -- Снял обфускацию LuaObfuscator (пейлоад "LOL!" = hex-пары + RLE через "NQ"), достал
+    -- таблицу констант. Ядро скрипта — одна функция, её константы идут ровно так:
+    --     workspace · FindFirstChildOfClass · ChangeState · Enum · HumanoidStateType
+    --     GettingUp · Character · CharacterAdded · Wait · MoveTo · Position · Vector3 · warn
+    -- И это ВСЁ. В скрипте НЕТ: Kill, LoadCharacter, SetCore, Health, BreakJoints, ремоутов.
+    -- Значит универсальный ресет — это чистая state-машина Humanoid'а:
+    --     Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    -- Работает в любой игре именно потому, что это движковый Humanoid, а не механика игры —
+    -- ты это и говорил. Состояние своего персонажа клиент меняет авторитетно (у него network
+    -- ownership своих частей), поэтому смена реплицируется и поднимает из Dead/Ragdoll.
+    --
+    -- ЧЕМ БЫЛ ПЛОХ МОЙ ПОДХОД (по пунктам, всё это мои ошибки):
+    --   • replicatesignal(Player.Kill) — это УБИЙСТВО. Оно не может «возродить с фулл HP»,
+    --     я выдавал смерть за респавн. Отсюда твоё «я просто сдыхаю».
+    --   • SetCore("ResetButtonCallback", fn) — это СЕТТЕР, он лишь переопределяет кнопку и
+    --     ничего не вызывает; а сама кнопка Reset всё равно только убивает.
+    --   • Опора на SpawnRequest/_doRespawn — привязка к механике конкретной игры там, где
+    --     достаточно движкового Humanoid. Плюс про U0 ты прав: модули инициализируются и
+    --     удаляются из дерева, живут в памяти — поэтому мой вывод «мёртвый код» тоже неверен.
+    --
+    -- ПОЧЕМУ ОДНОГО ChangeState МАЛО ИМЕННО ЗДЕСЬ (проверено по дампу игры).
+    -- Downed эта игра держит принудительно (наш же разбор, movement.lua:1402-1404):
+    --     Humanoid:SetStateEnabled(GettingUp, false)   ← состояние ЗАПРЕЩЕНО
+    --     Humanoid:ChangeState(Ragdoll)
+    --     Humanoid.PlatformStand = true
+    -- ChangeState(GettingUp) по ЗАПРЕЩЁННОМУ состоянию движок просто игнорирует. Поэтому
+    -- порядок обязателен: сначала РАЗРЕШИТЬ GettingUp и снять Ragdoll/PlatformStand, и только
+    -- потом менять состояние. Именно этого не хватало, чтобы «встать», а не «лежать и ждать».
+    local function reviveViaHumanoidState()
+        local c = LocalPlayer.Character
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if not hum then return false end
+        -- 1) Снимаем игровой замок Downed: без этого ChangeState ниже не даст ничего.
+        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true) end)
+        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false) end)
+        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
+        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Physics, false) end)
+        pcall(function() hum.PlatformStand = false end)
+        -- 2) Собственно подъём — то самое, что делает твой универсальный reset.
+        local ok = pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        -- 3) MoveTo на текущую позицию: в разобранном скрипте это есть, и смысл в том, чтобы
+        -- сбросить залипшую цель ходьбы, иначе персонаж после подъёма может «уползать».
+        pcall(function()
+            local root = hum.RootPart or c:FindFirstChild("HumanoidRootPart")
+            if root then hum:MoveTo(root.Position) end
+        end)
+        return ok
+    end
+
     -- ═══════════════ [V113] ПОЧЕМУ RESPAWN НЕ РАБОТАЛ ═══════════════
     -- Ремоут и путь были верны — я это перепроверил по дампу:
     --   ReplicatedStorage/Remotes/SpawnRequest.RE существует и это RemoteEvent
@@ -1734,7 +1784,7 @@ return function(Lib, Core)
     -- рантайме и ищем что-либо respawn/spawn/load-подобное на LocalPlayer. Имя сигнала не
     -- выдумываем — берём из списка, который вернул сам executor.
     --
-    -- ПЛЮС ГЛАВНОЕ: ты видел, как враг ис��езал и появлялся с полным HP — это штатная
+    -- ПЛЮС ГЛАВНОЕ: ты виде��, как враг ис��езал и появлялся с полным HP — это штатная
     -- dorespawn() игры. Её можно вызвать НАПРЯМУЮ: filtergc ищет функцию по upvalue'ам
     -- (environment.md: поле Upvalues), а у dorespawn ремоут RespawnRE лежит именно в
     -- upvalue (respawnstuff:224). Вызов игровой функции надёжнее ручного FireServer:
@@ -1823,10 +1873,15 @@ return function(Lib, Core)
     -- гадали бы, какой из путей доступен на твоём клиенте.
     local function tryRespawnOnce()
         local via = {}
-        if callGameRespawn() then via[#via + 1] = "_doRespawn" end
-        if fireRespawn() then via[#via + 1] = "SpawnRequest" end
-        local sig = findRespawnSignal()
-        if sig and pcall(replicatesignal, sig) then via[#via + 1] = "signal" end
+        -- [V119] ПЕРВЫМ — движковый подъём (твой универсальный метод). Он не зависит от
+        -- механики игры и работает без смерти, поэтому это основной путь.
+        if reviveViaHumanoidState() then via[#via + 1] = "GettingUp" end
+        -- Дальше — игровые пути, они нужны только если персонаж действительно мёртв
+        -- (Humanoid уничтожен/HP серверно в нуле) и поднимать уже нечего.
+        if isTrulyDead() then
+            if callGameRespawn() then via[#via + 1] = "_doRespawn" end
+            if fireRespawn() then via[#via + 1] = "SpawnRequest" end
+        end
         return #via > 0, table.concat(via, "+")
     end
 
@@ -1834,51 +1889,56 @@ return function(Lib, Core)
     -- закончилось. Кнопка Respawn это показывает, поэтому в следующий раз мы будем разбирать
     -- ФАКТ («_doRespawn не найден», «пути есть, но персонаж не пришёл»), а не мои гипотезы.
     local _respawnDiag = "not attempted yet"
-    local function pushRespawnUntilAlive()
-        local alive = false
-        -- Подписываемся ДО первой отправки, иначе быстрый респавн проскочил бы мимо нас.
-        local conn = LocalPlayer.CharacterAdded:Connect(function() alive = true end)
-        _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
-        local t0, via = os.clock(), ""
-        while not alive and os.clock() - t0 < 10 do
-            -- [V117] БЕЗ гейта по isTrulyDead(): именно он и блокировал отправку.
-            local _, v = tryRespawnOnce()
-            if v ~= "" then via = v end
-            task.wait(0.5)
-        end
-        if conn then conn:Disconnect() end
-        _respawnDiag = (via == "" and "no respawn path available (filtergc/_doRespawn + SpawnRequest both missing)"
-            or ("via " .. via .. (alive and " -> respawned" or " -> sent, but no CharacterAdded in 10s")))
-        return alive
+
+    -- [V119] Поднялись ли мы. Критерий — НЕ CharacterAdded (новый персонаж приходит только
+    -- при настоящем респавне), а выход из лежачего состояния: GettingUp/подъём означает, что
+    -- мы снова управляем персонажем. Прежний код ждал CharacterAdded все 10 секунд и потому
+    -- всегда «истекал», даже когда подъём фактически удался.
+    local function isUpAgain()
+        local c = LocalPlayer.Character
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        if not hum then return false end
+        if hum.PlatformStand == true then return false end
+        if c:GetAttribute("Downed") == true then return false end
+        local st = hum:GetState()
+        return st ~= Enum.HumanoidStateType.Physics
+            and st ~= Enum.HumanoidStateType.Ragdoll
+            and st ~= Enum.HumanoidStateType.FallingDown
+            and st ~= Enum.HumanoidStateType.Dead
     end
 
-    -- Единая точка входа. Возвращает true, если запрос реально начат.
+    local function pushRespawnUntilAlive()
+        local up = false
+        -- Ловим и настоящий респавн тоже: если сервер выдаст нового персонажа — это успех.
+        local conn = LocalPlayer.CharacterAdded:Connect(function() up = true end)
+        _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
+        local t0, via = os.clock(), ""
+        -- 3с вместо 10: подъём через state-машину мгновенный, ждать дольше нет смысла.
+        while not up and os.clock() - t0 < 3 do
+            local _, v = tryRespawnOnce()
+            if v ~= "" then via = v end
+            if isUpAgain() then up = true; break end
+            task.wait(0.15)             -- бьём часто: игра может переставить Ragdoll обратно
+        end
+        if conn then conn:Disconnect() end
+        _respawnDiag = (via == "" and "no path: no Humanoid to revive"
+            or ("via " .. via .. (up and " -> up" or " -> tried, still down")))
+        return up
+    end
+
+    -- Единая точка входа. Возвращает true, если попытка реально начата.
     local function requestRespawn()
         if _respawnBusy then return false end
-        -- [V118] Достаточно ЛЮБОГО пути: живого _doRespawn игры или ремоута SpawnRequest.
-        -- Раньше здесь проверялся только ремоут, и при его отсутствии мы выходили молча.
-        if not hasRespawnRemote() and not findSpawnService() then
-            _respawnDiag = "no respawn path: SpawnRequest remote and _doRespawn both not found"
+        -- [V119] Больше НЕ убиваем себя и не требуем ремоута: основной путь — движковый
+        -- подъём Humanoid'а, для него нужен только сам Humanoid. Прежние гейты (canKillSelf,
+        -- hasRespawnRemote) молча блокировали работу, хотя к подъёму отношения не имеют.
+        local c = LocalPlayer.Character
+        if not (c and c:FindFirstChildOfClass("Humanoid")) then
+            _respawnDiag = "no Humanoid in Character"
             return false
         end
-        -- Если я жив, умереть нечем кроме Player.Kill — без него смысла начинать нет.
-        if not isTrulyDead() and not canKillSelf() then return false end
         _respawnBusy = true
         task.spawn(function()
-            if not isTrulyDead() then
-                killSelf()
-                -- [V117] Ждём смерть КОРОТКО и не требуем атрибута "Dead": ждём того, что
-                -- видно клиенту — HP<=0 либо исчезновение Humanoid. Атрибут может не прийти
-                -- вовсе (его ставит только сервер и только в своём обработчике), а раньше
-                -- мы из-за него зависали на все 5 секунд и уходили ни с чем.
-                local t0 = os.clock()
-                while os.clock() - t0 < 1 do
-                    local c = LocalPlayer.Character
-                    local hum = c and c:FindFirstChildOfClass("Humanoid")
-                    if isTrulyDead() or not hum or hum.Health <= 0 then break end
-                    PostStep:Wait()
-                end
-            end
             pushRespawnUntilAlive()
             _respawnBusy = false
         end)
@@ -2108,7 +2168,7 @@ return function(Lib, Core)
             Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
         sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default (12)" })
 
-        -- ────────��────── Section 4: Combat exploits (Right) ��──────────────
+        -- ─���──────��────── Section 4: Combat exploits (Right) ��──────────────
         local sCbt = MV:Section({ Side = "Right" })
         sCbt:Header({ Name = "No Delay" })
         feature(sCbt, {
@@ -2273,10 +2333,12 @@ return function(Lib, Core)
         sResp:Button({
             Name = "Respawn Now",
             Callback = function()
-                -- [V118] RespawnRE в игре НЕ СУЩЕСТВУЕТ (проверено по дампу: 0 совпадений),
-                -- поэтому проверяем реальные пути — ремоут SpawnRequest или живой _doRespawn.
-                if not hasRespawnRemote() and not findSpawnService() then
-                    notify("Respawn", "no respawn path: SpawnRequest / _doRespawn not found"); return
+                -- [V119] Единственное реальное требование — наличие Humanoid'а: подъём делает
+                -- движковая state-машина, а не механика игры. Проверки ремоутов убраны, они
+                -- лишь молча блокировали кнопку.
+                local _c = LocalPlayer.Character
+                if not (_c and _c:FindFirstChildOfClass("Humanoid")) then
+                    notify("Respawn", "no Humanoid in Character"); return
                 end
                 -- [V116] Жив → нужен Player.Kill, иначе умереть нечем и врать «отправлено»
                 -- нельзя. destroySelf удалён, поэтому обходного пути без него больше нет.
@@ -2305,12 +2367,13 @@ return function(Lib, Core)
         sResp:Button({
             Name = "Respawn Diag",
             Callback = function()
-                local paths = {}
-                if findSpawnService() then paths[#paths + 1] = "_doRespawn" end
-                if getSpawnRemote() then paths[#paths + 1] = "SpawnRequest" end
-                if canKillSelf() then paths[#paths + 1] = "Player.Kill" end
-                if findRespawnSignal() then paths[#paths + 1] = "respawn-signal" end
-                notify("Respawn Diag", "found: " .. (#paths > 0 and table.concat(paths, ", ") or "NOTHING")
+                -- [V119] Показываем то, что важно для подъёма: состояние Humanoid'а.
+                local c = LocalPlayer.Character
+                local hum = c and c:FindFirstChildOfClass("Humanoid")
+                local st = hum and tostring(hum:GetState()):gsub("^Enum.HumanoidStateType%.", "") or "no humanoid"
+                notify("Respawn Diag", "state: " .. st
+                    .. " | PlatformStand: " .. tostring(hum and hum.PlatformStand)
+                    .. " | Downed: " .. tostring(c and c:GetAttribute("Downed"))
                     .. " | last: " .. tostring(_respawnDiag))
             end,
         })
