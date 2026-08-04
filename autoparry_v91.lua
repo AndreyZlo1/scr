@@ -26,7 +26,7 @@ local Config = {
 	-- понять, воспроизведён баг до или после правки, и я сам на этом ошибся — принял свежий
 	-- лог за старый. Держим версию в Config и подставляем в диаг, чтобы расхождение было
 	-- невозможно физически.
-	Version       = "V142",
+	Version       = "V143",
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
 
@@ -282,7 +282,7 @@ local Config = {
 	LiveM1SpeedFloor  = 0.45,   -- пол скорости для M1 выше (короткий трек → агрессивнее гасим шум)
 
 	-- [V66] ЭКСТРЕННЫЙ ДОДЖ дв����х угроз. ��сли 2-й ко��такт прилетает раньше, чем мы
-	-- физическ������ успеваем развернуться к нему + перевзвести перфект, блок 2-г��
+	-- физическ�������� успеваем развернуться к нему + перевзвести перфект, блок 2-г��
 	-- нев��змо��ен → доджим оба ���разу (iframes покрывают обоих). Порог = реальное
 	-- время разв��рота (по угловой скорости) + запас на перевзвод.
 	EmergencyDualDodge = true,
@@ -305,7 +305,7 @@ local Config = {
 	-- именно они и ломали: counter ждал момента contact−lead и часто отменялся гейтами, из-за чего
 	-- M2 не летел, а guard уже был сброшен → скрипт «стоял и ничего не делал» и мазал парри.
 	BoxingCounter     = false,
-	BoxingCounterReach= 5.5,   -- макс. плоская дистанция до атакующего, студы (��З юзера)
+	BoxingCounterReach= 5.5,   -- макс. плоская дистанция до атакующего, ��туды (��З юзера)
 	BoxingCounterGap  = 0.30,  -- анти-даблфайр: не слать M2 повторно чаще (сек). НЕ задержка перед 1-м
 	-- ================= [V91] ALI COUNTER =================
 	-- Работает по тому же принципу, что боксёрская контра: CombatConfig.Styles.ali.M2GrantsIFrames
@@ -356,7 +356,7 @@ local Config = {
 	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физичес��и ничего ����е даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
 	SA_BlatantDodge   = false,
-	SA_BlatantWindow  = 0.32,   -- сек до контакта: в этом окне ����а��атывает форс-додж
+	SA_BlatantWindow  = 0.32,   -- сек до контакта: в эт��м окне ����а��атывает форс-додж
 
 	-- [V97] AutoPlay addon — автоатака. По умолчанию ВЫКЛ (агрессивное поведение).
 	AutoPlay          = false,  -- мастер-тумблер аддона
@@ -570,7 +570,7 @@ local Config = {
 	-- кап (7 студ) на ВЕСЬ вектор vel*lead → большая РАДИАЛЬНАЯ скорость дэша съе��ала весь бюджет
 	-- → БОКОВАЯ коррекция (та, что задаёт угол facing) обрезалась пропорционально → лицо отставало
 	-- (в логе face=0.2/-0.6 BACK! при валидном press → сервер даунгрейдит перфект в обычный блок).
-	-- Фикс: раскладываем vel на радиаль (враг↔я, почти не влияет на угол) и боковую (задаёт угол),
+	-- Фикс: раскладываем vel на радиаль (враг↔я, почти не влияет на угол) �� боковую (задаёт угол),
 	-- капим РАЗДЕЛЬНО. Боковой лимит щедрый (угол важен), радиальный маленький (анти-��ерелёт в упор).
 	FaceLatMaxStuds = 18,        -- кап БОКОВОГО lead (перпендикуляр линии врагу) — главный для угла
 	FaceRadMaxStuds = 5,         -- кап РАДИА��ЬНОГО lead (вдоль линии) — на угол не влияет, режем сильнее
@@ -739,7 +739,7 @@ local State = {
 	dodgeCount   = 0,
 	grantEscapes = 0,
 	selfBusyUntil= 0,
-	attackBusyUntil = 0,   -- [V117] busy ТОЛЬКО из-за наше�� АТАКИ (не из-за дэша) — для exposed-escape
+	attackBusyUntil = 0,   -- [V117] busy ТОЛЬКО из-за наше�� АТАКИ (не из-за дэша) — ��ля exposed-escape
 	kicksBlocked   = 0,
 	reportsBlocked = 0,
 	acMuted        = 0,
@@ -888,7 +888,7 @@ end
 
 -- [V93] Единый неймспейс-таблица для ВСЕГО нового состояния (пинг-пик + ground-truth хитбоксы).
 -- ВАЖНО: модуль целиком — одна гигантская функция, а в Luau лимит 200 жи��ых локалов на функцию.
--- Оригинал был впритык к лимиту, поэтому каждое новое состояние держим полями ОДНОЙ таблицы
+-- Оригинал был впритык к лимиту, поэтому каждое новое состояние держим п��лями ОДНОЙ таблицы
 -- (=1 локал), а не десятком отдельных local — иначе CompileError "Out of local registers".
 local V93 = {
 	-- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Кольцо сырых сэмплов RTT; getPing() = медиана окна.
@@ -960,7 +960,7 @@ local V93 = {
 	dodgeChar = nil,
 }
 
--- [V116] РОБАСТНЫЙ МЕДИАННЫЙ ПИНГ. Прежний EMA+peak-hold ЛАТЧИЛ спай�� (в логе header ping=224
+-- [V116] РОБАСТНЫЙ ��ЕДИАННЫЙ ПИНГ. Прежний EMA+peak-hold ЛАТЧИЛ спай�� (в логе header ping=224
 -- при combat-ping=158) → uplink раздувался → жали СЛИШКОМ РАНО. Медиана окна последних сырых
 -- сэмплов игнорирует одиночные выбросы В ОБЕ СТОРОНЫ (Data Ping пилит вверх и вниз) и отслеживает
 -- устойчивый RTT: один спайк-кадр среди 24 сэмплов НЕ сдвигает медиану, а реально выросший пинг
@@ -1904,7 +1904,7 @@ local function indexAllAnims()
 							-- угрозы → ни блока, ни доджа, ни interrupt (юзер: «скрипт даже не атакует»).
 							-- Теперь любая не-защитная / не-реакционная / не-idle анимка боевого стиля = SKILL.
 							-- Ловится по keyframe-таймлайну (hitTimelineBase). Ложняков нет: реакции/блок/
-							-- idle/walk/dash уже исключены, а папка гарантированно боевая (есть M1/M2).
+							-- idle/walk/dash уже исключены, а папка гарантир��ванно боевая (есть M1/M2).
 							-- Список keyword'ов больше не нужен — покрываем ВСЕ текущие и ��удущие спец-удары.
 							if not kind and isStyleFolder then kind = "SKILL" end
 						end
@@ -2158,7 +2158,7 @@ end
 -- замаха, а распознавание идёт вплоть до контакта (0.28–0.68с), когда LinearVelocity уже удалён
 -- Debris'ом → predA откатывался назад и угроза отваливалась в predicted-miss.
 -- Кэш по "style|kind|combo": это КОНСТАНТЫ конфига, TTL не нужен.
--- ВАЖНО ПРО ОБЛАСТЬ ВИДИМОСТИ: hitboxGeom объявлен ВЫШЕ этой строки, поэтому обычный
+-- ВАЖНО ПРО ОБЛАСТЬ ВИДИМОСТИ: hitboxGeom объявлен ВЫШ�� этой строки, поэтому обычный
 -- `local function` он лексически не увидит (ссылка ушла бы в глобал=nil и валила бы весь
 -- schedulerStep каждый кадр). Объявляем ГЛОБАЛОМ — ровно так же, как уже сделано для
 -- styleForward выше, и на месте вызова страхуемся паттерном `f and f(...)`.
@@ -2713,7 +2713,7 @@ end
 -- Это ОТДЕЛЬНАЯ от обычной контры механика: сразу после УКЛОНЕНИЯ Ali может пустить M2, минуя
 -- её 7-секундный кулдаун, и достаёт на 22 студа (против ~5.5 у обычной контры). Собственный
 -- кулдаун механики — 6с. Вариант фиксирован игрой как "Left", поэтому рулить направлением тут
--- НЕ нужно (и не нужно портить траекторию дэша).
+-- НЕ н��жно (и не нужно портить траекторию дэша).
 -- Условие запуска: наш додж ПОДТВЕРЖДЁН сервером (tx.confirmed по атрибуту IFRAMES) — только
 -- тогда игра считает, что уклонение состоялось. Внутри i-frame окна мы неуязвимы, так что это
 -- полностью бе��платный выстрел.
@@ -2832,7 +2832,12 @@ local function counterPreemptsDodge(now)
 	-- Эта проверка ОБЯЗАНА идти до counterCandidate, потому что тот вернёт nil из-за M2Cooldown.
 	if now < (State.counterIFramesUntil or 0) then
 		State.counterPreemptFrame, State.counterPreemptVal = FrameId, true
-		State.counterCoverSkips = (State.counterCoverSkips or 0) + 1
+		-- [V143] Счётчик считал КАЖДЫЙ КАДР удержания, поэтому показывал 121 при 17 доджах —
+		-- бессмысленное число. Теперь это одна отметка на одну контру.
+		if State.counterCoverTag ~= State.counterIFramesUntil then
+			State.counterCoverTag = State.counterIFramesUntil
+			State.counterCoverSkips = (State.counterCoverSkips or 0) + 1
+		end
 		if now >= (State.lastPreemptLogAt or 0) + 0.5 then
 			State.lastPreemptLogAt = now
 			diagPush(("COUNTER-COVER t=%.2f  dodge skipped, our counter i-frames live for %.0fms more")
@@ -3435,7 +3440,7 @@ function State.ap.interruptible(th)
 end
 
 -- Контрудар запускает тот же AutoPlay M1 lifecycle (rotation+animation+ServerCheck), но
--- НЕ заменяет parry: scheduler продолжает обычную защиту как страховку до контакта.
+-- НЕ за��еняет parry: scheduler продолжает обычную защиту как страховку до контакта.
 function State.ap.tryInterrupt(now, th, threatCount)
 	local ap = State.ap
 	if not Config.AutoPlay or Config.AP_Interrupt == false then return false end
@@ -3965,7 +3970,7 @@ local function onAttack(attackerHRP, info, model, id, track)
 		local prev = sig[name]
 		if prev and (nowc - prev) < (Config.AntiDecoyGap or 0.12) then
 			cnt[name] = (cnt[name] or 1) + 1
-			-- Жёсткий предохранитель от флуд-спама: со 4-го свинга в окне это уже гарантированно
+			-- Жёсткий предохранитель от флуд-с��ама: со 4-го свинга в окне это уже гарантированно
 			-- машинный поток, дальше плодить угрозы бессмысленно (и дорого по кадру).
 			if cnt[name] > (Config.AntiDecoyMaxBurst or 3) then
 				if (nowc - (State.lastAntiDecoyLog or 0)) > 1 then
@@ -4088,6 +4093,36 @@ local function onAttack(attackerHRP, info, model, id, track)
 		serverProofClock = nil,
 	}
 	if th.serverProven then th.serverProofClock = nowClock end
+	-- ═══ [V143] КОРЕНЬ «не различает атаки при фейках» ═══
+	-- Один AnimationTrack имеет ОДНУ TimePosition, поэтому физически не может представлять два
+	-- одновременных свинга. Но угрозы складывались в список без всякой проверки, а каждая из них
+	-- держит ссылку на ЭТОТ ЖЕ объект трека и каждый кадр пересчитывает контакт от живого tp
+	-- (`th.contactAbs = now + remaining`). Как только враг переигрывает тот же трек, ВСЕ старые
+	-- записи, привязанные к нему, пересчитываются от новой TimePosition и съезжаются в одну точку.
+	-- Ровно это в диаге:
+	--   TRACE-GEOM ClawPixelatedZero M1 first=+941ms dt=+185ms   ← запись возрастом 941мс
+	--   TRACE-PROOF ClawPixelatedZero M1 HOLD unproven | dt=+185ms  ×4  (один и тот же свинг!)
+	--   CLUSTER n=5 spread=0ms contacts=[+185,+185]ms
+	--   DODGE multi-cover(n=5) [GRANT] → DODGE-CONFIRM covered=0
+	-- То есть один свинг размножался в пять «одновременных» дедлайнов, кластер верил, что летит
+	-- залп, и жёг Evasive-грант впустую. Отсюда и «видит фейк, но доджит его»: press-гейт держал
+	-- эти записи как unproven, а додж-путь их же считал за пять реальных атак.
+	-- Правильная модель: атакующий + трек = ОДИН живой свинг. Трек перезапустился → прежняя
+	-- запись описывает уже закончившийся свинг, её тайминги мусор, она снимается.
+	if track then
+		for i = #Threats, 1, -1 do
+			local old = Threats[i]
+			if old.name == name and old.track == track and not old.resolved and not old.staleTrack then
+				old.staleTrack = true
+				if Config.DeepDiag then
+					diagPush(("TRACE-STALE t=%.3f %s %s superseded: same track restarted (age=%.0fms, was dt=%+.0fms)")
+						:format(nowClock, name, tostring(old.kind),
+							(nowClock - old.detectClock) * 1000,
+							(old.contactAbs - nowClock) * 1000))
+				end
+			end
+		end
+	end
 	Threats[#Threats+1] = th
 
 	-- [V113] Трекинг КАДЕНСА свингов по атакующему (для boxing combo-guard). Запоминаем интервал
@@ -4471,7 +4506,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local noTrackExpired = (not th.track)
 				and (now - th.detectClock) > ((th.contact0 or 0) + 0.35)
 
-			if th.resolved or (th.group and th.group.cancelled) then
+			-- [V143] staleTrack снимается МОЛЧА, как resolved: свинг, который эта запись описывала,
+			-- закончился (её трек уже переигран под новый удар). Считать её промахом нельзя —
+			-- это накручивало бы фиктивные MISS и портило статистику точности.
+			if th.resolved or th.staleTrack or (th.group and th.group.cancelled) then
 				table.remove(Threats, i)
 			elseif th.feinted then
 				if not th.feintLogged then
@@ -4722,7 +4760,11 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					end
 					if take then faceTgt = th end
 				end
-				if dt <= Config.DodgeHorizon and dt >= -Config.HoldAfter then
+				-- [V143] Устаревшая запись (её трек уже переигран) не должна попадать в imminent:
+				-- imminent питает cluster, а именно там дубликаты одного свинга превращались в
+				-- «залп из пяти» и вызывали лишний додж. Снятие произойдёт кадром позже, поэтому
+				-- фильтруем здесь, а не полагаемся на порядок циклов.
+				if dt <= Config.DodgeHorizon and dt >= -Config.HoldAfter and not th.staleTrack then
 					imminent[#imminent+1] = th
 				end
 			end
@@ -4835,10 +4877,28 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local firstDt = clusterFirst.contactAbs - now
 			local iframeLo = ifLat
 			local iframeHi = ifLat + ifDur
+			-- [V143] Считаем РАЗЛИЧНЫЕ дедлайны, а не записи. Страховка на случай, если дубликаты
+			-- одного свинга появятся другим путём, чем общий трек: два РАЗНЫХ удара одного врага
+			-- физически не могут прийти в одну миллисекунду. Настоящий multi-hit (boxing M2 s1+s2)
+			-- разнесён на сотни мс (в диаге contacts=[600,1050]ms) и полностью проходит этот фильтр,
+			-- а дубликаты в диаге шли со spread=0..6ms. Порог 30мс их разделяет без новых настроек.
 			local covered = 0
 			for _, th in ipairs(cluster) do
 				local dtc = th.contactAbs - now
-				if dtc >= iframeLo and dtc <= iframeHi then covered = covered + 1 end
+				if dtc >= iframeLo and dtc <= iframeHi then
+					local dup = false
+					for _, other in ipairs(cluster) do
+						if other == th then break end
+						local odtc = other.contactAbs - now
+						if other.attackerModel == th.attackerModel
+						   and odtc >= iframeLo and odtc <= iframeHi
+						   and math.abs(odtc - dtc) <= 0.03 then
+							dup = true
+							break
+						end
+					end
+					if not dup then covered = covered + 1 end
+				end
 			end
 			if firstDt >= iframeLo and covered >= 2 then
 				if performDodge(now, ("multi-cover(n=%d span=%.0fms)"):format(covered, clusterSpread * 1000)) then
@@ -5075,7 +5135,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		local dtc = turnTo.contactAbs - now
 		-- HARD-снап должен успеть ДО разрешения удара: victim-р��порт читает наш facing у контакта,
 		-- а пакет летит к серверу ~пол-RTT. Значит жёстко доворачиваемся заранее — за (окно + RTT)
-		-- до контакта. В мультибое (2+) — всегда hard, чтобы мг��овенно перекидываться ме��ду целями
+		-- до контакта. В мультибое (2+) — всегда hard, чтобы мг��овенно пе��екидываться ме��ду целями
 		-- и не терять кадры на лерп. Иначе (одиночная, далеко) — плавный трекинг.
 		local hardWin = (Config.BlockFaceHardDt or 0.30) + up
 		local hard = (dtc <= hardWin) or (Config.MultiFaceHard and clusterN >= (Config.MultiThreatMinN or 2))
@@ -5389,7 +5449,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	local predErr  = (measured - rec.contact) * 1000
 	State.lastErrMs = predErr
 
-	-- [V116] ЧИСТО ДИАГНОСТИЧЕСКИЙ per-(kind,style) средний predErr — в предикт НЕ подаётся
+	-- [V116] ЧИ��ТО ДИАГНОСТИЧЕСКИЙ per-(kind,style) средний predErr — в предикт НЕ подаётся
 	-- (адаптивная калибрация удалена: отравляла между врагами — обучалась на одном, ломала второго).
 	-- Показываем скользящее среднее ошибки модели только для наблюдения точности в логе.
 	local ksKey = tostring(kind) .. ":" .. tostring(rec.style or "?")
@@ -6085,7 +6145,7 @@ local SelfVerify = { conn = nil, lastLog = {}, decoyId = nil }
 
 -- [V76] ТЕСТ-РЕЖИМ "наоборот": пока ты стоишь в idle, ПОСТОЯННО проигрываем АТАКУ как
 -- decoy (низкий локальный ��ес, тебе почти незаметно). Смысл: на обсер��ере (твоя мобила)
--- должно НЕПРЕРЫВНО показывать ATTACK, хотя ты ничего не жмёшь. Если показывает —
+-- должно НЕПРЕРЫВНО показывать ATTACK, хотя ты н��чего не жмёшь. Если показывает —
 -- значит decoy реально ��ходит в репликацию и хук подмены ра��очий. Тум��лер по клавише.
 local _testAnim, _testTrack, _testId
 local DesyncTest = { on = false }
@@ -6148,7 +6208,7 @@ local function toggleDesyncTest()
 		-- Держим трек доминирующим только пока движок ��ам не перебил его walk'ом. Важно:
 		-- полностью уд����жать чужую картину клиентски НЕЛЬЗ�� — анимация реплицируется
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
-		-- [module FIX] Никогда не обнуляем Movement/Core/Idle/Action треки. Старый V81
+		-- [module FIX] Никогда не обнуляе�� Movement/Core/Idle/Action треки. Старый V81
 		-- делал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно пок��зывал
 		-- Movement/Core weight=0 и locomotion исчезала. Decoy продо��жает реплицироваться
 		-- через свой Play/Stop цикл, не уничтожая реальные анимации персонажа.
@@ -6204,7 +6264,7 @@ local function topPriority()
 end
 -- [V87] IDLEMASK — постоянный спуф на IDLE-анимацию во время атаки. КРИТИЧНО: idle зациклен
 -- (Looped=true), поэтому его НЕ НУЖНО перезапускать чер��з Stop/Play — он крути��ся сам. Именно
--- бывший цикл "Stop(0); Play()" каждые ~длину и ломал ани��ации со временем (постоянные
+-- бывший ци��л "Stop(0); Play()" каждые ~длину и ломал ани��ации со временем (постоянные
 -- рестарты накапливали рассинхрон аниматора). Теперь: играем idle-decoy ОДИН раз, дальше в
 -- Heartbeat лишь мягко переутверждаем приоритет+вес и переиграем ТОЛЬКО если он реально
 -- переста�� играть. Никаких прин��дительных Stop → визуал стабилен неограниченно долго.
@@ -7213,7 +7273,7 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	-- [V139] ПРИОРИТЕТ ЗАЩИТЫ. Если press-дедлайн внутри VizSkipNearPress — кадр целиком
 	-- отдаётся парированию: ESP не рисуется вообще. Это те 1–2 кадра, где точность тайминга
 	-- решает исход, а полная перерисовка стоит больше, чем весь schedulerStep.
-	-- [V140] Пропуск теперь ОГРАНИЧЕН с двух сторон, иначе он превращается в вечную заморозку:
+	-- [V140] Пропуск теперь ОГРАНИЧЕН с двух сторон, иначе он превращается в вечную заморо��ку:
 	--   1) метрика обязана быть СВЕЖЕЙ — nearPress пишется на Heartbeat, а читается здесь, на
 	--      RenderStepped; несвежая (>0.2с) означает, что планировщик до неё не дошёл;
 	--   2) даже при свежей метрике подряд пропускаем не больше VizSkipMaxFrames кадров. Защита
