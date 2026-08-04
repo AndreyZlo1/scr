@@ -894,7 +894,7 @@ return function(Lib, Core)
         local okB, b = pcall(_getUp, _tryM1, _ndBlockIdx)
         if okB and type(b) == "number" and b ~= 0 then pcall(_setUp, _tryM1, _ndBlockIdx, 0) end
     end
-    -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs крутится
+    -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs к��утится
     -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
     -- атрибут = до 8 closure/кадр = лишний GC. Персистентная fn не аллоциру��т ничего.
     -- [V112] Комментарий [V111] выше относился к clearGateAttrs — она удалена (разбор
@@ -1010,7 +1010,7 @@ return function(Lib, Core)
     -- Dodge Everywhere: driveDodge ставит атрибут OutnumberedEvasiveGrant = true, из него
     -- получается u51 (Evasive.lua:529-531). Итог: слайдер стоит на вани*льных 30, а дэш
     -- летит 30 × 1.5 = 45 studs/s и длится на 20% дольше. Никакой «утечки» скорости не
-    -- было — игра штатно применяла бонус «в меньшинстве», про��то мы ��а��и его и включали.
+    -- было — игра штатно применяла бонус «в мен��шинстве», про��то мы ��а��и его и включали.
     -- Решение (выбрано пользователем): при активном Dodge зануляем множитель до 1.0, так
     -- что ��лайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
     --
@@ -1109,7 +1109,7 @@ return function(Lib, Core)
     }
     local EV_DEADLINE_IDXS = { 4, 5, 6, 7, 8 }   -- u6, u5, u4, u7, u8 — метки os.clock
 
-    -- [V112] Персистентная обёртка записи атрибута (использу��тся обходом ��ейтов Dodge).
+    -- [V112] Персистентная обёртка записи атрибута (использу��тся о��ходом ��ейтов Dodge).
     -- Отдельная функция, а не замыкание на месте: обход выполняется на каждый дэш.
     local function _setAttr(inst, key, val) inst:SetAttribute(key, val) end
 
@@ -1344,7 +1344,7 @@ return function(Lib, Core)
             if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, _evCdBase) end
         end
         -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
-        -- выключения тумблера иг��а ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
+        -- выключения тумбле��а иг��а ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
         -- который сервер даёт честно, когда вас реально окружили.
         if _evMultBase and _evMultIdx then
             if cfg and cfg.Evasive then cfg.Evasive.OutnumberedDashSpeedMultiplier = _evMultBase end
@@ -1734,30 +1734,62 @@ return function(Lib, Core)
     -- рантайме и ищем что-либо respawn/spawn/load-подобное на LocalPlayer. Имя сигнала не
     -- выдумываем — берём из списка, который вернул сам executor.
     --
-    -- ПЛЮС ГЛАВНОЕ: ты видел, как враг исчезал и появлялся с полным HP — это штатная
+    -- ПЛЮС ГЛАВНОЕ: ты видел, как враг ис��езал и появлялся с полным HP — это штатная
     -- dorespawn() игры. Её можно вызвать НАПРЯМУЮ: filtergc ищет функцию по upvalue'ам
     -- (environment.md: поле Upvalues), а у dorespawn ремоут RespawnRE лежит именно в
     -- upvalue (respawnstuff:224). Вызов игровой функции надёжнее ручного FireServer:
     -- вместе с ремоутом она возвращает CoreGui, курсор и снимает эффекты смерти (:232-255).
-    local _doRespawnFn, _doRespawnTried = nil, false
-    local function findGameDoRespawn()
-        if _doRespawnTried then return _doRespawnFn end
-        _doRespawnTried = true
+    -- ═══════ [V118] ЧЕСТНО: В V116/V117 Я ОПИРАЛСЯ НА МЁРТВЫЙ КОД ═══════
+    -- Проверил то, что должен был проверить сразу:
+    --     ls dumped/ReplicatedStorage        → 141 ребёнок
+    --     ls dumped/ReplicatedStorage | grep -i respawn → 0 совпадений
+    --     find .v0/gamedump -iname "RespawnRE*"          → 0 совпадений
+    -- Инстанса `RespawnRE` в игре НЕТ. А `respawnstuff_LocalScript.lua:15` делает
+    --     local RespawnRE = ReplicatedStorage:WaitForChild("RespawnRE")
+    -- БЕЗ таймаута — то есть скрипт навсегда висит на этой строке и НИКОГДА не доходит до
+    -- своего кода. Весь respawnstuff (экран "RESTART YOUR HEART", 7 кликов, dorespawn) —
+    -- мёртвый легаси, который не исполняется. Значит вся моя «находка» V116 и поиск
+    -- dorespawn через filtergc в V117 не могли сработать ни при каких условиях:
+    -- getRespawnRemote() всегда nil → фильтр по upvalue всегда nil.
+    --
+    -- ЖИВАЯ система респавна — другая:
+    --     U0/.../SpawnService/SpawnServiceClient_ModuleScript.lua
+    --       :596  ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("SpawnRequest", 60)
+    --       :604  u39._spawnRemote = v40          ← ремоут лежит на самом модуле-синглтоне
+    --       :397  function u1._doRespawn(u27)     ← реальный респавн
+    --       :410  u27._spawnRemote:FireServer()   ← без аргументов (единственный FireServer)
+    -- И ремоут `Remotes/SpawnRequest.RE` в дампе РЕАЛЬНО есть. То есть правильный ремоут я
+    -- всё это время держал лишь в запасной ветке.
+    --
+    -- ПОЧЕМУ ТЕПЕРЬ ЗОВЁМ _doRespawn, А НЕ FireServer НАПРЯМУЮ. В :401 стоит гейт:
+    --     if not _light or not _main or not _spawnRemote or u27._respawnInFlight then return end
+    -- Флаг `_respawnInFlight` ставится в true перед отправкой (:405) и снимается только по
+    -- завершении/аборту (:413-420, таймаут 65 секунд). Если он «залип» — а он залипает, если
+    -- прошлый респавн не довёл дело до конца, — то ЛЮБОЙ следующий респавн молча выходит.
+    -- Это ровно «я просто сдыхаю»: смерть есть, UI смерти есть, а запрос не уходит.
+    -- Поэтому перед вызовом флаг принудительно сбрасываем, а затем зовём штатную функцию:
+    -- она сама и ремоут дёрнет, и UI/эффекты/курсор вернёт (:406-421).
+    --
+    -- Синглтон ищем по КЛЮЧАМ таблицы (environment.md, Table filter options → Keys):
+    -- у модуля есть и `_spawnRemote`, и `_doRespawn` — такая пара уникальна.
+    local _spawnSvc = nil
+    local function findSpawnService()
+        if _spawnSvc and _spawnSvc._doRespawn then return _spawnSvc end
         if type(filtergc) ~= "function" then return nil end
-        local re = getRespawnRemote()
-        if not re then return nil end
-        -- Ищем функции, у которых RespawnRE в upvalue'ах. Кандидатов может быть несколько
-        -- (dorespawn и onclick), поэтому берём список, а не filterOne.
-        local ok, res = pcall(filtergc, "function", { Upvalues = { re }, IgnoreExecutor = true }, false)
-        if not ok or type(res) ~= "table" then return nil end
-        for _, fn in ipairs(res) do
-            -- dorespawn не принимает аргументов и вызывает FireServer сама. Отбираем по
-            -- числу параметров: onclick навешан на MouseButton1Click и тоже без аргументов,
-            -- поэтому дополнительно требуем, чтобы среди upvalue'ов был RespawnRE — это уже
-            -- обеспечено фильтром. Берём первую подходящую и проверяем её при вызове.
-            if type(fn) == "function" then _doRespawnFn = fn; break end
+        local ok, res = pcall(filtergc, "table", { Keys = { "_spawnRemote", "_doRespawn" } }, true)
+        if ok and type(res) == "table" and type(res._doRespawn) == "function" then
+            _spawnSvc = res
         end
-        return _doRespawnFn
+        return _spawnSvc
+    end
+
+    -- Вызов штатного респавна игры. Возвращает true, если функция реально вызвана.
+    local function callGameRespawn()
+        local svc = findSpawnService()
+        if not svc then return false end
+        -- Снимаем залипший флаг: без этого _doRespawn выйдет на :401 и ничего не сделает.
+        pcall(function() svc._respawnInFlight = false end)
+        return (pcall(function() svc:_doRespawn() end))
     end
 
     -- Поиск сигнала возрождения в whitelist'е Roblox (по подсказке пользователя).
@@ -1784,39 +1816,51 @@ return function(Lib, Core)
         return nil
     end
 
-    -- Одна попытка возрождения ВСЕМИ доступными путями. Порядок — от самого «родного»
-    -- к самому грубому, чтобы по возможности отработала штатная логика игры.
+    -- Одна попытка возрождения. Порядок — от самого «родного» к самому грубому.
+    -- [V118] Первым идёт ЖИВОЙ _doRespawn игры (со сбросом залипшего _respawnInFlight),
+    -- вторым — прямой SpawnRequest:FireServer(), третьим — сигнал из whitelist.
+    -- Возвращает вторым значением строку с тем, что реально сработало: без этого мы опять
+    -- гадали бы, какой из путей доступен на твоём клиенте.
     local function tryRespawnOnce()
-        local any = false
-        local fn = findGameDoRespawn()
-        if fn then any = pcall(fn) or any end          -- 1) игровая dorespawn()
-        if fireRespawn() then any = true end            -- 2) RespawnRE:FireServer()
+        local via = {}
+        if callGameRespawn() then via[#via + 1] = "_doRespawn" end
+        if fireRespawn() then via[#via + 1] = "SpawnRequest" end
         local sig = findRespawnSignal()
-        if sig then any = pcall(replicatesignal, sig) or any end  -- 3) сигнал из whitelist
-        return any
+        if sig and pcall(replicatesignal, sig) then via[#via + 1] = "signal" end
+        return #via > 0, table.concat(via, "+")
     end
 
+    -- [V118] Диагностика вместо догадок: сюда пишем, какие пути были доступны и чем всё
+    -- закончилось. Кнопка Respawn это показывает, поэтому в следующий раз мы будем разбирать
+    -- ФАКТ («_doRespawn не найден», «пути есть, но персонаж не пришёл»), а не мои гипотезы.
+    local _respawnDiag = "not attempted yet"
     local function pushRespawnUntilAlive()
         local alive = false
         -- Подписываемся ДО первой отправки, иначе быстрый респавн проскочил бы мимо нас.
         local conn = LocalPlayer.CharacterAdded:Connect(function() alive = true end)
         _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
-        local t0 = os.clock()
+        local t0, via = os.clock(), ""
         while not alive and os.clock() - t0 < 10 do
             -- [V117] БЕЗ гейта по isTrulyDead(): именно он и блокировал отправку.
-            tryRespawnOnce()
-            task.wait(0.4)
+            local _, v = tryRespawnOnce()
+            if v ~= "" then via = v end
+            task.wait(0.5)
         end
         if conn then conn:Disconnect() end
+        _respawnDiag = (via == "" and "no respawn path available (filtergc/_doRespawn + SpawnRequest both missing)"
+            or ("via " .. via .. (alive and " -> respawned" or " -> sent, but no CharacterAdded in 10s")))
         return alive
     end
 
     -- Единая точка входа. Возвращает true, если запрос реально начат.
     local function requestRespawn()
         if _respawnBusy then return false end
-        -- [V116] Было getSpawnRemote() — проверялся не тот ремоут. Теперь достаточно любого
-        -- из двух, а приоритет RespawnRE задан внутри fireRespawn.
-        if not hasRespawnRemote() then return false end
+        -- [V118] Достаточно ЛЮБОГО пути: живого _doRespawn игры или ремоута SpawnRequest.
+        -- Раньше здесь проверялся только ремоут, и при его отсутствии мы выходили молча.
+        if not hasRespawnRemote() and not findSpawnService() then
+            _respawnDiag = "no respawn path: SpawnRequest remote and _doRespawn both not found"
+            return false
+        end
         -- Если я жив, умереть нечем кроме Player.Kill — без него смысла начинать нет.
         if not isTrulyDead() and not canKillSelf() then return false end
         _respawnBusy = true
@@ -2229,9 +2273,10 @@ return function(Lib, Core)
         sResp:Button({
             Name = "Respawn Now",
             Callback = function()
-                -- [V116] Проверяем RespawnRE (главный), а не только SpawnRequest.
-                if not hasRespawnRemote() then
-                    notify("Respawn", "RespawnRE remote not found"); return
+                -- [V118] RespawnRE в игре НЕ СУЩЕСТВУЕТ (проверено по дампу: 0 совпадений),
+                -- поэтому проверяем реальные пути — ремоут SpawnRequest или живой _doRespawn.
+                if not hasRespawnRemote() and not findSpawnService() then
+                    notify("Respawn", "no respawn path: SpawnRequest / _doRespawn not found"); return
                 end
                 -- [V116] Жив → нужен Player.Kill, иначе умереть нечем и врать «отправлено»
                 -- нельзя. destroySelf удалён, поэтому обходного пути без него больше нет.
@@ -2254,7 +2299,22 @@ return function(Lib, Core)
         slider(sResp, { Name = "HP Threshold", Flag = "MV_AutoRespawnHP",
             Default = Config.AutoRespawn_HP, Min = 0, Max = 99, Suffix = "%",
             Callback = function(v) Config.AutoRespawn_HP = v end })
-        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} fires RespawnRE directly, skips the 7 heart clicks" })
+        -- [V118] Кнопка диагностики: показывает, какие пути респавна реально нашлись на твоём
+        -- клиенте и чем закончилась последняя попытка. Нужна, чтобы в следующий раз разбирать
+        -- факт, а не мои предположения.
+        sResp:Button({
+            Name = "Respawn Diag",
+            Callback = function()
+                local paths = {}
+                if findSpawnService() then paths[#paths + 1] = "_doRespawn" end
+                if getSpawnRemote() then paths[#paths + 1] = "SpawnRequest" end
+                if canKillSelf() then paths[#paths + 1] = "Player.Kill" end
+                if findRespawnSignal() then paths[#paths + 1] = "respawn-signal" end
+                notify("Respawn Diag", "found: " .. (#paths > 0 and table.concat(paths, ", ") or "NOTHING")
+                    .. " | last: " .. tostring(_respawnDiag))
+            end,
+        })
+        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} calls the game's own _doRespawn, unsticks _respawnInFlight" })
 
         uiReady = true
     end
