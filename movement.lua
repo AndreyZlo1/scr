@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════���������══════════════════
+    -- ══════════════════════════ Move-vector math ═════════�����������══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -704,7 +704,7 @@ return function(Lib, Core)
     end
 
     -- ═════════════════════════���═�����═══════════════════════════════════════════════
-    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо ����ук�� task.delay
+    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо �����ук�� task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
     -- (M1_ModuleScript.lua + CombatConfig). Прежний подход фильтровал задержки по их
@@ -790,7 +790,7 @@ return function(Lib, Core)
             _ndStat.calls, _ndStat.restart, _ndStat.rsSkip)
     end
 
-    -- [V112] Р��золвер M1 → tryM1 → индексы гейтов. Выполняется ОДИН раз (ленивая карта).
+    -- [V112] ����золвер M1 → tryM1 → индексы гейтов. Выполняется ОДИН раз (ленивая карта).
     local _tryM1 = nil
     -- [V132] Ссылка на сам модуль M1: хук ставим на v1.OnM1Activated, а НЕ на tryM1.
     -- Причина — разбор в _ndInstallComboHook: хук на tryM1 уничтожал карту его upvalue'ов.
@@ -964,7 +964,7 @@ return function(Lib, Core)
     --    хука индексы 4/5/6 попадают в НАШИ upvalue'ы:
     --        idx 4 → cidx    (число 9)  → `g ~= true` → _setUp(4, true) ПОРТИТ cidx,
     --                                     а игровой u21 не открывается вовсе;
-    --        idx 5 → _setUp  (function) → `type(p)=="number"` ложно, пропуск;
+    --        idx 5 → _setUp  (function) ��� `type(p)=="number"` ложно, пропуск;
     --        idx 6 → _ndOrigTryM1 (fn)  → ложно, пропуск.
     --    Хронология: в кадре N (_tryM1 ещё чистый) гейты открывались честно, в конце того же
     --    кадра driveNoDelay вызывал _ndInstallComboHook() → хук встал. Со кадра N+1 и до
@@ -978,7 +978,7 @@ return function(Lib, Core)
     --     end;
     -- Тело — ОДИН синхронный вызов tryM1, без единого yield между нашим кодом и чтением
     -- u19 на :460-461. То есть окно «сервер не успеет вклиниться» (весь смысл V131)
-    -- сохраняется полностью, а объект tryM1 остаётся ЧИСТЫМ — его карта upvalue'ов
+    -- сохраняется полностью, а ��бъект tryM1 остаётся ЧИСТЫМ — его карта upvalue'ов
     -- (u21=4, u32=5, u33=6, u19=9) продолжает работать и для зажима, и для driveNoDelay.
     --
     -- ПОЧЕМУ ЗАПИСЬ ДО��ОДИТ ДО ИГРЫ. В дампе (M1.lua:318) u19/u21/u32/u33 помечены `(ref)` —
@@ -1040,7 +1040,7 @@ return function(Lib, Core)
     -- подтвердить вывод на живой игре (calls > 0 и последовательность p55 = 1,2,3,4),
     -- прежде чем удалять механику. Поведение игры этот хук не меняет: аргументы и
     -- возвращаемое значение передаются в оригинал без изменений.
-    -- ═══════════════════════════════════════════════════════════════════════════════
+    -- ══════��════════════════════════════════════════════════════════════════════════
     -- [V149] Рестарт серии M1: Hold("Stop") + Hold("Start") после 3-го серверного удара.
     -- ═══════════════════════════════════════════════════════════════════════════════
     -- Лимиты берём из ИГРОВОЙ таблицы Shared.Network.CombatRemoteLimits, а не выдумываем.
@@ -1284,7 +1284,7 @@ return function(Lib, Core)
     --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
     --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
     -- V112 закрывал только путь (1), поэтому путь (2) ������родол����ал д��рж����ть комбо. Симптом
-    -- «после последнего удара долгая задержка» описывал ровно это.
+    -- «после последнего удара долгая задержка» описывал ровно эт��.
     --
     -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМ��Я. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
     --   Blocking            — снятие сломало бы собственный блок;
@@ -1309,8 +1309,107 @@ return function(Lib, Core)
 
     -- Стоимость кадра: три чтения upvalue; запись — только если значение реально другое.
     local _ndNextTry = 0
+    -- ═══════════════════════════════════════════════════════════════════════════════
+    -- [V151] ПОДМЕНА 4-й АНИМАЦИИ АТАКИ НА 1-ю (запрос пользователя)
+    -- ═══════════════════════════════════════════════════════════════════════════════
+    -- Почему это РАБОТАЕТ, в отличие от всего, что я пробовал в V147-V150: здесь мы не спорим
+    -- с сервером о номере удара и не шлём ни одного remote. Анимация — чисто клиентская, её
+    -- выбирает playM1SwingAnimation (M1.lua:255-259):
+    --     local v44 = getM1Animations();      -- {1stM1, 2ndM1, 3rdM1, 4thM1}
+    --     local u45 = v44 and v44[p41] or nil -- p41 = номер удара от сервера
+    --     AnimationHandler.LoadAnim(u40, "M1", u45, nil, false, p42)
+    -- Список берётся из папки стиля (GetCombatAnimsFolderForPlayer), а LoadAnim читает
+    -- `p44.AnimationId` В МОМЕНТ ВЫЗОВА и им же ключует кэш треков
+    -- (AnimationHandler:338-356: `u52 = p44.AnimationId`, затем `u1.Anims[char]["M1"][u52]`).
+    -- Значит достаточно записать в объект 4thM1 идентификатор 1stM1 — и на 4-м ударе сервера
+    -- клиент проиграет первую анимацию. Ровно ваша аналогия со стаминой: серверное значение
+    -- (номер удара) не трогаем, а клиентской механике сообщаем нужное.
+    --
+    -- Правим ИМЕННО AnimationId, а не таблицу-кэш u2 внутри модуля, по двум причинам:
+    --   1) u2 лежит в upvalue getM1Animations, до которой можно дойти только через мёртвую
+    --      tryM1 (debug-цепочка), а это лишняя хрупкость;
+    --   2) кэш u2 пересобирается при смене стиля, а объекты анимаций в папке — те же самые,
+    --      поэтому патч на инстансе переживает пересборку кэша.
+    -- Изменение чисто локальное (свойство инстанса на клиенте на сервер не репликуется) и
+    -- полностью обратимое: исходный AnimationId сохраняем и возвращаем при выключении.
+    local _animPatch = nil   -- { anim4 = Animation, origId = "rbxassetid://…", style = "boxing" }
+    local _animNextTry = 0
+
+    -- Папка анимаций текущего стиля игрока. Тем же путём, что и сама игра.
+    local function _animFolder()
+        local cau = tryRequire({ "Shared", "Utils", "CombatAnimationUtils" })
+        if not cau or not cau.GetCombatAnimsFolderForPlayer then return nil, nil end
+        local folder, style
+        pcall(function()
+            folder = cau.GetCombatAnimsFolderForPlayer(LocalPlayer)
+            if cau.GetPlayerCombatStyle then
+                style = string.lower(tostring(cau.GetPlayerCombatStyle(LocalPlayer)))
+            end
+        end)
+        return folder, style
+    end
+
+    -- Вернуть 4thM1 исходный идентификатор. Вызывается при выключении тумблера и при смене
+    -- стиля (иначе патч «залип» бы на папке прежнего стиля).
+    local function _animRestore()
+        local p = _animPatch
+        if not p then return end
+        _animPatch = nil
+        pcall(function()
+            if p.anim4 and p.anim4.Parent and p.anim4.AnimationId ~= p.origId then
+                p.anim4.AnimationId = p.origId
+            end
+        end)
+        _ndSay(nil, "4thM1 возвращён исходный AnimationId (%s)", tostring(p.origId))
+    end
+
+    local function _animApply()
+        -- Патч уже стоит и стиль не менялся — выходим сразу (вызывается каждый Heartbeat).
+        if _animPatch and _animPatch.anim4 and _animPatch.anim4.Parent then
+            local _, style = _animFolder()
+            if style == _animPatch.style then return end
+            -- Стиль сменился: снимаем прежний патч и ставим заново на новую папку.
+            _animRestore()
+        end
+        -- Бэкофф: папка может быть ещё не готова (респавн, смена стиля). Без него
+        -- GetCombatAnimsFolderForPlayer + WaitForChild дёргались бы каждый кадр — это ровно
+        -- тот источник лагов, из-за которого в V112 сносили прежние хуки.
+        local nowc = os.clock()
+        if nowc < _animNextTry then return end
+        _animNextTry = nowc + 1.0
+
+        local folder, style = _animFolder()
+        if not folder then return end
+        -- FindFirstChild, а НЕ WaitForChild: последний в Heartbeat-цикле подвесил бы кадр.
+        local a1 = folder:FindFirstChild("1stM1")
+        local a4 = folder:FindFirstChild("4thM1")
+        if not a1 or not a4 then return end
+        local id1 = a1.AnimationId
+        if type(id1) ~= "string" or id1 == "" then return end
+        if a4.AnimationId == id1 then
+            -- Уже совпадают. Запоминаем как патч без origId-перезаписи, чтобы _animRestore
+            -- не записал сюда мусор.
+            _animPatch = _animPatch or { anim4 = a4, origId = id1, style = style }
+            return
+        end
+        local orig = a4.AnimationId
+        local ok = pcall(function() a4.AnimationId = id1 end)
+        if not ok then
+            _ndSay("animfail", "подмена 4thM1 FAIL: запись AnimationId запрещена")
+            return
+        end
+        _animPatch = { anim4 = a4, origId = orig, style = style }
+        _ndSay(nil, "4thM1 -> 1stM1 (стиль %s): 4-й удар теперь играет первую анимацию. "
+            .. "было %s, стало %s", tostring(style), tostring(orig), tostring(id1))
+    end
+
     local function driveNoDelay()
-        if not Config.NoDelay_On then return end
+        if not Config.NoDelay_On then
+            -- Тумблер выключили — снимаем патч анимации, если он стоял.
+            if _animPatch then _animRestore() end
+            return
+        end
+        _animApply()
         -- [V113] Чистим атрибуты ПЕРВЫМ делом: они серверные и не зависят от того, удалось ли
         -- разрешить upvalue'ы M1. Ниже стоит ранний return по неудачному резолву — если
         -- вызывать очистку после него, серверный кулдаун не снималс�� бы вообще, пока модуль
@@ -1674,7 +1773,7 @@ return function(Lib, Core)
                 end
             end
             -- Дедлайны больше НЕ «все прочие числ��»: берём заранее известные индексы. Прежний
-            -- код мог случайно записать в список сам Cooldown или множитель.
+            -- код мог случайно записать в спис��к сам Cooldown или множитель.
             for _, idx in ipairs(EV_DEADLINE_IDXS) do
                 _evDeadlineIdxs[#_evDeadlineIdxs + 1] = idx
             end
@@ -1905,7 +2004,7 @@ return function(Lib, Core)
     -- self == _myChar) платится на всём этом трафике, а сам пер��ход C→Lua на каждый
     -- namecall не бесплатен. Хук ставился НАВСЕГДА (_combatHookDone) и не снимался даже
     -- когда обе фичи выключены, то есть налог шёл всю сессию. Ровно это и даёт
-    -- «накапливающиеся лаги» и падения: чем дольше сессия и чем больше объектов, тем
+    -- «накапливающиеся лаги» и падения: чем дольше се��сия и чем больше объектов, тем
     -- больше namecall-трафика через наш обработчик.
     -- Ниже — два ТОЧЕЧНЫХ решения, каждое стоит ноль на холостом ходу.
 
@@ -2284,14 +2383,29 @@ return function(Lib, Core)
                             if ok then break end
                             task.wait(0.4)
                         end
-                        notify("No Delay", ok and "ON (M1 cooldowns cleared)"
+                        -- [V151] Подмена 4thM1 -> 1stM1 не зависит от debug-резолва tryM1:
+                        -- она правит AnimationId инстанса. Ставим её сразу, а не ждём installNoDelay,
+                        -- иначе при недоступном debug.getupvalue тумблер не давал бы вообще ничего.
+                        _animApply()
+                        notify("No Delay", (_animPatch and "ON (4-й удар играет 1-ю анимацию)")
+                            or (ok and "ON (M1 cooldowns cleared)")
                             or "нужен debug.getupvalue / модуль M1 не найден")
                     end)
                 else
+                    -- [V151] ОБЯЗАТЕЛЬНО снимаем патч здесь: driveNoDelay при выключенном
+                    -- тумблере не вызывается вообще (проверка на :2090), поэтому ветка
+                    -- восстановления внутри него до выключения не доживает.
+                    _animRestore()
                     notify("No Delay", "Disabled")
                 end
             end,
-            Desc = "clears M1 cooldowns (0.45/1.25/1.55s) via tryM1 upvalues\nplus the server gate attributes, parry FX stays intact\nskips the slow 4th hit: combo runs 1-2-3, never the finisher",
+            -- [V151] Описание переписано под реальность. Прежний текст обещал «clears M1
+            -- cooldowns» и «skips the slow 4th hit» — ни того, ни другого не происходит:
+            -- гейты u21/u32/u33 лежат в мёртвой tryM1 (разбор V148), а номер удара присылает
+            -- сервер. Единственное, что реально делает тумблер, — клиентская подмена анимации.
+            Desc = "4-й удар комбо играет анимацию 1-го удара (клиентская подмена AnimationId)\n"
+                .. "темп ударов задаёт сервер и НЕ меняется — это только анимация\n"
+                .. "обратимо: выключение возвращает 4thM1 исходный ID",
         })
         sCbt:SubLabel({ Text = "Combo 1-2-3 only \u{00b7} 4th hit costs 1.25s (finisher) vs 0.45s" })
 
