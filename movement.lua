@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════�������══════════════════
+    -- ══════════════════════════ Move-vector math ═════════��������══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -704,7 +704,7 @@ return function(Lib, Core)
     end
 
     -- ═════════════════════════���═�����═══════════════════════════════════════════════
-    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хук�� task.delay
+    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо ��ук�� task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
     -- (M1_ModuleScript.lua + CombatConfig). Прежний подход фильтровал задержки по их
@@ -757,7 +757,12 @@ return function(Lib, Core)
     -- Печатаем только ПЕРЕХОДЫ состояния (резолв, установка хука, первая запись каждого
     -- гейта) и раз в 3с сводку счётчиков. Тумблера намеренно нет: постоянного спама тут
     -- физически не может быть, а лишняя настройка — признак ненайденной причины.
-    local _ndStat = { gate = 0, parry = 0, block = 0, combo = 0, calls = 0 }
+    -- [V148] swap — счётчик подмен p55 3→4. Выведен в сводку stat, чтобы «подмена идёт» и
+    -- «свинги идут» различались по логу без догадок: calls>0 и swap=0 означало бы, что
+    -- сервер третьих ударов вообще не присылает.
+    -- [V148] Поле combo удалено вместе с зажимом u19: клиентский зажим комбо был возможен
+    -- только внутри мёртвой tryM1, счётчик больше никто не увеличивает.
+    local _ndStat = { gate = 0, parry = 0, block = 0, calls = 0, swap = 0 }
     local _ndSaid = {}
     local function _ndSay(key, fmt, ...)
         -- key ~= nil → сообщение печатается ровно один раз за сессию (переход состояния).
@@ -772,8 +777,11 @@ return function(Lib, Core)
         local nowc = os.clock()
         if nowc < _ndNextDump then return end
         _ndNextDump = nowc + 3.0
-        _ndSay(nil, "stat calls=%d gateW=%d parryW=%d blockW=%d comboClamp=%d",
-            _ndStat.calls, _ndStat.gate, _ndStat.parry, _ndStat.block, _ndStat.combo)
+        -- [V148] calls теперь считает вызовы ЖИВОЙ OnHoldSwing (раньше — мёртвой
+        -- OnM1Activated, отсюда вечный calls=0 в логе V147). gateW/parryW/blockW оставлены
+        -- как есть, но помните: это записи в мёртвые u21/u32/u33, их рост ничего не значит.
+        _ndSay(nil, "stat swings=%d swap34=%d gateW=%d parryW=%d blockW=%d",
+            _ndStat.calls, _ndStat.swap, _ndStat.gate, _ndStat.parry, _ndStat.block)
     end
 
     -- [V112] Резолвер M1 → tryM1 → индексы гейтов. Выполняется ОДИН раз (ленивая карта).
@@ -886,7 +894,7 @@ return function(Lib, Core)
         -- никогда не активировать зажим.
         --
         -- ИТОГ: берём индекс из дампа (9 = gate+5), но ПРОВЕРЯЕМ только то, что там ЧИСЛО в
-        -- диапазоне 0..4 — единственное, что действительно гарантировано формулой `% 4 + 1`.
+        -- диапазоне 0..4 — единственное, ��то действительно гарантировано формулой `% 4 + 1`.
         local ci = _ndGateIdx + 5
         local okC, c19 = pcall(_getUp, fn, ci)
         if okC and type(c19) == "number" and c19 % 1 == 0 and c19 >= 0 and c19 <= 4 then
@@ -967,62 +975,159 @@ return function(Lib, Core)
     -- сохраняется полностью, а объект tryM1 остаётся ЧИСТЫМ — его карта upvalue'ов
     -- (u21=4, u32=5, u33=6, u19=9) продолжает работать и для зажима, и для driveNoDelay.
     --
-    -- ПОЧЕМУ ЗАПИСЬ ДОХОДИТ ДО ИГРЫ. В дампе (M1.lua:318) u19/u21/u32/u33 помечены `(ref)` —
-    -- это захваченные по ссылке ячейки. debug.setupvalue на чистом tryM1 пишет в ту самую
+    -- ПОЧЕМУ ЗАПИСЬ ДО��ОДИТ ДО ИГРЫ. В дампе (M1.lua:318) u19/u21/u32/u33 помечены `(ref)` —
+    -- это захваченные по ссылке ячейки. debug.setupvalue на чистом tryM1 пиш��т в ту самую
     -- ячейку, которую читает игра. Это и подтверждается практикой: гейты РАБОТАЛИ, но
     -- ровно один кадр — до момента, когда собственный хук их обесточил.
     --
     -- hookfunction мутирует сам объект функции, поэтому хук виден всем, кто держит ссылку
     -- на v1.OnM1Activated (в т.ч. если вызывающий закешировал её в локальную).
-    local _ndHookTried, _ndHookOk, _ndOrigOnM1 = false, false, nil
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- [V148] tryM1 — МЁРТВЫЙ КОД. ВЕСЬ NoDelay С V112 ПИСАЛ В НИКУДА.
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- Диаг V147 дал однозначную улику: `calls=0` во ВСЕХ строках stat за всю сессию, при
+    -- том что `hook OnM1Activated OK` напечатано, а `gateW` дорос до 36 и шли `combo reset`.
+    -- То есть удары были, а наш хук не вызвался ни разу. Проверка по дампу закрывает вопрос:
+    --
+    --   1) tryM1 упоминается в M1_ModuleScript РОВНО ТРИ РАЗА (grep):
+    --        :321  local function tryM1()          -- определение
+    --        :495  -- upvalues: tryM1 (copy)       -- комментарий
+    --        :496  tryM1();                        -- ЕДИНСТВЕННЫЙ вызов, внутри OnM1Activated
+    --   2) строка "OnM1Activated" НЕ ВСТРЕЧАЕТСЯ ни одним диспатчем во всём дампе. Полный
+    --      список Func-имён для модуля M1 (grep по '"M1"', сортировка по частоте):
+    --        Hold/Start (16), Hold/Stop (48), HoldActivated (4), HoldDeactivated (4),
+    --        OnHoldSwing (2), ServerResponse (2), ServerCheck (2), Hit, Blocked,
+    --        GuardBroken, PerfectBlocked, UltraInstinctDodge
+    --      Вызов идёт только через callClientFunction(p18,p19,p20,...) → v21[p20](...)
+    --      (CombatInputReplication:123-131), а p20 == "OnM1Activated" не бывает никогда.
+    --
+    --   ⇒ OnM1Activated не вызывается → tryM1 НЕ ИСПОЛНЯЕТСЯ НИКОГДА.
+    --
+    -- Следствие, объясняющее репорт «NoDelay не работает» на всех версиях V112…V147:
+    -- гейт u21 читается РОВНО в одном месте — `if not u21 then` на M1.lua:350, внутри
+    -- tryM1. u32/u33 (кулдауны парри/блока) и чтение u19 на :460-461 — тоже только там.
+    -- Значит наши 36 записей `u21 = true` были технически успешны и при этом полностью
+    -- бесполезны: читателя у этой ячейки нет. Диаг `gateW=36` показывал не работу, а
+    -- ровно это — мы писали в переменную, которую больше никто не смотрит.
+    --
+    -- ЖИВОЙ ПУТЬ M1 (дамп M1.lua:517-545 + :499-516) — серверный, а не клиентский:
+    --   клик → callClientFunction("Combat","M1","Hold","Start") → v1.Hold("Start"):
+    --       u23 = true; u24 = u24 + 1; Character:SetAttribute("M1Hold", true)
+    --       CombatRemoteClient.Fire("M1", "HoldActivated")      ← и ВСЁ, свинга тут нет
+    --   далее СЕРВЕР сам решает темп и присылает обратно v1.OnHoldSwing(p55, p56):
+    --       local v57 = math.clamp(p55, 1, 4)
+    --       u19 = v57                       ← НОМЕР УДАРА КОМБО ЗАДАЁТ СЕРВЕР
+    --       ApplyM1StepForward(style, Character, v57)
+    --       scheduleM1SwingTimers(v57, p56) ← он и гасит u21 (мёртвый) + ставит resetCombo
+    --
+    -- Отсюда сразу два честных вывода, которые надо зафиксировать, а не обходить:
+    --   • ЗАДЕРЖКИ МЕЖДУ УДАРАМИ НА КЛИЕНТЕ НЕТ. Тайминг свингов целиком серверный, гейта
+    --     для открытия не существует. Клиентский NoDelay для M1 невозможен в принципе.
+    --   • «СДЕЛАТЬ 4-Ю АТАКУ ТРЕТЬЕЙ» КЛИЕНТОМ НЕВОЗМОЖНО: номер удара приходит в p55 от
+    --     сервера. Подмена p55 на 4 изменила бы только ApplyM1StepForward и таймер сброса,
+    --     потому что анимацию на hold-пути клиент вообще не запускает (в OnHoldSwing нет ни
+    --     playM1SwingAnimation, ни AnimationHandler) — сервер бы всё равно исполнил свой 3-й
+    --     удар. Получилась бы косметическая ложь + рассинхрон u27[u25] с серверным счётом.
+    --
+    -- Ниже — ТОЛЬКО телеметрия, без единой записи в игру: хук на реальную OnHoldSwing,
+    -- который считает вызовы и печатает присланный сервером номер удара. Он нужен, чтобы
+    -- подтвердить вывод на живой игре (calls > 0 и последовательность p55 = 1,2,3,4),
+    -- прежде чем удалять механику. Поведение игры этот хук не меняет: аргументы и
+    -- возвращаемое значение передаются в оригинал без изменений.
+    local _ndHookTried, _ndHookOk, _ndOrigSwing = false, false, nil
     local function _ndInstallComboHook()
         -- [V132] БЫЛО `if _ndHooked ...`, где _ndHooked = «успех». При неудаче hookfunction
         -- флаг оставался false, а вызов идёт КАЖДЫЙ Heartbeat (см. driveNoDelay) → хуки
         -- наслаивались друг на друга бесконечно: hook→hook→hook, глубина стека росла на
         -- каждый M1. Теперь флаг попытки отделён от флага успеха: пробуем РОВНО раз.
         if _ndHookTried then return end
-        if not _ndComboIdx then return end
         local m1 = _ndM1Mod
-        if not m1 or type(m1.OnM1Activated) ~= "function" then return end
+        -- [V148] Цель хука сменилась с мёртвой OnM1Activated на живую OnHoldSwing.
+        if not m1 or type(m1.OnHoldSwing) ~= "function" then return end
         if type(hookfunction) ~= "function" then
-            _ndSay("nohook", "hookfunction отсутствует → пропуск 4-го удара недоступен")
+            _ndSay("nohook", "hookfunction отсутствует → телеметрия свингов недоступна")
             _ndHookTried = true
             return
         end
         _ndHookTried = true
-        -- ВАЖНО: gate/cidx читаем через `srcFn` = ЧИСТУЮ tryM1, которую мы не хукаем.
-        local srcFn, cidx = _tryM1, _ndComboIdx
         local ok, err = pcall(function()
-            _ndOrigOnM1 = hookfunction(m1.OnM1Activated, function(...)
+            _ndOrigSwing = hookfunction(m1.OnHoldSwing, function(p55, p56, ...)
                 _ndStat.calls = _ndStat.calls + 1
-                -- Зажим ДО того, как tryM1 прочитает u19: игра на :461 сделает
-                -- u19 = 0 % 4 + 1 = 1, то есть комбо всегда стартует с первого удара, а
-                -- p47 == 4 (финишер, FinisherCooldown 1.25с вместо AttackDuration 0.45с
-                -- на :305) не наступает никогда.
-                -- Зажимаем ТОЛЬКО >= 3: при 0/1/2 идёт живая серия 1→2→3, её рвать нельзя.
-                if Config.NoDelay_On then
-                    local okC, c = pcall(_getUp, srcFn, cidx)
-                    if okC and type(c) == "number" and c >= 3 then
-                        if pcall(_setUp, srcFn, cidx, 0) then
-                            _ndStat.combo = _ndStat.combo + 1
-                            _ndSay("clamp1", "combo clamp РАБОТАЕТ (первый раз: u19 %d -> 0)", c)
-                        end
+                -- Печатаем первые четыре свинга: этого хватает, чтобы увидеть, что номер
+                -- удара приходит извне и идёт по серверному циклу. Дальше молчим, иначе лог
+                -- утонет (свинги идут по несколько раз в секунду).
+                if _ndStat.calls <= 4 then
+                    _ndSay("swing" .. tostring(_ndStat.calls),
+                        "OnHoldSwing #%d: сервер прислал номер удара p55=%s, animSpeed p56=%s",
+                        _ndStat.calls, tostring(p55), tostring(p56))
+                end
+                -- ═══════════════════════════════════════════════════════════════════════
+                -- [V148] ПОДМЕНА p55 3→4 ПО ЗАПРОСУ. ЧТО ОНА ДЕЛАЕТ НА САМОМ ДЕЛЕ.
+                -- ═══════════════════════════════════════════════════════════════════════
+                -- Прогон тела OnHoldSwing (M1.lua:499-515) по каждому потребителю v57:
+                --   v57 = clamp(p55,1,4)
+                --   u19 = v57                          ← читатель ТОЛЬКО tryM1 → мёртво
+                --   ApplyM1StepForward(style, ch, v57) ← ЕДИНСТВЕННЫЙ ЖИВОЙ ЭФФЕКТ
+                --   scheduleM1SwingTimers(v57, p56)    ← пишет u21/u22/u20 → u21 мёртв
+                -- Анимации в этой функции нет вообще (ни playM1SwingAnimation, ни
+                -- AnimationHandler), поэтому «сделать 4-ю атаку» подмена не может: сервер
+                -- исполнит свой удар независимо от нашего числа.
+                --
+                -- А живой эффект оказался ОТРИЦАТЕЛЬНЫМ, и это не мнение, а таблица из
+                -- CombatConfig:230-233 —
+                --     M1StepForwardStuds = { [1] = 1.5, [3] = 1.5 }
+                -- ключей [2] и [4] в ней НЕТ. GetStyleM1StepForwardStuds (:675-687) на
+                -- отсутствующем ключе делает `typeof(v43) ~= "number" → return 0`. Значит
+                -- подмена 3→4 превращает шаг вперёд 1.5 студа в 0: третий удар перестаёт
+                -- доводить до цели и начинает промахиваться.
+                -- Второй живой сдвиг — таймер: scheduleM1SwingTimers(:305) при p47 == 4
+                -- берёт FinisherCooldown 1.25с вместо AttackDuration 0.45с, то есть окно
+                -- становится ДЛИННЕЕ (для NoDelay это ровно наоборот от цели).
+                --
+                -- Оставляю переключаемым и громко логируемым: вы просили проверить, поэтому
+                -- решает замер, а не мой вывод. Диаг печатает studs до/после — числа видно
+                -- сразу. Отдельного тумблера не добавлял: работает от Config.NoDelay_On.
+                local a55 = p55
+                if Config.NoDelay_On and a55 == 3 then
+                    a55 = 4
+                    _ndStat.swap = (_ndStat.swap or 0) + 1
+                    if _ndStat.swap <= 3 then
+                        -- Считаем фактические studs обоих вариантов ровно тем же путём, что
+                        -- и игра, чтобы в логе была не теория, а её собственные числа.
+                        -- Переиспользуем уже имеющиеся резолверы (getCombatConfig :694 и
+                        -- tryRequire :677), а не заводим новые: стиль берём тем же вызовом,
+                        -- что и сама OnHoldSwing на :512-513.
+                        local s3, s4 = "?", "?"
+                        pcall(function()
+                            local cfg = getCombatConfig()
+                            local anim = tryRequire({ "Shared", "Utils", "CombatAnimationUtils" })
+                            if cfg and cfg.GetStyleM1StepForwardStuds
+                                and anim and anim.GetPlayerCombatStyle then
+                                local style = string.lower(anim.GetPlayerCombatStyle(LocalPlayer))
+                                s3 = tostring(cfg.GetStyleM1StepForwardStuds(style, 3))
+                                s4 = tostring(cfg.GetStyleM1StepForwardStuds(style, 4))
+                            end
+                        end)
+                        _ndSay("swap" .. tostring(_ndStat.swap),
+                            "p55 3->4 (#%d): шаг вперёд %s -> %s студов, окно 0.45 -> 1.25с. "
+                                .. "Если удары стали промахиваться — виновата эта подмена, выключите NoDelay",
+                            _ndStat.swap, s3, s4)
                     end
                 end
-                return _ndOrigOnM1(...)
+                return _ndOrigSwing(a55, p56, ...)
             end)
         end)
-        _ndHookOk = ok and _ndOrigOnM1 ~= nil
+        _ndHookOk = ok and _ndOrigSwing ~= nil
         if _ndHookOk then
-            _ndSay("hookok", "hook OnM1Activated OK, зажим u19 по idx=%d", cidx)
+            _ndSay("hookok", "hook OnHoldSwing OK (телеметрия + подмена p55 3->4 при NoDelay_On)")
         else
-            _ndSay("hookfail", "hook OnM1Activated FAIL: %s", tostring(err))
+            _ndSay("hookfail", "hook OnHoldSwing FAIL: %s", tostring(err))
         end
     end
 
     -- ═══════════════════════════════════════════════════════════════════════════
     -- [V132] РАССМОТРЕН И ОТВЕРГНУТ: хук scheduleM1SwingTimers с подменой p48
-    -- ═══════════════════════════════════════════════════════════════════════════
+    -- ═════════════════════════════════════════════════════════════���═════════════
     -- Идея выглядела точнее, чем перекрытие гейта каждый кадр: настоящий источник задержки
     -- виден в дампе (M1.lua:295-316) и обе задержки делятся на p48 (скорость анимации), то
     -- есть подмена p48 на 1e4 обнулила бы их «в один приём»:
@@ -1287,7 +1392,7 @@ return function(Lib, Core)
     end
 
     -- [V112] Прежний driveNoDelay вызывал clearGateAttrs() — удалён вместе с ним, см.
-    -- разбор в блоке NO DELAY: тот список атрибутов tryM1 вообще не читает.
+    -- разбор в блоке NO DELAY: тот список атрибутов tryM1 во��бще не читает.
     -- Резолверы боевых модулей ПЕРЕНЕСЕНЫ ВЫШЕ (перед блоком NO DELAY): mapNoDelay
     -- использует tryRequire/hasDebugUpvalues, а в Lua local-функция обязана быть
     -- объявлена ЛЕКСИЧЕСКИ раньше места ��спользования — иначе замыкание захватило бы
@@ -1344,7 +1449,7 @@ return function(Lib, Core)
     --   [27] Cooldown              [4,5,6,7,8] = u6/u5/u4/u7/u8 — дедлайны os.clock
     --
     -- ТРЕТЬЕ: ЗАПИСЬ В CombatConfig БЫЛА БЕСПОЛЕЗНОЙ. Прежний комментарий утверждал, что
-    -- дэш читает «и upvalue, и поле конфига». Это неверно: Evasive.lua:20-24 КОПИРУЕТ
+    -- дэш читает «и upvalue, и поле конфига». Это неверно: Evasive.lua:20-24 КОПИР��ЕТ
     -- значения конфига в локальные переменные ОДИН РАЗ при загрузке модуля, и дальше
     -- CombatConfig.Evasive не читается вообще ни разу. Значит работал только патч
     -- upvalue; запись в конфиг оставлена лишь как безвредная страховка ��а случай, если
@@ -1571,7 +1676,7 @@ return function(Lib, Core)
         -- [V113] ОБЯЗАТЕЛЬНЫЙ СБРОС КЭШЕЙ. driveDodge пишет upvalue'ы только когда значение
         -- «ещё не применено» (_appliedSpeed/_appliedCd/_appliedMult). Но цель патча только
         -- что сменилась с _evFn на _origEvasive: без сброса кэш сказал бы «уже применено»,
-        -- и в новую (реально исполняемую) копию мы бы не записали НИЧЕГО. Это тот же класс
+        -- и в новую (реально исполняемую) копию мы бы не записали НИЧЕГО. Это тот же кл��сс
         -- ошибки, что и сам баг V112 — молчаливый промах мимо объекта.
         if _evHooked then _appliedSpeed, _appliedCd, _appliedMult = nil, nil, nil end
         return _evHooked
@@ -1703,7 +1808,7 @@ return function(Lib, Core)
     -- hookmetamethod(game, "__namecall") ставит наш Lua-обработчик на КАЖДЫЙ вызов метода
     -- ЛЮБОГО объекта во всей игре: каждый :FindFirstChild, :IsA, :GetAttribute, :Connect,
     -- :FireServer — десятки тысяч вызовов в секунду. Даже «дешёвый» путь (сравнение
-    -- self == _myChar) платится на всём этом трафике, а сам переход C→Lua на каждый
+    -- self == _myChar) платится на всём этом трафике, а сам пер��ход C→Lua на каждый
     -- namecall не бесплатен. Хук ставился НАВСЕГДА (_combatHookDone) и не снимался даже
     -- когда обе фичи выключены, то есть налог шёл всю сессию. Ровно это и даёт
     -- «накапливающиеся лаги» и падения: чем дольше сессия и чем больше объектов, тем
@@ -1726,7 +1831,7 @@ return function(Lib, Core)
     -- в разных замыканиях (stepClientRagdollSustain, Init, _bindCharacter) ссылаются на
     -- ОДИН объект, поэтому одного hookfunction достаточно для всех вызывающих. Патч
     -- отдельного upvalue у Init не сработал бы: у stepClientRagdollSustain своя копия.
-    -- Managed-рэгдоллы (Downed / carry / grip / смерть) пропускаем к оригиналу, чтобы не
+    -- Managed-рэгдо��лы (Downed / carry / grip / смерть) пропускаем к оригиналу, чтобы не
     -- сломать переноску и добивание.
     local _ragHooked, _origSustain = false, nil
     local function installAntiRagdollHook()
@@ -1791,7 +1896,7 @@ return function(Lib, Core)
     -- момент вызова, и ни один потребитель не кэширует функцию в local (проверено
     -- поиском по всему дампу). Внутренние вызовы самого модуля тоже идут через `u1.SetBlur`
     -- (ScreenEffects.lua:474) — а `u1` и есть возвращаемая таблица. Значит достаточно
-    -- подменить ПОЛЕ таблицы: работает на любом executor'е, без хуков и без слежки за
+    -- подмен��ть ПОЛЕ таблицы: работает на любом executor'е, без хуков и без слежки за
     -- namecall. require() отдаёт тот же кэшированный объект, что и у игры.
     --
     -- ПОЧЕМУ ФИЛЬТР ПО КЛЮЧУ, А НЕ «ВЫКЛЮЧИТЬ ВСЁ». key — первый аргумент SetBlur, и по
@@ -1825,7 +1930,7 @@ return function(Lib, Core)
     -- Мгновенно убрать блюр, который уже висит на экране в момент включения тумблера.
     -- Зовём штатный ClearBlur(key, 0) — так же, как это делает сама игра при сбросе
     -- (HealthServiceClient.lua:1462-1463, 1493-1494), поэтому состояние слоёв остаётся
-    -- согласованным и игра потом не «вспомнит» старый размер.
+    -- согласованным и игра ��отом не «вспомнит» старый размер.
     local function clearActiveBlur()
         if not _screenFx or type(_screenFx.ClearBlur) ~= "function" then return end
         for key in pairs(BLUR_BLOCK_KEYS) do
@@ -1930,7 +2035,7 @@ return function(Lib, Core)
         -- Warm up the hooks in the background now, so toggling a feature later never
         -- triggers a heap scan on the click (that was the freeze). Inert until a flag flips.
         bootstrapHooks()
-        -- [V112] Первичная привязка событийного счётчика grab-констрейнтов для персонажа,
+        -- [V112] Первичная привязка событийного счётчика grab-констре��нтов для персонажа,
         -- который УЖЕ существует на момент запуска (CharacterAdded для него не сработает).
         bindGrabWatch(LocalPlayer.Character)
     end
