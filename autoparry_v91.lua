@@ -305,7 +305,7 @@ local Config = {
 	-- именно они и ломали: counter ждал момента contact−lead и часто отменялся гейтами, из-за чего
 	-- M2 не летел, а guard уже был сброшен → скрипт «стоял и ничего не делал» и мазал парри.
 	BoxingCounter     = false,
-	BoxingCounterReach= 5.5,   -- макс. плоская ��������истанц��я до ата��ующего, ��туды (��З юзера)
+	BoxingCounterReach= 5.5,   -- макс. плоская ����������истанц��я до ата��ующего, ��туды (��З юзера)
 	BoxingCounterGap  = 0.30,  -- анти-даблфайр: не слать M2 повторно чаще (сек). НЕ задержка перед 1-м
 	-- ================= [V91] ALI COUNTER =================
 	-- Работает по тому же принципу, что боксёрская контра: CombatConfig.Styles.ali.M2GrantsIFrames
@@ -354,7 +354,7 @@ local Config = {
 	SA_HakariWiden    = 0.05,   -- extra front/hold seconds applied to a Hakari M2
 	-- [V91] BLATANT force-dodge.
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
-	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��е��ит, а мы залочены
+	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��е����ит, а мы залочены
 	-- софт-��остоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
 	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим ����� т����м дэш ��и��иче����и ничего ��������е даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
@@ -421,7 +421,7 @@ local Config = {
 	-- (80мс burst / ~4-в-сек). Тумблеров Turbo/Fast больше нет — это база, всегда включено.
 
 	-- [V98] реагировать только когда руки одеты (Equip==true). Иначе сервер всё равно
-	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-платформен��о.
+	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-плат��ормен��о.
 	RequireEquip      = true,
 
 	RestrictZone      = true,
@@ -508,7 +508,7 @@ local Config = {
 	-- [V122] сколько держим жёсткий взгляд на враге ПОСЛЕ выстрела M2-counter (сервер строит
 	-- boxing-M2 хи��бокс по нашему LookVector в момент ServerCheck → надо смотреть точно на врага).
 	BoxingFaceLockDur = 0.55,
-	-- [V155/ALI-ROTATION] Раньше Ali ошибочно использовал boxing hold=0.55с. У Ali другой
+	-- [V155/ALI-ROTATION] Раньше Ali о��ибочно использовал boxing hold=0.55с. У Ali другой
 	-- M2-таймлайн, поэтому его LookVector-lock хранится отдельно и доступен в UI.
 	AliFaceLockDur = 0.75,
 
@@ -1107,7 +1107,7 @@ local function canBlockNow()
 	local cantAny = c:GetAttribute("CantAnything") == true
 	if stunned or cantAny then
 		-- Block.lua штатно разрешает по��торный Block во время локального parried-stun:
-		-- Parried=true обходит Stunned/CantAnything. Прежний гейт требовал ParryBuffered,
+		-- Parried=true обходит Stunned/CantAnything. Прежний гейт требова�� ParryBuffered,
 		-- который скрипт нигде не выставлял, поэтому после запаренного AutoPlay-M1 защита молчала.
 		if c:GetAttribute("ParryWindowDisabled") ~= true
 		   and c:GetAttribute("PerfectBlocking") ~= true
@@ -1501,7 +1501,7 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 			local closeAmt = leadDot                       -- >0 = идёт на нас (по velocity)
 			-- [V102] ИЗМЕРЕННОЕ сближение (студ/с) кадр-к-кадру. AssemblyLinearVelocity у
 			-- бегающего игрока часто занижен/шумит (Humanoid move, CFrame-твины) → predA не
-			-- доводился до нас и geom-бокс мазал по врагу, который вбегает и бьёт «на возврате».
+			-- доводи��ся до нас и geom-бокс мазал по врагу, который вбегает и бьёт «на возврате».
 			-- Берём МАКС velocity- и измеренног�� сближения → бокс честно доводится к контакту.
 			if th.prevPos and th.prevPosT then
 				local dtp = now - th.prevPosT
@@ -1960,7 +1960,7 @@ local function indexAllAnims()
 			for _, styleFolder in ipairs(combat:GetChildren()) do
 				if styleFolder:IsA("Folder") then
 					-- [V109] СТИЛЕВАЯ папка = содержит канонические удары (M2 / 1stM1 / 2ndM1). Так мы
-					-- отличаем боевой ��тиль (Karate/Boxing/Kure/Striker/…) от НЕ-атакующих папок
+					-- отличаем боевой ��тиль (Karate/Boxing/Kure/Striker/…) от НЕ-атак��ющих папок
 					-- Combat (Dodges = дэши, Grappling = грэб-секвенции): и�� авто-классифицировать в
 					-- атаки НЕЛЬЗЯ (ложные срабатывания на дэш/захват). Проверка по составу папки —
 					-- независима от точного имени папки в рантайме.
@@ -2543,7 +2543,7 @@ local function resolveDashAnim(name)
 	return a
 end
 
-local function playDodgeMotion(dirOverride)
+local function playDodgeMotion(dirOverride, speedOverride)
 	if not Config.LegitAnims then return end
 	local hrp = localHRP()
 	if not hrp then return end
@@ -2597,7 +2597,9 @@ local function playDodgeMotion(dirOverride)
 		local att  = Instance.new("Attachment"); att.Name = "EvasiveDashAttachment"; att.Parent = hrp
 		local lv   = Instance.new("LinearVelocity"); lv.Name = "EvasiveDashLinearVelocity"
 		lv.MaxForce = 100000
-		lv.VectorVelocity = dir * Config.DashSpeed
+		-- [V156/ALI-TRAJECTORY] Обычный dodge сохраняет DashSpeed. Ali perfect-dodge может
+		-- передать меньшую скорость, чтобы 6-stud импульс не пронёс близкую цель насквозь.
+		lv.VectorVelocity = dir * math.min(speedOverride or Config.DashSpeed, Config.DashSpeed)
 		lv.Attachment0 = att
 		lv.RelativeTo = Enum.ActuatorRelativeTo.World
 		lv.Parent = hrp
@@ -2653,7 +2655,7 @@ local function sendDeactivate(force)
 	return true
 end
 
-local function sendDodge(dir)
+local function sendDodge(dir, speedOverride)
 	-- Evasive.lua hard-rejects while Character.Blocking is true. `State.blocking=false`
 	-- alone is only local intent; send the real Deactivated before requesting Evasive.
 	if State.guardUp or State.blocking then
@@ -2677,7 +2679,7 @@ local function sendDodge(dir)
 	-- (это отдельный баг D5 из аудита). Сначала нужно свести управление гейтами Evasive в ОДНО
 	-- место, и только потом трогать. Пишу это как открытый вопрос, а не как «сделано».
 	ServerRemote:FireServer({ Type = "Combat", Action = "Evasive", Func = "Evasive" })
-	playDodgeMotion(dir)
+	playDodgeMotion(dir, speedOverride)
 	State.lastDodge  = os.clock()
 	State.dodgeCount = State.dodgeCount + 1
 	State.flashUntil = os.clock() + 0.25
@@ -2839,7 +2841,7 @@ function V93.markOwnM2IFrames(now, tag)
 		end
 	end
 	-- [V152/BOXING-COUNTER] V146 ошибочно превращал расчётное окно в подтверждённую защиту:
-	-- один лишь FireServer ставил counterIFramesUntil на всю длительность M2, даже если сервер
+	-- один лишь FireServer ставил counterIFramesUntil ��а всю длительность M2, даже если сервер
 	-- отклонил запрос. Из-за этого обычный dodge блокировался без живого IFRAMES. Расчёт контакта
 	-- оставляем только для честной ло��альной занятости; неуязвимость подтверждает updateCounterTxn
 	-- по реплицированному атрибуту, а interrupt/M2+IF также прикрывается только фактом IFRAMES.
@@ -3059,7 +3061,9 @@ local function fireBoxingCounter(th, targetDist)
 	local net = math.max(uplink(), 0.02)
 	tx.pending, tx.confirmed, tx.sent = true, false, sentAt
 	tx.ackDeadline = sentAt + net + (V93.lookahead or 0) + 0.08
-	tx.expectedIFramesAt = sentAt + math.max(net * 0.5, 0.02)
+	-- [V156/COUNTER-VIABILITY] Runtime опроверг половину RTT: IFRAMES приходил через ~100мс.
+	-- Используем полное наблюдаемое плечо; тот же срок проверяется ДО отправки в tryBoxingCounter.
+	tx.expectedIFramesAt = sentAt + net + math.max(V93.lookahead or 0, 0) + (1 / 60)
 	tx.threat, tx.source, tx.result = th, cs, "sent"
 	tx.threatId = tostring(th.serverSwingId or (th.group and th.group.serverSwingId)
 		or ((th.name or "?") .. "/" .. (th.kind or "?") .. "/" .. math.floor((th.detectClock or sentAt) * 1000)))
@@ -3085,7 +3089,7 @@ end
 -- её 7-секундный кулдаун, и достаёт на 22 студа (против ~5.5 у обычной контры). Собственный
 -- кулдаун механики — 6с. Вариант фиксирован игрой как "Left", поэтому ��улить направлением тут
 -- НЕ н��жно (и не нужно портить траекторию дэша).
--- [V154/ALI] Прежнее условие `tx.confirmed` было неверным: IFRAMES означает только принятый
+-- [V154/ALI] Прежнее условие `tx.confirmed` было неверным: IFRAMES о��начает только принятый
 -- dodge, а серверный proc perfect-dodge приходит отдельным CombatBroadcastURE событием
 -- StyleEvasiveCounter. Бесплатная M2 теперь запрещена, пока именно этот факт не пометит текущую
 -- транзакцию perfectConfirmed.
@@ -3093,8 +3097,18 @@ local function tryAliEvasiveCounter(now)
 	if not Config.SkillAddon or not Config.AliEvasiveCounter then return false end
 	if (counterStyle() or "") ~= "ali" then return false end
 	local tx = State.dodgeTxn
-	if not (tx and tx.pending and tx.confirmed and tx.perfectConfirmed) then return false end
+	if not (tx and tx.pending and tx.perfectConfirmed) then return false end
 	if tx.evCounterFired then return false end
+	-- [V156/EVCOUNTER-ORDER] StyleEvasiveCounter и IFRAMES реплицируются независимо. Perfect
+	-- уже авторитетно доказан сервером, но sender ждёт второй факт, не исчезая молча.
+	if not tx.confirmed then
+		if not tx.evCounterAwaitIframeLogged then
+			tx.evCounterAwaitIframeLogged = true
+			diagPush(("ALI-EVCOUNTER-WAIT t=%.2f gate=await-iframe perfectAgo=%.0fms")
+				:format(now, (now-(tx.perfectAt or now))*1000))
+		end
+		return false
+	end
 	loadGameModules()
 	local ec
 	if GameData.cfg and GameData.cfg.GetStyleEvasiveCounter then
@@ -3104,18 +3118,30 @@ local function tryAliEvasiveCounter(now)
 	local cd    = (ec and tonumber(ec.Cooldown))  or 6
 	local range = (ec and tonumber(ec.MaxRange))  or 22
 	if (now - (State.lastEvCounter or -99)) < cd then return false end
-	-- окно: пока i-frames реально держатся (иначе это уже обычная M2 и упрётся в кулдаун)
-	if now > (tx.hi or 0) then
+	-- [V156/EVCOUNTER-WINDOW] tx.hi — расчётная граница, а StyleEvasiveCounter — серверный
+	-- факт perfect-dodge. В логе событие пришло на 15мс позже tx.hi, но ещё внутри transaction.
+	-- Поэтому sender живёт до authoritative transaction deadline, не до предсказанного iframe края.
+	if now > (tx.untilAt or 0) then
 		if not tx.evCounterExpiredLogged then
 			tx.evCounterExpiredLogged = true
-			diagPush(("ALI-EVCOUNTER-EXPIRE t=%.2f perfectAgo=%.0fms gate=IFRAMES-ended")
+			diagPush(("ALI-EVCOUNTER-EXPIRE t=%.2f perfectAgo=%.0fms gate=transaction-ended")
 				:format(now, (now-(tx.perfectAt or now))*1000))
 		end
 		return false
 	end
-	local c = localChar(); if not c then return false end
-	if c:GetAttribute("Equip") ~= true then return false end
-	if c:GetAttribute("CombatAttacking") == true or c:GetAttribute("Stunned") == true then return false end
+	local c = localChar()
+	if not c then return false end
+	local stateGate = c:GetAttribute("Equip") ~= true and "not-equipped"
+		or (c:GetAttribute("Stunned") == true and "stunned")
+		or (c:GetAttribute("CombatAttacking") == true and "combat-attacking") or nil
+	if stateGate then
+		if tx.evCounterStateGate ~= stateGate then
+			tx.evCounterStateGate = stateGate
+			diagPush(("ALI-EVCOUNTER-WAIT t=%.2f gate=%s perfectAgo=%.0fms")
+				:format(now, stateGate, (now-(tx.perfectAt or now))*1000))
+		end
+		return false
+	end
 	local myHRP = localHRP(); if not myHRP then return false end
 	local myPos = myHRP.Position
 	local best, bestDist
@@ -3129,7 +3155,14 @@ local function tryAliEvasiveCounter(now)
 			local d = math.sqrt(dx * dx + dz * dz)
 			if d <= range then best, bestDist = bound, d end
 		end
-		if not best then return false end
+		if not best then
+			if not tx.evCounterTargetGateLogged then
+				tx.evCounterTargetGateLogged = true
+				diagPush(("ALI-EVCOUNTER-WAIT t=%.2f gate=bound-target-missing-or-range range=%.0f")
+					:format(now, range))
+			end
+			return false
+		end
 	else
 		for i = 1, #Threats do
 			local th = Threats[i]
@@ -3329,23 +3362,19 @@ local function counterPreemptsDodge(now)
 	local best, bestDist = counterCandidate(now, true)
 	local val, why = best ~= nil, "M2 ready"
 	if best then
-		-- Контра будет доступна не раньше readyAt. Придержать додж имеет смысл только если
-		-- контра успевает СРАБОТАТЬ до контакта — иначе мы просто отменим защиту и пропустим
-		-- удар. Это тот случай, который нельзя решать «наугад»: сравниваем с фактическим
-		-- временем контакта конкретной угрозы.
+		-- [V156/COUNTER-VIABILITY] Preempt и sender обязаны отвечать одинаково. Раньше preempt
+		-- запрещал dodge по одному факту M2-ready, хотя её IFRAMES физически не успевали.
 		local readyAt = State.counterReadyAt(now)
-		if readyAt > now then
-			local contact = best.contactAbs or now
-			-- Запас берём из уже существующего Config.PerfectLead (лид нажатия), а не новым
-			-- тумблером: это тот же смысл «за сколько до контакта действие обязано уйти».
-			if readyAt <= contact - (Config.PerfectLead or 0.05) then
-				why = ("M2 busy %0.fms, успе��т к контакту"):format((readyAt - now) * 1000)
-			else
-				-- Не успеет: додж РАЗРЕШАЕМ. Это и есть исправление — раньше здесь молча
-				-- возвращался false по любой временной причине, и мы получали додж + M2.
-				val = false
-				why = ("M2 busy %0.fms, к контакту НЕ успеет → додж разрешён"):format((readyAt - now) * 1000)
+		local contact = best.contactAbs or now
+		local iframeLead = math.max(uplink(), 0.02) + math.max(V93.lookahead or 0, 0) + (1 / 60)
+		if readyAt + iframeLead <= contact then
+			if readyAt > now then
+				why = ("M2 busy %.0fms, IFRAMES успеют к контакту"):format((readyAt - now) * 1000)
 			end
+		else
+			val = false
+			why = ("M2/IFRAMES need %.0fms, contactIn=%.0fms → dodge разрешён")
+				:format(((readyAt - now) + iframeLead) * 1000, (contact - now) * 1000)
 		end
 	end
 	State.counterPreemptFrame, State.counterPreemptVal = FrameId, val
@@ -3361,6 +3390,20 @@ end
 local function tryBoxingCounter(now)
 	local best, bestDist = counterCandidate(now)
 	if not best then return false end
+	-- [V156/COUNTER-VIABILITY] В V155 M2 отправлялась даже за 15–30мс до server contact,
+	-- хотя runtime показал ~98–100мс до репликации IFRAMES. Такая «контра» снимала guard,
+	-- а fallback возвращал parry уже после deadline. До отправки требуем полный наблюдаемый
+	-- сетевой путь + lookahead + один physics-frame; если он не помещается, M2 вообще не трогаем.
+	local contactIn = (best.contactAbs or now) - now
+	local iframeLead = math.max(uplink(), 0.02) + math.max(V93.lookahead or 0, 0) + (1 / 60)
+	if contactIn <= iframeLead then
+		if not best.counterLateSkipLogged then
+			best.counterLateSkipLogged = true
+			diagPush(("COUNTER-SKIP/PARRY t=%.2f target=%s/%s contactIn=%.0fms need=%.0fms gate=IFRAMES-cannot-precede-contact")
+				:format(now, tostring(best.name), tostring(best.kind), contactIn * 1000, iframeLead * 1000))
+		end
+		return false
+	end
 	-- [V152] fireBoxingCounter пишет COUNTER-SEND. Отдельный старый `COUNTER` удалён: он называл
 	-- отправку успешной контрой до IFRAMES/нейтрализации и делал диагностику ложной.
 	fireBoxingCounter(best, bestDist)
@@ -3769,7 +3812,7 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 			owners.__intent = { owner = "autoplay", char = char, animationId = v53.AnimationId, expires = now + 0.15 }
 		end
 		-- Сначала подтверждаем, что родная M1-анимация реально запустилась. Только после этого
-		-- interrupt опускает guard; при failed play текущая защита остаётся нетронутой.
+		-- interrupt опускает guard; при failed play текущая защи��а остаётся нетронутой.
 		local played = false
 		pcall(function() played = ap.playSwing(char, combo, spd, false) == true end)
 		if not played then
@@ -3942,7 +3985,7 @@ function State.ap.ownM1Delay()
 			local okb, base = pcall(hitTimelineBase, info, nil)
 			if okb and type(base) == "number" then bestBase = base end
 		end
-		-- false = «у этого стиля база не считается»; отличаем от nil (ещё не считали).
+		-- false = «у эт��го стиля база не считается»; отличаем от nil (ещё не считали).
 		hit = bestBase and { id = bestId, base = bestBase } or false
 		vc[style] = hit
 	end
@@ -4024,7 +4067,7 @@ function State.ap.fireM2(model, why, variant)
 end
 
 -- Можно ли физическ�� сбить эту атаку. IFrames/HyperArmor берём из живого CombatConfig,
--- а не из списка стилей: обновления иг��ы автоматически сохранят правильный гейт.
+-- а не из списка стилей: обновлени�� иг��ы автоматически сохранят правильный гейт.
 function State.ap.interruptible(th)
 	if not th or not th.attackerModel or not th.attackerHRP then return false end
 	if th.attackerModel:GetAttribute("IFRAMES") == true
@@ -4156,7 +4199,7 @@ function State.ap.tryInterrupt(now, th, threatCount)
 end
 
 -- послать ЛЕГИТНЫЙ M1 по цели:
--- БЕЗ собственных лок/задержек — и��ровая tryM1 сама разрешит удар как только это ��опустимо
+-- БЕЗ собственных лок/задержек — и��ровая tryM1 сама разрешит удар к��к только это ��опустимо
 -- (AttackDuration/lockout/стан). Наш nextM1At — лишь троттл ПОЛЛА, чтобы не звать tryM1 сотни
 -- раз в кадр; настоящий рейт держит игра. Поэтому добиван��е/перебивание бьёт МГНОВЕННО, как
 -- только сервер снимает лок (напр. 0.15с parry-lockout после нашего парри).
@@ -4344,9 +4387,10 @@ local function dodgeReady()
 	if evasiveGranted() then
 		-- Полный кулдаун предсказания: живой ClientPredict.Evasive.Cooldown, иначе хардкод.
 		local fullCd = GameData.evPredictCooldown or Config.DodgeCooldown
-		-- Пол под грантом = ровно то, что игра пишет в u6 даже при активном гранте.
-		local grantFloor = (GameData.dashDuration or Config.DashDuration or 0.20)
-			+ (GameData.confirmTimeout or 0.18)
+		-- [V156/GRANT-COOLDOWN] Runtime опроверг старый пол 0.38с: запросы через 0.52/0.93с
+		-- сервер не подтвердил. CombatConfig.Evasive.Cooldown=1.5 уже загружен в GameData,
+		-- поэтому используем серверно обоснованный интервал без новой UI-настройки.
+		local grantFloor = GameData.evCooldown or 1.5
 		-- ═══════════════════════════════════════════════════════════════════════════
 		-- [V148] УБРАНА ЗАЛИПАЮЩАЯ ЗАЩЁЛКА V147 — ИМЕННО ОНА УБИЛА ДОДЖ
 		-- ═══════════════════════════════════════════════════════════════════════════
@@ -4381,7 +4425,7 @@ local function dodgeReady()
 		if since < grantFloor then
 			if not State.dodgeGateSaid then
 				State.dodgeGateSaid = true
-				diagPush(("DODGE-GATE  грант активен → пол %.2fс (DashDuration+ConfirmTimeout), прошло %.2fс")
+				diagPush(("DODGE-GATE  грант активен → серверный Evasive.Cooldown %.2fс, прошло %.2fс")
 					:format(grantFloor, since))
 			end
 			return false
@@ -4481,7 +4525,7 @@ local refreshContact = LPH_NO_VIRTUALIZE(function(th)
 		local tp = safeGet(th.track, "TimePosition", th.initTP)
 		if type(tp) ~= "number" then tp = th.initTP end
 
-		-- [V66] изме��яем РЕАЛЬНУЮ скорос��ь прогресса анимации (units анимации в
+		-- [V66] изме��яем РЕАЛЬНУЮ скорос��ь прогресса анимации (units анимац��и в
 		-- секунду ре��льного времени) через EMA. У честной атаки ≈ track.Speed;
 		-- у придержанной падает к ~0. По ней и считаем ��еал��ный контакт.
 		local lastTP    = th.lastTP or th.initTP
@@ -4823,7 +4867,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 	-- (`th.contactAbs = now + remaining`). Как только враг переигрывает т��т же трек, ВСЕ старые
 	-- записи, привязанные к нему, пересчитываются от новой TimePosition и съезжаются в одну точку.
 	-- Р��вно это в диаге:
-	--   TRACE-GEOM ClawPixelatedZero M1 first=+941ms dt=+185ms   ← запись возрастом 941мс
+	--   TRACE-GEOM ClawPixelatedZero M1 first=+941ms dt=+185ms   ← запись возраст��м 941мс
 	--   TRACE-PROOF ClawPixelatedZero M1 HOLD unproven | dt=+185ms  ×4  (один и тот же свинг!)
 	--   CLUSTER n=5 spread=0ms contacts=[+185,+185]ms
 	--   DODGE multi-cover(n=5) [GRANT] → DODGE-CONFIRM covered=0
@@ -5003,22 +5047,42 @@ function State.bestAliForwardDodgeDir(th)
 	local me = localHRP()
 	local aHRP = th and th.attackerHRP
 	if not me or not aHRP or not aHRP.Parent then return nil, "no-target" end
-	local delta = aHRP.Position - me.Position
+
+	-- [V156/ALI-TRAJECTORY] V155 целился в HRP и всегда проходил полные 6 studs. Runtime:
+	-- dist=8 дал perfect, dist=4/6 часто дал только IFRAMES без StyleEvasiveCounter. Целимся
+	-- в центр уже предсказанного server hitbox на contact и ограничиваем физический travel.
+	local origin = th.geomOrigin or aHRP.Position
+	local look = th.geomLook
+	if not look or look.Magnitude < 0.05 then
+		local lv = aHRP.CFrame.LookVector
+		look = Vector3.new(lv.X, 0, lv.Z)
+	end
+	if look.Magnitude < 0.05 then return nil, "no-look" end
+	look = look.Unit
+	local forward = tonumber(th.geomForward) or 0
+	local target = origin + look * forward
+	local delta = target - me.Position
 	local toward = Vector3.new(delta.X, 0, delta.Z)
-	if toward.Magnitude < 0.05 then return nil, "overlap" end
+	local targetDist = toward.Magnitude
+	if targetDist < 0.05 then return nil, "already-in-sweet-spot" end
 	toward = toward.Unit
 	local side = Vector3.new(-toward.Z, 0, toward.X)
 	local allowed = aHRP.Parent
+	local duration = math.max(tonumber(Config.DashDuration) or 0.2, 0.05)
+	local maxTravel = (tonumber(Config.DashSpeed) or 30) * duration
+	local travel = math.min(targetDist, maxTravel)
+	local speed = travel / duration
+	local startDelta = aHRP.Position - me.Position
+	local startDist = Vector3.new(startDelta.X, 0, startDelta.Z).Magnitude
 	local candidates = {
-		{ toward, "forward" },
-		{ (toward * 0.65 + side * 0.75).Unit, "forward-side" },
-		{ (toward * 0.65 - side * 0.75).Unit, "forward-side" },
-		{ side, "side" },
-		{ -side, "side" },
-		{ -toward, "away" },
+		{ toward, "hitbox-center", speed },
+		{ (toward * 0.8 + side * 0.35).Unit, "hitbox-center-side", speed },
+		{ (toward * 0.8 - side * 0.35).Unit, "hitbox-center-side", speed },
 	}
 	for _, candidate in ipairs(candidates) do
-		if dirIsClear(me.Position, candidate[1], allowed) then return candidate[1], candidate[2] end
+		if dirIsClear(me.Position, candidate[1], allowed) then
+			return candidate[1], candidate[2], candidate[3], startDist, targetDist, travel
+		end
 	end
 	return nil, "blocked"
 end
@@ -5070,13 +5134,15 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 		State.dualDodgeCount = (State.dualDodgeCount or 0) + 1
 	end
 	local isAliAbuse = reason == "ali-dodge-abuse"
-	local dir, dirMode
+	local dir, dirMode, dodgeSpeed, startDist, targetDist, travel
 	if isAliAbuse then
-		dir, dirMode = State.bestAliForwardDodgeDir(dodgeTarget)
+		dir, dirMode, dodgeSpeed, startDist, targetDist, travel = State.bestAliForwardDodgeDir(dodgeTarget)
 		if not dir then
 			diagPush(("ALI-DODGE-SKIP t=%.2f gate=trajectory reason=%s"):format(now, tostring(dirMode)))
 			return false
 		end
+		diagPush(("ALI-DODGE-TRAJECTORY t=%.2f mode=%s startDist=%.2f targetDist=%.2f travel=%.2f speed=%.1f")
+			:format(now, tostring(dirMode), startDist or -1, targetDist or -1, travel or -1, dodgeSpeed or -1))
 	else
 		dir = bestDodgeDir(now, preferBack)
 		dirMode = dir and "smart" or "input"
@@ -5090,7 +5156,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 		State.ap.dodgeSteerDir = dir
 		State.ap.dodgeSteerUntil = now + math.max((uplink() * 0.5) + 0.06, 0.12)
 	end
-	sendDodge(dir)
+	sendDodge(dir, dodgeSpeed)
 	local tx = State.dodgeTxn
 	-- [V90] Планируемое окно iframe считаем от РЕАЛЬНОЙ латентности (uplink ≈ RTT), а не от
 	-- Config.DodgeConfirm: последний — ServerConfirmTimeout игры, т.е. таймаут ожидания, а не
@@ -5102,6 +5168,10 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 	local iframeHi = iframeLo + ifDur0
 	tx.pending, tx.confirmed = true, false
 	tx.fire, tx.lo, tx.hi = now, iframeLo, iframeHi
+	-- [V156/DODGE-ACK] Раньше неподтверждённый request держал pending до конца расчётного
+	-- iframe и тем самым выключал block до 0.5с. Если IFRAMES не пришёл за полный сетевой путь
+	-- + lookahead + jitter, сервер dodge не принял: EDF/parry надо вернуть немедленно.
+	tx.ackDeadline = now + ifLat0 + math.max(V93.lookahead or 0, 0) + 0.08
 	tx.untilAt, tx.reason = iframeHi + 0.08, reason
 	-- [V155/ALI] Источник perfect-dodge закреплён за этой транзакцией: последующая M2 не должна
 	-- переехать на случайную ближайшую угрозу, пока исходный серверный swing ещё жив.
@@ -5118,6 +5188,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 	-- Без сброса Ali EvasiveCounter выстрелил бы РОВНО ОДИН раз за сессию (флаг остался бы true
 	-- на все последующие доджи).
 	tx.evCounterFired, tx.evCounterExpiredLogged = false, false
+	tx.evCounterAwaitIframeLogged, tx.evCounterTargetGateLogged, tx.evCounterStateGate = false, false, nil
 	local planned, soonest = 0, nil
 	for _, th in ipairs(Threats) do
 		local c = th.contactAbs
@@ -5169,6 +5240,18 @@ local function updateDodgeTxn(now)
 		diagPush(("DODGE-CONFIRM t=%.2f  %s  covered=%d  window=[+%.0f,+%.0f]ms")
 			:format(now, tostring(tx.reason or "?"), covered,
 				(tx.lo-tx.fire)*1000, (tx.hi-tx.fire)*1000))
+	end
+	-- [V156/DODGE-ACK] Не держим scheduler выключенным до tx.untilAt, если сервер уже не
+	-- подтвердил запрос в физическое ack-окно. Угрозы не были помечены covered до IFRAMES,
+	-- поэтому простое закрытие pending немедленно возвращает их обычному EDF/parry.
+	if not tx.confirmed and now >= (tx.ackDeadline or tx.untilAt) then
+		State.dodgeRejects = (State.dodgeRejects or 0) + 1
+		diagPush(("DODGE-REJECT/EARLY-FALLBACK t=%.2f %s ack=%.0fms IFRAMES not confirmed; EDF/parry restored (подряд=%d)")
+			:format(now, tostring(tx.reason or "?"), (now-(tx.fire or now))*1000, State.dodgeRejects))
+		tx.pending, tx.confirmed, tx.reason = false, false, nil
+		tx.abuseThreat, tx.perfectConfirmed, tx.perfectAt = nil, false, nil
+		State.ap.dodgeSteerDir, State.ap.dodgeSteerUntil = nil, 0
+		return
 	end
 	if now >= tx.untilAt then
 		-- [V155/PERFECT] Подтверждённый Evasive без StyleEvasiveCounter — это НЕ perfect-dodge.
@@ -5258,6 +5341,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- [V152] Обновляем Counter до idle fast-path: FAIL/FALLBACK обязан сработать даже если
 	-- Threats уже опустел/сменился между отправкой M2 и приходом серверного подтверждения.
 	State.updateCounterTxn(now)
+	-- [V156/EVCOUNTER-ORDER] Perfect-dodge может уже пометить исходную угрозу covered и удалить
+	-- её до следующего Heartbeat. Поэтому sender обязан стоять выше TRUE IDLE FAST PATH, а не
+	-- только выше pending-return: иначе #Threats==0 снова делает ALI-EVCOUNTER недостижимым.
+	if State.interruptFiredFrame ~= FrameId and tryAliEvasiveCounter(now) then return end
 	-- [V91/perf] TRUE IDLE FAST PATH. With no threats, no guard up and AutoPlay off there
 	-- is nothing for this step to do, yet it still paid GetServerTimeNow() (a cross-VM
 	-- property fetch) + uplink() ping math on EVERY Heartbeat. We must NOT skip the tail
@@ -5735,8 +5822,11 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		-- heuristic, this includes Boxing M2 s1+s2 and requires BOTH lower+upper bounds.
 		-- It intentionally runs while blocking is available: one confirmed iframe protects a
 		-- genuinely simultaneous burst better than spending BlockCooldown on its first hit.
-		if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
-			-- [V155/BOXING] Даже если оба Boxing-контакта математически помещаются в iframe,
+			if clusterStrategy == "IFRAME_CLUSTER" and Config.EmergencyDualDodge
+				-- [V156/SAFE-FALLBACK] Обычный multi-dodge больше не опускает рабочий guard.
+				-- Неподтверждённый Evasive не должен превращать блокируемый burst в пустую защиту.
+				and not canBlockNow()
+				-- [V155/BOXING] Даже если оба Boxing-контакта математически помещаются в iframe,
 			-- выбранная Ali-политика требует held guard/parry, а не расход Evasive.
 			and not State.clusterHasAliBoxingM2(cluster)
 			and Config.MultiDodgeCover ~= false and dodgeReady() and canDodgeNow()
@@ -5775,6 +5865,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 	end
 
+	-- [V156/EVCOUNTER-ORDER] Бесплатная Ali M2 уже проверена до idle fast-path. Здесь pending
+	-- только защищает принятый dodge от нового Block/Activated, пока завершается транзакция.
 	-- Do not send Block/Activated while an Evasive request is awaiting the game's IFRAMES
 	-- acknowledgement: Evasive.lua itself rejects requests while Blocking, and a new block
 	-- remote can cancel the just-requested dodge. Coverage is resolved by updateDodgeTxn.
@@ -5783,8 +5875,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- [V138] DODGE_M1_PARRY_M2 execution: fire a dodge to cover the incoming M1 with iframes.
 	-- The M2 is left in imminent and will be picked up as wantBlock in the normal parry path
 	-- once the dodge transaction resolves. Mark the M1 as covered so EDF skips it for parry.
-	if clusterStrategy == "DODGE_M1_PARRY_M2" and dodgeReady() and canDodgeNow()
-	   and not counterPreemptsDodge(now) then
+	-- [V156/SAFE-FALLBACK] Если block доступен, не рискуем guard ради неподтверждённого
+	-- Evasive. Split-strategy остаётся только когда dodge действительно единственная защита.
+	if clusterStrategy == "DODGE_M1_PARRY_M2" and not canBlockNow()
+	   and dodgeReady() and canDodgeNow() and not counterPreemptsDodge(now) then
 		local m1th = cluster[1]
 		local m1Dt = m1th.contactAbs - now
 		-- [V92] центрируем так же, как escape-ветки: попадание в дальний край окна означало,
@@ -6079,10 +6173,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- AutoPlay settings. AutoPlay interrupt runs independently via tryInterrupt above.
 	-- Counter REPLACES parry (returns to skip the block section below); it is NOT gated on
 	-- AutoPlay being off — boxing M2 punish is always better than parry when available.
-	-- [V91] ALI EVASIVE COUNTER идёт ПЕРЕД обычной контрой: он бесплатный (IgnoreM2Cooldown) и
-	-- стреляет внутри у��е поднятых i-frames, т.е. н�� тратит ни кулдаун M2, ни защиту. Обычная
-	-- контра после него всё равно упрётся в M2Cooldown, поэтому порядок именно такой.
-	if State.interruptFiredFrame ~= FrameId and tryAliEvasiveCounter(now) then return end
+	-- [V156] Evasive Counter уже обработан до pending-return выше. Здесь остаётся только обычная
+	-- M2-контра; повторный вызов perfect sender после завершения транзакции был недостижим/лишний.
 	if State.interruptFiredFrame ~= FrameId and tryBoxingCounter(now) then return end
 
 	if wantBlock then
@@ -7573,7 +7665,7 @@ task.spawn(function()
 	--      в oldNamecall НЕ вызывая checkcaller вообще — это ~99.9% всех namecall.
 	--   3) Отбор метода шёл цепочкой строковых сравнений (Kick, PostAsync, RequestAsync,
 	--      GetAsync, FireServer). Заменено на один хеш-lookup по WATCHED.
-	-- Семантика сохранена дословно: для методов вне WATCHED прежний код всё равно возвра��ал
+	-- Семантика сохранена дословно: для методов вн�� WATCHED прежний код всё равно возвра��ал
 	-- oldNamecall (шаг `mine and method ~= "FireServer"` либо финальный `method ~= "FireServer"`)
 	-- независимо от checkcaller — так что ранний выход эквивалентен.
 	local NC_WATCHED = {
@@ -7809,7 +7901,7 @@ V93.schedulerPhase = RunService.PreSimulation and "PreSimulation" or "Heartbeat-
 		pcall(sendDeactivate, true)
 	end
 
-	-- [PERF] Pending-очередь �� это housekeeping (сборка протухших записей >3с), НЕ
+	-- [PERF] Pending-очередь �� это housekeeping (сборка протухших записе�� >3с), НЕ
 	-- реактивный путь. Гонять полный обход pairs(Pending) каждый Heartbeat (до 240/с)
 	-- впустую при пустой/мелкой очереди — лишний GC-обход на слабых машинах. Чистим
 	-- раз в ~15 кадров; TTL=3с это с запасом переживает, тайминг пар��рования не зависит
