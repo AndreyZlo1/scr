@@ -26,7 +26,7 @@ local Config = {
 	-- понять, воспроизведён баг до или после правки, и я сам на этом ошибся — принял свежий
 	-- лог за старый. Держим версию в Config и подставляем в диаг, чтобы расхождение было
 	-- невозможно физически.
-	Version       = "V144",
+	Version       = "V150",
 	Enabled       = false,  -- [module] start OFF; user flips the "Enabled" toggle/keybind in the UI
 	Mode          = "Perfect",
 
@@ -305,7 +305,7 @@ local Config = {
 	-- именно они и ломали: counter ждал момента contact−lead и часто отменялся гейтами, из-за чего
 	-- M2 не летел, а guard уже был сброшен → скрипт «стоял и ничего не делал» и мазал парри.
 	BoxingCounter     = false,
-	BoxingCounterReach= 5.5,   -- макс. плоская ����истанц��я до ата��ующего, ��туды (��З юзера)
+	BoxingCounterReach= 5.5,   -- макс. плоская ������истанц��я до ата��ующего, ��туды (��З юзера)
 	BoxingCounterGap  = 0.30,  -- анти-даблфайр: не слать M2 повторно чаще (сек). НЕ задержка перед 1-м
 	-- ================= [V91] ALI COUNTER =================
 	-- Работает по тому же принципу, что боксёрская контра: CombatConfig.Styles.ali.M2GrantsIFrames
@@ -508,10 +508,10 @@ local Config = {
 
 	-- [V62] ГИБРИД мульти��оя: перфектим ближайшего, остальным держим guard
 	-- непрерывно (нулевые дыры = нулевые полные ������иты). holdUntil тянется по
-	-- самому дальнему угрожаю��ему контакту в кла��тере, guard не отпускается
+	-- самому дальнему угрожаю��ему контакту в кла����тере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
-	MultiThreatMinN   = 2,      -- со скольких одноврем��нных угроз ��ключать held-��еж��м
+	MultiThreatMinN   = 2,      -- со скольких одновр��м��нных угроз ��ключать held-��еж��м
 	-- [V73] multi-target knobs
 	BlockCooldown     = 0.50,
 	SequentialSpread  = 0.78,
@@ -732,7 +732,7 @@ local State = {
 	blocking     = false,
 	guardUp      = false,   -- ИСТИННОЕ серверное состояние guard: true когда серверу отправлен
 	                        -- Activated и ещё не отправлен Deactivated. Отдельно от blocking
-	                        -- (внутреннее намерение), чтобы ��арантиров��нно снимать guard даже
+	                        -- (внутреннее намер��ние), чтобы ��арантиров��нно снимать guard даже
 	                        -- если blocking ��брошен в обход releaseBlock (dodge/counter/outcome).
 	holdUntil    = 0,
 	status       = "ARMED",
@@ -755,6 +755,12 @@ local State = {
 	-- [V148] Поле dodgeConfirmedLast удалено: после снятия защёлки его никто не читает, а
 	-- итог транзакции полностью описывается счётчиком dodgeRejects (он же самоочищается).
 	dodgeRejects = 0,
+	-- [V150] Пока os.clock() < swingAnimUntil, guard-анимацию ("Blocking") не поднимаем: она
+	-- перекрывала трек нашего M1-свинга (разбор в playBlockAnim). Ставится в fireM1Custom.
+	-- Это же поле служит оценкой «когда освободится наш перс» для counterReadyAt.
+	swingAnimUntil = 0,
+	-- [V150] Сколько угроз снято как уже нейтрализованные (атакующий в Parried/Stunned).
+	threatNeutralized = 0,
 	-- [V147] Анти-спам диага гейта доджа: печатаем факт блокировки один раз, сбрасываем при
 	-- первом же прохождении гейта. Это не настройка — это защита лога от 60 строк в секунду.
 	dodgeGateSaid = nil,
@@ -859,7 +865,7 @@ end
 -- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса ��грока,
 -- доступен в ЛЮБОМ контексте, не бросает; возвращает one-way в секундах → RTT = ×2). Stats
 -- Data Ping (уже RTT в мс) — как второй источник; берём МАКСИМУМ (перекомпенсация безопаснее
--- недокомпенсации для парри). Если оба недоступны — отдаём последнее валидное значение, а НЕ
+-- недокомпенсации для парри). Если оба недоступны — отдаём последнее валид��ое значение, а НЕ
 -- хардкод 60. Итог: и hot-path, и header видят один настоящий RTT.
 local _lastGoodPing = 0.08
 -- Diagnostic-only source snapshot. Never consumed by scheduler/predictor.
@@ -1508,7 +1514,7 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 			-- а когда враг физически в радиусе, контакт уже неминуем → LATE. Поднял cap до 12. НО
 			-- предикт НЕ должен «проскакивать» за нас (иначе центр бокса уедет за спину) → clamp
 			-- дополнительно по фактической дистанции до нас (останавливаем predA чуть НЕ доходя).
-			-- Ложняков не добавляет: в High всё ещё держат facing-гейт (aimLook·toMe) и реальный
+			-- Ложняков ��е добавляет: в High всё ещё держат facing-гейт (aimLook·toMe) и реальный
 			-- размер парта — вбегающий, но целящийся НЕ в нас, отсекается по facing.
 			local distToMe = Vector3.new(aPos.X - meG.Position.X, 0, aPos.Z - meG.Position.Z).Magnitude
 			local closeCap = math.min(Config.WillHitCloseCap or 12, distToMe * 0.95)
@@ -2123,7 +2129,7 @@ local function hitTimelineBase(info, combo)
 		-- aMult=1.09 → 0.525/1.09 = 482мс, measured=485мс (ошибка 3мс). Раньше брали
 		-- math.max(cfgv, info.hit) БЕЗУСЛОВНО → ��аркер анимации "Hit" (617мс) перебивал конфиг
 		-- и мы жали блок на 130мс позже (predErr=-128ms LATE → HIT). Теперь маркер-страховка
-		-- применяется ТОЛЬКО к мультиhit-стилям (Boxing), где реальный значимый контакт ~749мс
+		-- п��именяется ТОЛЬКО к мультиhit-стилям (Boxing), где реальный значимый контакт ~749мс
 		-- и голый первый удар занижает окно. Одноhitовые (Basic/Capoeira/…) = чистый конфиг.
 		if multi > 1 and info.hit and info.hit > 0 then
 			-- [V74] Boxing M2 multi-hit: the first marker is the start of the hitbox window,
@@ -2418,6 +2424,21 @@ end
 
 local function playBlockAnim()
 	if not Config.LegitAnims then return end
+	-- ═══════ [V150] КОРЕНЬ «анимация атаки рванная в AutoPlay, но целая в Test Swing» ═══════
+	-- Виноват НЕ свинг и не рейт-гард (V140/V141 чинили не то). Виноват ЭТОТ трек.
+	-- Игровая playM1SwingAnimation (M1.lua:264-268) перед запуском свинга гасит ровно четыре
+	-- категории:  "Evasive", "PerfectBlock", "EHit", "Combat"  — категории "Blocking" в этом
+	-- списке НЕТ. А наш блок-трек грузится именно как "Blocking" (:2427). Поэтому он остаётся
+	-- ЖИВЫМ поверх свинга и, будучи Action-приоритетом с бесконечным лупом, забирает вес за
+	-- свой фейд-ин 0.08с (:2432) — свинг успевает показать буквально пару кадров и «сбивается».
+	-- Почему у игры этого бага нет: там атаковать в блоке НЕЛЬЗЯ (canAttack требует
+	-- Blocking ~= true, :3370), так что «Blocking + M1» — состояние, недостижимое штатно. Его
+	-- создаёт наш кастомный билдер, который эти гейты сознательно обходит.
+	-- Почему Test Swing был чистым: угроз нет → guard не поднят → трека "Blocking" не
+	-- существует → перекрывать свинг нечем. Ровно та разница, о которой сказал пользователь.
+	-- Гейт: пока идёт наш свинг, guard-анимацию не поднимаем. Это ТОЛЬКО косметика —
+	-- State.blocking и серверный Activated не трогаются, защита продолжает работать.
+	if os.clock() < (State.swingAnimUntil or 0) then return end
 	local char = localChar()
 	local anim = resolveBlockAnim()
 	if not char or not anim then return end
@@ -2730,7 +2751,7 @@ end
 --       COUNTER t=47414.59 → COUNTER-COVER t=47414.66 «live for 659ms more»
 --       47414.66 + 0.659 = 47415.32 = 47414.59 + 0.73 = 0.43 (hbDelay) + 0.30 (IFrameDuration)
 --   Ровно старая формула V142. Второй случай тот же: 47423.91 + 0.73 → «540ms more» на 47424.10.
---   То есть окно так и осталось 0.73с вместо 1.05 + 0.30 = 1.35с.
+--   То есть окно так и ост��лось 0.73с вместо 1.05 + 0.30 = 1.35с.
 --
 -- ОШИБКА 2 (главная). Я правил ТОЛЬКО fireBoxingCounter, а нашу M2 с i-frames пускает ЕЩЁ ОДИН
 --   путь — interrupt (:3594 `ap.fireM2(th.attackerModel, "interrupt", m2Var)` при
@@ -2834,7 +2855,7 @@ local function fireBoxingCounter(th)
 	-- а тот НАЧИНАЕТСЯ с counterReady() — где стоит проверка атрибута M2Cooldown. То есть ровно
 	-- ПОСЛЕ выстрела контры ответ гейта переворачивался с true на false, и ветки эскейпов тут же
 	-- получали разрешение на додж — хотя i-frames от нашего же M2 в этот момент активны
-	-- (у boxing и ali M2GrantsIFrames=true). Гейт отвечал «могу ли я контрить?», тогда как вопрос
+	-- (у boxing и ali M2GrantsIFrames=true). Гейт отвечал «могу ли я контрить?», тогда как ��опрос
 	-- звучит «прикрыт ли я прямо сейчас?». Запоминаем конец окна неуязвимости контры.
 	-- [V146] Расчёт окна вынесен в markOwnM2IFrames (см. выше): его обязан вызывать КАЖДЫЙ путь,
 	-- который пускает нашу M2 с i-frames, а не только контра.
@@ -2911,8 +2932,57 @@ end
 -- потому что решение «контра или додж» надо принять ДО того, как ветки доджа сожгут Evasive:
 -- у ali и boxing M2GrantsIFrames=true, т.е. своя тяжёлая даёт те же i-frames, что уклонение,
 -- но ещё и наносит урон. Возвращает (угроза, дистанция) либо nil.
-local function counterCandidate(now)
-	if not counterReady() then return nil end
+-- ═══════ [V150] КОРЕНЬ «сначала задоджил, потом M2-контра» ═══════
+-- Порядок в планировщике правильный: все ветки доджа (:5272-5508) стоят ВЫШЕ вызовов
+-- tryAliEvasiveCounter/tryBoxingCounter (:5594-5595) и честно спрашивают counterPreemptsDodge.
+-- Ломался сам ОТВЕТ гейта, потому что counterCandidate начинается с counterReady(), а тот
+-- смешивает два разных класса запретов:
+--   ПОСТОЯННЫЕ  — не тот стиль, нет Equip, M2Cooldown, Greenzone, EHit, мёртв: контры не будет
+--                 вообще, и додж действительно единственный выход;
+--   ВРЕМЕННЫЕ   — CombatAttacking/M1 (наш СВОЙ свинг от AutoPlay!), ParryAttackLockout,
+--                 BlockAttackLockout и анти-даблфайр BoxingCounterGap (0.30с).
+-- Пока висит временный запрет, counterReady=false → гейт разрешает додж → через 1-2 кадра
+-- атрибут гаснет, counterReady=true и tryBoxingCounter бьёт M2. Отсюда ровно та пара
+-- «додж, а потом M2», которую видел пользователь. Причём в AutoPlay это происходит постоянно:
+-- CombatAttacking/M1 на нас висит после каждого своего удара.
+-- Решение: различать классы. Кандидата ищем без временных гейтов, а «успеет ли контра к
+-- контакту» решаем по времени их снятия. Постоянные гейты по-прежнему запрещают preempt.
+local function counterBlockedPermanently()
+	if not Config.SkillAddon then return true end
+	local c = localChar(); if not c then return true end
+	if not counterStyle() then return true end
+	if c:GetAttribute("Equip") ~= true then return true end
+	if c:GetAttribute("M2Cooldown") == true or c:GetAttribute("M2CD") == true then return true end
+	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return true end
+	if c:GetAttribute("Ragdoll") == true or c:GetAttribute("Downed") == true then return true end
+	local hum = c:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return true end
+	local h = getHandler()
+	if h and h.GetAnims then
+		local ehit = false
+		pcall(function() ehit = next(h.GetAnims(c, "EHit")) ~= nil end)
+		if ehit then return true end
+	end
+	return false
+end
+
+-- Когда снимутся ВРЕМЕННЫЕ запреты на контру. Оценка сверху, из уже известных нам величин:
+-- конец собственного свинга (State.swingAnimUntil ставится в fireM1Custom) и анти-даблфайр-гэп.
+local function counterReadyAt(now)
+	local at = now
+	local gapEnd = (State.lastCounter or 0) + (Config.BoxingCounterGap or 0.30)
+	if gapEnd > at then at = gapEnd end
+	local swingEnd = State.swingAnimUntil or 0
+	if swingEnd > at then at = swingEnd end
+	return at
+end
+
+local function counterCandidate(now, ignoreTransient)
+	if ignoreTransient then
+		if counterBlockedPermanently() then return nil end
+	elseif not counterReady() then
+		return nil
+	end
 	local myHRP = localHRP()
 	if not myHRP then return nil end
 	-- [V91] реч контры зависит от стиля: Ali M2 сама доводит на M2StepForwardStuds=2 студа
@@ -3002,13 +3072,35 @@ local function counterPreemptsDodge(now)
 		end
 		return true
 	end
-	local best, bestDist = counterCandidate(now)
-	State.counterPreemptFrame, State.counterPreemptVal = FrameId, best ~= nil
+	-- [V150] Ищем кандидата БЕЗ временных запретов (см. разбор над counterBlockedPermanently).
+	local best, bestDist = counterCandidate(now, true)
+	local val, why = best ~= nil, "M2 ready"
+	if best then
+		-- Контра будет доступна не раньше readyAt. Придержать додж имеет смысл только если
+		-- контра успевает СРАБОТАТЬ до контакта — иначе мы просто отменим защиту и пропустим
+		-- удар. Это тот случай, который нельзя решать «наугад»: сравниваем с фактическим
+		-- временем контакта конкретной угрозы.
+		local readyAt = counterReadyAt(now)
+		if readyAt > now then
+			local contact = best.contactAbs or now
+			-- Запас берём из уже существующего Config.PerfectLead (лид нажатия), а не новым
+			-- тумблером: это тот же смысл «за сколько до контакта действие обязано уйти».
+			if readyAt <= contact - (Config.PerfectLead or 0.05) then
+				why = ("M2 busy %0.fms, успеет к контакту"):format((readyAt - now) * 1000)
+			else
+				-- Не успеет: додж РАЗРЕШАЕМ. Это и есть исправление — раньше здесь молча
+				-- возвращался false по любой временной причине, и мы получали додж + M2.
+				val = false
+				why = ("M2 busy %0.fms, к контакту НЕ успеет → додж разрешён"):format((readyAt - now) * 1000)
+			end
+		end
+	end
+	State.counterPreemptFrame, State.counterPreemptVal = FrameId, val
 	-- лог не чаще 2/сек: гейт опрашивается каждый кадр, иначе зальёт диаг
 	if best and now >= (State.lastPreemptLogAt or 0) + 0.5 then
 		State.lastPreemptLogAt = now
-		diagPush(("COUNTER-PREEMPT t=%.2f  %s  dist=%.1f  (dodge skipped, our M2 grants i-frames)")
-			:format(now, best.name or "?", bestDist or -1))
+		diagPush(("COUNTER-PREEMPT t=%.2f  %s  dist=%.1f  preempt=%s (%s)")
+			:format(now, best.name or "?", bestDist or -1, tostring(val), why))
 	end
 	return State.counterPreemptVal
 end
@@ -3309,17 +3401,50 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		if not v53 then return end
 		local spd = 1
 		pcall(function() spd = ap.getSpeed(char, combo) or 1 end)
+		-- [V150] Длину считаем ДО playSwing: окно защиты трека нужно открыть раньше, чем трек
+		-- запустится, иначе между запуском и установкой окна успевает влезть кадр планировщика
+		-- с playBlockAnim — то есть ровно тот перехлёст, который мы убираем.
+		-- [V150] ЧЕСТНО про источник длины. Прежний код (V141) писал
+		--     len = v53.Length / spd
+		-- и это НИКОГДА не работало: v53 приходит из ap.getAnims(), который повторяет игровой
+		-- getM1Animations (M1.lua:64-69) и возвращает объекты `Animation` (WaitForChild("1stM1")).
+		-- У класса Animation свойства Length нет вообще — есть только у AnimationTrack. Индексация
+		-- падала внутрь pcall, len оставался 0 и молча уходил в фолбэк 0.45. То есть «длина берётся
+		-- из самой анимации», как было написано в комментарии V141, — неправда.
+		-- Берём длительность из ЖИВОГО конфига игры (CombatConfig.ClientPredict.M1.AttackDuration,
+		-- дефолт 0.45 при недоступности) и делим на скорость свинга — это тот же множитель, по
+		-- которому игра растягивает трек в getFinalM1AnimSpeed.
+		local len = 0
+		pcall(function()
+			local cp = GameData.cfg and GameData.cfg.ClientPredict
+			local m1 = cp and cp.M1
+			len = tonumber(m1 and m1.AttackDuration) or 0
+		end)
+		if len <= 0 then len = Config.AP_AnimFallback or 0.45 end
+		len = len / math.max(spd, 0.01)
+		-- [V150] Гасим ЖИВОЙ блок-трек сами: игра категорию "Blocking" не трогает (см. разбор
+		-- в playBlockAnim), а без этого свинг стартует уже под перекрытием. Только косметика:
+		-- State.blocking и серверный статус блока не меняем — это делает ветка dropGuard ниже.
+		State.swingAnimUntil = now + len
+		if AnimLib.tracks.Blocking or (char:GetAttribute("Blocking") == true) then
+			stopBlockAnim()
+		end
 		-- Сначала подтверждаем, что родная M1-анимация реально запустилась. Только после этого
 		-- interrupt опускает guard; при failed play текущая защита остаётся нетронутой.
 		local played = false
 		pcall(function() played = ap.playSwing(char, combo, spd, false) == true end)
-		if not played then return end
+		if not played then
+			-- Свинг не стартовал — окно защиты немедленно закрываем, иначе оно зря глушило бы
+			-- guard-анимацию до конца len при полном отсутствии свинга.
+			State.swingAnimUntil = 0
+			return
+		end
 		-- ═══════ [V141] ПОЧЕМУ ДЁРГАЛОСЬ В AUTOPLAY, НО НЕ В TEST SWING ═══════
 		-- Разница между двумя путями ровно одна: КОЛИЧЕСТВО вызовов.
 		--   testSwing (:3629)  → fireM1Custom(char, nil, combo, true) — ОДИН вызов, трек играет
 		--                        целиком, перезапускать его некому → дёрганья нет.
 		--   AutoPlay (:3594)   → fireM1Custom в цикле, каждый кадр поллинга.
-		-- То есть баг не в самом свинге, а в том, ЧЕРЕЗ КАКОЕ ВРЕМЯ разрешён следующий.
+		-- То есть баг н�� в самом свинге, а в том, ЧЕРЕЗ КАКОЕ ВРЕМЯ разрешён следующий.
 		--
 		-- ВИНОВАТ БЫЛ МОЙ ЖЕ ГАРД V140, а не игра. Он считался так:
 		--     min(len * 0.55, 0.30)  →  min(0.45*0.55, 0.30) = min(0.2475, 0.30) = 0.2475с
@@ -3334,13 +3459,9 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		-- длина берётся из самой анимации и делится на её скорость, то есть источник данных
 		-- тот же, что у игры. Так темп сам приходит к штатному AttackDuration (0.45с), при
 		-- котором анимация успевает доиграть — ровно как при обычных атаках игрока.
-		do
-			local len = 0
-			pcall(function() len = (v53.Length or 0) / math.max(spd, 0.01) end)
-			if len <= 0 then len = Config.AP_AnimFallback or 0.45 end
-			ap.swingAnimAt  = now
-			ap.swingAnimMin = len
-		end
+		-- [V150] len уже посчитан выше (до playSwing), повторный расчёт удалён.
+		ap.swingAnimAt  = now
+		ap.swingAnimMin = len
 		if dropGuard and (State.blocking or char:GetAttribute("Blocking") == true) then
 			State.blocking, State.holdUntil = false, 0
 			stopBlockAnim()
@@ -3446,7 +3567,7 @@ end
 -- Три причины, по которым M2 предпочтительнее при прочих равных (всё из дампа CombatConfig):
 --   1) УРОН: M2.BaseDamage = 8.5 против M1.BaseDamage = 5 (×1.7). Ali Right ещё ×1.25 сверху.
 --   2) I-FRAMES: у стилей с M2GrantsIFrames=true своя тяжёлая ВЫДАЁТ неуязвимость
---      (VictimHitboxServiceClient._isSuppressed глушит скан хитбоксов при IFRAMES). Это меняет
+--      (VictimHitboxServiceClient._isSuppressed глушит скан хитбоксо�� при IFRAMES). Это меняет
 --      саму постановку задачи: с M1 надо ОПЕРЕДИТЬ удар, с такой M2 достаточно успеть ПОДНЯТЬ
 --      i-frames до контакта — проигранная гонка всё равно не наказыв��ется.
 --   3) РЭГДОЛЛ/НОКБЕК: M2 сбивает комбо целиком (DefaultStrongKnockback=25), M1 — один удар.
@@ -3576,7 +3697,7 @@ function State.ap.fireM2(model, why, variant)
 	if State.blocking or (c and c:GetAttribute("Blocking") == true) then
 		State.blocking, State.holdUntil = false, 0
 		stopBlockAnim()
-		pcall(sendDeactivate, true)   -- force: guard обязан опуститься, иначе M2 не пройдёт
+		pcall(sendDeactivate, true)   -- force: guard обязан опуститься, иначе M2 ��е пройдёт
 	end
 	if variant then steerM2Variant(variant) end
 	local ok = pcall(function()
@@ -3934,7 +4055,7 @@ local function dodgeReady()
 		--
 		-- НОВОЕ ПРАВИЛО: пол 0.38с действует всегда, а на полный CD откатываемся только при
 		-- УСТОЙЧИВОМ отказе — двух и более подряд неподтверждённых доджах. State.dodgeRejects
-		-- уже обнуляется при первом же подтверждении (:4676), поэтому счётчик не залипает:
+		-- уже обнуляется при первом же подтверждении (:4676), п��этому счётчик не залипает:
 		-- один промах из-за пинга ничего не стоит, а реальный серверный отказ (серия) — виден.
 		if (State.dodgeRejects or 0) >= 2 and since < fullCd then
 			-- Диаг ровно ОДИН раз на факт блокировки (не каждый кадр): иначе 60 строк/сек.
@@ -4828,7 +4949,40 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			-- [V143] staleTrack снимается МОЛЧА, как resolved: свинг, который эта запись описывала,
 			-- закончился (её трек уже переигран под новый удар). Считать её промахом нельзя —
 			-- это накручивало бы фиктивные MISS и портило статистику точности.
-			if th.resolved or th.staleTrack or (th.group and th.group.cancelled) then
+			-- ═══════ [V150] КОРЕНЬ «удар уже сбит, а скрипт всё равно доджит» ═══════
+			-- У записи угрозы не было НИ ОДНОГО поля про то, что атакующему сорвали замах:
+			-- есть resolved/staleTrack/feinted/dodged/coveredByDodge — и все они про НАС.
+			-- Состояние атакующего не спрашивалось нигде, поэтому сбитый удар оставался живой
+			-- угрозой до истечения по таймингу (dt < -0.35), а додж успевал сжечься впустую.
+			--
+			-- Факт из дампа, а не предположение — Block_ModuleScript.ApplyLocalParriedStun
+			-- (:161-210), которую вызывают M1.lua:674 и M2.lua:1708 при парри:
+			--     Character:SetAttribute("Parried", true)
+			--     Character:SetAttribute("Stunned", true)
+			--     MovementServiceUtils.SetSpeed(humanoid, p23)   -- ParryStunSpeed
+			-- Это АТРИБУТЫ на персонаже атакующего, то есть реплицируемые и читаемые нами — тот
+			-- же приём, что уже применён для IFRAMES в counterPreemptsDodge (V146).
+			-- Держатся: M1 → RecoveryLockout(0.4)*heightMult + 0.1 ≈ 0.5с; M2 → ParryStun.M2 = 1с.
+			-- Пока они висят, свинг физически завершиться не может → угроза мертва.
+			-- Снимаем её МОЛЧА (как resolved): это не промах, удар отработан парированием, и
+			-- записывать его в MISS означало бы врать в статистику точности.
+			local atkNeutralized = false
+			if th.attackerModel and th.attackerModel.Parent then
+				atkNeutralized = th.attackerModel:GetAttribute("Parried") == true
+					or th.attackerModel:GetAttribute("Stunned") == true
+					or th.attackerModel:GetAttribute("Ragdoll") == true
+					or th.attackerModel:GetAttribute("Downed") == true
+					or th.attackerModel:GetAttribute("GuardBroken") == true
+			end
+			if atkNeutralized then
+				if Config.DeepDiag and not th.neutralLogged then
+					th.neutralLogged = true
+					diagPush(("NEUTRALIZED t=%.2f  %s  %s  → угроза снята: атакующий в Parried/Stunned, "
+						.. "свинг завершиться не может (додж не нужен)"):format(now, th.name, th.kind))
+				end
+				State.threatNeutralized = (State.threatNeutralized or 0) + 1
+				table.remove(Threats, i)
+			elseif th.resolved or th.staleTrack or (th.group and th.group.cancelled) then
 				table.remove(Threats, i)
 			elseif th.feinted then
 				if not th.feintLogged then
@@ -4876,7 +5030,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				end
 				-- [V141, ОСТАВЛЕНО] Proof-состояние в каждой MISS-строке. Без него по логу нельзя
 				-- отличить «промах по таймингу» от «гейт сознательно держал нажатие» — именн�� эти
-				-- две пометки и показали, что владелец-тест V140 глушил законные удары.
+				-- две пометки и показали, чт�� владелец-тест V140 глушил законные удары.
 				reason = reason .. (" | proof=%s%s"):format(
 					th.serverProven and ("yes/" .. tostring(th.provenBy or "?")) or "NO",
 					th.pressHeldForProof and " HELD-BY-GATE" or "")
@@ -5197,7 +5351,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			local iframeLo = ifLat
 			local iframeHi = ifLat + ifDur
 			-- [V143] Считаем РАЗЛИЧНЫЕ дедлайны, а не записи. Страховка на случай, если дубликаты
-			-- одного свинга появятся другим путём, чем общий трек: два РАЗНЫХ удара одного врага
+			-- одного свинга появятся др��гим путём, чем общий трек: два РАЗНЫХ удара одного врага
 			-- физически не могут прийти в одну миллисекунду. Настоящий multi-hit (boxing M2 s1+s2)
 			-- разнесён на сотни мс (в диаге contacts=[600,1050]ms) и полностью проходит этот фильтр,
 			-- а дубликаты в диаге шли со spread=0..6ms. Порог 30мс их разделяет без новых настроек.
@@ -5937,7 +6091,7 @@ local function hookAnimator(animator)
 			-- счётчик всё равно сбрасывался в 0 → та же дорогая развёртка запускалась снова через
 			-- 256 вставок, и так по кругу. ��торой наблюдаемый «фриз при сбросе кэша», и он же
 			-- объясняет, почему таблица всё равно продолжала расти.
-			-- Теперь: (1) развёртка по ВРЕМЕНИ (раз в DecoySweepSec) — её стоимость больше не
+			-- Теп��рь: (1) развёртка по ВРЕМЕНИ (раз в DecoySweepSec) — её стоимость больше не
 			-- зависит от плотности боя; (2) если после развёртки таблица всё ещё крупнее
 			-- DecoySeenMax — сносим её целиком. Terse-режим безопасен: единственное следствие —
 			-- одна пропущенная same-id проверка на анимацию, а фильтр по Speed остаётся на месте.
@@ -6533,7 +6687,7 @@ local function toggleDesyncTest()
 		-- снова (иначе обсерв��р показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
 		-- Держим трек доминирующим только пока движок ��ам не перебил его walk'ом. Важно:
-		-- полностью уд����жать чужую картину клиентски НЕЛЬЗ�� — анимация реплицируется
+		-- полностью уд����жать чужую картину клиентски НЕЛЬЗ�� — анимация реплицируе��ся
 		-- встроенным Animator'��м Roblox (в дампе НЕТ remote при :Play), а не нашим remote-хуком.
 		-- [module FIX] Никогда не обнуляе�� Movement/Core/Idle/Action треки. Старый V81
 		-- де��ал AdjustWeight(0.01) каждый Heartbeat, поэтому лог закономерно пок��зывал
@@ -6803,7 +6957,7 @@ end
 -- ��РОКСИ репликации, а не док��зательство тог��, ��то реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
 -- ��ак по��ьзоваться: запусти скрипт на ВТОРОМ аккаунте (или попроси друга), встань рядом
--- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("ИмяГлавного")
+-- со своим главным и вызови в консоли:  getgenv().AP_OBSERVE("��мяГлавного")
 -- ��огда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬ��О реплицировался ему
 -- от твоего главного. Свингни ��а главном — �� в дебаге второго аккаунта увидишь, что
 -- ему при��ло: реальная атака, decoy-idle, или (если raknet-rewrite заработает) только idle.
@@ -6937,7 +7091,7 @@ function AnimLib.desyncOwnTrack(track, id, animator)
 	pcall(function() local s = track.Speed; if type(s) == "number" and s > 0.05 then origSpeed = s end end)
 	State.desyncFires = (State.desyncFires or 0) + 1
 
-	-- DELAY: анимацию замаха скрываем сразу и переигры����аем через mag мс (визуал стартует
+	-- DELAY: анимацию замаха скрываем сразу и переигры����аем через mag мс (визу��л стартует
 	-- позже). FireServer/урон НЕ трогаем — они уходят вовремя (отд��льный __namecall-хук).
 	local animId = id
 	local mag = desyncMag()
@@ -7418,7 +7572,7 @@ Viz.bboxRaw = function(m) return m:GetBoundingBox() end
 Viz.bbModel, Viz.bbClock, Viz.bbC, Viz.bbS = nil, -1, nil, nil
 -- [V112] PERF: ПЕРСИСТЕНТНЫЕ scratch-буферы для точек кольца/конуса. Раньше drawFlatRing делал
 -- `wpts={}` и drawTargetHitbox — `wArc={}`,`a2d={}`,`az={}` НА КАЖДЫЙ кадр отр��совки = 4 таблицы +
--- ~100 Vector2/Vector3 аллокаций/кадр → GC-дёрганье (главная оставшаяся причина «лагает»). Теперь
+-- ~100 Vector2/Vector3 а��локаций/кадр → GC-дёрганье (главная оставшаяся причина «лагает»). Теперь
 -- переиспользуем таблицы (индексы просто перезаписываются, размер сегментов константный). Держим
 -- ��олями Viz (НЕ новые local — лимит 200 локалов на giant-функцию).
 Viz.ringPts = {}
@@ -7687,7 +7841,7 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	-- видимыми на прошлых позициях; при 120+ fps это срезает основную всегда-активную нагрузку.
 	local nowc     = os.clock()
 	local interval = 1 / math.clamp(Config.VizMaxFPS or 60, 15, 240)
-	-- [V139/PERF] АВТО-ДЕГРАДАЦИЯ. Троттл по VizMaxFPS помогает только когда игра БЫСТРЕЕ кэпа.
+	-- [V139/PERF] АВТО-ДЕГРАДАЦИЯ. Троттл по VizMaxFPS по��огает только когда игра БЫСТРЕЕ кэпа.
 	-- Когда FPS ПРОСЕЛ (20 FPS = 50мс ка��р > interval 16мс) условие ниже всегда ложно, и полная
 	-- перерисовка (~280 операций проекции + пулы Drawing) платится КАЖДЫЙ кадр — ровно тогда,
 	-- когда бюджета и так нет. ESP усугублял просадку, из-за которой сам ��е и вызывался.
@@ -7700,7 +7854,7 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	if (nowc - (Viz.lastDraw or 0)) < interval then return end
 	-- [V139] ПРИОРИТЕТ ЗАЩИТЫ. Если press-дедлайн внутри VizSkipNearPress — кадр целиком
 	-- отдаётся парированию: ESP не рисуется вообще. Это те 1–2 кадра, где точность тайминга
-	-- решает исход, а полная перерисовка стоит больше, чем весь schedulerStep.
+	-- решает исход, а полная пер��рисовка стоит больше, чем весь schedulerStep.
 	-- [V140] Пропуск теперь ОГРАНИЧЕН с двух сторон, иначе он превращается в вечную заморо��ку:
 	--   1) метрика обязана быть СВЕЖЕЙ — nearPress пишется на Heartbeat, а читается здесь, на
 	--      RenderStepped; несвежая (>0.2с) означает, что планировщик до неё не дошёл;
