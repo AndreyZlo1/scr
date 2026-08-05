@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════���══════════════════
+    -- ══════════════════════════ Move-vector math ═════════����══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -798,7 +798,7 @@ return function(Lib, Core)
             end
         end
         if not _ndGateIdx then return false end
-        -- ═══════ [V128] ИНДЕКС СЧЁТЧИКА КОМБО u19 (для пропуска 4-го удара) ═══════
+        -- ═══════ [V128] ИНДЕКС СЧЁТЧИКА КОМ��О u19 (для пропуска 4-го удара) ═══════
         -- Порядок upvalue'ов tryM1 из дампа (M1.lua:322), считаем от найденного u21 (=G):
         --     G+0 u21 (boolean)                  ← уже найден выше как _ndGateIdx
         --     G+1 u32 (number)  G+2 u33 (number)
@@ -850,7 +850,7 @@ return function(Lib, Core)
     -- [V112] Единственный драйвер No Delay: держим три гейта tryM1 открытыми.
     -- ═════════ [V113] ПОЧЕМУ НЕ УБИРАЛАСЬ ЗАДЕРЖКА ПОСЛЕ КОМБО ═════════
     -- Я УДАЛИЛ НУЖНЫЙ КОД, опираясь на неверное утверждение. В V112 я написал, что
-    -- «tryM1 не читает эти атрибуты вовсе», и выбросил очистку атрибутов. Дамп говорит
+    -- «tryM1 не читает эти атрибуты вовсе», и выбросил очистку атрибутов. Дам�� говорит
     -- обратное: tryM1 проверяет их подряд и выходит по каждому (M1.lua:397-436):
     --        M1Cooldown, M1, CombatAttacking, ParryAttackLockout, BlockAttackLockout,
     --        Blocking, Greenzone, RpCombatLocked, CantAnything, GuardBroken, M2, PendingM2
@@ -934,12 +934,37 @@ return function(Lib, Core)
         --
         -- Отдельного тумблера нет намеренно: это часть смысла No Delay — убрать задержки, а
         -- финишер и есть самая большая из них.
+        -- ─────── [V129] ПОЧЕМУ V128 НЕ СРАБОТАЛ: строгое `== 3` пропускало счётчик ───────
+        -- В V128 стояло `if c19 == 3`, то есть обнуление происходило ТОЛЬКО если кадр
+        -- Heartbeat попал ровно в промежуток между 3-м и 4-м ударом. Есть два разных пути,
+        -- на которых значение 3 не наблюдается вообще, и оба видны в дампе:
+        --
+        --   1) ДВА УДАРА ВНУТРИ ОДНОГО КАДРА. No Delay держит u21/u32/u33 и атрибуты
+        --      открытыми каждый кадр, поэтому клиентский стопор между свингами снят
+        --      полностью. tryM1 синхронна, так что за один кадр (~16мс) она может пройти
+        --      дважды: u19 успевает стать 3 и сразу 4, а наш polling видит уже 4.
+        --
+        --   2) СЕРВЕР ВОЗВРАЩАЕТ СЧЁТЧИК НАЗАД. M1.lua:552-561, v1.ServerResponse:
+        --          if p61 == "Declined" then ... local v65 = u27[p62]
+        --              if typeof(v65) == "number" and v65 > 0 then u19 = v65 - 1
+        --      То есть на КАЖДЫЙ отклонённый сервером свинг клиентский счётчик
+        --      восстанавливается в «номер удара минус один». Мы обнулили u19 в 0, сервер
+        --      прислал Declined по 3-му свингу — и u19 снова стал 2. Дальше 3, потом 4,
+        --      финишер на месте. Именно это и означает «последняя атака не стала первой».
+        --      А отклонений при No Delay много: клиент бьёт чаще, чем сервер принимает.
+        --
+        -- ИСПРАВЛЕНИЕ: сравнение `>= 3` вместо `== 3`. Условие перестаёт быть «поймать
+        -- ровно одно мгновение» и становится инвариантом, который проверяется каждый кадр:
+        -- счётчик НИКОГДА не остаётся в 3 или 4. Поэтому неважно, попал ли кадр в стык
+        -- ударов и успел ли сервер переписать значение — на следующем же кадре u19 снова 0,
+        -- и tryM1 посчитает u19 % 4 + 1 = 1.
+        -- Значения 0/1/2 по-прежнему не трогаем: это живая середина комбо, обнуление там
+        -- оборвало бы серию.
         if _ndComboIdx then
             local okC, c19 = pcall(_getUp, _tryM1, _ndComboIdx)
-            -- Строго == 3: только состояние «третий удар уже прошёл». Значения 0/1/2 трогать
-            -- нельзя — это оборвало бы комбо в начале, а 4 обнулять поздно и незачем
-            -- (игра сама сделает u19 % 4 + 1 = 1 следующим ударом).
-            if okC and c19 == 3 then pcall(_setUp, _tryM1, _ndComboIdx, 0) end
+            if okC and type(c19) == "number" and c19 >= 3 then
+                pcall(_setUp, _tryM1, _ndComboIdx, 0)
+            end
         end
     end
     -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs к��утится
@@ -1024,7 +1049,7 @@ return function(Lib, Core)
     -- разбор в блоке NO DELAY: тот список атрибутов tryM1 вообще не читает.
     -- Резолверы боевых модулей ПЕРЕНЕСЕНЫ ВЫШЕ (перед блоком NO DELAY): mapNoDelay
     -- использует tryRequire/hasDebugUpvalues, а в Lua local-функция обязана быть
-    -- объявлена ЛЕКСИЧЕСКИ раньше места использования — иначе замыкание захватило бы
+    -- объявлена ЛЕКСИЧЕСКИ раньше места ��спользования — иначе замыкание захватило бы
     -- глобальный nil вместо нашей функции, и No Delay молча не работал бы.
 
     -- ══════════════════ INFINITE SPRINT (stamina, client field) ═════════════
@@ -1109,7 +1134,7 @@ return function(Lib, Core)
     -- [V112] Гейты, которые лежат ВНЕ обхода u51 (Evasive.lua:605-618) и потому не
     -- покрываются grant'ом. Раньше их прятал глобальный __namecall-спуф GetAttribute;
     -- теперь снимаем их СИНХРОННО внутри обёртки Evasive — см. installEvasiveHook.
-    -- Список — именно порядковый, чтобы восстанавливать ровно то, что сняли.
+    -- Список — именно порядковый, чтобы во��станавливать ровно то, что сняли.
     local DODGE_GATE_ATTRS = { "Blocking", "CombatAttacking", "Greenzone", "RpCombatLocked" }
     -- Map Evasive base values ONCE: config-table defaults + (if debug API present) the upvalue
     -- indices for DashSpeed / Cooldown (Evasive.lua:506 upvalue list).
@@ -1647,7 +1672,7 @@ return function(Lib, Core)
         _carryVictim, _carryCacheT = nil, 0
         _noclipActive = Config.NoClip_On
         -- [V112] Перепривязываем событийный счётчик grab-констрейнтов: подписки жили на
-        -- СТАРОМ персонаже, после респавна они мертвы, а счётчик остался бы с прошлым
+        -- СТАРОМ персонаже, после респавна они мертвы, а счётчик остал��я бы с прошлым
         -- значением (в т.ч. «нас держат», е��ли нас схватили перед смертью).
         bindGrabWatch(char)
         task.wait(0.5)
@@ -1797,7 +1822,7 @@ return function(Lib, Core)
             Min = 0, Max = 25, Suffix = " spd", Callback = function(v) Config.NS_Speed = v end })
         sNS:SubLabel({ Text = "Suppresses combat slowdowns · Restore Speed 0 = game default (12)" })
 
-        -- ─���──────��────── Section 4: Combat exploits (Right) ��──────────────
+        -- ─���──────��────── Section 4: Combat exploits (Right) ��────────���─────
         local sCbt = MV:Section({ Side = "Right" })
         sCbt:Header({ Name = "No Delay" })
         feature(sCbt, {
