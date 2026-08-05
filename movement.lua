@@ -846,7 +846,7 @@ return function(Lib, Core)
     --      (CombatConfig:120) против AttackDuration = 0.45 — это и есть «долгая» задержка
     --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
     --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
-    -- V112 закрывал только путь (1), поэтому путь (2) продол����ал д��рж����ть комбо. Симптом
+    -- V112 закрывал только путь (1), поэтому путь (2) ��родол����ал д��рж����ть комбо. Симптом
     -- «после последнего удара долгая задержка» описывал ровно это.
     --
     -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
@@ -1109,7 +1109,7 @@ return function(Lib, Core)
     }
     local EV_DEADLINE_IDXS = { 4, 5, 6, 7, 8 }   -- u6, u5, u4, u7, u8 — метки os.clock
 
-    -- [V112] Персистентная обёртка записи атрибут�� (использу��тся о��ходом ��ейтов Dodge).
+    -- [V112] Персистентная обёртка записи атрибут���� (использу��тся о��ходом ��ейтов Dodge).
     -- Отдельная функция, а не замыкание на месте: обход выполняется на каждый дэш.
     local function _setAttr(inst, key, val) inst:SetAttribute(key, val) end
 
@@ -1224,7 +1224,7 @@ return function(Lib, Core)
             -- обычным GetAttribute. Единственный yield во всей функции до этих проверок —
             -- строка 510 (`LocalPlayer.Character or CharacterAdded:Wait()`), и он не
             -- срабатывает, когда персонаж есть. Значит снять атрибуты, вызвать оригинал и
-            -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чтени��м игрой
+            -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чте��и��м игрой
             -- никакой другой код ��сполниться не может — гонки нет by design.
             -- Записи локальные (на сервер не репл*ицируются), а сами гейты проверяются на
             -- клиенте, поэтому этого достаточно.
@@ -1572,9 +1572,44 @@ return function(Lib, Core)
         if re and re:IsA("RemoteEvent") then _spawnRemote = re end
         return _spawnRemote
     end
+    -- ═══════ [V124] ТВОЯ ЗАЦЕПКА С РЕРОЛЛОМ ОКАЗАЛАСЬ ТОЧНЫМ ПОПАДАНИЕМ ═══════
+    -- Ты сказал: «в реролле роста происходит что-то типа респавна, здоровье не меняется».
+    -- Пошёл смотреть, что делает реролл, и нашёл ровно то, чего не хватало всё это время.
+    --
+    -- ЦЕПОЧКА РЕРОЛЛА (по дампу, файлы и строки):
+    --   RerollCurrencyServiceClient:105  Remotes.RerollSpin:InvokeServer(...)   ← сам реролл
+    --   ProfileServiceClient:621         CharacterServiceUtils.WaitForCharacterGenReady(...)
+    --   ProfileServiceClient:628-638     Remotes.LoadCharacter:InvokeServer()   ← ПЕРЕСБОРКА
+    --   Helpers:69                       Remotes.LoadCharacter (кэшируется как RemoteFunction)
+    --
+    -- ВОТ ОНО: `Remotes.LoadCharacter` — это **RemoteFunction БЕЗ АРГУМЕНТОВ** (:638 вызов
+    -- пустой), и сервер по нему ПЕРЕСОЗДАЁТ персонажа. Именно это ты и видел в реролле:
+    -- «вроде здоровье не меняется, но всё же похоже на респавн» — потому что это не смерть и
+    -- не лечение, а полная пересборка модели сервером.
+    --
+    -- ПОЧЕМУ ЭТО РЕШАЕТ ВСЁ, С ЧЕМ Я БОРОЛСЯ V116-V123. Все прежние пути требовали, чтобы
+    -- сервер СНАЧАЛА признал тебя мёртвым: SpawnRequest, RespawnRE и _doRespawn — это кнопка
+    -- «RESTART YOUR HEART» с экрана смерти. Пока сервер держит тебя живым (`Downed=true`),
+    -- он их молча отбрасывает — отсюда «при нажатии ничего не происходит». А LoadCharacter
+    -- смерти НЕ ТРЕБУЕТ вообще: реролл дёргает его на полностью живом персонаже.
+    -- Поэтому убивать себя больше не нужно — ни ломать джойнты, ни падать под карту.
+    --
+    -- ВАЖНО: это RemoteFunction, а не RemoteEvent. Нужен InvokeServer (не FireServer), и он
+    -- БЛОКИРУЕТ поток до ответа сервера — значит звать только из отдельного потока.
+    local _loadCharRemote = nil
+    local function getLoadCharacterRemote()
+        if _loadCharRemote and _loadCharRemote.Parent then return _loadCharRemote end
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local rf = remotes and remotes:FindFirstChild("LoadCharacter")
+        -- Проверка класса обязательна: игра сама её делает (ProfileServiceClient:147),
+        -- потому что под этим именем может лежать не тот объект.
+        if rf and rf:IsA("RemoteFunction") then _loadCharRemote = rf end
+        return _loadCharRemote
+    end
+
     -- Есть ли вообще чем возрождаться.
     local function hasRespawnRemote()
-        return (getRespawnRemote() or getSpawnRemote()) ~= nil
+        return (getLoadCharacterRemote() or getRespawnRemote() or getSpawnRemote()) ~= nil
     end
     local _lastRespawnFire = 0
     -- Персистентная обёртка вместо замыкания на каждый вызов.
@@ -1644,7 +1679,7 @@ return function(Lib, Core)
     -- И это ВСЁ. В скрипте НЕТ: Kill, LoadCharacter, SetCore, Health, BreakJoints, ремоутов.
     -- Значит универсальный ресет — это чистая state-машина Humanoid'а:
     --     Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-    -- Работает в любой игре имен��о потому, что это движковый Humanoid, а не механика игры —
+    -- Работает в лю��ой игре имен��о потому, что это движковый Humanoid, а не механика игры —
     -- ты это и говорил. Состояние своего персонажа клиент меняет авторитетно (у него network
     -- ownership своих частей), поэтому смена реплицируется и поднимает из Dead/Ragdoll.
     --
@@ -1712,7 +1747,7 @@ return function(Lib, Core)
     -- Твой диаг: `state: Ragdoll | Downed: true | paths=neck>void death[joints=0 head=false]`
     -- плюс твои слова «удаляет всё, из-за чего я визуально невидим, и это всё ещё не респавн».
     -- Что это доказывает: удаление частей ВЫПОЛНЯЛОСЬ (иначе ты бы не стал невидимым), но
-    -- сервер смерть не признал — `no CharacterAdded in 12s`. Значит удаление своих частей в
+    -- се��вер смерть не признал — `no CharacterAdded in 12s`. Значит удаление своих частей в
     -- ЭТОЙ игре на сервер не влияет: у сервера собственное состояние персонажа (Downed=true
     -- держится), а локально снесённая модель — только визуал у тебя на экране.
     -- Вывод: разрушать модель нельзя, это калечит клиент и не даёт респавна. Убрано целиком.
@@ -1785,6 +1820,25 @@ return function(Lib, Core)
         return viaModule or viaRemote
     end
 
+    -- [V124] ГЛАВНЫЙ путь: пересборка персонажа через реролловый LoadCharacter.
+    -- Диагностика тут подробная намеренно — прошлые версии молча возвращали false, и я тратил
+    -- твоё время на догадки. Теперь каждая причина отказа пишется словами.
+    local _lcInfo, _lcBusy = "not attempted", false
+    local function loadCharacter()
+        if _lcBusy then return false end          -- InvokeServer уже летит, второй не нужен
+        local rf = getLoadCharacterRemote()
+        if not rf then _lcInfo = "no Remotes.LoadCharacter (RemoteFunction)"; return false end
+        _lcBusy = true
+        -- Отдельный поток обязателен: InvokeServer БЛОКИРУЕТ поток до ответа сервера, и вызов
+        -- из цикла ожидания заморозил бы сам цикл (а с ним и проверку CharacterAdded).
+        task.spawn(function()
+            local ok, err = pcall(function() return rf:InvokeServer() end)
+            _lcInfo = ok and "invoked ok" or ("invoke error: " .. tostring(err))
+            _lcBusy = false
+        end)
+        return true
+    end
+
     -- [V122] ИСПРАВЛЯЮ СВОЁ ЖЕ УТВЕРЖДЕНИЕ ИЗ V120. Я написал, что void-монитор игры зовёт
     -- сервер. Это была ДОГАДКА, и она неверна — перепроверил по всему дампу:
     --     GetVoidThresholdY определён в SpawnServiceUtils:19-21 и не вызывается НИ РАЗУ,
@@ -1803,7 +1857,7 @@ return function(Lib, Core)
 
     -- ═══════════════ [V113] ПОЧЕМУ RESPAWN НЕ РАБОТАЛ ═══════════════
     -- Ремоут и путь были верны — я это перепроверил по дампу:
-    --   ReplicatedStorage/Remotes/SpawnRequest.RE существует и это RemoteEvent
+    --   ReplicatedStorage/Remotes/SpawnRequest.RE сущ��ствует и это RemoteEvent
     --   (_remotes_index.json: "ReplicatedStorage.Remotes.SpawnRequest").
     -- Не работал не вызов, а СМЫСЛ: `SpawnRequest` — это не «заспавни меня», а «я мёртв,
     -- верни меня в игру». Сервер обслуживает его только для мёртвого игрока
@@ -1970,7 +2024,7 @@ return function(Lib, Core)
         for _, info in ipairs(list) do
             local ev = tostring(info and info.Event or "")
             local parent = tostring(info and info.Parent or "")
-            -- Нас интересуют сигналы игрока, отвечающие за появление/загрузку персонажа.
+            -- Нас интересуют сигналы игрока, отвечающие за появлени��/загрузку персонажа.
             if parent == "Player" and (ev:find("[Rr]espawn") or ev:find("[Ss]pawn")
                 or ev:find("LoadCharacter") or ev:find("[Rr]eset")) then
                 local got = pcall(function() _respawnSignal = LocalPlayer[ev] end)
@@ -2003,15 +2057,20 @@ return function(Lib, Core)
     -- [V123] Ничего не ломаем и не телепортируем. Только игровой путь.
     local function tryRespawnOnce(attempt)
         local via = {}
+        -- [V124] Шаг 0 и ГЛАВНЫЙ: LoadCharacter — путь реролла. Единственный, который НЕ
+        -- требует, чтобы сервер сначала признал нас мёртвыми. Идёт первым и на 1-й попытке.
+        if attempt == 1 and loadCharacter() then via[#via + 1] = "LoadChar" end
         -- Шаг 1: сервис из памяти → s:_doRespawn() + выстрел его же ремоута. Это ровно то,
         -- что делает игра после 7 кликов по сердцу, но без гейта кликов.
         -- Раз в ~0.9с, а не каждые 0.3с: FireServer в цикле — прямой путь к кику за флуд,
         -- а сама игра между нажатиями ждёт 0.6с (_onHeartClick:508).
-        if attempt % 3 == 1 and gameRespawn() then via[#via + 1] = "memSvc" end
+        -- [V124] Сдвинуто на попытку 4+ (~1.2с): даём LoadCharacter отработать в одиночку.
+        -- Иначе в диаге опять была бы каша из путей, и мы не узнали бы, что именно сработало.
+        if attempt >= 4 and attempt % 3 == 1 and gameRespawn() then via[#via + 1] = "memSvc" end
         -- Шаг 2: ремоуты, найденные обычным путём в дереве (RespawnRE / Remotes.SpawnRequest) —
         -- на случай, если синглтон в памяти не нашёлся. Условие isTrulyDead убрано: сервер
         -- держит Downed=true, и «мёртв ли я» решает он, а не наша догадка.
-        if fireRespawn() then via[#via + 1] = "remote" end
+        if attempt >= 4 and fireRespawn() then via[#via + 1] = "remote" end
         return #via > 0, table.concat(via, "+")
     end
 
@@ -2043,9 +2102,13 @@ return function(Lib, Core)
             task.wait(0.3)
         end
         if conn then conn:Disconnect() end
+        -- [V124] Диаг переписан под новый путь. Раньше он показывал death[joints/head] от
+        -- удалённого кода — ты правильно заметил, что информация старая. Теперь главное поле
+        -- это LoadChar[...]: по нему сразу видно, найден ли RemoteFunction и что ответил сервер.
         _respawnDiag = "tries=" .. attempt
             .. " paths=" .. (#order > 0 and table.concat(order, ">") or "NONE")
-            .. " death[" .. tostring(_deathInfo) .. "]"
+            .. " LoadChar[" .. tostring(_lcInfo) .. "]"
+            .. " svc[" .. tostring(_deathInfo) .. "]"
             .. (up and " -> respawned" or " -> no CharacterAdded in 12s")
         return up
     end
@@ -2108,7 +2171,7 @@ return function(Lib, Core)
     -- [V112] ЛЕНИВЫЙ PostStep. Преж��е все драйверы вызывались КАЖДЫЙ кадр безусловно, и
     -- каждый сам решал, работать ему или нет — то ес��ь на выключенных фичах мы всё равно
     -- платили за 4 вызова функций на кадр. Теперь проверяем флаги ДО вызова: пока фичи
-    -- выключены, тело цикла — это несколько сравнений булевых полей.
+    -- выключен��, тело цикла — это несколько сравнений булевых полей.
     -- driveDodge вызывается только при Dodge_On (внутри он и так первым делом это проверял),
     -- driveAutoRespawn — новый драйвер респавна по порогу HP.
     PostStep:Connect(LPH_NO_VIRTUALIZE(function()
@@ -2491,21 +2554,26 @@ return function(Lib, Core)
         sResp:Button({
             Name = "Respawn Diag",
             Callback = function()
-                -- [V119] Показываем то, что важно для подъёма: состояние Humanoid'а.
+                -- [V124] ДЕБАГ ОБНОВЛЁН — ты верно сказал, что тут была старая информация.
+                -- Убрал RequiresNeck / BreakJoints: они относились к слому шеи, а этого кода
+                -- больше нет (V123 доказал, что форсировать смерть с клиента бесполезно).
+                -- Теперь показываем то, что решает СЕЙЧАС: есть ли RemoteFunction LoadCharacter
+                -- (главный путь реролла), готов ли персонаж по атрибуту самой игры, и что
+                -- вернула последняя попытка.
                 local c = LocalPlayer.Character
                 local hum = c and c:FindFirstChildOfClass("Humanoid")
                 local st = hum and tostring(hum:GetState()):gsub("^Enum.HumanoidStateType%.", "") or "no humanoid"
-                -- [V120] RequiresNeck/BreakJointsOnDeath — это ровно те защиты, что игра ставит
-                -- в RagdollService:360-361. Если тут false, слом шеи не убьёт, и это видно сразу.
+                -- CharacterGenReady — атрибут ИГРОКА, по которому сама игра понимает, что
+                -- персонаж собран (CharacterServiceUtils:1464, ждёт его после реролла).
                 notify("Respawn Diag", "state: " .. st
-                    .. " | PlatformStand: " .. tostring(hum and hum.PlatformStand)
                     .. " | Downed: " .. tostring(c and c:GetAttribute("Downed"))
-                    .. " | RequiresNeck: " .. tostring(hum and hum.RequiresNeck)
-                    .. " | BreakJoints: " .. tostring(hum and hum.BreakJointsOnDeath)
+                    .. " | Dead: " .. tostring(LocalPlayer:GetAttribute("Dead"))
+                    .. " | GenReady: " .. tostring(LocalPlayer:GetAttribute("CharacterGenReady"))
+                    .. " | LoadCharacter RF: " .. tostring(getLoadCharacterRemote() ~= nil)
                     .. " | last: " .. tostring(_respawnDiag))
             end,
         })
-        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} calls the game's own _doRespawn, unsticks _respawnInFlight" })
+        sResp:SubLabel({ Text = "0% = on death/Downed only \u{00b7} rebuilds character via Remotes.LoadCharacter (the reroll path)" })
 
         uiReady = true
     end
