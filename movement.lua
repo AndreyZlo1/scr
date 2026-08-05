@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════������══════════════════
+    -- ══════════════════════════ Move-vector math ═════════�������══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -704,7 +704,7 @@ return function(Lib, Core)
     end
 
     -- ═════════════════════════���═�����═══════════════════════════════════════════════
-    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хука task.delay
+    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хук�� task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
     -- (M1_ModuleScript.lua + CombatConfig). Прежний подход фильтровал задержки по их
@@ -753,8 +753,34 @@ return function(Lib, Core)
     -- Честный предел: серверный рейт M1 по-прежнему ограничивает РЕАЛЬНЫЙ урон; мы
     -- убираем только клиентский стопор/ощущение задержки.
 
+    -- ═══════════ [V132] ДИАГ NO DELAY — без новой настройки ═══════════
+    -- Печатаем только ПЕРЕХОДЫ состояния (резолв, установка хука, первая запись каждого
+    -- гейта) и раз в 3с сводку счётчиков. Тумблера намеренно нет: постоянного спама тут
+    -- физически не может быть, а лишняя настройка — признак ненайденной причины.
+    local _ndStat = { gate = 0, parry = 0, block = 0, combo = 0, calls = 0 }
+    local _ndSaid = {}
+    local function _ndSay(key, fmt, ...)
+        -- key ~= nil → сообщение печатается ровно один раз за сессию (переход состояния).
+        if key then
+            if _ndSaid[key] then return end
+            _ndSaid[key] = true
+        end
+        print(string.format("[ND] " .. fmt, ...))
+    end
+    local _ndNextDump = 0
+    local function _ndDump()
+        local nowc = os.clock()
+        if nowc < _ndNextDump then return end
+        _ndNextDump = nowc + 3.0
+        _ndSay(nil, "stat calls=%d gateW=%d parryW=%d blockW=%d comboClamp=%d",
+            _ndStat.calls, _ndStat.gate, _ndStat.parry, _ndStat.block, _ndStat.combo)
+    end
+
     -- [V112] Резолвер M1 → tryM1 → индексы гейтов. Выполняется ОДИН раз (ленивая карта).
     local _tryM1 = nil
+    -- [V132] Ссылка на сам модуль M1: хук ставим на v1.OnM1Activated, а НЕ на tryM1.
+    -- Причина — разбор в _ndInstallComboHook: хук на tryM1 уничтожал карту его upvalue'ов.
+    local _ndM1Mod = nil
     local _ndGateIdx, _ndParryIdx, _ndBlockIdx = nil, nil, nil
     local _ndComboIdx = nil   -- [V128] индекс u19 (счётчик комбо) в tryM1
     -- [V131] _ndComboCands удалён: механика «обучения по кадрам» не могла работать, т.к. u19
@@ -773,11 +799,24 @@ return function(Lib, Core)
         -- чтобы правка игрой порядка upvalue'ов ничего не сломала.
         local ok, ups = pcall(debug.getupvalues, m1.OnM1Activated)
         if not (ok and type(ups) == "table") then return false end
+        -- [V132] БЫЛО `for _, v in pairs(ups)`. pairs НЕ ГАРАНТИРУЕТ ПОРЯДОК обхода: пока у
+        -- OnM1Activated ровно один upvalue (дамп M1.lua:493-495 «upvalues: tryM1 (copy)»),
+        -- случайность не видна, но добавь игра второй function-upvalue — и мы взяли бы
+        -- произвольный из двух, а карта индексов ниже молча поехала бы. Идём по индексам и
+        -- ПРОВЕРЯЕМ кандидата по числу upvalue'ов: у tryM1 их 22 (дамп M1.lua:318).
         local fn
-        for _, v in pairs(ups) do
-            if type(v) == "function" then fn = v; break end
+        for i = 1, 8 do
+            local okU, v = pcall(_getUp, m1.OnM1Activated, i)
+            if not okU then break end
+            if type(v) == "function" then
+                local infoOk, inf = pcall(debug.getinfo, v)
+                local nups = (infoOk and type(inf) == "table" and tonumber(inf.nups)) or 0
+                -- 22 в дампе; допускаем >= 18 на случай иной сборки, но отсекаем мелкие
+                -- хелперы (у них upvalue'ов единицы) — именно они и попадались бы наугад.
+                if nups >= 18 or nups == 0 then fn = v; break end
+            end
         end
-        if not fn then return false end
+        if not fn then _ndSay("nofn", "resolve FAIL: tryM1 не найден среди upvalue OnM1Activated"); return false end
         -- Проверяем ОЖИДАЕМУЮ подпись из дампа: [4] boolean, [5] и [6] числа.
         -- Если совпало — берём эти индексы. Если игра сдвинула upvalue'ы, ищем ту же
         -- подпись сканированием (первый boolean + два числа сразу за ним).
@@ -854,6 +893,15 @@ return function(Lib, Core)
             _ndComboIdx = ci
         end
         _tryM1 = fn
+        -- [V132] Модуль нужен для хука на v1.OnM1Activated (см. _ndInstallComboHook).
+        _ndM1Mod = m1
+        _ndSay("map", "resolve OK gate=%s parry=%s block=%s combo=%s (u19=%s)",
+            tostring(_ndGateIdx), tostring(_ndParryIdx), tostring(_ndBlockIdx),
+            tostring(_ndComboIdx), tostring(c19))
+        if not _ndComboIdx then
+            _ndSay("nocombo", "ВНИМАНИЕ: индекс u19 не подтверждён (idx %d вернул %s) → пропуск 4-го удара выключен",
+                ci, tostring(c19))
+        end
         return true
     end
 
@@ -880,31 +928,121 @@ return function(Lib, Core)
     -- yield'а (tryM1 синхронна до самого playM1SwingAnimation).
     -- hookfunction на Lua-функцию — ровно тот инструмент (см. skill potassium-api/closure.md);
     -- oth здесь не нужен, tryM1 не C-функция.
-    local _ndHooked, _ndOrigTryM1 = false, nil
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- [V132] КОРЕНЬ ОБОИХ БАГОВ NO DELAY: ХУК СТАВИЛСЯ НА САМУ tryM1
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- ПОЧЕМУ V131 БЫЛ НЕВЕРЕН. Официальная семантика (potassium-api/closure.md):
+    --     hookfunction(target, hook) → «Hooks a Lua or C function.
+    --                                   RETURNS A COPY OF THE ORIGINAL FUNCTION.»
+    -- То есть объект `target` ПОСЛЕ хука исполняет тело нашего замыкания, а оригинал
+    -- живёт только в возвращённой копии. Значит и таблица upvalue'ов у объекта `target`
+    -- становится НАШЕЙ, а не игровой. Последствия — ровно два репорта пользователя:
+    --
+    -- 1) «Скрипт не делает 4-ю атаку комбо третьей».
+    --    Внутри хука стояло `_getUp(target, cidx)` — но target уже захукан. Его upvalue'ы
+    --    теперь Config, _getUp, target, cidx, _setUp, _ndOrigTryM1 — ШЕСТЬ штук. Чтение
+    --    индекса 9 (u19) выходило за границу → c = nil → `type(c)=="number"` ложно →
+    --    зажим НЕ выполнялся НИ РАЗУ. Условие `>= 3` (V129) и индекс 9 (V131) были верны,
+    --    до них просто не доходило валидное значение.
+    --
+    -- 2) «NoDelay не делает вообще ничего, разницы до/после включения нет».
+    --    driveNoDelay читает те же гейты по _tryM1 — а это тот же объект. После установки
+    --    хука индексы 4/5/6 попадают в НАШИ upvalue'ы:
+    --        idx 4 → cidx    (число 9)  → `g ~= true` → _setUp(4, true) ПОРТИТ cidx,
+    --                                     а игровой u21 не открывается вовсе;
+    --        idx 5 → _setUp  (function) → `type(p)=="number"` ложно, пропуск;
+    --        idx 6 → _ndOrigTryM1 (fn)  → ложно, пропуск.
+    --    Хронология: в кадре N (_tryM1 ещё чистый) гейты открывались честно, в конце того же
+    --    кадра driveNoDelay вызывал _ndInstallComboHook() → хук встал. Со кадра N+1 и до
+    --    конца сессии u21/u32/u33 не трогались НИКОГДА, а cidx превращался в `true`, после
+    --    чего `_getUp(target, true)` падал навсегда. Итог: NoDelay жил ~16 мс за сессию.
+    --
+    -- ИСПРАВЛЕНИЕ: хукать НЕ tryM1, а v1.OnM1Activated. Дамп M1.lua:493-495:
+    --     function v1.OnM1Activated()
+    --         -- upvalues: tryM1 (copy)
+    --         tryM1();
+    --     end;
+    -- Тело — ОДИН синхронный вызов tryM1, без единого yield между нашим кодом и чтением
+    -- u19 на :460-461. То есть окно «сервер не успеет вклиниться» (весь смысл V131)
+    -- сохраняется полностью, а объект tryM1 остаётся ЧИСТЫМ — его карта upvalue'ов
+    -- (u21=4, u32=5, u33=6, u19=9) продолжает работать и для зажима, и для driveNoDelay.
+    --
+    -- ПОЧЕМУ ЗАПИСЬ ДОХОДИТ ДО ИГРЫ. В дампе (M1.lua:318) u19/u21/u32/u33 помечены `(ref)` —
+    -- это захваченные по ссылке ячейки. debug.setupvalue на чистом tryM1 пишет в ту самую
+    -- ячейку, которую читает игра. Это и подтверждается практикой: гейты РАБОТАЛИ, но
+    -- ровно один кадр — до момента, когда собственный хук их обесточил.
+    --
+    -- hookfunction мутирует сам объект функции, поэтому хук виден всем, кто держит ссылку
+    -- на v1.OnM1Activated (в т.ч. если вызывающий закешировал её в локальную).
+    local _ndHookTried, _ndHookOk, _ndOrigOnM1 = false, false, nil
     local function _ndInstallComboHook()
-        if _ndHooked or not _tryM1 or not _ndComboIdx then return end
-        if type(hookfunction) ~= "function" then return end   -- нет UNC-хука → тихо живём без пропуска
-        local target, cidx = _tryM1, _ndComboIdx
-        local ok = pcall(function()
-            _ndOrigTryM1 = hookfunction(target, function(...)
-                -- Зажим ДО чтения: игра на :461 сделает u19 = 0 % 4 + 1 = 1, то есть комбо
-                -- всегда стартует с первого удара, а p47 == 4 (финишер, FinisherCooldown 1.25с
-                -- вместо AttackDuration 0.45с на :305) не наступает никогда.
-                -- Зажимаем ТОЛЬКО значение 3: при 0/1/2 идёт живая серия 1→2→3, её рвать нельзя.
-                -- Флаг — Config.NoDelay_On (:118). Глобала NoDelayOn в этом файле НЕ существует:
-                -- он был бы всегда nil, и хук молча ничего не делал бы — ровно та же порода
-                -- ошибки, что и мёртвый _ndComboIdx.
+        -- [V132] БЫЛО `if _ndHooked ...`, где _ndHooked = «успех». При неудаче hookfunction
+        -- флаг оставался false, а вызов идёт КАЖДЫЙ Heartbeat (см. driveNoDelay) → хуки
+        -- наслаивались друг на друга бесконечно: hook→hook→hook, глубина стека росла на
+        -- каждый M1. Теперь флаг попытки отделён от флага успеха: пробуем РОВНО раз.
+        if _ndHookTried then return end
+        if not _ndComboIdx then return end
+        local m1 = _ndM1Mod
+        if not m1 or type(m1.OnM1Activated) ~= "function" then return end
+        if type(hookfunction) ~= "function" then
+            _ndSay("nohook", "hookfunction отсутствует → пропуск 4-го удара недоступен")
+            _ndHookTried = true
+            return
+        end
+        _ndHookTried = true
+        -- ВАЖНО: gate/cidx читаем через `srcFn` = ЧИСТУЮ tryM1, которую мы не хукаем.
+        local srcFn, cidx = _tryM1, _ndComboIdx
+        local ok, err = pcall(function()
+            _ndOrigOnM1 = hookfunction(m1.OnM1Activated, function(...)
+                _ndStat.calls = _ndStat.calls + 1
+                -- Зажим ДО того, как tryM1 прочитает u19: игра на :461 сделает
+                -- u19 = 0 % 4 + 1 = 1, то есть комбо всегда стартует с первого удара, а
+                -- p47 == 4 (финишер, FinisherCooldown 1.25с вместо AttackDuration 0.45с
+                -- на :305) не наступает никогда.
+                -- Зажимаем ТОЛЬКО >= 3: при 0/1/2 идёт живая серия 1→2→3, её рвать нельзя.
                 if Config.NoDelay_On then
-                    local okC, c = pcall(_getUp, target, cidx)
+                    local okC, c = pcall(_getUp, srcFn, cidx)
                     if okC and type(c) == "number" and c >= 3 then
-                        pcall(_setUp, target, cidx, 0)
+                        if pcall(_setUp, srcFn, cidx, 0) then
+                            _ndStat.combo = _ndStat.combo + 1
+                            _ndSay("clamp1", "combo clamp РАБОТАЕТ (первый раз: u19 %d -> 0)", c)
+                        end
                     end
                 end
-                return _ndOrigTryM1(...)
+                return _ndOrigOnM1(...)
             end)
         end)
-        _ndHooked = ok and _ndOrigTryM1 ~= nil
+        _ndHookOk = ok and _ndOrigOnM1 ~= nil
+        if _ndHookOk then
+            _ndSay("hookok", "hook OnM1Activated OK, зажим u19 по idx=%d", cidx)
+        else
+            _ndSay("hookfail", "hook OnM1Activated FAIL: %s", tostring(err))
+        end
     end
+
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- [V132] РАССМОТРЕН И ОТВЕРГНУТ: хук scheduleM1SwingTimers с подменой p48
+    -- ═══════════════════════════════════════════════════════════════════════════
+    -- Идея выглядела точнее, чем перекрытие гейта каждый кадр: настоящий источник задержки
+    -- виден в дампе (M1.lua:295-316) и обе задержки делятся на p48 (скорость анимации), то
+    -- есть подмена p48 на 1e4 обнулила бы их «в один приём»:
+    --     u22 = task.delay((p47 == 4 and FinisherCooldown or AttackDuration) / p48, …u21 = true)
+    --     u20 = task.delay(ComboResetTime / p48, resetCombo)
+    -- ПОЧЕМУ ЭТО НЕЛЬЗЯ ДЕЛАТЬ. Вторая задержка — таймер СБРОСА комбо, а resetCombo
+    -- (M1.lua:246-252) безусловен:
+    --     u19 = 0; u21 = true; u20 = nil
+    -- Обнулив её, мы получаем сброс комбо мгновенно после КАЖДОГО свинга → u19 всегда 0 →
+    -- каждый удар считается первым (u19 % 4 + 1 = 1). Последствия сразу два:
+    --   • серия 1→2→3 исчезает, все удары играют одну и ту же анимацию (u19 индексирует
+    --     getM1Animations()[u19] на :453);
+    --   • клиент отправляет u27[u25] = 1 на каждый свинг, тогда как сервер ведёт свой счёт
+    --     комбо → рассинхрон и рост Declined-ответов (:552-561), которые вдобавок
+    --     откатывают счётчик обратно.
+    -- Разделить две задержки нельзя: они делят ОДИН параметр p48.
+    -- Поэтому источник задержки остаётся закрытым прежним способом — перекрытием u21 = true
+    -- каждый Heartbeat. Остаточное окно не более одного кадра (~16 мс), комбо и серверная
+    -- сверка при этом целы. Это не костыль: гейт u21 и есть та переменная, которую tryM1
+    -- читает на :397, а task.delay лишь возвращает её в true.
 
     -- [V112] УДАЛЕНО ЦЕЛИКОМ: extractId / buildM1Ids / onAnimPlayed / hookAnimator,
     -- хук task.delay (installNoDelayHook) и список GATE_ATTRS.
@@ -965,7 +1103,7 @@ return function(Lib, Core)
         for i = 1, #M1_GATE_ATTRS do
             local k = M1_GATE_ATTRS[i]
             -- Пишем только если атрибут реально стоит: запись в nil уже-пустого атрибута
-            -- бессмысленна, а лишние SetAttribute на кадр — та самая мелкая нагрузка.
+            -- бессмысленна, а ли��ние SetAttribute на кадр — та самая мелкая нагрузка.
             if c:GetAttribute(k) ~= nil then pcall(_clearAttr, c, k) end
         end
     end
@@ -981,18 +1119,35 @@ return function(Lib, Core)
         clearM1GateAttrs()
         if not _tryM1 then
             -- Резолв может не удаться (модуль ещё не загружен). Без этого бэкоффа
-            -- tryRequire дёргал бы FindFirstChild+require КАЖДЫЙ кадр — свой источник лагов.
+            -- tryRequire дёргал бы FindFirstChild+require КАЖДЫЙ кадр — свой ист��чник лагов.
             local nowc = os.clock()
             if nowc < _ndNextTry then return end
             _ndNextTry = nowc + 1.0
             if not mapNoDelay() then return end
         end
+        -- [V132] _tryM1 здесь снова ЧИСТАЯ функция игры (хук ушёл на OnM1Activated), поэтому
+        -- индексы 4/5/6 опять означают u21/u32/u33, как и задумано. Счётчики нужны, чтобы
+        -- отличить «NoDelay работает» от «NoDelay молча ничего не пишет» по логу, а не на глаз.
         local okG, g = pcall(_getUp, _tryM1, _ndGateIdx)
-        if okG and g ~= true then pcall(_setUp, _tryM1, _ndGateIdx, true) end
+        if okG and g ~= true then
+            if pcall(_setUp, _tryM1, _ndGateIdx, true) then
+                _ndStat.gate = _ndStat.gate + 1
+                _ndSay("g1", "gate u21 открыт (первый раз: было %s)", tostring(g))
+            end
+        end
         local okP, p = pcall(_getUp, _tryM1, _ndParryIdx)
-        if okP and type(p) == "number" and p ~= 0 then pcall(_setUp, _tryM1, _ndParryIdx, 0) end
+        if okP and type(p) == "number" and p ~= 0 then
+            if pcall(_setUp, _tryM1, _ndParryIdx, 0) then _ndStat.parry = _ndStat.parry + 1 end
+        end
         local okB, b = pcall(_getUp, _tryM1, _ndBlockIdx)
-        if okB and type(b) == "number" and b ~= 0 then pcall(_setUp, _tryM1, _ndBlockIdx, 0) end
+        if okB and type(b) == "number" and b ~= 0 then
+            if pcall(_setUp, _tryM1, _ndBlockIdx, 0) then _ndStat.block = _ndStat.block + 1 end
+        end
+        -- Санити-чек ОДИН раз: типы на индексах гейтов обязаны совпадать с дампом. Если тут
+        -- когда-нибудь напечатается не boolean/number/number — значит карта снова поехала
+        -- (например, кто-то опять захукал tryM1), и молчаливой поломки V131 не повторится.
+        _ndSay("types", "типы гейтов: [%d]=%s [%d]=%s [%d]=%s",
+            _ndGateIdx, type(g), _ndParryIdx, type(p), _ndBlockIdx, type(b))
 
         -- ═══════ [V128] ПРОПУСК ПОСЛЕДНЕГО (4-го) УДАРА КОМБО ═══════
         -- Ты прав: последний удар долгий, и вот точная причина из дампа (M1.lua:305):
@@ -1051,6 +1206,7 @@ return function(Lib, Core)
         -- :561 `u19 = v65 - 1`). Гонку выигрывает сервер, поэтому 4-й удар и играл.
         -- Здесь только ставим хук (идемпотентно, один раз) — сам зажим живёт внутри tryM1.
         _ndInstallComboHook()
+        _ndDump()
     end
     -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs к��утится
     -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
@@ -1062,7 +1218,7 @@ return function(Lib, Core)
     -- [V112] Вместо installAnimHook — простой резолв карты upvalue'ов No Delay.
     -- Хуков здесь больше НЕТ: ни task.delay, ни Animator-коннекта. Респавн ничего не
     -- ломает — upvalue'ы принад��ежат МОДУЛЮ M1 (он живёт всю сессию), а не персонажу,
-    -- поэтому переподключение после CharacterAdded не требуется.
+    -- поэтому переподключение п��сле CharacterAdded не требуется.
     local noDelayMapped = false
     local function installNoDelay()
         if noDelayMapped then return true end
@@ -1167,7 +1323,7 @@ return function(Lib, Core)
     -- OutnumberedDashDurationMultiplier = 1.2. А u51 взводится ровно нашим же тумблером
     -- Dodge Everywhere: driveDodge ставит атрибут OutnumberedEvasiveGrant = true, из него
     -- получается u51 (Evasive.lua:529-531). Итог: слайдер стоит на вани*льных 30, а дэш
-    -- летит 30 × 1.5 = 45 studs/s и длится на 20% дольше. Никакой «утечки» скорости не
+    -- летит 30 × 1.5 = 45 studs/s �� длится на 20% дольше. Никакой «утечки» скорости не
     -- было — игра штатно применяла бонус «в м��н��шинстве», про��то мы ��а��и его и включали.
     -- Решение (выбрано пользователем): при активном Dodge зануляе�� множитель до 1.0, так
     -- что ����лайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
@@ -1179,7 +1335,7 @@ return function(Lib, Core)
     --     запусками, то есть баг был плавающим.
     --   • Cooldown = 1.5 и OutnumberedDashSpeedMultiplier = 1.5 — ОДНО И ТО ЖЕ ЧИСЛО.
     --     Поиск «первое число, равное 1.5» с равной вероятностью попадал в множитель
-    --     вместо кулдауна, после чего driveDodge писал 1.5 не туда, а настоящий кулдаун
+    --     вместо кулдауна, после чего driveDodge писал 1.5 не туд��, а настоящий кулдаун
     --     уезжал в список «дедлайнов».
     -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся н�� то����ный порядок upvalue'ов из
     -- дампа (Evasive.lua:508), проверяя ожидаемые значения по конфигу. Индексы:
@@ -1381,7 +1537,7 @@ return function(Lib, Core)
             -- CombatAttacking / Greenzone / RpCombatLocked читаются на Evasive.lua:605-618
             -- обычным GetAttribute. Единственный yield во всей функции до этих проверок —
             -- строка 510 (`LocalPlayer.Character or CharacterAdded:Wait()`), и он не
-            -- срабатывает, когда персонаж есть. Значит снять атрибуты, вызвать оригинал и
+            -- срабатывает, когда ��ерсонаж есть. Значит снять атрибуты, вызвать оригинал и
             -- вернуть их обратно можно СИНХРОННО: между нашим снятие�� и чте��и��м игрой
             -- никакой другой код ��сполниться не может — гонки нет by design.
             -- Записи локальные (на сервер не репл*ицируются), а сами гейты проверяются на
