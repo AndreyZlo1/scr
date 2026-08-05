@@ -119,7 +119,7 @@ local Config = {
 
 	-- [V93] ПОЛНЫЙ round-trip. Локальный атрибут PerfectBlocking СЕРВЕРНЫЙ: после нашего нажатия
 	-- он проходит нажатие→сервер (RTT/2) и реплик. атрибута назад (RTT/2) = ПОЛНЫЙ RTT, и лишь
-	-- т����гда становится true на нашем клиенте. VictimHitConfirm (дамп VictimHitboxServiceClient)
+	-- т������гда становится true на нашем клиенте. VictimHitConfirm (дамп VictimHitboxServiceClient)
 	-- читает ИМЕННО этот локальный атрибут в момент оверлапа хитбокса → чтобы к контакту он был
 	-- true, жать надо на полный RTT раньше. Прежний 0.5 (полу-RTT) недокомпенсировал ровно на
 	-- пол-пинга → на 195мс пинге блок стабильно опаздывал (диаг: PERFECT@~185мс vs LATE@~95мс,
@@ -305,7 +305,7 @@ local Config = {
 	-- именно они и ломали: counter ждал момента contact−lead и часто отменялся гейтами, из-за чего
 	-- M2 не летел, а guard уже был сброшен → скрипт «стоял и ничего не делал» и мазал парри.
 	BoxingCounter     = false,
-	BoxingCounterReach= 5.5,   -- макс. плоская дистанция до ата��ующего, ��туды (��З юзера)
+	BoxingCounterReach= 5.5,   -- макс. плоская дистанц��я до ата��ующего, ��туды (��З юзера)
 	BoxingCounterGap  = 0.30,  -- анти-даблфайр: не слать M2 повторно чаще (сек). НЕ задержка перед 1-м
 	-- ================= [V91] ALI COUNTER =================
 	-- Работает по тому же принципу, что боксёрская контра: CombatConfig.Styles.ali.M2GrantsIFrames
@@ -511,7 +511,7 @@ local Config = {
 	-- самому дальнему угрожаю��ему контакту в кластере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
-	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-реж��м
+	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-��еж��м
 	-- [V73] multi-target knobs
 	BlockCooldown     = 0.50,
 	SequentialSpread  = 0.78,
@@ -1153,7 +1153,7 @@ end
 -- держать цель после этого вызова (schedulerStep дёргает каждый Heartbeat, н�� грейс покрывает
 -- сам момент контакта и пару кадров после). Velocity-lead УБРАН: сервер валидирует facing на
 -- ФАКТИЧЕСКУЮ позици�� атакующего в момент удара, упреждение по скорости уводило прицел вбок
--- (в логах давало face=0.5 BACK на стрейфящем враге) → блок отклонялся.
+-- (в логах давало face=0.5 BACK на стрейфя��ем враге) → блок отклонялся.
 local function computeMultiFaceGoal()
 	if not Config.AutoFace then return nil end
 	-- [V91/perf] Cheapest possible bail-out FIRST: multi-face needs at least two live
@@ -1780,7 +1780,7 @@ end
 -- 1.15 (бьёт на 15% быстрее), высокий → 0.85. Раньше мы всегда слали 1 → быстрые
 -- враги давали LATE. Сначала пр��бу��м родные функции игры (future-proof при апдейтах),
 -- потом фолбэк на задокументированную формулу от атрибута Height.
--- [V120] WEAK KEYS: кэш по МОДЕЛИ (Instance). Без weak-ключа каждый респавн/уход игрока = новый
+-- [V120] WEAK KEYS: к��ш по МОДЕЛИ (Instance). Без weak-ключа каждый респавн/уход игрока = новый
 -- перманентный ключ → таблица растёт бесконечно И держит мёртвые модели от GC (утечка памяти,
 -- со временем GC-дёр��анье → фризы → п��здние нажатия). __mode="k": запись авто-удаляется, когда
 -- модель становится собираемой. На корректность не влияет (чтение ��сегда п�� ЖИВОЙ модели).
@@ -1881,7 +1881,7 @@ local function animIdOf(inst)
 end
 -- [V85] id защитных анимаций (block/guard/parry/deflect/perfect). Некоторые стили имеют
 -- защитные анимации не должны попадать в статический attack registry.
--- и парри срабатывал на ЧУЖОЙ блок. Собираем их явно и жёстко исключаем из детекта угроз.
+-- и парри срабатывал на ЧУЖОЙ блок. Собираем их явно и жёстко исключаем из д��текта угроз.
 local BlockIds = {}
 local function looksDefensive(nm)
 	local l = nm:lower()
@@ -2012,7 +2012,7 @@ GameData.m2VariantId = function(style, animName)
 	return out or nil
 end
 
--- [V144/PERF] Резолв инфы об атаке на каждый распознанный удар (зо��ётся из onAttack и из
+-- [V144/PERF] Резолв инфы об атаке на каждый распо��нанный удар (зо��ётся из onAttack и из
 -- AnimationPlayed). Без макроса шёл через интерпретатор.
 local resolveInfo = LPH_NO_VIRTUALIZE(function(id, model)
 	local entry  = AttackIds[id]
@@ -2680,6 +2680,71 @@ local function counterReady()
 	return true
 end
 
+-- ═══════════════════ [V146] ЕДИНАЯ ОТМЕТКА «МЫ ПОД СВОИМИ i-FRAMES» ═══════════════════
+-- ПОЧЕМУ V145 НЕ ДАЛ РОВНО НИЧЕГО — ДВЕ КОНКРЕТНЫЕ ОШИБКИ, ОБЕ ВИДНЫ В ДИАГЕ V144:
+--
+-- ОШИБКА 1. Я читал `GameData.boxingM2Contacts`, а таблица лежит в `V93` (объявлена на :956,
+--   и весь остальной код обращается к ней как `V93.boxingM2Contacts`, :2050). GameData такого
+--   поля не имеет ВООБЩЕ → выражение было nil → цикл поиска максимума не выполнялся ни разу →
+--   lastContact оставался равным hbDelay. Арифметическое доказательство прямо из диага:
+--       COUNTER t=47414.59 → COUNTER-COVER t=47414.66 «live for 659ms more»
+--       47414.66 + 0.659 = 47415.32 = 47414.59 + 0.73 = 0.43 (hbDelay) + 0.30 (IFrameDuration)
+--   Ровно старая формула V142. Второй случай тот же: 47423.91 + 0.73 → «540ms more» на 47424.10.
+--   То есть окно так и осталось 0.73с вместо 1.05 + 0.30 = 1.35с.
+--
+-- ОШИБКА 2 (главная). Я правил ТОЛЬКО fireBoxingCounter, а нашу M2 с i-frames пускает ЕЩЁ ОДИН
+--   путь — interrupt (:3594 `ap.fireM2(th.attackerModel, "interrupt", m2Var)` при
+--   `m2Iframes = ap.m2GrantsIFrames()`). Он не писал counterIFramesUntil никогда. Диаг:
+--       INTERRUPT t=47430.40 l13n1 M1(MuayThai) via=M2+IF ours=443ms
+--       DODGE     t=47430.48 outnumbered-escape [GRANT]      ← через 80мс, в наших же i-frames
+--       INTERRUPT t=47433.60 via=M1/c1 → DODGE t=47433.94    ← то же во время нашей атаки
+--   Здесь `+IF` в теге — это и есть m2Iframes=true, то есть мы уже неуязвимы, а скрипт жжёт
+--   грант. Именно про это ты и писал. Оба доджа потом получили
+--   `DODGE-REJECT … IFRAMES not confirmed` (t=47434.42, t=47437.56) — сервер их не принял,
+--   потому что мы в этот момент атаковали (дамп Evasive:613 проверяет CombatAttacking).
+--
+-- ЧТО ДЕЛАЕМ: одна функция, которую ОБЯЗАНЫ вызвать все пути нашей M2 с i-frames.
+local function markOwnM2IFrames(now, tag)
+	local style = tostring(styleOf(localChar()) or ""):lower()
+	loadGameModules()
+	-- Последний контакт нашей M2. Базовая задержка — из живого конфига игры.
+	local lastContact = 0.43
+	if GameData.cfg and GameData.cfg.GetStyleM2HitboxDelay then
+		local okd, d = pcall(GameData.cfg.GetStyleM2HitboxDelay, style, false, nil)
+		if okd and type(d) == "number" and d > 0 then lastContact = d end
+		-- У стиля с вариантами (ali: Left 0.53 / Right 0.67) берём САМЫЙ ДОЛГИЙ: какой вариант
+		-- резолвит сервер, мы наверняка не знаем (он считает его из реплицированного
+		-- MoveDirection), а недооценка окна — это ровно тот баг, который мы и лечим.
+		if GameData.cfg.GetStyleM2Variants then
+			local okv, vs = pcall(GameData.cfg.GetStyleM2Variants, style)
+			if okv and type(vs) == "table" then
+				for _, vid in pairs(vs) do
+					local ok2, d2 = pcall(GameData.cfg.GetStyleM2HitboxDelay, style, false, vid)
+					if ok2 and type(d2) == "number" and d2 > lastContact then lastContact = d2 end
+				end
+			end
+		end
+	end
+	-- Мультихит: у boxing M2 два контакта, второй на 1.05с. Таблица — V93, НЕ GameData (ошибка 1).
+	if style == "boxing" then
+		local mc = V93.boxingM2Contacts
+		if type(mc) == "table" then
+			for i = 1, #mc do
+				if type(mc[i]) == "number" and mc[i] > lastContact then lastContact = mc[i] end
+			end
+		end
+	end
+	local dur = lastContact + (GameData.iframeDur or Config.IFrameDur or 0.30)
+	State.counterIFramesUntil = math.max(State.counterIFramesUntil or 0, now + dur)
+	-- Занятость своей атакой: на атрибут CombatAttacking опираться НЕЛЬЗЯ — его каждый кадр
+	-- стирает No Delay из movement.lua (он в его M1_GATE_ATTRS). Локально атрибут снят, поэтому
+	-- и игровой гейт, и canDodgeNow() думают «мы не атакуем», а сервер знает правду и отказывает
+	-- в i-frames (`DODGE-REJECT … IFRAMES not confirmed`). Держим своим временем.
+	State.attackBusyUntil = math.max(State.attackBusyUntil or 0, now + lastContact)
+	State.selfBusyUntil   = math.max(State.selfBusyUntil or 0, now + lastContact)
+	State.ownIFrameTag = tag
+end
+
 -- Мгновенно пустить M2 по цели th: снап лицом (сервер строит хитбокс по нашему LookVector),
 -- уронить guard (M2 не пустится с поднятым блоком), FireServer прямо в этот кадр.
 local function fireBoxingCounter(th)
@@ -2720,46 +2785,9 @@ local function fireBoxingCounter(th)
 	-- получали разрешение на додж — хотя i-frames от нашего же M2 в этот момент активны
 	-- (у boxing и ali M2GrantsIFrames=true). Гейт отвечал «могу ли я контрить?», тогда как вопрос
 	-- звучит «прикрыт ли я прямо сейчас?». Запоминаем конец окна неуязвимости контры.
-	-- Длительность берём из ЖИВОГО конфига игры: M2 бьёт на M2HitboxDelay (boxing 0.43, ali 0.53),
-	-- i-frames держатся до конца удара + Evasive.IFrameDuration (0.30). Никаких новых слайдеров.
-	local hbDelay = 0.43
-	if GameData.cfg and GameData.cfg.GetStyleM2HitboxDelay then
-		local okd, d = pcall(GameData.cfg.GetStyleM2HitboxDelay, cs, false, nil)
-		if okd and type(d) == "number" and d > 0 then hbDelay = d end
-	end
-	-- ═══════ [V145] ОКНО БЫЛО ВДВОЕ КОРОЧЕ РЕАЛЬНОГО M2 (додж после контры) ═══════
-	-- V142 считал окно как GetStyleM2HitboxDelay + IFrameDuration = 0.43 + 0.30 = 0.73с.
-	-- Но у boxing M2 УДАРА ДВА, и второй приходит на 1.05с — это не догадка, значение уже
-	-- лежит в скрипте как GameData.boxingM2Contacts = {0.60, 1.05} (взято из Hit-маркеров
-	-- .anim и подтверждено конфигом), и в диаге видно то же:
-	--     MULTI t=46251.91 woordzzz M2(Boxing) contacts=[600,1050]ms markers=[600,1050]ms
-	-- То есть наш собственный M2 ещё только замахивается на второй хит, а гейт уже считал
-	-- себя истёкшим. Отсюда додж ровно на стыке: COUNTER-COVER t=46273.15 «live for 192ms
-	-- more» (истекало в 46273.34) → DODGE t=46273.36, через 20мс после окончания окна.
-	-- Берём ПОСЛЕДНИЙ контакт, а не первый: i-frames нужны до конца всей атаки.
-	local lastContact = hbDelay
-	if cs == "boxing" then
-		local mc = GameData.boxingM2Contacts
-		if type(mc) == "table" then
-			for i = 1, #mc do
-				if type(mc[i]) == "number" and mc[i] > lastContact then lastContact = mc[i] end
-			end
-		end
-	end
-	State.counterIFramesUntil = os.clock() + lastContact
-		+ (GameData.iframeDur or Config.IFrameDur or 0.30)
-	-- [V145] И ГЛАВНОЕ: помечаем себя занятыми своей же атакой. fireBoxingCounter этого не
-	-- делал вообще (attackBusyUntil ставился только в fireM1, :6768), поэтому для всей
-	-- остальной логики контра была «бесплатной» и невидимой.
-	-- Почему нельзя было опереться на атрибут CombatAttacking, который читает сама игра
-	-- (Evasive_ModuleScript.lua:613 `if u50:GetAttribute("CombatAttacking") then return end`,
-	-- причём БЕЗ поблажки на грант): его каждый кадр стирает No Delay из movement.lua —
-	-- CombatAttacking входит в его M1_GATE_ATTRS. Локально атрибут снят, поэтому и игровой
-	-- гейт, и canDodgeNow() видят «мы не атакуем», а СЕРВЕР знает правду и отказывает в
-	-- i-frames. Ровно это в диаге и записано как «DODGE-REJECT … IFRAMES not confirmed».
-	-- Поэтому занятость держим своим временем, а не атрибутом, который может быть стёрт.
-	State.attackBusyUntil = math.max(State.attackBusyUntil or 0, os.clock() + lastContact)
-	State.selfBusyUntil   = math.max(State.selfBusyUntil or 0, os.clock() + lastContact)
+	-- [V146] Расчёт окна вынесен в markOwnM2IFrames (см. выше): его обязан вызывать КАЖДЫЙ путь,
+	-- который пускает нашу M2 с i-frames, а не только контра.
+	markOwnM2IFrames(os.clock(), "counter/" .. tostring(cs))
 end
 
 -- [V91] ALI EVASIVE COUNTER. CombatConfig.Styles.ali.EvasiveCounter:
@@ -2861,7 +2889,7 @@ local function counterCandidate(now)
 		-- стояло только `not th.dodged`, но при выдаче доджа угроза помечается `coveredByDodge`
 		-- (строки ~4788 и ~4812), а `dodged` там НЕ выставляется — его ставит лишь ветка 4284.
 		-- Поэтому угроза, уже закрытая i-frames доджа, оставалась валидным кандидатом на контру,
-		-- и мы били M2 поверх собственного уворота. Проверяем оба флага.
+		-- и мы били M2 поверх собственного уворо��а. Проверяем оба флага.
 		if aHRP and aHRP.Parent and not th.feinted and not th.dodged
 		   and not th.coveredByDodge
 		   and not (mustDodgeFn and mustDodgeFn(th))
@@ -2879,8 +2907,32 @@ end
 -- [V92] Мемоизация на кадр: гейты доджа спрашивают это несколько раз за ��адр, а counterCandidate
 -- перебирает Threats. FrameId уже инкрементится планировщиком, поэтому используем его как ключ.
 local function counterPreemptsDodge(now)
-	if Config.CounterPreemptsDodge == false then return false end
 	if State.counterPreemptFrame == FrameId then return State.counterPreemptVal end
+	-- ═══════ [V146] ФАКТ ВМЕСТО ПРЕДСКАЗАНИЯ: атрибут IFRAMES на нашем персонаже ═══════
+	-- Дамп VictimHitboxServiceClient_ModuleScript.lua:139 — игра решает «неуязвим ли ты» так:
+	--     return p22:GetAttribute("IFRAMES") == true and true
+	--            or (p22:GetAttribute("Ragdoll") == true ... "Downed" ... "UltraInstinct")
+	-- Это ЧИТАЕМЫЙ атрибут, а не внутреннее состояние. Значит вычислять окно по конфигу нужно
+	-- только как опережение (атрибут приходит с сервера через ~ping), а сам факт неуязвимости
+	-- надо просто СПРОСИТЬ. Раньше мы этого не делали ни разу и полагались только на свой
+	-- расчётный counterIFramesUntil — который, как показано в markOwnM2IFrames, ставился не
+	-- всеми путями и считался по nil-таблице.
+	-- Проверка стоит ДО Config.CounterPreemptsDodge намеренно: тумблер управляет тактикой
+	-- «контра вместо доджа», а здесь мы отказываем в дэше по физике — под i-frames он
+	-- бесполезен в принципе, и сервер его всё равно не примет (Evasive:613).
+	local ch = localChar()
+	if ch then
+		if ch:GetAttribute("IFRAMES") == true or ch:GetAttribute("UltraInstinct") == true then
+			State.counterPreemptFrame, State.counterPreemptVal = FrameId, true
+			if now >= (State.lastPreemptLogAt or 0) + 0.5 then
+				State.lastPreemptLogAt = now
+				diagPush(("IFRAME-COVER t=%.2f  dodge skipped, live IFRAMES attribute on us (src=%s)")
+					:format(now, tostring(State.ownIFrameTag or "game")))
+			end
+			return true
+		end
+	end
+	if Config.CounterPreemptsDodge == false then return false end
 	-- [V142] Контра ТОЛЬКО ЧТО выстрелила и её i-frames ещё держатся → додж бессмыслен: мы уже
 	-- неуязвимы, а Evasive сжёгся бы впустую (и, что хуже, на грант-эскейпе тратился бы грант).
 	-- Эта проверка ОБЯЗАНА идти до counterCandidate, потому что тот вернёт nil из-за M2Cooldown.
@@ -2988,7 +3040,7 @@ State.isMustDodge = isMustDodge
 -- ============================ AutoPlay addon (V99) ============================
 -- Автоатака через РОДНУЮ tryM1() игры (M1.lua). Фа��ты из ��ампа (CombatConfig.ClientPredict.M1):
 --   • ParryStun.M2 = 1.0с                    — жертва M2-парри з��станена 1с (окно добивания);
---   • AttackDuration = 0.45с                 — реальный рейт M1 (tryM1 сам гейтит по нему, u21);
+--   • AttackDuration = 0.45с                 — реальный ре��т M1 (tryM1 сам гейтит по нему, u21);
 --   • LocalParryAttackLockoutSeconds = 0.15с — после НАШЕГО парри tryM1 залочен 0.15с (u32);
 --   • LocalBlockAttackLockoutSeconds = 0.15с — после блока/гардбрейка (u33);
 --   • DefaultHitboxDelay = 0.32с             — хитбокс M1 долетает ��ерез 0.32с (для interrupt-расчёта).
@@ -3600,6 +3652,11 @@ function State.ap.tryInterrupt(now, th, threatCount)
 	if useM2 then
 		ownHit = m2Hit
 		tag = ("M2%s%s"):format(m2Var and ("/" .. m2Var) or "", m2Iframes and "+IF" or "")
+		-- [V146] КОРЕНЬ «доджа в своих же i-frames». Этот путь пускает нашу M2 (ту же, что контра)
+		-- и при m2Iframes даёт ту же неуязвимость, но отметку не ставил НИКОГДА — её ставила только
+		-- fireBoxingCounter. Поэтому counterPreemptsDodge не знал о нас ничего, и escape-ветка
+		-- разрешала додж через 80мс: `INTERRUPT t=47430.40 via=M2+IF` → `DODGE t=47430.48`.
+		if m2Iframes then markOwnM2IFrames(now, "interrupt/M2+IF") end
 	else
 		if not ap.fireM1(th.attackerModel, "interrupt", true, true) then return false end
 		ownHit = m1Hit
@@ -3888,7 +3945,7 @@ local refreshContact = LPH_NO_VIRTUALIZE(function(th)
 		end
 
 		-- [V96] Live-TP коррекция теперь И для M1 (раньше только M2/SKILL). M1 предсказывался
-		-- чистым обратным отсчётом contact0-elapsed, без учёта РЕАЛЬНОГО прогресс�� анимации → при
+		-- чистым обратн��м отсчётом contact0-elapsed, без учёта РЕАЛЬНОГО прогресс�� анимации → при
 		-- desync/ускорении атаки contactAbs уплыв��л (в логе predErr скакал от -290 до +138ms). Для
 		-- M1 окно короткое, поэтому корректируем через ту же live-скорость, но с более высоким полом
 		-- (M1 редко «придерживают», агрессивный пол убирает шум коротких треков).
@@ -4199,7 +4256,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 	-- держит ссылку на ЭТОТ ЖЕ объект трека и каждый кадр пересчитывает контакт от живого tp
 	-- (`th.contactAbs = now + remaining`). Как только враг переигрывает тот же трек, ВСЕ старые
 	-- записи, привязанные к нему, пересчитываются от новой TimePosition и съезжаются в одну точку.
-	-- Ровно это в диаге:
+	-- Р��вно это в диаге:
 	--   TRACE-GEOM ClawPixelatedZero M1 first=+941ms dt=+185ms   ← запись возрастом 941мс
 	--   TRACE-PROOF ClawPixelatedZero M1 HOLD unproven | dt=+185ms  ×4  (один и тот же свинг!)
 	--   CLUSTER n=5 spread=0ms contacts=[+185,+185]ms
@@ -4388,6 +4445,21 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff)
 	end
 	local tx0 = State.dodgeTxn
 	if tx0 and tx0.pending then return false end
+	-- [V146] ФИЗИЧЕСКОЕ ВЕТО. Стоит в мастер-гейте, чтобы его не могла обойти НИ ОДНА ветка —
+	-- включая must-dodge с bypassAutoOff и blatant с force. Под живым IFRAMES дэш не добавляет
+	-- ничего (мы уже неуязвимы по VictimHitboxServiceClient:139), зато сжигает грант/кулдаун, а
+	-- сервер его всё равно отклоняет, пока мы в атаке (Evasive:613 → «IFRAMES not confirmed»).
+	do
+		local ch0 = localChar()
+		if ch0 and (ch0:GetAttribute("IFRAMES") == true or ch0:GetAttribute("UltraInstinct") == true) then
+			if State.lastDodgeRefuse ~= "already-iframed" then
+				State.lastDodgeRefuse = "already-iframed"
+				diagPush(("DODGE-SKIP t=%.2f  %s  (already invulnerable: IFRAMES live, src=%s)")
+					:format(now, reason, tostring(State.ownIFrameTag or "game")))
+			end
+			return false
+		end
+	end
 	local can, why = canDodgeNow(force)
 	if not can then
 		if State.lastDodgeRefuse ~= why then
@@ -5164,7 +5236,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			-- Модель времени (проверена по дампу): contactAbs живёт в КЛИЕНТСКИХ часах
 			-- (onAttack: contactAbs = nowClock + remaining0), а getPingRaw() отдаёт RTT
 			-- (источник A = GetNetworkPing()*2) ⇒ up ≈ RTT. Сервер поднимает IFRAMES через
-			-- oneWay после отправки, iframe живёт IFrameDur; серверный контакт наступает на
+			-- oneWay после отправки, iframe жив��т IFrameDur; серверный контакт наступает на
 			-- oneWay РАНЬШЕ предсказанного клиентского. Отсюда допустимый суммарный lead
 			-- ∈ [RTT, RTT+IFrameDur], а центр окна = RTT + IFrameDur/2.
 			-- Было: fireLead = inset + DodgeConfirm + DodgeArmWindow, и ниже ещё + up ⇒
@@ -5535,7 +5607,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	if result == "PERFECT" and rec.th and rec.th.group then
 		rec.th.group.cancelled = true -- perfect первого strike останавливает оставшуюся атаку
 	elseif result == "EARLY" and rec.th and rec.th.group then
-		rec.th.group.held = true -- ordinary block: держим guard до второго marker
+		rec.th.group.held = true -- ordinary block: держим guard до второ��о marker
 	end
 	-- A perfect resolves the current held-guard transaction. Other attackers in the
 	-- latched cluster must be re-armed; keeping pressed=true caused later M2/M1 NO-PRESS.
@@ -6570,7 +6642,7 @@ end
 
 -- [V74] DESYNC SELF-VERIFY. К��к понять, работает ли desync ВООБЩЕ, без второго
 -- аккаунта: Animator.AnimationPlayed срабатывает на КАЖДЫЙ т��ек, который стартует на
--- нашем аниматоре — а это ровно то, что Roblox реплицируе�� другим клиентам. Значит
+-- н��шем аниматоре — а это ровно то, что Roblox реплицируе�� другим клиентам. Значит
 -- если при свинге сюда прилетают И реальная атака, И decoy-idle — оба уходят в се��ь,
 -- и чужо�� AnimationPlayed увидит оба трека. Э���� объективное доказательство, что
 -- decoy-overlay реально загрязняет чужой детект (а не только крутится локально).
