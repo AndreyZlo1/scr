@@ -1708,34 +1708,81 @@ return function(Lib, Core)
     -- а разобрать связи персонажа целиком (это и есть BreakJoints) и снести саму голову.
     -- Удаление своих частей реплицируется через network ownership, поэтому сервер видит
     -- настоящую Humanoid.Died и возрождает штатно с полным HP.
+    -- ═══════ [V123] ВЕСЬ ПОДХОД «ФОРСИРОВАТЬ СМЕРТЬ» ОТМЕНЁН ═══════
+    -- Твой диаг: `state: Ragdoll | Downed: true | paths=neck>void death[joints=0 head=false]`
+    -- плюс твои слова «удаляет всё, из-за чего я визуально невидим, и это всё ещё не респавн».
+    -- Что это доказывает: удаление частей ВЫПОЛНЯЛОСЬ (иначе ты бы не стал невидимым), но
+    -- сервер смерть не признал — `no CharacterAdded in 12s`. Значит удаление своих частей в
+    -- ЭТОЙ игре на сервер не влияет: у сервера собственное состояние персонажа (Downed=true
+    -- держится), а локально снесённая модель — только визуал у тебя на экране.
+    -- Вывод: разрушать модель нельзя, это калечит клиент и не даёт респавна. Убрано целиком.
+    --
+    -- Заодно объясняю `joints=0 head=false` в последнем замере: первые попытки всё снесли,
+    -- поэтому на 39-й находить было уже нечего — счётчик показывал ноль на пустой модели.
+    --
+    -- ═══════ ИГРОВОЙ ПУТЬ: ДОСТАЁМ СЕРВИС ИЗ ПАМЯТИ ═══════
+    -- Ты прав: U0 удаляется, но модуль уже был выполнен и его результат ЖИВЁТ в памяти.
+    -- Ключевой факт из дампа (SpawnServiceClient:640): `return u1:Get()` — модуль отдаёт
+    -- СИНГЛТОН, а `Get` (:68-95) создаёт его один раз с полями:
+    --     _spawnRemote, _light, _main, _dead, _clicks, _busy, _respawnInFlight, _janitor
+    -- Эта таблица достижима через filtergc даже после удаления скриптов из дерева.
+    --
+    -- И главное — я ОШИБАЛСЯ в V116, когда написал «через _doRespawn идти НЕЛЬЗЯ, он выходит
+    -- без UI смерти». Перепроверил `_doRespawn` (:397-421) и `Init` (:589+):
+    --     if not _light or (not _main or (not _spawnRemote or _respawnInFlight)) then return end
+    --     ... _spawnRemote:FireServer()
+    -- Проверки `_dead` и `_clicks` в нём НЕТ ВООБЩЕ — семь кликов по сердцу гейтятся только в
+    -- `_onHeartClick` (:508). А `_light`/`_main` создаются в `_makeDeathUi`, который вызывается
+    -- из `Init` СРАЗУ при загрузке, а не в момент смерти. То есть `_doRespawn` доступен всегда,
+    -- и вызов его напрямую обходит счётчик кликов. Это и есть игровой способ.
     local _deathInfo = "not attempted"
-    local function breakNeck()
-        local c = LocalPlayer.Character
-        local hum = c and c:FindFirstChildOfClass("Humanoid")
-        if not (c and hum) then _deathInfo = "no character/humanoid"; return false end
-        -- 1) Снимаем защиты игры (RagdollService:360-361 ставит их в false).
-        pcall(function() hum.RequiresNeck = true end)
-        pcall(function() hum.BreakJointsOnDeath = true end)
-        -- 2) Рвём ВСЕ связи: Motor6D/Weld/Snap/Rotate (JointInstance) + констрейнты ragdoll'а.
-        -- Никаких проверок по имени и по Part0/Part1 — именно они всё и ломали.
-        local joints = 0
-        for _, d in ipairs(c:GetDescendants()) do
-            if d:IsA("JointInstance") or d:IsA("WeldConstraint") or d:IsA("Constraint") then
-                if pcall(function() d:Destroy() end) then joints = joints + 1 end
-            end
+    local _svc = nil
+    -- Ищем синглтон по НАБОРУ уникальных ключей: такая комбинация есть только у него,
+    -- поэтому ложных совпадений не будет. filtergc — предпочтительный способ (быстрее getgc).
+    local function findSpawnService()
+        if type(_svc) == "table" and rawget(_svc, "_spawnRemote") ~= nil then return _svc end
+        local ok, res = pcall(function()
+            return filtergc("table", {
+                Keys = { "_spawnRemote", "_respawnInFlight", "_clicks", "_dead" },
+            }, true)
+        end)
+        if ok and type(res) == "table" then _svc = res end
+        return _svc
+    end
+
+    -- Достаём сам RemoteEvent. Берём его ИЗ синглтона, а не по имени из ReplicatedStorage:
+    -- ссылка живёт в памяти, даже если ремоут уже убрали из дерева.
+    local function getMemoryRemote()
+        local s = findSpawnService()
+        local re = s and rawget(s, "_spawnRemote")
+        if typeof(re) == "Instance" and re:IsA("RemoteEvent") then return re end
+        return nil
+    end
+
+    -- Игровой респавн: тот же путь, которым идёт сама игра после 7 кликов по сердцу.
+    local function gameRespawn()
+        local s = findSpawnService()
+        if not s then _deathInfo = "svc not found in memory"; return false end
+        local re = getMemoryRemote()
+        -- _respawnInFlight остаётся true после нашей же неудачной попытки (сбрасывается только
+        -- в _abortRespawnTransition, :346). Если его не снять, _doRespawn молча выйдет в первой
+        -- строке — ровно тот тип «тихого отказа», на котором я уже прогорал. Снимаем принудительно.
+        pcall(function() s._respawnInFlight = false end)
+        pcall(function() s._busy = false end)
+        -- Игра требует _dead для показа UI; ставим, чтобы её же логика не откатила переход.
+        pcall(function() s._dead = true end)
+        local viaModule = false
+        if type(rawget(getmetatable(s) or {}, "_doRespawn")) == "function"
+            or type(s._doRespawn) == "function" then
+            viaModule = pcall(function() s:_doRespawn() end)
         end
-        -- 3) Сносим голову. При RequiresNeck = true отсутствие головы — гарантированная смерть
-        -- на уровне движка, независимо от того, как называются джойнты в этом риге.
-        local headGone = false
-        for _, d in ipairs(c:GetChildren()) do
-            if d:IsA("BasePart") and (d.Name == "Head" or d.Name == "head") then
-                if pcall(function() d:Destroy() end) then headGone = true end
-            end
-        end
-        -- Пишем ФАКТЫ в диаг: сколько связей нашлось и снялась ли голова. Если joints=0 —
-        -- значит доступа к джойнтам нет вообще, и это будет видно сразу, без догадок.
-        _deathInfo = "joints=" .. joints .. " head=" .. tostring(headGone)
-        return joints > 0 or headGone
+        -- Дублируем прямым выстрелом ремоута из памяти: если _doRespawn упёрся в отсутствие
+        -- _light/_main (UI мог быть уничтожен вместе с U0), сервер всё равно получит запрос.
+        local viaRemote = false
+        if re then viaRemote = pcall(function() re:FireServer() end) end
+        _deathInfo = "svc=yes doRespawn=" .. tostring(viaModule)
+            .. " remote=" .. tostring(re ~= nil and viaRemote)
+        return viaModule or viaRemote
     end
 
     -- [V122] ИСПРАВЛЯЮ СВОЁ ЖЕ УТВЕРЖДЕНИЕ ИЗ V120. Я написал, что void-монитор игры зовёт
@@ -1750,20 +1797,9 @@ return function(Lib, Core)
     -- КАЖДЫЕ 0.3с. Каждый вызов заново ставил CFrame и сбрасывал набранную скорость падения,
     -- поэтому персонаж болтался под картой вместо того, чтобы провалиться ниже порога.
     -- Теперь телепорт делается ОДИН раз за попытку респавна.
-    local _voidFired = false
-    local function dropToVoid()
-        if _voidFired then return false end
-        local c = LocalPlayer.Character
-        local root = c and (c:FindFirstChild("HumanoidRootPart") or c.PrimaryPart)
-        if not root then return false end
-        local ok = pcall(function()
-            -- Уходим сразу ГЛУБОКО ниже порога уничтожения, а не на 50 стадов под него.
-            root.CFrame = CFrame.new(root.Position.X, workspace.FallenPartsDestroyHeight - 500, root.Position.Z)
-            root.AssemblyLinearVelocity = Vector3.new(0, -500, 0)
-        end)
-        _voidFired = ok
-        return ok
-    end
+    -- [V123] dropToVoid УДАЛЁН. Он и был причиной «тычусь под землю»: телепортировал тебя под
+    -- карту, а убить не мог — void-логика игры это мёртвый код (разбор выше). Толку ноль, вреда
+    -- много: ты терял позицию. Разбор оставлен как история решений.
 
     -- ═══════════════ [V113] ПОЧЕМУ RESPAWN НЕ РАБОТАЛ ═══════════════
     -- Ремоут и путь были верны — я это перепроверил по дампу:
@@ -1790,7 +1826,7 @@ return function(Lib, Core)
     -- наш случай как пример «Example without arguments»:
     --        local player = game.Players.LocalPlayer
     --        replicatesignal(player.Kill)   -- "This example will kill the LocalPlayer."
-    -- Это настоящая серверная смерть, мгновенная и не требующая ни урона, ни падения,
+    -- Это настоящая серверная смерть, мгновенная и не тр��бующая ни урона, ни падения,
     -- ни разрешения игры. Именно поэтому обходятся оба прежних тупика: и серверный Health,
     -- и отключённая кнопка Reset (CoreGuiPolicy.lua:109).
     --
@@ -1964,20 +2000,18 @@ return function(Lib, Core)
     -- поднимает на ноги с тем же HP, а тебе нужен НОВЫЙ персонаж с полным HP. Поэтому из
     -- пути респавна GettingUp убран совсем: респавн = форсировать НАСТОЯЩУЮ смерть и дать
     -- серверу возродить нас. Слом шеи идёт сразу с 1-й попытки, без разогрева.
+    -- [V123] Ничего не ломаем и не телепортируем. Только игровой путь.
     local function tryRespawnOnce(attempt)
         local via = {}
-        -- Шаг 1 (сразу): слом шеи. RequiresNeck возвращаем в true — игра снимает его в
-        -- RagdollService:361, и именно поэтому раньше трюк не убивал.
-        if breakNeck() then via[#via + 1] = "neck" end
-        -- Шаг 2 (с попытки 8, ~2.4с): бездна — ПОСЛЕДНИЙ резерв. Понижен с 4-й попытки, потому
-        -- что void-логика игры оказалась мёртвым кодом (разбор у dropToVoid), и раньше именно
-        -- она забивала весь лог, создавая видимость работы.
-        if attempt >= 8 and dropToVoid() then via[#via + 1] = "void" end
-        -- Шаг 3: когда смерть уже случилась — просим игру заспавнить нас.
-        if isTrulyDead() then
-            if callGameRespawn() then via[#via + 1] = "_doRespawn" end
-            if fireRespawn() then via[#via + 1] = "SpawnRequest" end
-        end
+        -- Шаг 1: сервис из памяти → s:_doRespawn() + выстрел его же ремоута. Это ровно то,
+        -- что делает игра после 7 кликов по сердцу, но без гейта кликов.
+        -- Раз в ~0.9с, а не каждые 0.3с: FireServer в цикле — прямой путь к кику за флуд,
+        -- а сама игра между нажатиями ждёт 0.6с (_onHeartClick:508).
+        if attempt % 3 == 1 and gameRespawn() then via[#via + 1] = "memSvc" end
+        -- Шаг 2: ремоуты, найденные обычным путём в дереве (RespawnRE / Remotes.SpawnRequest) —
+        -- на случай, если синглтон в памяти не нашёлся. Условие isTrulyDead убрано: сервер
+        -- держит Downed=true, и «мёртв ли я» решает он, а не наша догадка.
+        if fireRespawn() then via[#via + 1] = "remote" end
         return #via > 0, table.concat(via, "+")
     end
 
@@ -1997,7 +2031,7 @@ return function(Lib, Core)
         -- критерий успеха: слом шеи и бездна ведут именно к нему.
         local conn = LocalPlayer.CharacterAdded:Connect(function() up = true end)
         _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
-        _voidFired = false              -- [V122] бездна снова доступна для новой попытки
+        _deathInfo = "not attempted"    -- [V123] чистим диаг перед новой серией попыток
         local t0, attempt, seen, order = os.clock(), 0, {}, {}
         while not up and os.clock() - t0 < 12 do
             attempt = attempt + 1
