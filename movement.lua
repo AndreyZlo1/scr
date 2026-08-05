@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════�����══════════════════
+    -- ══════════════════════════ Move-vector math ═════════������══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -757,7 +757,9 @@ return function(Lib, Core)
     local _tryM1 = nil
     local _ndGateIdx, _ndParryIdx, _ndBlockIdx = nil, nil, nil
     local _ndComboIdx = nil   -- [V128] индекс u19 (счётчик комбо) в tryM1
-    local _ndComboCands = nil -- [V130] кандидаты на u19: { [idx] = {last=, score=} }
+    -- [V131] _ndComboCands удалён: механика «обучения по кадрам» не могла работать, т.к. u19
+    -- меняется и возвращается внутри одного вызова tryM1 (:461 вперёд, :472 назад при неудаче
+    -- анимации), а поллинг видел лишь случайные срезы.
     -- Персистентные обёртки для pcall — БЕЗ аллокации замыкания на кадр.
     local function _getUp(fn, i) return debug.getupvalue(fn, i) end
     local function _setUp(fn, i, v) return debug.setupvalue(fn, i, v) end
@@ -816,22 +818,40 @@ return function(Lib, Core)
         -- (`>= 3` вместо `== 3`) не дала ничего: она правила код, до которого не доходило
         -- управление. Отсюда «4 атака воспроизводится» — её никто и не блокировал.
         --
-        -- ПРАВИЛЬНО: не угадывать индекс, а найти его ПО ПОВЕДЕНИЮ. Достоверно про u19 из дампа
-        -- известно только то, что это число и что оно меняется по закону
-        --     M1.lua:461   u19 = u19 % 4 + 1     → 1,2,3,4,1,2,3,4…
-        -- Собираем всех числовых кандидатов; отсев делает _ndLearnCombo ниже.
-        _ndComboCands = {}
-        local dinfo = select(2, pcall(debug.getinfo, fn))
-        local nups = (type(dinfo) == "table" and tonumber(dinfo.nups)) or 32
-        for i = 1, nups do
-            -- gate/parry/block исключаем: их значения мы сами обнуляем каждый кадр, они никогда
-            -- не «прокрутятся» как комбо и только тратили бы наблюдения.
-            if i ~= _ndGateIdx and i ~= _ndParryIdx and i ~= _ndBlockIdx then
-                local okN, vN = pcall(_getUp, fn, i)
-                if okN and type(vN) == "number" then
-                    _ndComboCands[i] = { last = vN, score = 0 }
-                end
-            end
+        -- ═══════ [V131] ТОЧНЫЙ ИНДЕКС u19 ИЗ ДАМПА: ОН ДЕВЯТЫЙ, А НЕ G+5 ═══════
+        -- Я ошибался, когда писал (V130), что «порядок upvalue'ов из дампа не выводится».
+        -- Выводится, и он там напечатан ЯВНО — строкой-комментарием прямо над телом tryM1
+        -- (M1_ModuleScript.lua:322):
+        --   upvalues: u29, LocalPlayer, u23, u21, u32, u33, isCombatInputBlocked,
+        --             getFinalM1AnimSpeed, u19, getM1Animations, AnimationHandler,
+        --             playM1SwingAnimation, Evasive, MovementServiceClient, CombatStepUtils,
+        --             CombatAnimationUtils, scheduleM1SwingTimers, u25, u26, u27, u28,
+        --             CombatRemoteClient
+        -- Нумеруем: 1=u29, 2=LocalPlayer, 3=u23, 4=u21, 5=u32, 6=u33, 7=isCombatInputBlocked,
+        --           8=getFinalM1AnimSpeed, **9=u19**, 10=getM1Animations …
+        -- Это ровно согласуется с уже РАБОТАЮЩИМИ индексами гейтов выше: u21=4, u32=5, u33=6.
+        -- То есть u19 = _ndGateIdx + 5 было бы 9 ТОЛЬКО при _ndGateIdx=4... и да, gate=4, так
+        -- что арифметика V128 случайно совпадала, но ломалась подпись: я требовал, чтобы по
+        -- краям от u19 стояли ФУНКЦИИ на G+3/G+4/G+6 — а там getFinalM1AnimSpeed (8) и
+        -- getM1Animations (10) ЕСТЬ, зато G+3 = 7 = isCombatInputBlocked тоже функция…
+        -- проверка `type(c19)=="number"` падала по другой причине: на момент маппинга бой ещё
+        -- не начинался, u19 = 0 — это число, ок; но `_getUp` на индексе 7/10 у Luraph-сборки
+        -- может вернуть nil, и всё условие рушилось целиком. Опираться на 4 значения сразу
+        -- было хрупко.
+        --
+        -- ПОЧЕМУ ОТКАЗЫВАЮСЬ И ОТ «ОБУЧЕНИЯ ПО КАДРАМ» (V130): u19 меняется и ВОЗВРАЩАЕТСЯ
+        -- внутри ОДНОГО вызова tryM1 — :461 `u19 = u19 % 4 + 1`, а на :472 при неудаче анимации
+        -- `u19 = math.max(0, u19 - 1)`. Плюс :508 `u19 = v57` (серверный ответ) и :561
+        -- (Declined → v65-1). Поллинг с Heartbeat видит только СЛУЧАЙНЫЕ срезы этой чехарды,
+        -- поэтому «два перехода ровно по модулю 4» могли не набраться никогда — ещё один способ
+        -- никогда не активировать зажим.
+        --
+        -- ИТОГ: берём индекс из дампа (9 = gate+5), но ПРОВЕРЯЕМ только то, что там ЧИСЛО в
+        -- диапазоне 0..4 — единственное, что действительно гарантировано формулой `% 4 + 1`.
+        local ci = _ndGateIdx + 5
+        local okC, c19 = pcall(_getUp, fn, ci)
+        if okC and type(c19) == "number" and c19 % 1 == 0 and c19 >= 0 and c19 <= 4 then
+            _ndComboIdx = ci
         end
         _tryM1 = fn
         return true
@@ -843,25 +863,47 @@ return function(Lib, Core)
     --     монотонно) → кандидат вычёркивается навсегда;
     --   • переход обязан быть ровно `new == old % 4 + 1`; два таких перехода запирают индекс.
     --     Одного мало: на +1 растёт много чего, а вот цикл ПО МОДУЛЮ 4 — это уже подпись комбо.
-    local function _ndLearnCombo()
-        if _ndComboIdx or not _ndComboCands or not _tryM1 then return end
-        for i, st in pairs(_ndComboCands) do
-            local ok, v = pcall(_getUp, _tryM1, i)
-            if not ok or type(v) ~= "number" or v % 1 ~= 0 or v < 0 or v > 4 then
-                _ndComboCands[i] = nil
-            elseif v ~= st.last then
-                if v == (st.last % 4) + 1 then
-                    st.score = st.score + 1
-                    if st.score >= 2 then _ndComboIdx = i; return end
-                else
-                    -- Сервер умеет откатывать счётчик назад (M1.lua:552-561: Declined →
-                    -- u19 = u27[id] - 1), поэтому «неправильный» переход НЕ дисквалифицирует
-                    -- кандидата — он лишь сбрасывает накопленные очки.
-                    st.score = 0
+    -- ═══════════ [V131] ЗАЖИМ СЧЁТЧИКА ДЕЛАЕМ В ХУКЕ, А НЕ В ПОЛЛИНГЕ ═══════════
+    -- ПОЧЕМУ ПОЛЛИНГ НЕ МОГ РАБОТАТЬ ПРИНЦИПИАЛЬНО. Мы обнуляли u19 из Heartbeat, то есть
+    -- МЕЖДУ вызовами tryM1. А сервер в промежутке присылает свой ответ и ПЕРЕЗАПИСЫВАЕТ
+    -- счётчик поверх нашего нуля:
+    --     M1.lua:508  u19 = v57            (v57 = clamp(номер удара от сервера, 1, 4))
+    --     M1.lua:561  u19 = v65 - 1        (ветка Declined)
+    -- Оба обработчика висят на remote-событиях и выполняются в СВОИХ потоках, а не в наших
+    -- кадрах. Гонка «мы пишем 0 в кадре N → сервер пишет 3 через 40мс → tryM1 в кадре N+3
+    -- читает 3 → бьёт 4-м» воспроизводится всегда. Именно поэтому «4 атака воспроизводится»
+    -- сохранялась при любых правках условия (== 3, >= 3): проблема была не в условии.
+    --
+    -- ЕДИНСТВЕННОЕ МЕСТО, ГДЕ ГОНКИ НЕТ — сам вызов tryM1: значение u19 читается на :460-461
+    -- сразу после входа. Если обнулить u19 в момент ВХОДА в tryM1, никакой серверный ответ
+    -- уже не успеет встать между нашей записью и чтением игры — между ними нет ни одного
+    -- yield'а (tryM1 синхронна до самого playM1SwingAnimation).
+    -- hookfunction на Lua-функцию — ровно тот инструмент (см. skill potassium-api/closure.md);
+    -- oth здесь не нужен, tryM1 не C-функция.
+    local _ndHooked, _ndOrigTryM1 = false, nil
+    local function _ndInstallComboHook()
+        if _ndHooked or not _tryM1 or not _ndComboIdx then return end
+        if type(hookfunction) ~= "function" then return end   -- нет UNC-хука → тихо живём без пропуска
+        local target, cidx = _tryM1, _ndComboIdx
+        local ok = pcall(function()
+            _ndOrigTryM1 = hookfunction(target, function(...)
+                -- Зажим ДО чтения: игра на :461 сделает u19 = 0 % 4 + 1 = 1, то есть комбо
+                -- всегда стартует с первого удара, а p47 == 4 (финишер, FinisherCooldown 1.25с
+                -- вместо AttackDuration 0.45с на :305) не наступает никогда.
+                -- Зажимаем ТОЛЬКО значение 3: при 0/1/2 идёт живая серия 1→2→3, её рвать нельзя.
+                -- Флаг — Config.NoDelay_On (:118). Глобала NoDelayOn в этом файле НЕ существует:
+                -- он был бы всегда nil, и хук молча ничего не делал бы — ровно та же порода
+                -- ошибки, что и мёртвый _ndComboIdx.
+                if Config.NoDelay_On then
+                    local okC, c = pcall(_getUp, target, cidx)
+                    if okC and type(c) == "number" and c >= 3 then
+                        pcall(_setUp, target, cidx, 0)
+                    end
                 end
-                st.last = v
-            end
-        end
+                return _ndOrigTryM1(...)
+            end)
+        end)
+        _ndHooked = ok and _ndOrigTryM1 ~= nil
     end
 
     -- [V112] УДАЛЕНО ЦЕЛИКОМ: extractId / buildM1Ids / onAnimPlayed / hookAnimator,
@@ -982,8 +1024,8 @@ return function(Lib, Core)
         -- Heartbeat попал ровно в промежуток между 3-м и 4-м ударом. Есть два разных пути,
         -- на которых значение 3 не наблюдается вообще, и оба видны в дампе:
         --
-        --   1) ДВА УДАРА ВНУТРИ ОДНОГО КАДРА. No Delay держит u21/u32/u33 и атрибуты
-        --      открытыми каждый кадр, поэтому клиентский стопор между свингами снят
+        --   1) ДВА УДАРА ВН��ТРИ ОДНОГО КАДРА. No Delay держит u21/u32/u33 и атрибуты
+        --      открытыми каждый кадр, поэтому клиентский стопор между свин��ами снят
         --      полностью. tryM1 синхронна, так что за один кадр (~16мс) она может пройти
         --      дважды: u19 успевает стать 3 и сразу 4, а наш polling видит уже 4.
         --
@@ -1003,16 +1045,12 @@ return function(Lib, Core)
         -- и tryM1 посчитает u19 % 4 + 1 = 1.
         -- Значения 0/1/2 по-прежнему не трогаем: это живая середина комбо, обнуление там
         -- оборвало бы серию.
-        -- [V130] Пока индекс не найден — учимся на живом счётчике; как только заперт, зажимаем.
-        -- Порядок важен: обучение обязано идти ДО зажима, иначе мы сами затрём те переходы,
-        -- по которым кандидат опознаётся.
-        _ndLearnCombo()
-        if _ndComboIdx then
-            local okC, c19 = pcall(_getUp, _tryM1, _ndComboIdx)
-            if okC and type(c19) == "number" and c19 >= 3 then
-                pcall(_setUp, _tryM1, _ndComboIdx, 0)
-            end
-        end
+        -- [V131] Зажим счётчика больше НЕ делается отсюда. Причина подробно разобрана над
+        -- _ndInstallComboHook: запись из Heartbeat происходит МЕЖДУ вызовами tryM1, а сервер в
+        -- этом промежутке перезаписывает u19 своими обработчиками (M1.lua:508 `u19 = v57` и
+        -- :561 `u19 = v65 - 1`). Гонку выигрывает сервер, поэтому 4-й удар и играл.
+        -- Здесь только ставим хук (идемпотентно, один раз) — сам зажим живёт внутри tryM1.
+        _ndInstallComboHook()
     end
     -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs к��утится
     -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
@@ -1689,7 +1727,7 @@ return function(Lib, Core)
         pcall(stepNoClip)
     end))
     -- [V112] ЛЕНИВЫЙ PostStep. Преж��е все драйверы вызывались КАЖДЫЙ кадр безуслов��о, и
-    -- каждый сам решал, работать ему или нет — то ес��ь на выключенных фичах мы всё равно
+    -- каждый с��м решал, работать ему или нет — то ес��ь на выключенных фичах мы всё равно
     -- платили за 4 вызова функций на кадр. Теперь проверяем флаги ДО вызова: пока фичи
     -- выключен��, тело цикла — это несколько сравнений булевых полей.
     -- driveDodge вызывается только при Dodge_On (внутри он и так первым делом это проверял),
