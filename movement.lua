@@ -708,7 +708,7 @@ return function(Lib, Core)
             and type(debug.getupvalue) == "function"
     end
 
-    -- ═════════════════════════��═�����═══════════════════════════════════════════════
+    -- ═════════════════════════���═�����═══════════════════════════════════════════════
     -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо хука task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
@@ -846,7 +846,7 @@ return function(Lib, Core)
     --      (CombatConfig:120) против AttackDuration = 0.45 — это и есть «долгая» задержка
     --      именно после 4-го удара (`p47 == 4 and FinisherCooldown or AttackDuration`).
     --   2) серверный атрибут M1Cooldown (и M1 / CombatAttacking).
-    -- V112 закрывал только путь (1), поэтому путь (2) ��родол����ал д��рж����ть комбо. Симптом
+    -- V112 закрывал только путь (1), поэтому путь (2) ������родол����ал д��рж����ть комбо. Симптом
     -- «после последнего удара долгая задержка» описывал ровно это.
     --
     -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
@@ -1023,7 +1023,7 @@ return function(Lib, Core)
     --     Поиск «первое число, равное 1.5» с равной вероятностью попадал в множитель
     --     вместо кулдауна, после чего driveDodge писал 1.5 не туда, а настоящий кулдаун
     --     уезжал в список «дедлайнов».
-    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся на то����ный порядок upvalue'ов из
+    -- Теперь идём по ИНДЕКСАМ (упорядоченно) и опираемся н�� то����ный порядок upvalue'ов из
     -- дампа (Evasive.lua:508), проверяя ожидаемые значения по конфигу. Индексы:
     --   [15] ServerConfirmTimeout  [16] DashDuration  [22] DashSpeed
     --   [23] OutnumberedDashSpeedMultiplier  [24] OutnumberedDashDurationMultiplier
@@ -1109,7 +1109,7 @@ return function(Lib, Core)
     }
     local EV_DEADLINE_IDXS = { 4, 5, 6, 7, 8 }   -- u6, u5, u4, u7, u8 — метки os.clock
 
-    -- [V112] Персистентная обёртка записи атрибут���� (использу��тся о��ходом ��ейтов Dodge).
+    -- [V112] Персистентная обёртка записи атри��ут���� (использу��тся о��ходом ��ейтов Dodge).
     -- Отдельная функция, а не замыкание на месте: обход выполняется на каждый дэш.
     local function _setAttr(inst, key, val) inst:SetAttribute(key, val) end
 
@@ -1224,7 +1224,7 @@ return function(Lib, Core)
             -- обычным GetAttribute. Единственный yield во всей функции до этих проверок —
             -- строка 510 (`LocalPlayer.Character or CharacterAdded:Wait()`), и он не
             -- срабатывает, когда персонаж есть. Значит снять атрибуты, вызвать оригинал и
-            -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чте��и��м игрой
+            -- вернуть их обратно можно СИНХРОННО: между нашим снятие�� и чте��и��м игрой
             -- никакой другой код ��сполниться не может — гонки нет by design.
             -- Записи локальные (на сервер не репл*ицируются), а сами гейты проверяются на
             -- клиенте, поэтому этого достаточно.
@@ -1343,7 +1343,7 @@ return function(Lib, Core)
             if cfg and cfg.Evasive then cfg.Evasive.Cooldown = _evCdBase end
             if _evCdIdx then pcall(_setUp, evTarget(), _evCdIdx, _evCdBase) end
         end
-        -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без этого после
+        -- [V112] Возвращаем вани*льные множители outnumbered (1.5 / 1.2). Без ��того после
         -- выключения ��умбле��а иг��а ост��лась бы БЕЗ легитимного бонуса «в меньшинстве»,
         -- который сервер даёт честно, когда вас реально окружили.
         if _evMultBase and _evMultIdx then
@@ -1421,7 +1421,7 @@ return function(Lib, Core)
         local rag = tryRequire({ "Shared", "Services", "RagdollService", "RagdollServiceClient" })
         if not rag or type(rag.Init) ~= "function" then return false end
         -- Берём upvalue #5 и ПРОВЕРЯЕМ, что это функция; если игра сдвинула порядок —
-        -- ищем перебором ту, у ко��орой н��т upvalue'ов (sustainClientRagdoll их н�� имеет,
+        -- ищем пер��бором ту, у ко��орой н��т upvalue'ов (sustainClientRagdoll их н�� имеет,
         -- в отличие от isManagedRagdoll/stepClientRagdollSustain).
         local fn
         local ok5, v5 = pcall(_getUp, rag.Init, 5)
@@ -1547,7 +1547,7 @@ return function(Lib, Core)
     -- ЭКСПЛОИТ: шлём RespawnRE:FireServer() напрямую, минуя счётчик кликов u10. Аргументов
     -- у него нет (:227 — вызов пустой), поэтому подделывать нечего.
     --
-    -- ВАЖНО про порядок: экран смерти поднимается по атрибуту "Dead" на ПЕРСОНАЖЕ (:385),
+    -- ВАЖНО про порядок: экран смерт�� поднимается по атрибуту "Dead" на ПЕРСОНАЖЕ (:385),
     -- и respawn имеет смысл только после смерти. Поэтому цепочка: убить → дождаться Dead →
     -- RespawnRE. Респавн даёт полное HP, т.к. сервер создаёт персонажа заново
     -- (dorespawn ждёт именно LocalPlayer.CharacterAdded, :229).
@@ -1622,7 +1622,7 @@ return function(Lib, Core)
         local re = getRespawnRemote() or getSpawnRemote()
         if not re then return false end
         -- Троттлинг обязателен: спам ремоута — верный путь к кику за флуд. Но 3с было
-        -- слишком много: игра сама позволяет нажать кнопку повторно примерно раз в 0.7с
+        -- слишком много: игра сама позволяет нажать кнопку повторно пример��о раз в 0.7с
         -- (:353 task.wait(0.6) + твины), поэтому 1с безопасно и не мешает «моментально».
         local now = os.clock()
         if now - _lastRespawnFire < 1 then return false end
@@ -1645,7 +1645,7 @@ return function(Lib, Core)
     -- isDeadOrDowned() возвращает true И на Downed. Сервер же обслуживает SpawnRequest
     -- только при флаге СМЕРТИ (IsDeathFlagged читает атрибут Dead, SpawnServiceUtils.lua:25).
     -- Из-за этого цепочка V114 вела себя ровно так, как ты описал: Player.Kill сбивал тебя
-    -- в Downed, isDeadOrDowned говорил «мёртв», скрипт слал SpawnRequest, сервер молча
+    -- в Downed, isDeadOrDowned говорил «мёртв», ск��ипт слал SpawnRequest, сервер молча
     -- отказывал (ты жив, ты просто лежишь) — и оставалось только штатное ожидание подъёма
     -- по HP. Downed — это состояние ЖИВОГО персонажа, а не смерть.
     -- ═══════ [V116] ЭТА ФУНКЦИЯ И БЫЛА ЛОВУШКОЙ ═══════
@@ -1987,7 +1987,7 @@ return function(Lib, Core)
     -- прошлый респавн не довёл дело до конца, — то ЛЮБОЙ следующий респавн молча выходит.
     -- Это ровно «я просто сдыхаю»: смерть есть, UI смерти есть, а запрос не уходит.
     -- Поэтому перед вызовом флаг принудительно сбрасываем, а затем зовём штатную функцию:
-    -- она сама и ремоут дёрнет, и UI/эффекты/курсор вернёт (:406-421).
+    -- она сама и ре��оут дёрнет, и UI/эффекты/курсор вернёт (:406-421).
     --
     -- Синглтон ищем по КЛЮЧАМ таблицы (environment.md, Table filter options → Keys):
     -- у модуля есть и `_spawnRemote`, и `_doRespawn` — такая пара уникальна.
@@ -2055,11 +2055,150 @@ return function(Lib, Core)
     -- пути респавна GettingUp убран совсем: респавн = форсировать НАСТОЯЩУЮ смерть и дать
     -- серверу возродить нас. Слом шеи идёт сразу с 1-й попытки, без разогрева.
     -- [V123] Ничего не ломаем и не телепортируем. Только игровой путь.
+    -- ═══════════════ [V125] КОРЕНЬ НАЙДЕН И ДОКАЗАН ═══════════════
+    -- Твой диаг: `Dead: false | GenReady: true | state: Running | LoadChar[invoked ok]`
+    -- и при этом `no CharacterAdded in 12s`, хотя ВСЕ четыре пути отработали без ошибок.
+    -- Ключ — `Dead: false`. Вот доказательство из дампа, файл PlayerScripts/respawnstuff:
+    --     :391  u26:GetAttributeChangedSignal("Dead"):Connect(...)
+    --     :398  if u26:GetAttribute("Dead") then   ← экран смерти показывается ТОЛЬКО тут
+    --     :216  local function dorespawn()
+    --     :228      RespawnRE:FireServer()
+    --     :222      LocalPlayer.CharacterAdded:Wait()
+    -- То есть сама игра дёргает респавн исключительно когда атрибут игрока `Dead == true`.
+    -- Сервер СЧИТАЕТ ТЕБЯ ЖИВЫМ (Dead=false, GenReady=true), поэтому он молча отбрасывает и
+    -- RespawnRE, и SpawnRequest, и _doRespawn, и LoadCharacter. `invoked ok` означает лишь
+    -- «вызов дошёл без ошибки Lua», а не «сервер согласился возрождать».
+    --
+    -- ВЫВОД, который надо принять: форсировать возрождение с клиента в этой игре НЕЛЬЗЯ.
+    -- Возрождение выдаёт сервер, а он выдаёт его только мёртвым. Убить себя мы тоже не можем —
+    -- V123 доказал это на практике (модель ломается локально, сервер смерть не признаёт).
+    -- Способов обойти это нет: и «смерть», и «возрождение» — целиком серверные решения.
+    -- Cmdr/Kohl тоже мимо: команда respawnServer делает настоящий v:LoadCharacter(), но
+    -- CmdrShared:11 гейтит доступ жёстким списком UserId админов, и тебя там нет.
+    --
+    -- ЧТО РЕАЛЬНО РЕШАЕТ ТВОЮ ПРОБЛЕМУ. Ты застреваешь под землёй и в ragdoll — но раз сервер
+    -- считает тебя живым, ты ВЛАДЕЛЕЦ физики своего персонажа (network ownership). Значит
+    -- перемещение и смена состояния Humanoid'а реплицируются. Это единственный канал, который
+    -- у нас достоверно работает, и его достаточно: подъём + возврат на поверхность.
+    -- Это подтверждает и сама игра — RagdollService:610 и :708 поднимают ровно так:
+    --     Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    local _recInfo = "not attempted"
+    local function selfRecover()
+        local c = LocalPlayer.Character
+        local hum = c and c:FindFirstChildOfClass("Humanoid")
+        local root = c and (c:FindFirstChild("HumanoidRootPart") or c.PrimaryPart)
+        if not (hum and root) then _recInfo = "no humanoid/root"; return false end
+
+        -- 1) Снимаем ragdoll. SetStateEnabled обязателен: RagdollService отключает GettingUp,
+        -- и без включения обратно ChangeState тихо игнорируется — на этом я горел в V119.
+        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true) end)
+        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Physics, false) end)
+        pcall(function() hum.PlatformStand = false end)
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+
+        -- 2) Если провалился под карту — ищем поверхность НАД собой и встаём на неё.
+        -- Луч пускаем сверху вниз, исключив собственного персонажа, иначе он попадёт в нас же.
+        local moved = false
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { c }
+        local from = Vector3.new(root.Position.X, root.Position.Y + 2000, root.Position.Z)
+        local hit = workspace:Raycast(from, Vector3.new(0, -5000, 0), params)
+        if hit then
+            moved = pcall(function()
+                root.CFrame = CFrame.new(hit.Position + Vector3.new(0, 5, 0))
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+        _recInfo = "gettingUp ok surface=" .. tostring(hit ~= nil) .. " moved=" .. tostring(moved)
+        return true
+    end
+
+    -- ═══════════ [V126] ТЫ БЫЛ ПРАВ: ДВИЖКОВЫЙ КАНАЛ СУЩЕСТВУЕТ ═══════════
+    -- Я ошибся в V125, когда написал «способов нет». Искал только игровые ремоуты и не проверил
+    -- движковые сигналы. В reference'е Potassium (references/signal.md) есть буквально это:
+    --     -- Example without arguments
+    --     -- This example will kill the `LocalPlayer`.
+    --     replicatesignal(player.Kill)
+    -- `replicatesignal` — «Fires all server connections connected to a RBXScriptSignal», то есть
+    -- бьёт по СЕРВЕРНЫМ коннектам, а не локальным как firesignal. Это ровно то, о чём ты сказал:
+    -- сигналить движку напрямую. И `Player.Kill` в whitelist'е репликации Roblox.
+    --
+    -- ГЛАВНОЕ, ЧТО Я РАНЬШЕ НЕ ПОНЯЛ. Ты говорил «Kill работает, но это не респавн» — и я на
+    -- этом основании его отбросил (записал в память как тупик). Это была ошибка: Kill не
+    -- конкурент респавну, а его ОТСУТСТВУЮЩЕЕ УСЛОВИЕ. Доказано в V125: респавн выдаётся
+    -- только при `Dead == true` (respawnstuff:398), а сервер держал `Dead: false`. Значит
+    -- цепочка двухступенчатая, и без первой ступени вторая физически не могла сработать:
+    --     replicatesignal(Player.Kill)  →  сервер видит НАСТОЯЩУЮ смерть, ставит Dead=true
+    --     →  RespawnRE / SpawnRequest / LoadCharacter уже принимаются  →  новый персонаж, фулл HP
+    -- Это и объясняет то, что ты видел у человека: телепорт + полное HP.
+    local _killInfo = "not attempted"
+
+    -- Проверяем возможность ДО выстрела: cansignalreplicate говорит, реплицируется ли сигнал.
+    -- Не угадываем — спрашиваем у самого executor'а, иначе опять получили бы «invoked ok» без
+    -- эффекта, как с LoadCharacter в V124.
+    local function engineKill()
+        local sig = nil
+        -- pcall на доступе к полю обязателен: Kill не является обычным свойством, и на части
+        -- сборок обращение к нему бросает ошибку вместо возврата nil.
+        pcall(function() sig = LocalPlayer.Kill end)
+        if typeof(sig) ~= "RBXScriptSignal" then
+            _killInfo = "Player.Kill missing (type=" .. tostring(typeof(sig)) .. ")"
+            return false
+        end
+        if type(cansignalreplicate) == "function" then
+            local okc, canRep = pcall(cansignalreplicate, sig)
+            if okc and canRep == false then
+                _killInfo = "Kill not replicable on this build"
+                return false
+            end
+        end
+        if type(replicatesignal) ~= "function" then
+            _killInfo = "no replicatesignal in executor"
+            return false
+        end
+        local ok, err = pcall(replicatesignal, sig)
+        _killInfo = ok and "Kill replicated" or ("Kill error: " .. tostring(err))
+        return ok
+    end
+
+    -- Резерв — твоя идея с падением в бездну, но с одной поправкой по существу.
+    -- math.huge использовать НЕЛЬЗЯ: CFrame с бесконечностью — невалидное значение, движок его
+    -- отбрасывает (а при арифметике даёт NaN и ломает сборку персонажа). Нужен КОНЕЧНЫЙ Y ниже
+    -- порога уничтожения. Порог берём из движка: workspace.FallenPartsDestroyHeight — ниже него
+    -- движок сам удаляет части, причём на СЕРВЕРЕ, что и даёт настоящую смерть.
+    -- Игра знает про этот порог: SpawnServiceUtils:21 GetVoidThresholdY() = FallenPartsDestroyHeight - 50.
+    local _voidInfo = "not attempted"
+    local function dropToVoid()
+        local c = LocalPlayer.Character
+        local root = c and (c:FindFirstChild("HumanoidRootPart") or c.PrimaryPart)
+        if not root then _voidInfo = "no root"; return false end
+        local threshold = -500
+        pcall(function() threshold = workspace.FallenPartsDestroyHeight end)
+        local targetY = threshold - 500      -- заведомо ниже порога, но конечное число
+        local ok = pcall(function()
+            root.CFrame = CFrame.new(root.Position.X, targetY, root.Position.Z)
+            root.AssemblyLinearVelocity = Vector3.new(0, -300, 0)
+        end)
+        _voidInfo = ok and ("dropped to Y=" .. math.floor(targetY)) or "teleport blocked"
+        return ok
+    end
+
     local function tryRespawnOnce(attempt)
         local via = {}
-        -- [V124] Шаг 0 и ГЛАВНЫЙ: LoadCharacter — путь реролла. Единственный, который НЕ
-        -- требует, чтобы сервер сначала признал нас мёртвыми. Идёт первым и на 1-й попытке.
-        if attempt == 1 and loadCharacter() then via[#via + 1] = "LoadChar" end
+        -- [V126] Ступень 1: движковая смерть. Идёт ПЕРВОЙ и только один раз — повторять её
+        -- бессмысленно и опасно (лишний флуд по репликации).
+        if attempt == 1 and engineKill() then via[#via + 1] = "Kill" end
+        -- Ступень 1-резерв (с попытки 7, ~2с): если Kill не реплицировался — падаем под порог
+        -- уничтожения, чтобы смерть оформил сам движок.
+        if attempt == 7 and _killInfo ~= "Kill replicated" and dropToVoid() then
+            via[#via + 1] = "void"
+        end
+        -- [V126] LoadCharacter сдвинут с 1-й попытки на 4-ю. Причина: теперь ему предшествует
+        -- движковая смерть, и запрос имеет смысл только ПОСЛЕ того, как сервер поставит Dead=true.
+        -- На 1-й попытке он бы ушёл в живого игрока и был отброшен — ровно как в V124.
+        if attempt == 4 and loadCharacter() then via[#via + 1] = "LoadChar" end
         -- Шаг 1: сервис из памяти → s:_doRespawn() + выстрел его же ремоута. Это ровно то,
         -- что делает игра после 7 кликов по сердцу, но без гейта кликов.
         -- Раз в ~0.9с, а не каждые 0.3с: FireServer в цикле — прямой путь к кику за флуд,
@@ -2089,7 +2228,7 @@ return function(Lib, Core)
         -- [V120] Настоящий респавн — это НОВЫЙ персонаж, поэтому CharacterAdded здесь главный
         -- критерий успеха: слом шеи и бездна ведут именно к нему.
         local conn = LocalPlayer.CharacterAdded:Connect(function() up = true end)
-        _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
+        _lastRespawnFire = 0            -- снимаем троттлинг для первого выс��рела
         _deathInfo = "not attempted"    -- [V123] чистим диаг перед новой серией попыток
         local t0, attempt, seen, order = os.clock(), 0, {}, {}
         while not up and os.clock() - t0 < 12 do
@@ -2105,10 +2244,15 @@ return function(Lib, Core)
         -- [V124] Диаг переписан под новый путь. Раньше он показывал death[joints/head] от
         -- удалённого кода — ты правильно заметил, что информация старая. Теперь главное поле
         -- это LoadChar[...]: по нему сразу видно, найден ли RemoteFunction и что ответил сервер.
+        -- [V126] Главное поле теперь Kill[...] — по нему сразу видно, прошла ли ДВИЖКОВАЯ смерть.
+        -- Плюс DeadAttr: если Kill сработал, но Dead так и остался false, значит сервер смерть
+        -- не принял, и это будет видно фактом, а не догадкой.
         _respawnDiag = "tries=" .. attempt
             .. " paths=" .. (#order > 0 and table.concat(order, ">") or "NONE")
+            .. " Kill[" .. tostring(_killInfo) .. "]"
+            .. " DeadAttr=" .. tostring(LocalPlayer:GetAttribute("Dead"))
+            .. " void[" .. tostring(_voidInfo) .. "]"
             .. " LoadChar[" .. tostring(_lcInfo) .. "]"
-            .. " svc[" .. tostring(_deathInfo) .. "]"
             .. (up and " -> respawned" or " -> no CharacterAdded in 12s")
         return up
     end
@@ -2126,7 +2270,23 @@ return function(Lib, Core)
         end
         _respawnBusy = true
         task.spawn(function()
-            pushRespawnUntilAlive()
+            -- [V125] Развилка по факту, а не по догадке. Атрибут `Dead` игрока — тот самый,
+            -- по которому игра решает, показывать ли экран смерти (respawnstuff:398).
+            -- Dead == true  → сервер готов возрождать, шлём ему запросы (старый путь).
+            -- Dead ~= true  → сервер считает нас живым и ЛЮБОЙ запрос отбросит. Долбить его
+            -- 40 раз бессмысленно (именно это ты и наблюдал как «ничего не происходит»),
+            -- поэтому вместо этого поднимаемся и вылезаем из-под карты сами.
+            -- [V126] Развилка V125 УДАЛЕНА, и это была моя ошибка. Она уводила живого игрока
+            -- в selfRecover и НИКОГДА не пыталась возродить — потому что я считал, что убить
+            -- себя невозможно. С `replicatesignal(Player.Kill)` это стало возможно, поэтому
+            -- живой игрок идёт по тому же пути: сначала движковая смерть, потом респавн.
+            local ok = pushRespawnUntilAlive()
+            -- selfRecover остаётся ТОЛЬКО как аварийный выход: если возрождения не случилось,
+            -- лучше хотя бы подняться и вылезти из-под карты, чем оставить тебя лежать.
+            if not ok then
+                selfRecover()
+                _respawnDiag = tostring(_respawnDiag) .. " | fallback self-recover [" .. tostring(_recInfo) .. "]"
+            end
             _respawnBusy = false
         end)
         return true
@@ -2168,7 +2328,7 @@ return function(Lib, Core)
         pcall(stepFly, dt)
         pcall(stepNoClip)
     end))
-    -- [V112] ЛЕНИВЫЙ PostStep. Преж��е все драйверы вызывались КАЖДЫЙ кадр безусловно, и
+    -- [V112] ЛЕНИВЫЙ PostStep. Преж��е все драйверы вызывались КАЖДЫЙ кадр безуслов��о, и
     -- каждый сам решал, работать ему или нет — то ес��ь на выключенных фичах мы всё равно
     -- платили за 4 вызова функций на кадр. Теперь проверяем флаги ДО вызова: пока фичи
     -- выключен��, тело цикла — это несколько сравнений булевых полей.
@@ -2202,7 +2362,7 @@ return function(Lib, Core)
         _noclipActive = Config.NoClip_On
         -- [V112] Перепривязываем событийный счётчик grab-констрейнтов: подписки жили на
         -- СТАРОМ персонаже, после респавна они мертвы, а счётчик остался бы с прошлым
-        -- значением (в т.ч. «нас держат», если нас схватили перед смертью).
+        -- значением (в т.ч. «нас держат», е��ли нас схватили перед смертью).
         bindGrabWatch(char)
         task.wait(0.5)
         if Config.Sprint_On then setSprint(true) end
