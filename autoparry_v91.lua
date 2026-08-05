@@ -305,7 +305,7 @@ local Config = {
 	-- именно они и ломали: counter ждал момента contact−lead и часто отменялся гейтами, из-за чего
 	-- M2 не летел, а guard уже был сброшен → скрипт «стоял и ничего не делал» и мазал парри.
 	BoxingCounter     = false,
-	BoxingCounterReach= 5.5,   -- макс. плоская дистанц��я до ата��ующего, ��туды (��З юзера)
+	BoxingCounterReach= 5.5,   -- макс. плоская ����истанц��я до ата��ующего, ��туды (��З юзера)
 	BoxingCounterGap  = 0.30,  -- анти-даблфайр: не слать M2 повторно чаще (сек). НЕ задержка перед 1-м
 	-- ================= [V91] ALI COUNTER =================
 	-- Работает по тому же принципу, что боксёрская контра: CombatConfig.Styles.ali.M2GrantsIFrames
@@ -353,7 +353,7 @@ local Config = {
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��етит, а мы залочены
 	-- софт-��остоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
-	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физиче����и ничего ��������е даёт.
+	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш ��и��иче����и ничего ��������е даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
 	SA_BlatantDodge   = false,
 	SA_BlatantWindow  = 0.32,   -- сек до кон��акта: в э����м окне ����а��атывает форс-додж
@@ -432,7 +432,7 @@ local Config = {
 	SelfBusyDur     = 0.45,
 
 	DesyncAttack   = false,
-	-- [V88] Режимы desync (цикл клавишей ]):
+	-- [V88] Режимы desync (ци��л клавишей ]):
 	--   delay     — визуал твоего замаха задержан на DesyncDelayMs; FireServer уходит вовремя.
 	--   firedelay — визуал идёт ��овремя; только M1/M2 ServerCheck уходит позже на DesyncDelayMs.
 	--   idlemask  �� посто��нный ��пуф IDLE, пок�� ты атак��еш����.
@@ -511,7 +511,7 @@ local Config = {
 	-- самому дальнему угрожаю��ему контакту в кластере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
-	MultiThreatMinN   = 2,      -- со скольких одновременных угроз включать held-��еж��м
+	MultiThreatMinN   = 2,      -- со скольких одновременных угроз ��ключать held-��еж��м
 	-- [V73] multi-target knobs
 	BlockCooldown     = 0.50,
 	SequentialSpread  = 0.78,
@@ -570,7 +570,7 @@ local Config = {
 	-- [V118] РАЗДЕЛЬНЫЕ капы боковой/радиальной составляющей упреждения. КОРЕНЬ жалобы «враг
 	-- дэшит В УПОР (радиально) + толкается влев��/вправо (боково) → блок, не парри»: старый единый
 	-- кап (7 студ) на ВЕСЬ вектор vel*lead → большая РАДИАЛЬНАЯ скорость дэша съе��ала весь бюджет
-	-- → БОКОВАЯ коррекция (та, что задаёт угол facing) обр��залась пропорционально → лицо отставало
+	-- → БОКОВАЯ коррекция (та, что ��адаёт угол facing) обр��залась пропорционально → лицо отставало
 	-- (в логе face=0.2/-0.6 BACK! при валидном press → сервер даунгрейдит перфект в обычный блок).
 	-- Фикс: раскладываем vel на ради��ль (враг��я, почти не влияет на угол) �� боковую (задаёт угол),
 	-- капим РАЗДЕЛЬНО. Боковой лимит щедрый (угол важен), радиальный маленький (анти-��ерелёт в упор).
@@ -704,7 +704,7 @@ local LEGACY_M1_OFFSETS = {
 	karate   = {0.0375, 0.075, 0.15, 0.225},
 	capoeira = {0.02, 0.1, 0.02, -0.05},
 	slugger  = {0.3, 0.25, 0.25, 0.17},
-	wrestling= {0.04, 0.05, 0.04, 0.03},  -- [V90] отсутствовал
+	wrestling= {0.04, 0.05, 0.04, 0.03},  -- [V90] о��сутствовал
 }
 local LEGACY_M1_BASE = { ali=0.22, karate=0.24, muaythai=0.30, slugger=0.20, capoeira=0.33,
                          hakari=0.21, hakario=0.21, wingchun=0.28 }
@@ -732,7 +732,7 @@ local State = {
 	blocking     = false,
 	guardUp      = false,   -- ИСТИННОЕ серверное состояние guard: true когда серверу отправлен
 	                        -- Activated и ещё не отправлен Deactivated. Отдельно от blocking
-	                        -- (внутреннее намерение), чтобы гарантированно снимать guard даже
+	                        -- (внутреннее намерение), чтобы ��арантиров��нно снимать guard даже
 	                        -- если blocking ��брошен в обход releaseBlock (dodge/counter/outcome).
 	holdUntil    = 0,
 	status       = "ARMED",
@@ -749,6 +749,14 @@ local State = {
 	desyncFires    = 0,
 	fireCount    = 0,
 	lastDodge    = -99,
+	-- [V147] Итог ПОСЛЕДНЕЙ закрытой dodge-транзакции: true = сервер подтвердил IFRAMES,
+	-- false = отказ, nil = доджей ещё не было. Читает dodgeReady, чтобы под грантом не
+	-- спамить дэшем, который сервер всё равно отклоняет. Пишется в updateDodgeTxn.
+	dodgeConfirmedLast = nil,
+	dodgeRejects = 0,
+	-- [V147] Анти-спам диага гейта доджа: печатаем факт блокировки один раз, сбрасываем при
+	-- первом же прохождении гейта. Это не настройка — это защита лога от 60 строк в секунду.
+	dodgeGateSaid = nil,
 	lastDodgeInfo   = nil,
 	-- [V134] authoritative dodge transaction. `pending` exists only after the request was
 	-- sent; `confirmed` flips only on the game's replicated IFRAMES attribute.
@@ -969,7 +977,7 @@ local V93 = {
 -- при combat-ping=158) → uplink раздувался → жали СЛИШКОМ РАНО. Медиана окна последних сырых
 -- сэмплов игнорирует одиночные выбросы В ОБЕ СТОРОНЫ (Data Ping пилит вверх и вниз) и отслеживает
 -- устойчивый RTT: один спайк-кадр среди 24 сэмплов НЕ сдвигает медиану, а реально выросший пинг
--- поднимает её за <1с. Это принципиальная оценка центральной тенденции, не костыль и не обучение.
+-- поднимает её за <1с. ��то принципиальная оценка центральной тенденции, не костыль и не обучение.
 -- [V111] PERF: getPing() зовётся из uplink() (schedulerStep) И applyFacing (RenderStepped) каждый
 -- кадр → мемоизируем: новый сырой сэмпл кладём не ча��е PingSampleGap, медиану пересчитываем только
 -- при добавлении сэмпла, между добавлениями отд��ём кэш.
@@ -1271,7 +1279,7 @@ end
 -- (workspace:GetPartBoundsInBox(part.CFrame, part.Size, {ourChar})) — клиент шлёт серверу
 -- VictimHitConfirm вместе с нашим PerfectBlocking. То есть ИСТИННАЯ геометрия удара — сам
 -- парт, а не наши догадки про yaw/размах. High опирается на это:
---   • если парт атакующего уже есть — п��оверяем пе��есечение с нами 1:1 как игра (авторитетно);
+--   • если парт атакующего ��же есть — п��оверяем пе��есечение с нами 1:1 как игра (авторитетно);
 --   • пока парт�� нет — предсказываем бок�� РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
 --     к��стылей (point-blank/heavy/drag/latch).
 -- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один ��аз за FrameId,
@@ -1543,7 +1551,7 @@ local hitboxGeom = LPH_NO_VIRTUALIZE(function(th)
 	-- стэшим на th для drag-детекта в willHitMe (знак доворота = prevLook vs текущий facing)
 	th.yawRate  = trackedRate
 	th.prevLook = prevLook
-	th.prevPos  = prevPos   -- [V101] для measured-closing (лунж-детект тяжёлых)
+	th.prevPos  = prevPos   -- [V101] для measured-closing (лунж-д��тект тяжёлых)
 	th.prevPosT = prevT
 
 
@@ -1750,6 +1758,22 @@ local function loadGameModules()
 		local cpe = cp and cp.Evasive
 		if cpe and type(cpe.ServerConfirmTimeout) == "number" then
 			GameData.confirmTimeout = cpe.ServerConfirmTimeout
+		end
+		-- ═══════ [V147] ЖИВЫЕ КУЛДАУНЫ ДОДЖА — ОНИ НУЖНЫ ДЛЯ ГЕЙТА ПОД ГРАНТОМ ═══════
+		-- В дампе это ДВА РАЗНЫХ числа, и путать их нельзя:
+		--   CombatConfig.Evasive.Cooldown = 1.5              — базовый кулдаун дэша, из него
+		--       syncCooldownFromServer считает u6 (Evasive:92-95);
+		--   CombatConfig.ClientPredict.Evasive.Cooldown = 2  — кулдаун клиентского предсказания,
+		--       именно ему соответствовал хардкод Config.DodgeCooldown = 2.05.
+		-- Держим оба живыми: хардкод молча разойдётся с игрой при первом же балансном патче.
+		if type(ev) == "table" and type(ev.Cooldown) == "number" and ev.Cooldown > 0 then
+			GameData.evCooldown = ev.Cooldown
+		end
+		if cpe and type(cpe.Cooldown) == "number" and cpe.Cooldown > 0 then
+			GameData.evPredictCooldown = cpe.Cooldown
+		end
+		if type(ev) == "table" and type(ev.DashDuration) == "number" and ev.DashDuration > 0 then
+			GameData.dashDuration = ev.DashDuration
 		end
 		-- Реальное окно перфект-блока (Block.PerfectBlockWindow=0.125) — для диагностики
 		-- и как верхняя граница осмысленного PerfectWindow.
@@ -2583,6 +2607,21 @@ local function sendDodge(dir)
 		sendDeactivate(true)
 		stopBlockAnim()
 	end
+	-- ═══════ [V147] ИЗВЕСТНОЕ ОТКРЫТОЕ РАСХОЖДЕНИЕ (осознанно НЕ правится здесь) ═══════
+	-- Мы бьём в ServerRemote напрямую, минуя CombatRemoteClient.Fire — это НАМЕРЕННО, так
+	-- обходится клиентский рейт-лимит (CombatRemoteLimits: Evasive 4/сек). Но игра перед своей
+	-- отправкой ещё и продвигает СВОИ гейты (Evasive:626-628):
+	--     u5 = now + ServerConfirmTimeout
+	--     u6 = math.max(u6, now + DashDuration + ServerConfirmTimeout)
+	--     u7 = now + DashDuration
+	-- Мы их не двигаем, поэтому игровой модуль Evasive считает, что дэша не было. Практическое
+	-- следствие: если игрок нажмёт додж ВРУЧНУЮ сразу после скриптового, игра пропустит его без
+	-- кулдауна → два Evasive-remote подряд, второй сервер отклонит, а IFRAMECD при этом сгорит.
+	-- ПОЧЕМУ НЕ ПРАВЛЮ ЗДЕСЬ: единственный способ — debug.setupvalue по u5/u6/u7 внутри игрового
+	-- Evasive, а этими же upvalue'ами уже управляет movement.lua (_evSpeedIdx/_evCdIdx при
+	-- Dodge_On). Писать в них из двух модулей — гарантированный конфликт двух источников истины
+	-- (это отдельный баг D5 из аудита). Сначала нужно свести управление гейтами Evasive в ОДНО
+	-- место, и только потом трогать. Пишу это как открытый вопрос, а не как «сделано».
 	ServerRemote:FireServer({ Type = "Combat", Action = "Evasive", Func = "Evasive" })
 	playDodgeMotion(dir)
 	State.lastDodge  = os.clock()
@@ -2685,7 +2724,7 @@ end
 --
 -- ОШИБКА 1. Я читал `GameData.boxingM2Contacts`, а таблица лежит в `V93` (объявлена на :956,
 --   и весь остальной код обращается к ней как `V93.boxingM2Contacts`, :2050). GameData такого
---   поля не имеет ВООБЩЕ → выражение было nil → цикл поиска максимума не выполнялся ни разу →
+--   поля не имеет ВООБЩЕ → выражение бы��о nil → цикл поиска максимума не выполнялся ни разу →
 --   lastContact оставался равным hbDelay. Арифметическое доказательство прямо из диага:
 --       COUNTER t=47414.59 → COUNTER-COVER t=47414.66 «live for 659ms more»
 --       47414.66 + 0.659 = 47415.32 = 47414.59 + 0.73 = 0.43 (hbDelay) + 0.30 (IFrameDuration)
@@ -2803,7 +2842,7 @@ end
 
 -- [V91] ALI EVASIVE COUNTER. CombatConfig.Styles.ali.EvasiveCounter:
 --   { Cooldown = 6, MaxRange = 22, IgnoreM2Cooldown = true, VariantId = "Left" }
--- Это ОТДЕЛЬНАЯ от обычной контры механика: сразу после УКЛОНЕНИЯ Ali может пустить M2, минуя
+-- Это ОТДЕЛЬНА�� от обычной контры механика: сразу после УКЛОНЕНИЯ Ali может пустить M2, минуя
 -- её 7-секундный кулдаун, и достаёт на 22 студа (против ~5.5 у обычной контры). Собственный
 -- кулдаун механики — 6с. Вариант фиксирован игрой как "Left", поэтому ��улить направлением тут
 -- НЕ н��жно (и не нужно портить траекторию дэша).
@@ -3256,7 +3295,7 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		-- Но при десинке (или когда враг с anti-autoparry вынуждает сервер отклонять наши
 		-- ServerCheck) атрибут НЕ выставляется: canAttack остаётся true, рейт-гард пропускает
 		-- нас каждые AP_PunishFastGap=80мс, и playSwing РЕСТАРТИТ трек с tp=0. Анимация длиной
-		-- ~0.45с (AttackDuration) перезап��скалась 5-6 раз, от��юда видимое дёрганье, которого
+		-- ~0.45с (AttackDuration) перез��п��скалась 5-6 раз, от��юда видимое дёрганье, которого
 		-- «при обычных атаках нет» — там гейтом служит серверный атрибут.
 		-- Ставим ЛОКАЛЬНЫЙ пол на перезапуск: он не зависит от серверных атрибутов и потому
 		-- работает именно в том режиме, где отваливается штатный гейт. Пропорция от реальной
@@ -3341,7 +3380,7 @@ function State.ap.canAttack(ignoreBlocking)
 	return true
 end
 
--- реальный радиус нашего M1 С УЧЁТОМ РОСТА (крупнее аватар → больше хитбокс/дос��аёт да��ьше)
+-- реальный р��диус нашего M1 С УЧЁТОМ РОСТА (крупнее аватар → больше хитбокс/дос��аёт да��ьше)
 function State.ap.reach()
 	local base = Config.AP_BaseReach or 5.5
 	-- ForwardOffset тоже style-specific. Берём живой CombatConfig, а запас 1.5 stud оставляем
@@ -3412,7 +3451,7 @@ end
 --   3) РЭГДОЛЛ/НОКБЕК: M2 сбивает комбо целиком (DefaultStrongKnockback=25), M1 — один удар.
 -- Ценой идёт кулдаун M2 (Styles.*.M2Cooldown, обычно 7с), поэтому M2 не спамится, а выбирается
 -- только когда действительно решает.
--- ════════════════════════════════════════════════════════════════════════════════════════════
+-- ═══��════════════════════════════════════════════════════════════════════════════════════════
 
 -- Даёт ли НАША тяжёлая i-frames. Кэш по стилю: это константа конфига, TTL не нужен.
 function State.ap.m2GrantsIFrames()
@@ -3603,7 +3642,7 @@ function State.ap.tryInterrupt(now, th, threatCount)
 	-- [V138] Дополнительная проверка: убедиться что enemyLeft ещё достаточно велик
 	-- (не пытаться сбивать атаку у которой осталось < 50ms — уже поздно).
 	if enemyLeft < 0.05 then return false end
-	-- [V138] Разные margin для M1 и M2: M2 медленнее (hitboxDelay ~0.59с), у нас больше
+	-- [V138] Разные margin для M1 �� M2: M2 медленнее (hitboxDelay ~0.59с), у нас больше
 	-- времени чтобы опередить. M1 быстрее — нужен строгий margin чтобы не промахнуться.
 	local baseMargin = th.kind == "M2" and (Config.AP_InterruptMargin or 0.055) * 0.6
 	                                    or  (Config.AP_InterruptMargin or 0.055)
@@ -3726,7 +3765,7 @@ end
 
 -- [V105] ТЕСТ-СВИН�� для UI-кнопки: шлёт один M1 с анимацией комбо, которую использовал бы скрипт
 -- (Fixed → AP_FixedHit, иначе следующий по счёту). Цель не нужна — бьём «в воздух» на текущий
--- LookVector. Возвращает (номер_удара, успех) для нотификации.
+-- LookVector. Возвращает (номер_удар��, успех) для нотификации.
 function State.ap.testSwing()
 	local ap = State.ap
 	if not ap.getM1() then return 0, false end
@@ -3819,6 +3858,41 @@ end
 -- на персонаже ещё висит. Мы читали только этот атрибут и потому верили в грант, которого
 -- уже нет. Поэтому теперь IFRAMECD/EvasiveCooldownRemaining — вето даже под грантом.
 -- Никакой новой настройки: используем ровно те атрибуты, что читает сама игра.
+-- ═══════ [V147] ПОЧЕМУ ФИКС V145 НЕ РАБОТАЛ: ВЕТО ПО IFRAMECD ПОД ГРАНТОМ МЁРТВО ═══════
+-- V145 переставил ранний выход `if evasiveGranted() then return true end` ПОСЛЕ вето по
+-- IFRAMECD / EvasiveCooldownRemaining и считал вопрос закрытым. Это была ошибка, и дамп
+-- доказывает её прямо: игра, выдавая грант, САМА СТИРАЕТ ровно эти два атрибута. Пять
+-- независимых точек в Evasive_ModuleScript.lua:
+--     :148-149   :169-170   :234-235   :323-324   :344-345
+--         Character:SetAttribute("IFRAMECD", nil)
+--         Character:SetAttribute("EvasiveCooldownRemaining", nil)
+-- Значит при ЖИВОМ гранте IFRAMECD физически не может быть true, вето не срабатывает
+-- НИКОГДА, управление доходит до `return true`, и единственным ограничителем остаётся
+-- DodgeMinSpacing = 0.35. Логика V145 «если IFRAMECD всё-таки true, значит грант уже снят»
+-- верна сама по себе, но описывает случай, который под грантом не наступает.
+-- Диаг V144 подтверждает численно: доджи на t=46275.49 → 46276.11 → 46277.17, то есть
+-- интервалы 0.62с и 1.06с — оба БОЛЬШЕ 0.35 и оба МЕНЬШЕ DodgeCooldown 2.05.
+--
+-- ЧТО ГРАНТ ОТМЕНЯЕТ НА САМОМ ДЕЛЕ. В дампе гейты дэша выглядят так (u51 = hasOutnumberedGrant):
+--     :574  if not u51 and v54 < u8 then return end   -- лок после начала атаки (0.2с)
+--     :578  if not u51 and v54 < u6 then return end   -- полный кулдаун (Evasive.Cooldown = 1.5)
+--     :582  if not u51 and v54 < u7 then return end   -- длительность дэша (0.2с)
+--     :625  if not u51 and v54 < u5 then return end   -- ожидание подтверждения (0.18с)
+-- ВСЕ ЧЕТЫРЕ снимаются грантом. То есть КЛИЕНТ под грантом действительно разрешает спам —
+-- никакого «скрытого» клиентского кулдауна, который мы могли бы прочитать, там нет.
+-- Но сервер спам не принимает: отсюда `DODGE-REJECT … IFRAMES not confirmed`.
+--
+-- ПОЭТОМУ ГЕЙТ СТРОИМ НА ОТВЕТЕ СЕРВЕРА, А НЕ НА НОВОЙ НАСТРОЙКЕ. У нас уже есть
+-- авторитетный факт — State.dodgeTxn.confirmed (флаг ставится по реплицированному атрибуту
+-- IFRAMES, :4532). Правило самонастраивающееся:
+--   • предыдущий додж ПОДТВЕРЖДЁН → сервер принимает наш темп, под грантом идём быстро, но
+--     не быстрее, чем игра сама себе разрешает записью u6 (:627):
+--         u6 = max(u6, now + DashDuration + ServerConfirmTimeout)  = 0.2 + 0.18 = 0.38с
+--     Это не выдуманное число, а буквально выражение из дампа.
+--   • предыдущий додж НЕ ПОДТВЕРЖДЁН → грант нам дэш не купил, значит упираемся в серверный
+--     кулдаун; откатываемся на полный ClientPredict.Evasive.Cooldown (2с, живое значение).
+-- Новых тумблеров нет: оба порога выведены из CombatConfig, а решение — из уже собираемой
+-- телеметрии txn.
 local function dodgeReady()
 	local c = localChar()
 	-- MinSpacing действует ВСЕГДА: это наш анти-спам, а не кулдаун игры. Под грантом он и
@@ -3830,16 +3904,47 @@ local function dodgeReady()
 		local remG = c:GetAttribute("EvasiveCooldownRemaining")
 		if type(remG) == "number" and remG > 0 then return false end
 	end
-	-- Грант снимает только ВРЕМЕННОЙ кулдаун (u6/u5/u7/u8 в дампе) — это игра действительно
-	-- делает, поэтому здесь ранний выход остаётся законным, но уже ПОСЛЕ вето выше.
-	if evasiveGranted() then return true end
-	if Config.UseServerCooldown and c then
-		if c:GetAttribute("IFRAMECD") == true then return false end
-		local rem = c:GetAttribute("EvasiveCooldownRemaining")
-		if type(rem) == "number" and rem > 0 then return false end
+	local since = os.clock() - State.lastDodge
+	if evasiveGranted() then
+		-- Полный кулдаун предсказания: живой ClientPredict.Evasive.Cooldown, иначе хардкод.
+		local fullCd = GameData.evPredictCooldown or Config.DodgeCooldown
+		-- Пол под грантом = ровно то, что игра пишет в u6 даже при активном гранте.
+		local grantFloor = (GameData.dashDuration or Config.DashDuration or 0.20)
+			+ (GameData.confirmTimeout or 0.18)
+		-- State.dodgeConfirmedLast == false означает: последний ЗАКРЫТЫЙ додж сервер не
+		-- подтвердил. nil (ещё не было доджей) трактуем как «можно» — иначе первый додж в
+		-- сессии всегда ждал бы 2с впустую.
+		if State.dodgeConfirmedLast == false then
+			if since < fullCd then
+				-- Диаг ровно ОДИН раз на каждый факт блокировки (не каждый кадр): без него
+				-- нельзя отличить «гейт держит» от «доджей просто нет».
+				if not State.dodgeGateSaid then
+					State.dodgeGateSaid = true
+					diagPush(("DODGE-GATE  грант активен, но прошлый додж НЕ подтверждён → ждём полный CD %.2fс (прошло %.2fс)")
+						:format(fullCd, since))
+				end
+				return false
+			end
+			State.dodgeGateSaid = nil
+			return true
+		end
+		if since < grantFloor then
+			if not State.dodgeGateSaid then
+				State.dodgeGateSaid = true
+				diagPush(("DODGE-GATE  грант активен, прошлый додж подтверждён → пол %.2fс (DashDuration+ConfirmTimeout), прошло %.2fс")
+					:format(grantFloor, since))
+			end
+			return false
+		end
+		State.dodgeGateSaid = nil
 		return true
 	end
-	return (os.clock() - State.lastDodge) >= Config.DodgeCooldown
+	if Config.UseServerCooldown and c then
+		-- Вето по атрибутам уже отработало выше; здесь остаётся только положительный ответ.
+		return true
+	end
+	return since >= (GameData.evPredictCooldown and (GameData.evPredictCooldown + 0.05)
+		or Config.DodgeCooldown)
 end
 
 -- force=true (blatant override): пропускаем ТОЛЬКО софт-состояния (Stunned/CantAnything),
@@ -4139,7 +4244,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 		if prev and (nowc - prev) < (Config.AntiDecoyGap or 0.12) then
 			cnt[name] = (cnt[name] or 1) + 1
 			-- Жёсткий предохранитель от флуд-с��ама: со 4-го свинга в окне это уже гарантированно
-			-- машинный поток, дальше плодить угрозы бессмысленно (и дорого по кадру).
+			-- машинный по��ок, дальше плодить угрозы бессмысленно (и дорого по кадру).
 			if cnt[name] > (Config.AntiDecoyMaxBurst or 3) then
 				if (nowc - (State.lastAntiDecoyLog or 0)) > 1 then
 					State.lastAntiDecoyLog = nowc
@@ -4247,12 +4352,12 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 		-- this attacker is really swinging (attribute or live hitbox). Animation alone leaves
 		-- it false, which is the signature of a faked / cancelled swing.
 		-- [V90] suspect = быстрый повтор от того же врага (типовой профиль Anti-AutoParry:
-		-- фейк первым, реальный удар вторым). Такая угроза НЕ доверяется по модельному
+		-- фейк первым, реальный удар вторым). Такая у��роза НЕ доверяется по модельному
 		-- атрибуту — ей нужен claimed VictimSwingId живого хитбокса.
 		suspect = suspectSwing,
 		-- [V90] Модельный атрибут НЕ считается доказательством для suspect-свинга: пока враг
 		-- реально бьёт, M1/M2/CombatAttacking = true, и фейк проезжал гейт «бесплатно».
-		-- [V140] attrProof уже посчитан выше с ребро-триггером (одиночный фейк, подмешанный в
+		-- [V140] attrProof уже пос��итан выше с ребро-триггером (одиночный фейк, подмешанный в
 		-- окно реального свинга, больше не наследует модельный атрибут как доказательство).
 		serverProven = (not suspectSwing) and attrProof or false,
 		-- [V142] ЧЕМ именно подтверждена угроза — только для диага (строки MISS/TRACE-PROOF).
@@ -4557,9 +4662,18 @@ local function updateDodgeTxn(now)
 				(tx.lo-tx.fire)*1000, (tx.hi-tx.fire)*1000))
 	end
 	if now >= tx.untilAt then
+		-- [V147] Запоминаем ИТОГ закрытой транзакции ДО обнуления tx.confirmed. Это вход для
+		-- гейта под грантом в dodgeReady: сервер — единственный источник истины о том, купил
+		-- ли грант нам дэш. Без этой строки dodgeReady не смог бы отличить «сервер принимает
+		-- наш темп» от «все доджи улетают в отказ» и продолжал бы спамить под грантом.
+		State.dodgeConfirmedLast = tx.confirmed and true or false
 		if not tx.confirmed then
-			diagPush(("DODGE-REJECT t=%.2f  %s  IFRAMES not confirmed; EDF retained")
-				:format(now, tostring(tx.reason or "?")))
+			State.dodgeRejects = (State.dodgeRejects or 0) + 1
+			diagPush(("DODGE-REJECT t=%.2f  %s  IFRAMES not confirmed; EDF retained (подряд отказов=%d, следующий додж ждёт полный CD %.2fс)")
+				:format(now, tostring(tx.reason or "?"), State.dodgeRejects,
+					GameData.evPredictCooldown or Config.DodgeCooldown))
+		else
+			State.dodgeRejects = 0
 		end
 		tx.pending, tx.confirmed, tx.reason = false, false, nil
 	end
@@ -4647,7 +4761,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- [V90] АВТОРИТЕТНЫЕ КОНСТАНТЫ I-FRAME.
 	-- ifDur берём из ЖИВОГО CombatConfig.Evasive.IFrameDuration (GameData.iframeDur), а не из
 	-- Config.IFrameDur: последний висит на UI-слайдере "i-Frame Window", и авто-восстановление
-	-- конфига из прошлой сессии затирало бы им физическую константу игры → тихая регрессия
+	-- конфига из прошлой сессии затирало ��ы им физическую константу игры → тихая регрессия
 	-- тайминга, которую невозможно отладить. Слайдер остаётся, но только как ручной override.
 	-- ifLat — РЕАЛЬНАЯ задержка до подъёма серверных IFRAMES. Раньше по всему блоку стояла
 	-- Config.DodgeConfirm (0.18) — это ServerConfirmTimeout игры, ТАЙМАУТ, а не латентность:
@@ -4662,7 +4776,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	table.clear(imminent)
 	State.interruptCandidate = nil
 	State.interruptThreatCount = 0
-	-- [V139/PERF] table.clear вместо `for k in pairs(...) do t[k]=nil end`. Ключи здесь —
+	-- [V139/PERF] table.clear вместо `for k in pairs(...) do t[k]=nil end`. Ключ�� здесь —
 	-- Instance атакующих; поимённое зануление это полный обход хеш-части КАЖДЫЙ Heartbeat плюс
 	-- удержание сильных ссылок на модели между кадрами. table.clear делает то же одним вызовом.
 	table.clear(V93.interruptSeen)
@@ -4704,7 +4818,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				table.remove(Threats, i)
 			-- [V121] КОРЕНЬ «скрипт ВООБЩЕ не парирует M2»: у M2 анимационный трек уничтожается
 			-- (Parent=nil) ~0.5с в замах, а реальный удар (delayed hitbox, M2HitboxDelay) прилетает
-			-- на 0.78-0.84с. Прежнее `trackGone and elapsed>0.5` убивало угрозу РОВНО на 0.5с — за
+			-- на 0.78-0.84с. Прежнее `trackGone and elapsed>0.5` уби��ало угрозу РОВНО на 0.5с — за
 			-- 30-110мс ДО того как откроется press-окно (pressAt) → M2 никогда не нажимался (в логе
 			-- ��бе M2 удалены то��но через 0.5с, dt ещё +250..+300мс). Track-gone угрозы и так тикают
 			-- по wall-clock (remaining=contact0-elapsed) → catch-all `dt<-0.35` гарантирует удаление.
@@ -4847,7 +4961,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 							if th.serverSwingId or (th.group and th.group.serverSwingId) then
 								th.serverProven, th.serverProofClock = true, now
 								th.suspect = false
-								-- [V140] VictimSwingId уникален для свинга → атрибут не занимает.
+								-- [V140] VictimSwingId уник��лен для свинга → атрибут не занимает.
 								th.provenBy = "swingid"
 							end
 						-- [V142/ОТКАТ] Владелец-тест убран и здесь: он отбирал доказательство у второго
@@ -4866,7 +4980,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 										(th.contactAbs - now) * 1000))
 							end
 						elseif (th.contactAbs - now) < 0.18 and serverHitboxProof(th.name) then
-							-- Хитбокс — сильное пер-свинговое доказательство, атрибут не занимает.
+							-- Хитбо��с — сильное пер-свинговое доказательство, атрибут не занимает.
 							th.serverProven, th.serverProofClock = true, now
 							th.provenBy = "hitbox"
 						end
@@ -5219,7 +5333,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				   and not counterPreemptsDodge(now) then
 					if performDodge(now, "combo-escape") then return end
 				end
-		-- exposed-эскейп: ��ы залочены в СВОЕЙ АТАКЕ (не можем блокнуть мид-сви��г) и удар входит в окно.
+		-- exposed-эскейп: ��ы з��лочены в СВОЕЙ АТАКЕ (не можем блокнуть мид-сви��г) и удар входит в окно.
 			-- [V117] гейт по attackBusyUntil (НЕ selfBusyUntil): дэш тоже ставил selfBusyUntil → один додж
 			-- делал нас «busy» → следующий удар → ещё один exposed-додж → самоподдерживающийся додж-луп
 			-- (в логе dodges=101, почти все exposed). Дэш сам даёт i-frames, передоджить его незачем.
@@ -5264,7 +5378,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			-- кадра и опаздываем на dt (при 20 FPS это 50мс — фатально для окна 300мс).
 			if soonestDt <= (fireLead + up + (V93.lookahead or 0)) then
 				local overloaded, why = false, nil
-				-- [V96] ��БЩЕЕ ПРАВИЛО (по требованию юзера): до��ж — резервная защита, а не основная.
+				-- [V96] ��БЩЕЕ ПРАВИЛО (по требованию юзер��): до��ж — резервная защита, а не основная.
 				-- Пока parry доступен (canBlockNow) — блокируем/перфектим ВСЁ, что блокируемо, и НЕ
 				-- тратим додж. Все эвристики ниже (heavy/multi/burst/guardbreak) выполняем только
 				-- когда блок реально невозможен прямо сейчас. Неблокируемые атаки идут выше отдельным
@@ -7346,7 +7460,7 @@ end)
 -- [V144/PERF] ГРАДИЕНТ-LUT. `Config.RingA:Lerp(Config.RingB, f)` создавал НОВЫЙ Color3 на каждый
 -- сегмент каждой перерисовки: ринг (до 48) + зеркальная лента + blur-копия — под сотню объектов на
 -- кадр, которые живут до ближайшего GC. Именно такой ровный поток мелкого мусора и даёт
--- периодические микро-фризы, а не одна дорогая операция. Оттенки на глаз неразличимы, поэтому
+-- периодические микро-фризы, а не одна дорогая операция. Оттенки на глаз неразлич��мы, поэтому
 -- держим 33 предпосчитанных ступени и берём готовый Color3 по индексу. Таблица пересобирается
 -- только при смене RingA/RingB (то есть при правке настроек), а не каждый кадр.
 -- Ключ — сами Color3 по значению (в Luau это value-тип, сравнение не аллоцирует). Через tostring
@@ -7641,7 +7755,7 @@ local applyFacing = LPH_NO_VIRTUALIZE(function()
 		pcall(function() State.faceHum.AutoRotate = true end); State.faceHum = nil
 	end
 	-- [V97] PING-SCALED предикт позиции цели ВОЗВРАЩЁН. В V95 я убрал velocity-lead (ду��ая, что
-	-- сервер валидирует по факт. позиции) — но это ломало facing на резко движущемся/рывкающем
+	-- сервер вали��ирует по факт. позиции) — но это ломало facing на резко движущемся/рывкающем
 	-- враге (в логе face=0.14/-0.58 BACK! на LATE-мисс��х). Причина: на нашем экране другой игрок
 	-- отрисован в ПРОШЛОМ (интерп-лаг + ping), а ��ервер держит его ВПЕРЕДИ. При рывке рассинхрон
 	-- = vel*latency растёт → мы смотрим туда, где враг БЫЛ, сервер видит спину → блок отклонё��.
@@ -7743,7 +7857,7 @@ task.spawn(function()
 	while true do task.wait(3); scanAnimators() end
 end)
 
--- ═════════════════════��═══���════���═════════��══════���══════════════════════════��
+-- ═════════════════════��═══���═══������═════════��══════���══════════════════════════��
 --  LOADER MODULE WRAPPER  (Syllinse Project integration)
 --  The loader does: local h = chunk(); if type(h)=="function" then h = h(Lib, Core) end
 --  and then calls h.start() and h.buildUI(ctx). Everything above already ran at
