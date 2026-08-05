@@ -1109,7 +1109,7 @@ return function(Lib, Core)
     }
     local EV_DEADLINE_IDXS = { 4, 5, 6, 7, 8 }   -- u6, u5, u4, u7, u8 — метки os.clock
 
-    -- [V112] Персистентная обёртка записи атрибута (использу��тся о��ходом ��ейтов Dodge).
+    -- [V112] Персистентная обёртка записи атрибут�� (использу��тся о��ходом ��ейтов Dodge).
     -- Отдельная функция, а не замыкание на месте: обход выполняется на каждый дэш.
     local function _setAttr(inst, key, val) inst:SetAttribute(key, val) end
 
@@ -1224,7 +1224,7 @@ return function(Lib, Core)
             -- обычным GetAttribute. Единственный yield во всей функции до этих проверок —
             -- строка 510 (`LocalPlayer.Character or CharacterAdded:Wait()`), и он не
             -- срабатывает, когда персонаж есть. Значит снять атрибуты, вызвать оригинал и
-            -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чтением игрой
+            -- вернуть их обратно можно СИНХРОННО: между нашим снятием и чтени��м игрой
             -- никакой другой код ��сполниться не может — гонки нет by design.
             -- Записи локальные (на сервер не репл*ицируются), а сами гейты проверяются на
             -- клиенте, поэтому этого достаточно.
@@ -1421,7 +1421,7 @@ return function(Lib, Core)
         local rag = tryRequire({ "Shared", "Services", "RagdollService", "RagdollServiceClient" })
         if not rag or type(rag.Init) ~= "function" then return false end
         -- Берём upvalue #5 и ПРОВЕРЯЕМ, что это функция; если игра сдвинула порядок —
-        -- ищем перебором ту, у которой н��т upvalue'ов (sustainClientRagdoll их н�� имеет,
+        -- ищем перебором ту, у ко��орой н��т upvalue'ов (sustainClientRagdoll их н�� имеет,
         -- в отличие от isManagedRagdoll/stepClientRagdollSustain).
         local fn
         local ok5, v5 = pcall(_getUp, rag.Init, 5)
@@ -1451,7 +1451,7 @@ return function(Lib, Core)
         return true
     end
 
-    -- Собственно под��ём. Персистентные обёртки — без аллокации замыканий на кадр.
+    -- Собственно под��ём. Персистентные обёртки — без аллокации замыкан��й на кадр.
     local function _clearRagAttr(c) c:SetAttribute("Ragdoll", nil) end
     local function _forceGetup(hum)
         hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
@@ -1644,7 +1644,7 @@ return function(Lib, Core)
     -- И это ВСЁ. В скрипте НЕТ: Kill, LoadCharacter, SetCore, Health, BreakJoints, ремоутов.
     -- Значит универсальный ресет — это чистая state-машина Humanoid'а:
     --     Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-    -- Работает в любой игре именно потому, что это движковый Humanoid, а не механика игры —
+    -- Работает в любой игре имен��о потому, что это движковый Humanoid, а не механика игры —
     -- ты это и говорил. Состояние своего персонажа клиент меняет авторитетно (у него network
     -- ownership своих частей), поэтому смена реплицируется и поднимает из Dead/Ragdoll.
     --
@@ -1692,46 +1692,77 @@ return function(Lib, Core)
     -- Игра выставляет их на Humanoid при ragdoll/Downed. Поэтому порядок обязателен:
     -- СНАЧАЛА вернуть RequiresNeck = true, и только ПОТОМ рвать шею. Без этого трюк молча
     -- ничего не делает — что и объясняет, почему «просто лежу».
+    -- ═══════ [V122] ПОЧЕМУ V121 «ТОЛЬКО ТЕЛЕПОРТИЛ ПОД ЗЕМЛЮ» ═══════
+    -- Твой диаг: `last: via void>void>void>...` — в списке НИ ОДНОГО "neck". Значит breakNeck()
+    -- возвращал false на каждой из 40 попыток: он не нашёл джойнт и молча ничего не ломал,
+    -- а работал только шаг 2 (бездна). Отсюда «тычусь под землю, но не ресетаюсь».
+    --
+    -- Ошибка была в СЛИШКОМ УЗКОМ фильтре поиска:
+    --     d:IsA("JointInstance") or d:IsA("Motor6D") or d:IsA("Weld")   + условие Part0/Part1 == Head
+    -- Ragdoll-системы (и RagdollService этой игры) на ragdoll УДАЛЯЮТ Motor6D и заменяют их
+    -- констрейнтами (BallSocket/Weld*Constraint*). WeldConstraint НЕ является ни Weld, ни
+    -- JointInstance — мой фильтр их не видел. Плюс если часть головы называется не "Head",
+    -- условие `== head` не выполнялось никогда, и функция превращалась в пустышку.
+    --
+    -- Новый подход — как в настоящих reanimate-скриптах: не искать ОДИН «правильный» джойнт,
+    -- а разобрать связи персонажа целиком (это и есть BreakJoints) и снести саму голову.
+    -- Удаление своих частей реплицируется через network ownership, поэтому сервер видит
+    -- настоящую Humanoid.Died и возрождает штатно с полным HP.
+    local _deathInfo = "not attempted"
     local function breakNeck()
         local c = LocalPlayer.Character
         local hum = c and c:FindFirstChildOfClass("Humanoid")
-        if not (c and hum) then return false end
-        -- 1) Снимаем защиты игры, иначе движок не считает потерю шеи смертью.
+        if not (c and hum) then _deathInfo = "no character/humanoid"; return false end
+        -- 1) Снимаем защиты игры (RagdollService:360-361 ставит их в false).
         pcall(function() hum.RequiresNeck = true end)
         pcall(function() hum.BreakJointsOnDeath = true end)
-        -- 2) Ищем шейный джойнт. R15: Head.Neck (Motor6D). R6: Torso.Neck (Motor6D/Weld).
-        -- Ищем по СВЯЗИ, а не по имени: движку важно, что джойнт соединяет Head с торсом,
-        -- и в дампе видно, что игра работает с обоими ригами (RigType R15 и Torso/UpperTorso).
-        local head = c:FindFirstChild("Head")
-        local killed = false
+        -- 2) Рвём ВСЕ связи: Motor6D/Weld/Snap/Rotate (JointInstance) + констрейнты ragdoll'а.
+        -- Никаких проверок по имени и по Part0/Part1 — именно они всё и ломали.
+        local joints = 0
         for _, d in ipairs(c:GetDescendants()) do
-            if d:IsA("JointInstance") or d:IsA("Motor6D") or d:IsA("Weld") then
-                local ok, p0, p1 = pcall(function() return d.Part0, d.Part1 end)
-                if ok and head and (p0 == head or p1 == head) then
-                    if pcall(function() d:Destroy() end) then killed = true end
-                end
+            if d:IsA("JointInstance") or d:IsA("WeldConstraint") or d:IsA("Constraint") then
+                if pcall(function() d:Destroy() end) then joints = joints + 1 end
             end
         end
-        return killed
+        -- 3) Сносим голову. При RequiresNeck = true отсутствие головы — гарантированная смерть
+        -- на уровне движка, независимо от того, как называются джойнты в этом риге.
+        local headGone = false
+        for _, d in ipairs(c:GetChildren()) do
+            if d:IsA("BasePart") and (d.Name == "Head" or d.Name == "head") then
+                if pcall(function() d:Destroy() end) then headGone = true end
+            end
+        end
+        -- Пишем ФАКТЫ в диаг: сколько связей нашлось и снялась ли голова. Если joints=0 —
+        -- значит доступа к джойнтам нет вообще, и это будет видно сразу, без догадок.
+        _deathInfo = "joints=" .. joints .. " head=" .. tostring(headGone)
+        return joints > 0 or headGone
     end
 
-    -- Второй, НЕЗАВИСИМЫЙ путь форсировать смерть — падение в бездну.
-    -- В дампе игра сама держит void-монитор (SpawnServiceUtils:12-21):
-    --     VOID_MARGIN_STUDS = 50, VOID_CHECK_INTERVAL = 0.2
-    --     GetVoidThresholdY() = workspace.FallenPartsDestroyHeight - 50
-    -- В клиентских файлах GetVoidThresholdY НЕ вызывается ни разу — значит его вызывает
-    -- СЕРВЕРНЫЙ скрипт (серверных в дампе нет). То есть сервер каждые 0.2с проверяет, не упал
-    -- ли игрок ниже порога, и сам помечает Dead → respawn. Телепорт своего root part вниз
-    -- реплицируется (мы его владелец), поэтому этот путь тоже доступен с клиента.
+    -- [V122] ИСПРАВЛЯЮ СВОЁ ЖЕ УТВЕРЖДЕНИЕ ИЗ V120. Я написал, что void-монитор игры зовёт
+    -- сервер. Это была ДОГАДКА, и она неверна — перепроверил по всему дампу:
+    --     GetVoidThresholdY определён в SpawnServiceUtils:19-21 и не вызывается НИ РАЗУ,
+    --     FallenPartsDestroyHeight упоминается только там же.
+    -- То есть void-логика игры — мёртвый код, никто тебя за падение не убивает. Работает лишь
+    -- движковое уничтожение частей ниже workspace.FallenPartsDestroyHeight, и на него нельзя
+    -- опираться как на основной путь. Поэтому бездна теперь — ПОСЛЕДНИЙ резерв, а не второй шаг.
+    --
+    -- И вторая причина, почему это «тыкало под землю» без результата: старый код дёргал телепорт
+    -- КАЖДЫЕ 0.3с. Каждый вызов заново ставил CFrame и сбрасывал набранную скорость падения,
+    -- поэтому персонаж болтался под картой вместо того, чтобы провалиться ниже порога.
+    -- Теперь телепорт делается ОДИН раз за попытку респавна.
+    local _voidFired = false
     local function dropToVoid()
+        if _voidFired then return false end
         local c = LocalPlayer.Character
         local root = c and (c:FindFirstChild("HumanoidRootPart") or c.PrimaryPart)
         if not root then return false end
-        local threshold = workspace.FallenPartsDestroyHeight - 50
-        return (pcall(function()
-            root.CFrame = CFrame.new(root.Position.X, threshold - 100, root.Position.Z)
-            root.AssemblyLinearVelocity = Vector3.new(0, -300, 0)
-        end))
+        local ok = pcall(function()
+            -- Уходим сразу ГЛУБОКО ниже порога уничтожения, а не на 50 стадов под него.
+            root.CFrame = CFrame.new(root.Position.X, workspace.FallenPartsDestroyHeight - 500, root.Position.Z)
+            root.AssemblyLinearVelocity = Vector3.new(0, -500, 0)
+        end)
+        _voidFired = ok
+        return ok
     end
 
     -- ═══════════════ [V113] ПОЧЕМУ RESPAWN НЕ РАБОТАЛ ═══════════════
@@ -1938,8 +1969,10 @@ return function(Lib, Core)
         -- Шаг 1 (сразу): слом шеи. RequiresNeck возвращаем в true — игра снимает его в
         -- RagdollService:361, и именно поэтому раньше трюк не убивал.
         if breakNeck() then via[#via + 1] = "neck" end
-        -- Шаг 2 (с попытки 4, ~1.2с): бездна. Серверный void-монитор (0.2с) помечает Dead сам.
-        if attempt >= 4 and dropToVoid() then via[#via + 1] = "void" end
+        -- Шаг 2 (с попытки 8, ~2.4с): бездна — ПОСЛЕДНИЙ резерв. Понижен с 4-й попытки, потому
+        -- что void-логика игры оказалась мёртвым кодом (разбор у dropToVoid), и раньше именно
+        -- она забивала весь лог, создавая видимость работы.
+        if attempt >= 8 and dropToVoid() then via[#via + 1] = "void" end
         -- Шаг 3: когда смерть уже случилась — просим игру заспавнить нас.
         if isTrulyDead() then
             if callGameRespawn() then via[#via + 1] = "_doRespawn" end
@@ -1964,21 +1997,22 @@ return function(Lib, Core)
         -- критерий успеха: слом шеи и бездна ведут именно к нему.
         local conn = LocalPlayer.CharacterAdded:Connect(function() up = true end)
         _lastRespawnFire = 0            -- снимаем троттлинг для первого выстрела
-        local t0, via, attempt = os.clock(), "", 0
-        -- 12с: слому шеи и void-монитору (0.2с у сервера) нужен реальный round-trip,
-        -- плюс сам респавн. 3с из V119 обрывали процесс на середине.
+        _voidFired = false              -- [V122] бездна снова доступна для новой попытки
+        local t0, attempt, seen, order = os.clock(), 0, {}, {}
         while not up and os.clock() - t0 < 12 do
             attempt = attempt + 1
             local _, v = tryRespawnOnce(attempt)
-            if v ~= "" then via = (via == "" and v or via .. ">" .. v) end
-            -- [V121] Никаких «успехов» по состоянию Humanoid'а: выходим ТОЛЬКО по
-            -- CharacterAdded (up ставится в обработчике выше). Именно ложный выход по
-            -- isUpAgain() и делал функцию пустышкой.
+            -- [V122] Логируем каждый путь ОДИН раз. Раньше строка забивалась «void>void>void...»
+            -- на 40 повторов, и в ней не было видно ни одного реально сработавшего шага.
+            if v ~= "" and not seen[v] then seen[v] = true; order[#order + 1] = v end
+            -- [V121] Выходим ТОЛЬКО по CharacterAdded (up ставится в обработчике выше).
             task.wait(0.3)
         end
         if conn then conn:Disconnect() end
-        _respawnDiag = (via == "" and "no path: no Humanoid / no neck joint found"
-            or ("via " .. via .. (up and " -> respawned" or " -> no CharacterAdded in 12s")))
+        _respawnDiag = "tries=" .. attempt
+            .. " paths=" .. (#order > 0 and table.concat(order, ">") or "NONE")
+            .. " death[" .. tostring(_deathInfo) .. "]"
+            .. (up and " -> respawned" or " -> no CharacterAdded in 12s")
         return up
     end
 
@@ -2038,7 +2072,7 @@ return function(Lib, Core)
         pcall(stepNoClip)
     end))
     -- [V112] ЛЕНИВЫЙ PostStep. Преж��е все драйверы вызывались КАЖДЫЙ кадр безусловно, и
-    -- каждый сам решал, работать ему или нет — то есть на выключенных фичах мы всё равно
+    -- каждый сам решал, работать ему или нет — то ес��ь на выключенных фичах мы всё равно
     -- платили за 4 вызова функций на кадр. Теперь проверяем флаги ДО вызова: пока фичи
     -- выключены, тело цикла — это несколько сравнений булевых полей.
     -- driveDodge вызывается только при Dodge_On (внутри он и так первым делом это проверял),
