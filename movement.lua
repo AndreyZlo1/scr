@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════�����������══════════════════
+    -- ══════════════════════════ Move-vector math ═════════������������══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -704,7 +704,7 @@ return function(Lib, Core)
     end
 
     -- ═════════════════════════���═�����═══════════════════════════════════════════════
-    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вместо �����ук�� task.delay
+    -- NO DELAY — [V112] ПЕРЕПИСАНО С НУЛЯ: патч upvalue'ов M1 вм��сто �����ук�� task.delay
     -- ═══════════════════════════════════════════════════════════════════════════
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН. Три независимые ошибки, каждая подтверждена дампом
     -- (M1_ModuleScript.lua + CombatConfig). Прежний подход фильтровал задержки по их
@@ -785,7 +785,7 @@ return function(Lib, Core)
         -- OnM1Activated, отсюда вечный calls=0 в логе V147). gateW/parryW/blockW оставлены
         -- как есть, но помните: это записи в мёртвые u21/u32/u33, их рост ничего не значит.
         -- [V149] gateW/parryW/blockW из сводки убраны: это записи в мёртвые u21/u32/u33, их
-        -- рост не значит ничего и в ��оге V147/V148 только маскировал отсутствие эффекта.
+        -- рост не значит ничего и в ����оге V147/V148 только маскировал отсутствие эффекта.
         _ndSay(nil, "stat swings=%d restart=%d rsSkip=%d",
             _ndStat.calls, _ndStat.restart, _ndStat.rsSkip)
     end
@@ -884,7 +884,7 @@ return function(Lib, Core)
         --           8=getFinalM1AnimSpeed, **9=u19**, 10=getM1Animations …
         -- Это ровно согласуется с уже РАБОТАЮЩИМИ индексами гейтов выше: u21=4, u32=5, u33=6.
         -- То есть u19 = _ndGateIdx + 5 было бы 9 ТОЛЬКО при _ndGateIdx=4... и да, gate=4, так
-        -- что арифметика V128 случайно совпадала, но ломалась подпись: я требова��, чтобы по
+        -- что арифметика V128 случайно совпадала, но ломалась подпись: я требова���, чтобы по
         -- к��аям от u19 стояли ФУНКЦИИ на G+3/G+4/G+6 — а там getFinalM1AnimSpeed (8) и
         -- getM1Animations (10) ЕСТЬ, зато G+3 = 7 = isCombatInputBlocked тоже функция…
         -- проверка `type(c19)=="number"` падала по другой причине: на момент маппинга бой ещё
@@ -1056,7 +1056,7 @@ return function(Lib, Core)
     -- свингов подряд) мгновенно вынесла бы нас за лимит на отслеживаемом ключе.
     local _ndRestartLimits, _ndLastRestart, _ndRestartBusy = nil, 0, false
     local function _ndRestartMinGap()
-        -- Берём максимум из двух интервалов пары: цикл содержит оба сообщения, поэтому
+        -- Берём максимум из двух интервалов пар��: цикл содержит оба сообщения, поэтому
         -- ограничивает нас более строгое из них.
         if _ndRestartLimits == nil then
             _ndRestartLimits = tryRequire({ "Shared", "Network", "CombatRemoteLimits" }) or false
@@ -1213,7 +1213,7 @@ return function(Lib, Core)
         end)
         _ndHookOk = ok and _ndOrigSwing ~= nil
         if _ndHookOk then
-            _ndSay("hookok", "hook OnHoldSwing OK (телеметрия + подмена p55 3->4 при NoDelay_On)")
+            _ndSay("hookok", "hook OnHoldSwing OK (только телеметрия p55; аргументы не меняются)")
         else
             _ndSay("hookfail", "hook OnHoldSwing FAIL: %s", tostring(err))
         end
@@ -1409,21 +1409,52 @@ return function(Lib, Core)
             if not Config.NoDelay_On then return end
             local ids = _animIds
             if not ids then return end
+
+            -- [V153/OWNERSHIP] СНАЧАЛА владелец, ПОТОМ AnimationId. AutoPlay и Anti AutoParry
+            -- намеренно используют Action4 и иногда тот же asset id. В V152 NoDelay видел только
+            -- id4, делал Stop(0) и сам создавал второй M1-трек — именно это рвало AutoPlay/decoy.
+            local owners
+            if type(getgenv) == "function" then
+                local g = getgenv()
+                owners = rawget(g, "__V0_COMBAT_TRACK_OWNERS")
+            end
+            local owned = type(owners) == "table" and owners[track] or nil
+            if owned then return end
+
             local anim = track and track.Animation
             if not anim or anim.AnimationId ~= ids.id4 then return end
-            -- Скорость берём с самого реплицированного трека: сервер уже применил к ней
-            -- getFinalM1AnimSpeed (масштаб персонажа, пинг), пересчитывать её нам нечем.
-            local spd = 1
+            -- [V153/OWNERSHIP-RACE] AutoPlay публикует intent до AnimationPlayed. Забираем именно
+            -- этот трек во владение раньше, чем ветка ручного 4thM1 успеет вызвать для него Stop(0).
+            local intent = type(owners) == "table" and owners.__intent or nil
+            if intent and intent.owner == "autoplay" and intent.char == LocalPlayer.Character
+                and intent.animationId == anim.AnimationId and os.clock() <= (intent.expires or 0) then
+                owners[track] = { owner = "autoplay-intent" }
+                return
+            end
+            -- Настоящий непомеченный 4thM1 — это реплицированный ручной трек. До Stop снимаем
+            -- ВЕСЬ runtime: не только Speed, но и Action4 priority/weight/time. V152 запускал
+            -- replacement с дефолтным весом и не учитывал Action4 — поза дёргалась при blend.
+            local spd, weight, priority, timePos = 1, 1, Enum.AnimationPriority.Action4, 0
             pcall(function() spd = track.Speed end)
+            pcall(function() weight = math.max(track.WeightCurrent, track.WeightTarget) end)
+            pcall(function() priority = track.Priority end)
+            pcall(function() timePos = track.TimePosition end)
             if type(spd) ~= "number" or spd <= 0 then spd = 1 end
-            -- Глушим серверный трек 4-го удара и ставим на его место первый.
+            if type(weight) ~= "number" or weight <= 0 then weight = 1 end
             pcall(function() track:Stop(0) end)
-            -- Через игровой AnimationHandler, а не Animator:LoadAnimation напрямую: так трек
-            -- попадает в его учёт (категория "M1") и корректно гасится штатными StopAnim —
-            -- иначе он остался бы жить поверх следующих ударов.
+
+            local replacement
             pcall(function()
-                ah.LoadAnim(LocalPlayer.Character, "M1", ids.anim1, nil, false, spd)
+                replacement = ah.LoadAnim(LocalPlayer.Character, "M1", ids.anim1, nil, false, spd, 0)
+                if replacement then
+                    replacement.Priority = priority
+                    replacement.TimePosition = math.min(math.max(timePos, 0), math.max(replacement.Length - 0.01, 0))
+                    replacement:AdjustWeight(weight, 0)
+                end
             end)
+            if replacement and type(owners) == "table" then
+                owners[replacement] = { owner = "nodelay-replacement" }
+            end
         end)
         _ndSay(nil, "перехват анимации ON (стиль %s): 4thM1 (%s) подменяется на 1stM1 (%s)",
             tostring(_animIds.style), tostring(_animIds.id4), tostring(_animIds.id1))
@@ -1436,19 +1467,25 @@ return function(Lib, Core)
             return
         end
         _animApply()
-        -- [V113] Чистим атрибуты ПЕРВЫМ делом: они серверные и не зависят от того, удалось ли
-        -- разрешить upvalue'ы M1. Ниже стоит ранний return по неудачному резолву — если
-        -- вызывать очистку после него, серверный кулдаун не снималс�� бы вообще, пока модуль
-        -- M1 не подгрузится.
-        clearM1GateAttrs()
-        if not _tryM1 then
-            -- Резолв может не удаться (модуль ещё не загружен). Без этого бэкоф��а
-            -- tryRequire дёргал бы FindFirstChild+require КАЖДЫЙ кадр — свой ист��чник лагов.
+        -- [V153] Живой NoDelay теперь НЕ стирает серверные M1/CombatAttacking/M1Cooldown и НЕ
+        -- пишет u21/u32/u33. Дамп доказывает: u21/u32/u33 читает только невызванная tryM1,
+        -- а атрибуты — серверная истина. Их стирание не ускоряло Hold, зато ломало AutoPlay:
+        -- canAttack видел «свободно» через 10мс и создавал пачку Action4-треков/ServerCheck.
+        -- Оставляем map только ради ссылки на модуль и бесплатной телеметрии живого OnHoldSwing.
+        if not _ndM1Mod then
             local nowc = os.clock()
-            if nowc < _ndNextTry then return end
-            _ndNextTry = nowc + 1.0
-            if not mapNoDelay() then return end
+            if nowc >= _ndNextTry then
+                _ndNextTry = nowc + 1.0
+                mapNoDelay()
+            end
         end
+        _ndInstallComboHook()
+        _ndDump()
+        do return end
+
+        -- [V153/ИСТОРИЯ] Код ниже оставлен как история прошлых решений, но недостижим из-за
+        -- return выше. Он не должен снова включаться: записи в мёртвые upvalue и очистка
+        -- реплицированных атрибутов были корнем конфликта с AutoPlay, а не NoDelay-решением.
         -- [V132] _tryM1 здесь снова ЧИСТАЯ функция игры (хук ушёл на OnM1Activated), поэтому
         -- индексы 4/5/6 опять означают u21/u32/u33, как и задумано. Счётчики нужны, чтобы
         -- отличить «NoDelay работает» от «NoDelay молча ничего не пишет» по логу, а не на глаз.
@@ -1497,7 +1534,7 @@ return function(Lib, Core)
         -- тоже уже зафиксированы с номером 3, поэтому серверная сверка по swingId остаётся целой.
         --
         -- Отдельного тумблера нет намеренно: это часть смысла No Delay — убрать задержки, а
-        -- финишер и есть самая большая из них.
+        -- ��инишер и есть самая большая из них.
         -- ─────── [V129] ПОЧЕМУ V128 НЕ СРАБОТАЛ: строгое `== 3` пропускало счётчик ───────
         -- В V128 стояло `if c19 == 3`, то есть обнуление происходило ТОЛЬКО если кадр
         -- Heartbeat попал ровно в промежуток между 3-м и 4-м ударом. Есть два разных пути,
@@ -2120,7 +2157,7 @@ return function(Lib, Core)
     --
     -- ПОЧЕМУ ФИЛЬТР ПО КЛЮЧУ, А НЕ «ВЫКЛЮЧИТЬ ВСЁ». key — первый аргумент SetBlur, и по
     -- нему видно природу блюра. Боевой/эффектный блюр (удары, Downed, захват, смерть,
-    -- Black Flash, падение) мешает играть — его глушим. Блюр меню и панелей — часть
+    -- Black Flash, падение) мешает играть — его глу��им. Блюр меню и панелей — часть
     -- нормального UI, его снятие сделало бы интерфейс визуально сломанным, поэтому он
     -- проходит к оригиналу. Отдельная настройка для этого не нужна: разделение выводится
     -- из самих данных игры.
@@ -2409,7 +2446,7 @@ return function(Lib, Core)
                             if ok then break end
                             task.wait(0.4)
                         end
-                        -- [V152] Перехват AnimationPlayed не зависит от debug-резолва tryM1,
+                        -- [V152] Перехват AnimationPlayed не з��висит от debug-резолва tryM1,
                         -- поэтому ставим его сразу и не ждём installNoDelay: иначе при
                         -- недоступном debug.getupvalue тумблер не давал бы вообще ничего.
                         _animApply()
