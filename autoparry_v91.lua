@@ -353,7 +353,7 @@ local Config = {
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��етит, а мы залочены
 	-- софт-��остоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
-	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш ��и��иче����и ничего ��������е даёт.
+	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — т��м дэш ��и��иче����и ничего ��������е даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
 	SA_BlatantDodge   = false,
 	SA_BlatantWindow  = 0.32,   -- сек до кон��акта: в э����м окне ����а��атывает форс-додж
@@ -506,9 +506,9 @@ local Config = {
 	-- boxing-M2 хи��бокс по нашему LookVector в момент ServerCheck → надо смотреть точно на врага).
 	BoxingFaceLockDur = 0.55,
 
-	-- [V62] ГИБРИД мульти��оя: перфектим ближайшего, остальным держим guard
+	-- [V62] ГИБРИД мульти����я: перфектим ближайшего, остальным держим guard
 	-- непрерывно (нулевые дыры = нулевые полные ������иты). holdUntil тянется по
-	-- самому дальнему угрожаю��ему контакту в кла����тере, guard не отпускается
+	-- самому дальнему угрожаю��ему контакту в ��ла����тере, guard не отпускается
 	-- в середине burst, re-press в BlockCooldown исключён.
 	MultiThreatGuard  = true,
 	MultiThreatMinN   = 2,      -- со скольких одновр��м��нных угроз ��ключать held-��еж��м
@@ -698,7 +698,7 @@ local LEGACY_M1_OFFSETS = {
 	ali      = {0.06, 0.15, 0.2, 0},      -- [V90] CombatConfig.Styles.ali.M1HitboxDelayOffsets
 	basic    = {0.02, 0.02, 0.02, 0.02},
 	boxing   = {0.02, 0.02, 0.02, 0.06},
-	-- [V90] СВЕРЕНО С ДАМПОМ: было {0.16,0.18,0.16,0.21} — устарело после апдейта игры.
+	-- [V90] СВЕРЕНО С ДАМПОМ: было {0.16,0.18,0.16,0.21} — устарело после апдей��а игры.
 	hakari   = {0.14, 0.16, 0.07, 0.17},
 	hakario  = {0.14, 0.16, 0.07, 0.17},
 	karate   = {0.0375, 0.075, 0.15, 0.225},
@@ -721,7 +721,8 @@ local COMBO_RESET  = 1.55
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService  = game:GetService("UserInputService")
+-- [V151] UserInputService удалён: ни одной ссылки в файле (ввод идёт через MacLib Keybind).
+-- Это регистр главного чанка, а мы упёрлись в лимит Luau 200 → "out of local registers".
 local Workspace         = game:GetService("Workspace")
 local Stats             = game:GetService("Stats")
 
@@ -861,7 +862,7 @@ end
 -- контексте (обработчики remote/AnimationPlayed, schedulerStep) этот путь систематически
 -- фейлил pcall → возвращался хардкод 0.06 = ровно те самые 60ms. Из-за этого планировщик
 -- (pressAt = contact - lead - up - velLead, где up=uplink() зависит от getPingRaw) компенсировал
--- ~68ms вместо реальных 111–345ms → ��лок стабильно опаздывал (LATE) на любом заметном пинге.
+-- ~68ms вместо реальных 111–345ms → ��лок стабильно опаздывал (LATE) на любом заметном пин��е.
 -- Фикс: первичный источник — LocalPlayer:GetNetworkPing() (метод самого инстанса ��грока,
 -- доступен в ЛЮБОМ контексте, не бросает; возвращает one-way в секундах → RTT = ×2). Stats
 -- Data Ping (уже RTT в мс) — как второй источник; берём МАКСИМУМ (перекомпенсация безопаснее
@@ -970,7 +971,7 @@ local V93 = {
 	interruptSeen = {},
 	boxingM2Contacts = { 0.6000000, 1.0500000 }, -- static .anim Hit markers; config confirms count=2
 	ownM1Info = { t = "M1", s = "Basic" },
-	-- [V139] Переиспользуемый info-рекорд для расчёта тайминга НАШЕЙ M2. Про��одит в тот же
+	-- [V139] Переиспользуемый info-рекорд для расчёта тайминга НАШЕЙ M2. Про��одит �� тот же
 	-- hitTimeline, что и вражеские угрозы, поэтому автоматически учитывает вариант (Ali
 	-- Left 0.53 / Right 0.67), momentum и множитель роста — без второй копии математики.
 	ownM2Info = { t = "M2", s = "Basic", mom = false, variant = nil },
@@ -1674,7 +1675,7 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 	if not hit then th.offTarget = true end
 	-- [V91] ДИАГНОСТИКА ОТКАЗА — закрываем сл��пое пятно логов.
 	-- Было: TRACE-GEOM пишется ТОЛЬКО когда threatens==true (в scheduler, под `if threatens and
-	-- not th.firstThreatClock`), поэтому у отвергнутых угроз в диаге не было НИ ОДНОЙ цифры —
+	-- not th.firstThreatClock`), поэтому у отвергнутых угроз в диаге не было НИ ОДНОЙ ци��ры —
 	-- строка MISS сообщала лишь «geometry-rejected source=predicted-miss». По трём диагам это
 	-- 63/80/123 промахов, т.е. крупнейшая категория, и причину нельзя был�� увидеть.
 	-- Дополнительно: в режиме High решение принимают dist2d/reach/faceToMe, а TRACE-GEOM печатает
@@ -1791,20 +1792,10 @@ local function loadGameModules()
 	end)
 end
 
--- [V132] Получить множитель замедления анимации на пинге (CombatPingAnimUtils).
-local function getPingAnimMult(scaledDelay)
-	loadGameModules()
-	local pau = GameData.pau
-	if pau and pau.GetPingAnimSpeedMultiplier then
-		local ok, mult = pcall(function()
-			return pau.GetPingAnimSpeedMultiplier(scaledDelay, LocalPlayer)
-		end)
-		if ok and type(mult) == "number" and mult > 0.05 and mult < 1 then
-			return mult
-		end
-	end
-	return 1
-end
+-- [V151] getPingAnimMult (V132) УДАЛЁН: за всё время не был вызван ни разу — ноль ссылок.
+-- Держать его = держать регистр главного чанка, а мы вылезли за лимит Luau 200 и получили
+-- "out of local registers". Множитель пинга при необходимости берётся напрямую через
+-- GameData.pau.GetPingAnimSpeedMultiplier там, где он реально понадобится.
 
 -- [V71] множитель скорости атаки конкретного АТАКУЮЩЕГО. Задержка удара в игре =
 -- base / mult (GetScaledHitboxDelay). mult зависит от роста персонажа: низкий → до
@@ -1985,7 +1976,7 @@ local function indexAllAnims()
 						end
 						if not AttackIds[id] and not BlockIds[id] then
 							-- [V108] спец-атака (крит/финишер) где угодно в дереве → SKILL, НЕ benign,
-							-- чтобы детект её видел. Реакции/успехи (ehit/success) остаются benign.
+							-- чтобы дете��т её видел. Реакции/успехи (ehit/success) остаются benign.
 							local lname = d.Name:lower()
 							if not (lname:find("ehit") or lname:find("success"))
 								and (lname:find("crit") or lname:find("momentum")
@@ -2123,7 +2114,7 @@ local function hitTimelineBase(info, combo)
 				cfgv = (LEGACY_M2_BASE[sl] or 0.30) + WINDUP_EXTRA
 			end
 		end
-		-- [V124] КОНФИГ — авторитетный источник тайминга M2 для ОДНОhitовых стилей:
+		-- [V124] КОНФИГ — авторитетный источник тайминга M2 для О��НОhitовых стилей:
 		-- GetStyleM2HitboxDelay = ровно та задержка, что сервер делит на mult роста
 		-- (GetScaledHitboxDelay: delay/mult). Диаг: Basic M2HitboxDelay=0.525, attacker
 		-- aMult=1.09 → 0.525/1.09 = 482мс, measured=485мс (ошибка 3мс). Раньше брали
@@ -2236,7 +2227,7 @@ function styleStepForward(style, kind, combo)
 		end)
 	end
 	if type(out) ~= "number" then
-		-- фолбэк: значения Ali из дампа (единственный стиль со ступом на момент V91)
+		-- фолбэк: зн��чения Ali из дампа (единственный стиль со ступом на момент V91)
 		local sl = string.lower(tostring(style))
 		if sl == "ali" then
 			out = (kind == "M1") and (((combo == 1) or (combo == 3)) and 1.5 or 0) or 2
@@ -2947,7 +2938,12 @@ end
 -- CombatAttacking/M1 на нас висит после каждого своего удара.
 -- Решение: различать классы. Кандидата ищем без временных гейтов, а «успеет ли контра к
 -- контакту» решаем по времени их снятия. Постоянные гейты по-прежнему запрещают preempt.
-local function counterBlockedPermanently()
+-- [V151] Обе функции живут ПОЛЯМИ State, а не локалами главного чанка. Причина техническая:
+-- Luau жёстко ограничивает функцию 200 локалами, файл уже был на пределе (фикс V130 про это же),
+-- и мои два новых `local function` в V150 дали "out of local registers" — скрипт не запускался
+-- вообще. Поля таблицы регистров не занимают. State для этого годится: по нему нигде нет
+-- pairs/JSONEncode, так что функции в полях ничего не ломают.
+function State.counterBlockedPerm()
 	if not Config.SkillAddon then return true end
 	local c = localChar(); if not c then return true end
 	if not counterStyle() then return true end
@@ -2968,7 +2964,7 @@ end
 
 -- Когда снимутся ВРЕМЕННЫЕ запреты на контру. Оценка сверху, из уже известных нам величин:
 -- конец собственного свинга (State.swingAnimUntil ставится в fireM1Custom) и анти-даблфайр-гэп.
-local function counterReadyAt(now)
+function State.counterReadyAt(now)
 	local at = now
 	local gapEnd = (State.lastCounter or 0) + (Config.BoxingCounterGap or 0.30)
 	if gapEnd > at then at = gapEnd end
@@ -2979,7 +2975,7 @@ end
 
 local function counterCandidate(now, ignoreTransient)
 	if ignoreTransient then
-		if counterBlockedPermanently() then return nil end
+		if State.counterBlockedPerm() then return nil end
 	elseif not counterReady() then
 		return nil
 	end
@@ -3080,13 +3076,13 @@ local function counterPreemptsDodge(now)
 		-- контра успевает СРАБОТАТЬ до контакта — иначе мы просто отменим защиту и пропустим
 		-- удар. Это тот случай, который нельзя решать «наугад»: сравниваем с фактическим
 		-- временем контакта конкретной угрозы.
-		local readyAt = counterReadyAt(now)
+		local readyAt = State.counterReadyAt(now)
 		if readyAt > now then
 			local contact = best.contactAbs or now
 			-- Запас берём из уже существующего Config.PerfectLead (лид нажатия), а не новым
 			-- тумблером: это тот же смысл «за сколько до контакта действие обязано уйти».
 			if readyAt <= contact - (Config.PerfectLead or 0.05) then
-				why = ("M2 busy %0.fms, успеет к контакту"):format((readyAt - now) * 1000)
+				why = ("M2 busy %0.fms, успе��т к контакту"):format((readyAt - now) * 1000)
 			else
 				-- Не успеет: додж РАЗРЕШАЕМ. Это и есть исправление — раньше здесь молча
 				-- возвращался false по любой временной причине, и мы получали додж + M2.
@@ -3918,7 +3914,7 @@ function State.ap.onPerfectParry(attackerName, kind)
 	if not model then return end
 	-- [V138] Если Boxing Counter только что сработал (≤0.35с назад), M2 уже ушёл —
 	-- M1 dobivanie бесполезно (враг ещё не застанен нашим контером) и только палит кулдаун.
-	-- Используем стан от нашего M2 (BoxingCounterStun ~ 0.6с) ��ак окно для AutoPlay позже.
+	-- Используем стан от нашего M2 (BoxingCounterStun ~ 0.6с) ��ак окно для AutoPlay по��же.
 	if Config.BoxingCounter and (os.clock() - (State.lastCounter or 0)) < 0.40 then return end
 	-- окно стана: M2-парри = ParryStun.M2 (1с, надёжно); M1-парри короче (RecoveryLockout врага)
 	local stun = (kind == "M2") and (Config.AP_M2Stun or 1.0) or (Config.AP_M1Stun or 0.5)
@@ -4004,7 +4000,7 @@ end
 -- никакого «скрытого» клиентского кулдауна, который мы могли бы прочитать, там нет.
 -- Но сервер спам не принимает: отсюда `DODGE-REJECT … IFRAMES not confirmed`.
 --
--- ПОЭТОМУ ГЕЙТ СТРОИМ НА ОТВЕТЕ СЕРВЕРА, А НЕ НА НОВОЙ НАСТРОЙКЕ. У нас уже есть
+-- ПОЭТОМУ ГЕЙТ СТРОИМ НА ОТВЕТЕ СЕРВЕРА, А НЕ НА НОВОЙ НАС��РОЙКЕ. У нас уже есть
 -- авторитетный факт — State.dodgeTxn.confirmed (флаг ставится по реплицированному атрибуту
 -- IFRAMES, :4532). Правило [V148], после снятия защёлки V147:
 --   • БАЗА под грантом — пол, который игра сама себе пишет в u6 (:627) даже при активном
@@ -4910,7 +4906,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- на низком пинге окно пок��ытия завышалось на 150мс, на высоком — занижалось.
 	local ifDur     = GameData.iframeDur or Config.IFrameDur or 0.30
 	-- Пол 0.02с: ��а очень низком пинге up→0.01 и «coverLo = ifLat - 0.03» уходил в минус, т.е.
-	-- уже прилетевший удар ��читался покрываемым. Дэш не защищает назад во времени.
+	-- уже прилетевший удар ��читался покрываемым. Дэш не защищает назад во вр��мени.
 	local ifLat     = math.max(up, 0.02)
 	local wantBlock = nil
 	local faceTgt   = nil
@@ -5176,7 +5172,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					-- Реальный свинг всегда создаёт парт в Workspace.Hitboxes, поэтому че��тную
 					-- атаку этот гейт не режет.
 					-- [V142] Гейт вернулся к исходному условию: держим нажатие, пока доказательства нет
-					-- и до контакта ещё больше ProofGraceSec, либо свинг помечен suspect. Попытка
+					-- и до контакта ещё больше ProofGraceSec, ��ибо свинг помечен suspect. Попытка
 					-- V141 сделать байпас «заработанным» опиралась на репутацию — она убрана.
 					if Config.ServerProofGate and not th.serverProven
 					   and (th.suspect or (th.contactAbs - now) > (Config.ProofGraceSec or 0.06)) then
@@ -5258,7 +5254,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- one-dodge feasibility test lie. Each threat record is already one animation strike.
 	-- [V139/BUG] `clusterHeavy` был СЛУЧАЙНЫМ ГЛОБАЛОМ (забыт `local`) и потому НИКОГДА не
 	-- сбрасывался в false. Первая же M2 за сессию залипала в _ENV как true — и с этого момента
-	-- два решения принимались по мусору из прошлого боя:
+	-- два решения принимались по м��сору из прошлого боя:
 	--   • строка ~4541: `clusterN == 2 and ... and not clusterHeavy` — стратегия SEQUENTIAL
 	--     отключалась НАВСЕГДА, кластеры из двух разнесённых M1 уходили в один общий блок
 	--     вместо двух отдельных парри (второй удар проходил);
@@ -5501,7 +5497,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 			-- combo-эскейп: блок н��доступен (кулдаун/стан) → додж единственная защита. [V96] ТЕПЕРЬ
 			-- строго по iframe-окну (coverable = dt в [coverLo, coverHi]). Раньше условие было
-			-- `soonestDt <= coverHi` БЕЗ нижней границы → додж жёгся когда удар был в упор (dt<coverLo),
+			-- `soonestDt <= coverHi` БЕЗ нижней границы → додж жёгс�� когда удар был в упор (dt<coverLo),
 			-- iframes не успевали подняться → в логе `combo-escape ... fire→contact=0ms TOO EARLY`.
 				if Config.ComboEscapeDodge and Config.DodgeOnParryCooldown ~= false
 				   and not canBlockNow() and coverable
@@ -5971,7 +5967,7 @@ local function onOutcome(attacker, result, kind, eventClock)
 	-- [V64] Замер эффективности per-hit rearm: к��пим ре��ультаты по позиции удара
 	-- в ком��о. opener = c1-2 (всегда были свежими нажатиями), tail = c3+ (раньше
 	-- шли held-guard → HIT). Если после V64 PERFECT на tail вырос, а HIT упал —
-	-- rearm работает и сервер перевз��одит перфект от свежего Activated.
+	-- rearm работает и сервер перев����одит перфект от свежего Activated.
 	do
 		State.comboStat = State.comboStat or { opener = {}, tail = {} }
 		local bucket = ((rec.combo or 0) >= 3) and State.comboStat.tail or State.comboStat.opener
@@ -6094,7 +6090,7 @@ local function hookAnimator(animator)
 			-- Теп��рь: (1) развёртка по ВРЕМЕНИ (раз в DecoySweepSec) — её стоимость больше не
 			-- зависит от плотности боя; (2) если после развёртки таблица всё ещё крупнее
 			-- DecoySeenMax — сносим её целиком. Terse-режим безопасен: единственное следствие —
-			-- одна пропущенная same-id проверка на анимацию, а фильтр по Speed остаётся на месте.
+			-- одна пропущенная same-id проверка на анимацию, �� фильтр по Speed остаётся на месте.
 			State.decoySweepAt = State.decoySweepAt or nowd
 			if nowd >= State.decoySweepAt then
 				State.decoySweepAt = nowd + (Config.DecoySweepSec or 5)
@@ -6150,7 +6146,7 @@ end)
 
 -- [V90.4] Серверный hitbox-reactor удалён: он срабатывал только по уже-приземлившемуся удару,
 -- из-за чего мог держать guard и мешать. Парри теперь
--- полностью предиктивный (willHitMe по анимации), как и ра��ьше.
+-- полностью предикти��ный (willHitMe по анимации), как и ра��ьше.
 
 local function acAvailable(name)
 	local ok, v = pcall(function()
@@ -7404,18 +7400,8 @@ local function summary()
 	}, "\n")
 end
 
-local function saveDiag()
-	local body = summary() .. "\n\n" .. table.concat(DiagLog, "\n") .. "\n"
-	local fname = ("autoparry_diag_%d.txt"):format(os.time() % 1000000)
-	local ok = pcall(function() if writefile then writefile(fname, body) end end)
-	if ok and writefile then
-		dbg("SAVED ->", fname, "(", #DiagLog, "lines )")
-		if setclipboard then pcall(setclipboard, fname) end
-	else
-		statusPush(summary())
-	end
-	return fname
-end
+-- [V151] saveDiag УДАЛЁН: ноль вызовов (кнопки сохранения в UI нет, диаг читается из консоли).
+-- Освобождает ещё один регистр главного чанка — причина "out of local registers".
 
 -- [V130] REGISTER FIX ("out of local registers"): the whole AutoParry visuals module lives in a
 -- `do ... end` block so its ~20 constants/pools/draw-funcs stop counting against the main-chunk
@@ -7609,7 +7595,7 @@ end)
 -- Filled geometry comes from TriPool (2 triangles per quad); Flat still uses the cheap line ring.
 -- [V144/PERF] Ribbon — самый дорогой элемент ринга: он рисуется дважды (основная лента + зеркальная)
 -- и ещё раз для blur-копии, т.е. до 3×seg вызовов на кадр. Раньше он создавал 4 Vector2 и ТОЛЬКО
--- потом проверял глубину, поэтому за камерой все четыр�� уходили в мусор. Сначала глубина, потом
+-- потом проверял глубину, поэтому за камерой ��се четыр�� уходили в мусор. Сначала глубина, потом
 -- аллокации. Плюс сам он был виртуализирован.
 Viz.ribbonQuad = LPH_NO_VIRTUALIZE(function(cam, a, b, c, d, color, transp)
 	-- a,b = inner edge (angle1, angle2), c,d = outer edge (angle2, angle1)
