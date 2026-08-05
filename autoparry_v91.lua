@@ -2744,35 +2744,43 @@ local function steerM2Variant(want)
 end
 
 local function counterReady()
-	if not Config.SkillAddon then return false end
+	-- [V157/HEAVY-ATOMIC] Возвращаем не только bool, но и точный live-гейт. V156 молча
+	-- превращал любой отказ sender-а в nil-кандидата, а speculative preempt продолжал обещать M2.
+	if not Config.SkillAddon then return false, "SkillAddon-off" end
 	local c = localChar()
-	if not c then return false end
+	if not c then return false, "no-character" end
 	local cs = counterStyle()
-	if not cs then return false end
+	if not cs then return false, "counter-style-disabled" end
 	-- анти-даблфайр: не спамим M2 быстрее BoxingCounterGap (реальный кулдаун держит игра через
 	-- M2Cooldown; этот гэп только закрывает сетевое окно до появления атрибута). НЕ задержка.
-	if (os.clock() - (State.lastCounter or 0)) < (Config.BoxingCounterGap or 0.30) then return false end
-	for _, attr in ipairs(BOXING_BLOCK_ATTRS) do
-		if c:GetAttribute(attr) then return false end
+	if (os.clock() - (State.lastCounter or 0)) < (Config.BoxingCounterGap or 0.30) then
+		return false, "BoxingCounterGap"
 	end
-	if c:GetAttribute("CantAnything") and not c:GetAttribute("CombatRecovery") then return false end
+	for _, attr in ipairs(BOXING_BLOCK_ATTRS) do
+		if c:GetAttribute(attr) then return false, attr end
+	end
+	if c:GetAttribute("CantAnything") and not c:GetAttribute("CombatRecovery") then
+		return false, "CantAnything"
+	end
 	-- [V139/BUG] Было `== false`: при ещё НЕ выставленном атрибуте (nil, первые кадры после
 	-- спавна/смены стиля) гейт пропускал, и контра улетала без оружия в руках — сервер такой
 	-- M2 отклоняет, а State.lastCounter уже обновлён → BoxingCounterGap глушил СЛЕДУЮЩУЮ,
 	-- уже валидную контру. canAttack всегда проверял `~= true`; приводим к тому же виду.
-	if c:GetAttribute("Equip") ~= true then return false end
-	if c:GetAttribute("Greenzone") == true or c:GetAttribute("RpCombatLocked") == true then return false end
+	if c:GetAttribute("Equip") ~= true then return false, "Equip" end
+	if c:GetAttribute("Greenzone") == true then return false, "Greenzone" end
+	if c:GetAttribute("RpCombatLocked") == true then return false, "RpCombatLocked" end
 	-- M2 на кулдауне → counter невозможен (FireServer был бы вхолостую, iframes не выдаются).
-	if c:GetAttribute("M2Cooldown") == true or c:GetAttribute("M2CD") == true then return false end
+	if c:GetAttribute("M2Cooldown") == true then return false, "M2Cooldown" end
+	if c:GetAttribute("M2CD") == true then return false, "M2CD" end
 	local hum = c:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then return false end
+	if not hum or hum.Health <= 0 then return false, "dead" end
 	local h = getHandler()
 	if h and h.GetAnims then
 		local ehit = false
 		pcall(function() ehit = next(h.GetAnims(c, "EHit")) ~= nil end)
-		if ehit then return false end
+		if ehit then return false, "EHit" end
 	end
-	return true
+	return true, "ready"
 end
 
 -- ═══════════════════ [V146] ЕДИНАЯ ОТМЕТКА «МЫ ПОД СВОИМИ i-FRAMES» ═══════════════════
@@ -3256,10 +3264,13 @@ function State.counterReadyAt(now)
 end
 
 local function counterCandidate(now, ignoreTransient)
+	-- [V157/HEAVY-ATOMIC] ignoreTransient разрешён только для диагностики подходящей цели.
+	-- Решение об отправке всегда отдельно требует counterReady() в том же кадре.
 	if ignoreTransient then
 		if State.counterBlockedPerm() then return nil end
-	elseif not counterReady() then
-		return nil
+	else
+		local ready, gate = counterReady()
+		if not ready then return nil, nil, gate end
 	end
 	local myHRP = localHRP()
 	if not myHRP then return nil end
@@ -3299,6 +3310,7 @@ local function counterCandidate(now, ignoreTransient)
 		-- и мы били M2 поверх собственного уворо��а. Проверяем оба флага.
 		if aHRP and aHRP.Parent and not aliVsBoxingM2 and not th.feinted and not th.dodged
 		   and not th.coveredByDodge and not th.coveredByCounter and not th.counterPendingId
+		   and not th.counterCommittedToParry
 		   and not (mustDodgeFn and mustDodgeFn(th))
 		   and (th.contactAbs - now) > -0.15 then
 			local dx, dz = myPos.X - aHRP.Position.X, myPos.Z - aHRP.Position.Z
@@ -3358,38 +3370,31 @@ local function counterPreemptsDodge(now)
 		end
 		return true
 	end
-	-- [V150] Ищем кандидата БЕЗ временных запретов (см. разбор над counterBlockedPermanently).
-	local best, bestDist = counterCandidate(now, true)
-	local val, why = best ~= nil, "M2 ready"
-	if best then
-		-- [V156/COUNTER-VIABILITY] Preempt и sender обязаны отвечать одинаково. Раньше preempt
-		-- запрещал dodge по одному факту M2-ready, хотя её IFRAMES физически не успевали.
-		local readyAt = State.counterReadyAt(now)
-		local contact = best.contactAbs or now
-		local iframeLead = math.max(uplink(), 0.02) + math.max(V93.lookahead or 0, 0) + (1 / 60)
-		if readyAt + iframeLead <= contact then
-			if readyAt > now then
-				why = ("M2 busy %.0fms, IFRAMES успеют к контакту"):format((readyAt - now) * 1000)
-			end
-		else
-			val = false
-			why = ("M2/IFRAMES need %.0fms, contactIn=%.0fms → dodge разрешён")
-				:format(((readyAt - now) + iframeLead) * 1000, (contact - now) * 1000)
-		end
-	end
-	State.counterPreemptFrame, State.counterPreemptVal = FrameId, val
-	-- лог не чаще 2/сек: гейт опрашивается каждый кадр, иначе зальёт диаг
-	if best and now >= (State.lastPreemptLogAt or 0) + 0.5 then
-		State.lastPreemptLogAt = now
-		diagPush(("COUNTER-PREEMPT t=%.2f  %s  dist=%.1f  preempt=%s (%s)")
-			:format(now, best.name or "?", bestDist or -1, tostring(val), why))
-	end
-	return State.counterPreemptVal
+	-- [V157/HEAVY-ATOMIC] Удалено speculative резервирование через counterCandidate(now, true).
+	-- Heavy, которую мы лишь надеемся отправить после снятия CombatAttacking/lockout, НЕ является
+	-- защитой. Отменить dodge теперь могут только live IFRAMES выше или уже отправленный counterTxn.
+	State.counterPreemptFrame, State.counterPreemptVal = FrameId, false
+	return false
 end
 
 local function tryBoxingCounter(now)
-	local best, bestDist = counterCandidate(now)
+	-- [V157/HEAVY-ATOMIC] Сначала находим подходящую угрозу независимо от transient-гейтов,
+	-- затем в ЭТОМ ЖЕ кадре проверяем live readiness. Только реальный COUNTER-SEND заменяет parry.
+	local best, bestDist = counterCandidate(now, true)
 	if not best then return false end
+	local ready, gate = counterReady()
+	if not ready then
+		-- После первого live-отказа эта конкретная угроза целиком принадлежит EDF/parry.
+		-- Не пытаемся украсть окно повторной Heavy через несколько кадров у самого контакта.
+		best.counterCommittedToParry = true
+		if best.counterFallbackGate ~= gate then
+			best.counterFallbackGate = gate
+			diagPush(("COUNTER-FALLBACK/PARRY t=%.2f target=%s/%s contactIn=%.0fms gate=%s")
+				:format(now, tostring(best.name), tostring(best.kind),
+					((best.contactAbs or now)-now)*1000, tostring(gate or "unknown")))
+		end
+		return false
+	end
 	-- [V156/COUNTER-VIABILITY] В V155 M2 отправлялась даже за 15–30мс до server contact,
 	-- хотя runtime показал ~98–100мс до репликации IFRAMES. Такая «контра» снимала guard,
 	-- а fallback возвращал parry уже после deadline. До отправки требуем полный наблюдаемый
@@ -5654,7 +5659,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					-- Реальный свинг всегда создаёт парт в Workspace.Hitboxes, поэтому че��тную
 					-- атаку этот гейт не режет.
 					-- [V142] Гейт вернулся к исходному условию: держим нажатие, пока доказательства нет
-					-- и до контакта ещё больше ProofGraceSec, ��ибо свинг помечен suspect. Попытка
+					-- и до контакта ещё больше ProofGraceSec, либо свинг помечен suspect. Попытка
 					-- V141 сделать байпас «заработанным» опиралась на репутацию — она убрана.
 					if Config.ServerProofGate and not th.serverProven
 					   and (th.suspect or (th.contactAbs - now) > (Config.ProofGraceSec or 0.06)) then
@@ -5726,6 +5731,11 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	State.ap.tryInterrupt(now, State.interruptCandidate, State.interruptThreatCount)
 
 	table.sort(imminent, V93.sortByContact)
+
+	-- [V157/HEAVY-ATOMIC] Единственная обычная попытка Heavy выполняется сразу после построения
+	-- EDF-списка, ДО любых optional dodge-веток. Только успешный COUNTER-SEND делает return;
+	-- любой live-gate пишет FALLBACK и в том же кадре продолжает к dodge/parry.
+	if State.interruptFiredFrame ~= FrameId and tryBoxingCounter(now) then return end
 
 	-- Multi-attacker clustering is based on distinct attackers and absolute contacts.
 	-- A cluster is handled as one defensive transaction, never as competing EDF presses.
@@ -6097,7 +6107,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 
 	-- [V95] ЕДИНЫЙ АВТОРИТЕТ ПОВОРОТА. Раньше здесь напря��ую дёргался faceToward (писал HRP в
 	-- Heartbeat), конфликтуя с enforceFaceLock/AutoRotate/шиф��локом в RenderStepped. Теперь только
-	-- ВЫСТАВЛЯЕМ цель — применит applyFacing в RenderStepped (последний писатель кадра).
+	-- ВЫСТАВЛЯЕМ цель — прим��нит applyFacing в RenderStepped (последний писатель кадра).
 	-- ЦЕЛЬ = атакующий с БЛИЖАЙШИМ ещё-не-прилетевшим контактом (faceTgt), т.к. сервер валидирует
 	-- НАШ facing в момент разрешения удара (victim-репорт читает Blocking/PerfectBlocking на
 	-- Heartbeat при оверлапе хитбокса ≈ контакт). Смотрим спиной → сервер отклоняет блок. faceTgt
@@ -6168,15 +6178,8 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 	end
 
-	-- Legacy Boxing counter оставлен только как отдельный SkillAddon fallback. Когда новый
-	-- [V138] Boxing Counter always fires first when boxing style + M2 ready, regardless of
-	-- AutoPlay settings. AutoPlay interrupt runs independently via tryInterrupt above.
-	-- Counter REPLACES parry (returns to skip the block section below); it is NOT gated on
-	-- AutoPlay being off — boxing M2 punish is always better than parry when available.
-	-- [V156] Evasive Counter уже обработан до pending-return выше. Здесь остаётся только обычная
-	-- M2-контра; повторный вызов perfect sender после завершения транзакции был недостижим/лишний.
-	if State.interruptFiredFrame ~= FrameId and tryBoxingCounter(now) then return end
-
+	-- [V157/HEAVY-ATOMIC] Поздняя повторная Heavy удалена. Если ранняя атомарная попытка выше
+	-- не отправила COUNTER-SEND, окно этой угрозы уже принадлежит штатному EDF/parry.
 	if wantBlock then
 		-- ParryWindowDisabled запрещает perfect-window, но не обычный guard. Если guard уже
 		-- поднят, не re-arm'им его на каждый удар: помечаем угрозу покрытой и продолжаем hold.
@@ -7276,7 +7279,7 @@ local function topPriority()
 	return p
 end
 -- [V87] IDLEMASK — постоянный спуф на IDLE-анимацию во время атаки. КРИТИЧНО: idle зациклен
--- (Looped=true), поэтому его НЕ НУЖНО перезапускать чер��з Stop/Play — он крути��ся сам. Именно
+-- (Looped=true), поэтому его НЕ НУЖНО перезапуск��ть чер��з Stop/Play — он крути��ся сам. Именно
 -- бывший ци��л "Stop(0); Play()" каждые ~длину и ломал ани��ации со временем (постоянные
 -- рестарты накапливали рассинхрон аниматора). Теперь: играем idle-decoy ОДИН раз, дальше в
 -- Heartbeat лишь мягко переутверждаем приоритет+вес и переиграем ТОЛЬКО если он реально
@@ -7658,7 +7661,7 @@ task.spawn(function()
 	-- Что было не так:
 	--   1) `checkcaller` и `getnamecallmethod` читались как ГЛОБАЛЫ на каждый вызов — два обхода
 	--      таблицы глобалов (у executor это ещё и getgenv-прокси) там, где счёт идёт на десятки
-	--      тысяч в секунду. Теперь захвачены в локальные upvalue один раз при установке хука.
+	--      тысяч в секунду. Теперь захвачены в локал��ные upvalue один раз при установке хука.
 	--   2) `checkcaller()` — C-вызов через границу executor — выполнялся ПЕРВЫМ, то е��ть для
 	--      каждого игрового :IsA/:FindFirstChild, хотя его результат нужен ровно для одной ветки
 	--      (FireServer). Теперь сначала берём method и, если он не из интересующих пяти, уходим
@@ -7867,7 +7870,7 @@ V93.schedulerPhase = RunService.PreSimulation and "PreSimulation" or "Heartbeat-
 	local now = os.clock()
 	FrameId = FrameId + 1        -- [V68] invalidates per-frame HRP cache
 	-- [V91] Переутверждаем направ��ение движения для выбора M2-варианта. Humanoid:Move задаёт
-	-- MoveDirection только на текущий кадр (дальше его перезапишет игровой ControlModule), а
+	-- MoveDirection только на текущ��й кадр (дальше его перезапишет игровой ControlModule), а
 	-- сервер резолвит вариант из РЕПЛИЦИРОВАННОГО MoveDirection при обработке нашего ServerCheck —
 	-- т.е. на ~oneWay позже отправки. Поэтому держим направление короткое окно вокруг выстрела.
 	if State.ap.steerUntil and now < State.ap.steerUntil and State.ap.steerDir then
