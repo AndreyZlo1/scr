@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════����══════════════════
+    -- ══════════════════════════ Move-vector math ═════════�����══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -757,6 +757,7 @@ return function(Lib, Core)
     local _tryM1 = nil
     local _ndGateIdx, _ndParryIdx, _ndBlockIdx = nil, nil, nil
     local _ndComboIdx = nil   -- [V128] индекс u19 (счётчик комбо) в tryM1
+    local _ndComboCands = nil -- [V130] кандидаты на u19: { [idx] = {last=, score=} }
     -- Персистентные обёртки для pcall — БЕЗ аллокации замыкания на кадр.
     local function _getUp(fn, i) return debug.getupvalue(fn, i) end
     local function _setUp(fn, i, v) return debug.setupvalue(fn, i, v) end
@@ -808,17 +809,59 @@ return function(Lib, Core)
         --     G+6 getM1Animations      (function)
         -- Проверяем всю подпись целиком, а не только тип числа: u25/u26 тоже числа, и без
         -- окружающих функций их легко перепутать со счётчиком комбо.
-        local okF1, f1 = pcall(_getUp, fn, _ndGateIdx + 3)
-        local okF2, f2 = pcall(_getUp, fn, _ndGateIdx + 4)
-        local okC,  c19 = pcall(_getUp, fn, _ndGateIdx + 5)
-        local okF3, f3 = pcall(_getUp, fn, _ndGateIdx + 6)
-        if okF1 and okF2 and okC and okF3
-           and type(f1) == "function" and type(f2) == "function"
-           and type(c19) == "number" and type(f3) == "function" then
-            _ndComboIdx = _ndGateIdx + 5
+        -- ↑ [V130] ВСЁ ВЫШЕ ПРО ИНДЕКС +5 БЫЛО ДОГАДКОЙ И НЕ РАБОТАЛО. Декомпилятор печатает
+        -- ИМЕНА upvalue'ов (u19/u21/u32), но НЕ их порядок в таблице upvalue'ов прототипа — из
+        -- дампа этот порядок не выводится в принципе. Подпись не совпала, `_ndComboIdx` остался
+        -- **nil**, и блок пропуска 4-го удара не выполнялся НИ РАЗУ. Поэтому и правка V129
+        -- (`>= 3` вместо `== 3`) не дала ничего: она правила код, до которого не доходило
+        -- управление. Отсюда «4 атака воспроизводится» — её никто и не блокировал.
+        --
+        -- ПРАВИЛЬНО: не угадывать индекс, а найти его ПО ПОВЕДЕНИЮ. Достоверно про u19 из дампа
+        -- известно только то, что это число и что оно меняется по закону
+        --     M1.lua:461   u19 = u19 % 4 + 1     → 1,2,3,4,1,2,3,4…
+        -- Собираем всех числовых кандидатов; отсев делает _ndLearnCombo ниже.
+        _ndComboCands = {}
+        local dinfo = select(2, pcall(debug.getinfo, fn))
+        local nups = (type(dinfo) == "table" and tonumber(dinfo.nups)) or 32
+        for i = 1, nups do
+            -- gate/parry/block исключаем: их значения мы сами обнуляем каждый кадр, они никогда
+            -- не «прокрутятся» как комбо и только тратили бы наблюдения.
+            if i ~= _ndGateIdx and i ~= _ndParryIdx and i ~= _ndBlockIdx then
+                local okN, vN = pcall(_getUp, fn, i)
+                if okN and type(vN) == "number" then
+                    _ndComboCands[i] = { last = vN, score = 0 }
+                end
+            end
         end
         _tryM1 = fn
         return true
+    end
+
+    -- [V130] Шаг отсева кандидатов на u19. Критерии — ровно из формулы игры `u19 = u19 % 4 + 1`:
+    --   • значение обязано быть целым в 0..4 (0 = стартовое). Выход за диапазон означает, что это
+    --     не комбо-счётчик, а, например, swing-id (u25/u26 в дампе тоже числа, но растут
+    --     монотонно) → кандидат вычёркивается навсегда;
+    --   • переход обязан быть ровно `new == old % 4 + 1`; два таких перехода запирают индекс.
+    --     Одного мало: на +1 растёт много чего, а вот цикл ПО МОДУЛЮ 4 — это уже подпись комбо.
+    local function _ndLearnCombo()
+        if _ndComboIdx or not _ndComboCands or not _tryM1 then return end
+        for i, st in pairs(_ndComboCands) do
+            local ok, v = pcall(_getUp, _tryM1, i)
+            if not ok or type(v) ~= "number" or v % 1 ~= 0 or v < 0 or v > 4 then
+                _ndComboCands[i] = nil
+            elseif v ~= st.last then
+                if v == (st.last % 4) + 1 then
+                    st.score = st.score + 1
+                    if st.score >= 2 then _ndComboIdx = i; return end
+                else
+                    -- Сервер умеет откатывать счётчик назад (M1.lua:552-561: Declined →
+                    -- u19 = u27[id] - 1), поэтому «неправильный» переход НЕ дисквалифицирует
+                    -- кандидата — он лишь сбрасывает накопленные очки.
+                    st.score = 0
+                end
+                st.last = v
+            end
+        end
     end
 
     -- [V112] УДАЛЕНО ЦЕЛИКОМ: extractId / buildM1Ids / onAnimPlayed / hookAnimator,
@@ -960,6 +1003,10 @@ return function(Lib, Core)
         -- и tryM1 посчитает u19 % 4 + 1 = 1.
         -- Значения 0/1/2 по-прежнему не трогаем: это живая середина комбо, обнуление там
         -- оборвало бы серию.
+        -- [V130] Пока индекс не найден — учимся на живом счётчике; как только заперт, зажимаем.
+        -- Порядок важен: обучение обязано идти ДО зажима, иначе мы сами затрём те переходы,
+        -- по которым кандидат опознаётся.
+        _ndLearnCombo()
         if _ndComboIdx then
             local okC, c19 = pcall(_getUp, _tryM1, _ndComboIdx)
             if okC and type(c19) == "number" and c19 >= 3 then
@@ -976,7 +1023,7 @@ return function(Lib, Core)
 
     -- [V112] Вместо installAnimHook — простой резолв карты upvalue'ов No Delay.
     -- Хуков здесь больше НЕТ: ни task.delay, ни Animator-коннекта. Респавн ничего не
-    -- ломает — upvalue'ы принадлежат МОДУЛЮ M1 (он живёт всю сессию), а не персонажу,
+    -- ломает — upvalue'ы принад��ежат МОДУЛЮ M1 (он живёт всю сессию), а не персонажу,
     -- поэтому переподключение после CharacterAdded не требуется.
     local noDelayMapped = false
     local function installNoDelay()
@@ -1106,7 +1153,7 @@ return function(Lib, Core)
     -- дэш читает «и upvalue, и поле конфига». Это неверно: Evasive.lua:20-24 КОПИРУЕТ
     -- значения конфига в локальные переменные ОДИН РАЗ при загрузке модуля, и дальше
     -- CombatConfig.Evasive не читается вообще ни разу. Значит работал только патч
-    -- upvalue; запись в конфиг оставлена лишь как безвредная страховка на случай, если
+    -- upvalue; запись в конфиг оставлена лишь как безвредная страховка ��а случай, если
     -- модуль будет перезагружен (тогда он подхватит наши значения при копировании).
     --
     -- COOLDOWN — client-authoritative, exactly like infinite sprint: the server validates a real
@@ -1634,7 +1681,7 @@ return function(Lib, Core)
         pcall(_forceGetup, hum)
     end
 
-    -- ═════════════════════════ MASTER LOOPS ═════════════════════════════════
+    -- ═════════════════════════ MASTER LOOPS ═══════════════════════════════��═
     PreStep:Connect(LPH_NO_VIRTUALIZE(function(dt)
         dt = (typeof(dt) == "number" and dt > 0) and dt or (1 / 60)
         pcall(stepSpeed, dt)
