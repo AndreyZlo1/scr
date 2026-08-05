@@ -112,7 +112,7 @@ local Config = {
 	ReleaseGap    = 0.40,
 
 	-- [V103] FACE-GATE BLOCK: не жечь нажатие блока (и 0.5с BlockCooldown), пока смотрим спиной к
-	-- атакующему — блок направленный, сервер такой парри отклонит. Ждём доворота (applyFacing),
+	-- атакующему — блок направленный, се��вер такой парри отклонит. Ждём доворота (applyFacing),
 	-- пр��с��им при приемлемом facing ИЛИ когда времени уже не�� (последний шанс). Дефолт ON.
 	FaceGateBlock = true,
 	FaceGateMin   = 0.2,       -- мин. faceDot (cos) до а��аку��щего, при котором разрешаем нажатие
@@ -274,7 +274,7 @@ local Config = {
 	-- нулю → додж/блок уходили рано, реальный удар прилетал на +300мс позже (в логе
 	-- predErr=+328ms → промах по held-heavy → Ragdoll-спираль). Теперь для M2/SKILL
 	-- контакт считается по РЕАЛЬНОЙ скорости прогресса трека: remaining =
-	-- (hitTL - tp) / max(liveSpeed, floor). При замедлении окно едет с ударом.
+	-- (hitTL - tp) / max(liveSpeed, floor). При замедлении окно ед��т с ударом.
 	LiveHeavyTimer    = true,
 	LiveSpeedFloor    = 0.15,   -- ниже этой доли номинала скорость не считаем (антидел/0)
 	LiveSpeedSmooth   = 0.35,   -- EMA-сглаживание измеренной скорости прогресса
@@ -353,7 +353,7 @@ local Config = {
 	-- (self-busy) или в софт-стане (Stunned/CantAnything) — из-за этого «атаковал не вовремя →
 	-- съел удар». Этот аддон ОВЕРРАЙДИТ блокировку: если удар вот-вот при��етит, а мы залочены
 	-- софт-��остоянием и не можем блокнуть — форсим сам dodge-инпут (сервер его примет).
-	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физичес��и ничего ��������е даёт.
+	-- Жёсткие состояния (Ragdoll/Grabbed/Downed) НЕ обходим — там дэш физиче����и ничего ��������е даёт.
 	-- Blatant = палевно (легит-игрок не смог бы), поэтому по умолчанию ВЫКЛ.
 	SA_BlatantDodge   = false,
 	SA_BlatantWindow  = 0.32,   -- сек до кон��акта: в э����м окне ����а��атывает форс-додж
@@ -1153,7 +1153,7 @@ end
 -- держать цель после этого вызова (schedulerStep дёргает каждый Heartbeat, н�� грейс покрывает
 -- сам момент контакта и пару кадров после). Velocity-lead УБРАН: сервер валидирует facing на
 -- ФАКТИЧЕСКУЮ позици�� атакующего в момент удара, упреждение по скорости уводило прицел вбок
--- (в логах давало face=0.5 BACK на стрейфя��ем враге) → блок отклонялся.
+-- (в логах давало face=0.5 BACK на ��трейфя��ем враге) → блок отклонялся.
 local function computeMultiFaceGoal()
 	if not Config.AutoFace then return nil end
 	-- [V91/perf] Cheapest possible bail-out FIRST: multi-face needs at least two live
@@ -1254,7 +1254,7 @@ local function attackerYawRate(aHRP, flatLook)
 			rate = dAng / dtr
 			prevLook = rec.look
 		end
-		-- [V101] позиция/время прошлого кадра — для measured-closing (дельта дистанции),
+		-- [V101] позиция/время прошлого кадра — для measured-closing (дельта дистанци��),
 		-- ловит дэш-выпады с CFrame-твином, где AssemblyLinearVelocity остаётся ≈0.
 		prevPos, prevT = rec.pos, rec.t
 	end
@@ -1274,7 +1274,7 @@ end
 --   • если парт атакующего уже есть — п��оверяем пе��есечение с нами 1:1 как игра (авторитетно);
 --   • пока парт�� нет — предсказываем бок�� РЕАЛЬНЫМ размером (кэш по типу атаки), без trust-
 --     к��стылей (point-blank/heavy/drag/latch).
--- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один раз за FrameId,
+-- Пер-кадровый индекс живых ��артов по в��адельцу (Owner.Value). Скан один ��аз за FrameId,
 -- чтобы не обходить папку по разу на каждую угрозу в м��льтибое. Всё состояние — в V93 (см. выше
 -- ��ро лимит 200 локалов), новых local тут не заводим.
 local hitboxIndex = LPH_NO_VIRTUALIZE(function()
@@ -1881,7 +1881,7 @@ local function animIdOf(inst)
 end
 -- [V85] id защитных анимаций (block/guard/parry/deflect/perfect). Некоторые стили имеют
 -- защитные анимации не должны попадать в статический attack registry.
--- и парри срабатывал на ЧУЖОЙ блок. Собираем их явно и жёстко исключаем из д��текта угроз.
+-- и парри срабатывал на ЧУЖОЙ блок. Собираем их явно и жёстко ис��лючаем из д��текта угроз.
 local BlockIds = {}
 local function looksDefensive(nm)
 	local l = nm:lower()
@@ -2012,7 +2012,7 @@ GameData.m2VariantId = function(style, animName)
 	return out or nil
 end
 
--- [V144/PERF] Резолв инфы об атаке на каждый распо��нанный удар (зо��ётся из onAttack и из
+-- [V144/PERF] Резолв инфы об атаке н�� каждый распо��нанный удар (зо��ётся из onAttack и из
 -- AnimationPlayed). Без макроса шёл через интерпретатор.
 local resolveInfo = LPH_NO_VIRTUALIZE(function(id, model)
 	local entry  = AttackIds[id]
@@ -2065,7 +2065,7 @@ local function hitTimelineBase(info, combo)
 		loadGameModules()
 		local cfgv, multi = nil, 1
 		if GameData.cfg then
-			-- [V90] ТРЕТИЙ АРГУМЕНТ (variantId) — КОРНЕВОЙ ФИКС ALI.
+			-- [V90] ТРЕТИЙ АРГУМЕНТ (variantId) — КОРН��ВОЙ ФИКС ALI.
 			-- Игровая сигнатур��: GetStyleM2HitboxDelay(style, hakariMomentum, variantId).
 			-- Раньше variantId не передавался ⇒ для Ali всегда возвращался Left(0.53), а Right(0.67)
 			-- прилетал на 140мс позже ⇒ блок жался слишком рано ⇒ ragdoll-вариант пробивал всегда.
@@ -2704,7 +2704,18 @@ end
 --   потому что мы в этот момент атаковали (дамп Evasive:613 проверяет CombatAttacking).
 --
 -- ЧТО ДЕЛАЕМ: одна функция, которую ОБЯЗАНЫ вызвать все пути нашей M2 с i-frames.
-local function markOwnM2IFrames(now, tag)
+-- ═══════════ [V147] ПОЧЕМУ БЫЛО «out of local registers» ═══════════
+-- Luau даёт максимум 200 РЕГИСТРОВ (локальных переменных) на функцию, а тело файла — тоже
+-- функция (главный чанк). Top-level локалей здесь уже было ровно у предела:
+--     коммит 01ca31c → 210 объявлений  (компилировался)
+--     коммит 09f31ce → 211 объявлений  ← мой V146, НЕ компилируется
+-- Разница ровно в единице — это мой `local function markOwnM2IFrames`. Ошибка не в логике
+-- V146, а в том, что я добавил НОВУЮ top-level локаль в файл с исчерпанными регистрами.
+-- Поэтому функция становится ПОЛЕМ уже существующей таблицы V93 (:898): сама таблица свой
+-- регистр занимает давно, а её поля регистров не требуют вообще.
+-- ПРАВИЛО НА БУДУЩЕЕ: в этом файле новые top-level `local` добавлять НЕЛЬЗЯ — только поля
+-- V93 / State / Config.
+function V93.markOwnM2IFrames(now, tag)
 	local style = tostring(styleOf(localChar()) or ""):lower()
 	loadGameModules()
 	-- Последний контакт нашей M2. Базовая задержка — из живого конфига игры.
@@ -2787,7 +2798,7 @@ local function fireBoxingCounter(th)
 	-- звучит «прикрыт ли я прямо сейчас?». Запоминаем конец окна неуязвимости контры.
 	-- [V146] Расчёт окна вынесен в markOwnM2IFrames (см. выше): его обязан вызывать КАЖДЫЙ путь,
 	-- который пускает нашу M2 с i-frames, а не только контра.
-	markOwnM2IFrames(os.clock(), "counter/" .. tostring(cs))
+	V93.markOwnM2IFrames(os.clock(), "counter/" .. tostring(cs))
 end
 
 -- [V91] ALI EVASIVE COUNTER. CombatConfig.Styles.ali.EvasiveCounter:
@@ -2909,7 +2920,7 @@ end
 local function counterPreemptsDodge(now)
 	if State.counterPreemptFrame == FrameId then return State.counterPreemptVal end
 	-- ═══════ [V146] ФАКТ ВМЕСТО ПРЕДСКАЗАНИЯ: атрибут IFRAMES на нашем персонаже ═══════
-	-- Дамп VictimHitboxServiceClient_ModuleScript.lua:139 — игра решает «неуязвим ли ты» так:
+	-- Дамп VictimHitboxServiceClient_ModuleScript.lua:139 — игра решает «неуязвим ли ты» т��к:
 	--     return p22:GetAttribute("IFRAMES") == true and true
 	--            or (p22:GetAttribute("Ragdoll") == true ... "Downed" ... "UltraInstinct")
 	-- Это ЧИТАЕМЫЙ атрибут, а не внутреннее состояние. Значит вычислять окно по конфигу нужно
@@ -2977,7 +2988,7 @@ end
 -- Wrestling M2 (гарантированный захват, см. M2GrabTargetForwardOffset в CombatConfig). Их
 -- нельзя блокнуть, с��асает лишь додж (i-frames = абсолютная неуязвимость: VictimHitboxService
 -- ._isSuppressed гасит урон при IFRAMES/Ragdoll/Downed/UltraInstinct). Список собираем по
--- стилю/��ипу через Config.MustDodgeStyles (расширяется ��ез правки движка) + живой сигнал по
+-- стилю/��ипу через Config.MustDodgeStyles (расширяется ����з правки движка) + живой сигнал по
 -- атрибуту атакующего, е��ли игра е��о выставит в момент замаха.
 local function isMustDodge(th)
 	if not th then return false end
@@ -3245,7 +3256,7 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		-- Но при десинке (или когда враг с anti-autoparry вынуждает сервер отклонять наши
 		-- ServerCheck) атрибут НЕ выставляется: canAttack остаётся true, рейт-гард пропускает
 		-- нас каждые AP_PunishFastGap=80мс, и playSwing РЕСТАРТИТ трек с tp=0. Анимация длиной
-		-- ~0.45с (AttackDuration) перезапускалась 5-6 раз, от��юда видимое дёрганье, которого
+		-- ~0.45с (AttackDuration) перезап��скалась 5-6 раз, от��юда видимое дёрганье, которого
 		-- «при обычных атаках нет» — там гейтом служит серверный атрибут.
 		-- Ставим ЛОКАЛЬНЫЙ пол на перезапуск: он не зависит от серверных атрибутов и потому
 		-- работает именно в том режиме, где отваливается штатный гейт. Пропорция от реальной
@@ -3362,7 +3373,7 @@ function State.ap.flatDist(model)
 	        - Vector3.new(aim.X, 0, aim.Z)).Magnitude
 end
 
--- снап лицом ТОЧНО на цель прямо сейчас + держим предиктивный facing на окно хитбокса.
+-- снап лицом ТОЧНО на цель прямо сей��ас + держим предиктивный facing на окно хитбокса.
 -- Сервер строит M1-хитбокс по нашему LookVector в момент ServerCheck.
 function State.ap.snapTo(hrp)
 	setFaceGoal(hrp, true, Config.AP_FaceHold or 0.35)
@@ -3495,7 +3506,7 @@ function State.ap.reachM2()
 end
 
 -- Готова ли M2 к отправке ПРЯМО СЕЙЧАС. Кулдаун держит игра (Styles.*.M2Cooldown), атрибут —
--- серверная истина; локальный гэп закрывает только сетевое окно до появления атрибута.
+-- серверн��я истина; локальный гэп закрывает только сетевое окно до появления атрибута.
 function State.ap.m2Ready()
 	local c = localChar()
 	if not c then return false end
@@ -3615,7 +3626,7 @@ function State.ap.tryInterrupt(now, th, threatCount)
 		if d then
 			m2Iframes = ap.m2GrantsIFrames()
 			-- ДВЕ РАЗНЫЕ ПОСТАНОВКИ ЗАДАЧИ:
-			--  • M2 БЕЗ i-frames — это чистая гонка, как M1: наш удар должен прийти раньше.
+			--  • M2 БЕЗ i-frames — это чистая гонка, как M1: наш удар должен прийти ра��ьше.
 			--  • M2 С i-frames — гонку выигрывать НЕ НУЖНО. Достаточно, чтобы сервер принял M2 и
 			--    поднял IFRAMES до контакта: внутри окна неуязвимости вражеский удар не проходит
 			--    физически, поэтому даже ��проигранный» размен для нас бесплатный. Дедлайн тут —
@@ -3656,7 +3667,7 @@ function State.ap.tryInterrupt(now, th, threatCount)
 		-- и при m2Iframes даёт ту же неуязвимость, но отметку не ставил НИКОГДА — её ставила только
 		-- fireBoxingCounter. Поэтому counterPreemptsDodge не знал о нас ничего, и escape-ветка
 		-- разрешала додж через 80мс: `INTERRUPT t=47430.40 via=M2+IF` → `DODGE t=47430.48`.
-		if m2Iframes then markOwnM2IFrames(now, "interrupt/M2+IF") end
+		if m2Iframes then V93.markOwnM2IFrames(now, "interrupt/M2+IF") end
 	else
 		if not ap.fireM1(th.attackerModel, "interrupt", true, true) then return false end
 		ownHit = m1Hit
@@ -3746,7 +3757,7 @@ function State.ap.onPerfectParry(attackerName, kind)
 	if not model then return end
 	-- [V138] Если Boxing Counter только что сработал (≤0.35с назад), M2 уже ушёл —
 	-- M1 dobivanie бесполезно (враг ещё не застанен нашим контером) и только палит кулдаун.
-	-- Используем стан от нашего M2 (BoxingCounterStun ~ 0.6с) как окно для AutoPlay позже.
+	-- Используем стан от нашего M2 (BoxingCounterStun ~ 0.6с) ��ак окно для AutoPlay позже.
 	if Config.BoxingCounter and (os.clock() - (State.lastCounter or 0)) < 0.40 then return end
 	-- окно стана: M2-парри = ParryStun.M2 (1с, надёжно); M1-парри короче (RecoveryLockout врага)
 	local stun = (kind == "M2") and (Config.AP_M2Stun or 1.0) or (Config.AP_M1Stun or 0.5)
@@ -4112,7 +4123,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 	-- ровно наоборот — шлёт ФЕЙК первым, а РЕАЛЬНЫЙ удар через ~50мс. Скрипт цеплялся за фейк,
 	-- реальный свинг вообще не попадал в Threats ⇒ нажатия в его окно не было ⇒ чистый хит.
 	-- Именно поэтому «некоторые скрипты всё равно пробивают».
-	-- Теперь быстрый повтор НЕ отбрасывается: он регис��рируется с меткой suspect=true, а решение
+	-- Теперь быстрый повт��р НЕ отбрасывается: он регис��рируется с меткой suspect=true, а решение
 	-- «настоящий или фейк» принимает пер-свинговая серверная истина — VictimSwingId на партах
 	-- Workspace.Hitboxes (associatedHitbox → th.serverSwingId). Ниже в press-гейте suspect-угроза
 	-- обязана иметь claimed-хитбокс и НЕ получает bypass по ProofGraceSec.
@@ -4156,7 +4167,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 	-- в это окно фейковая анимация проезжала proof-гейт бесплатно (это прямо признано в
 	-- комментарии V90 выше, но исправлено было только для suspect-ветки).
 	-- Делаем proof РЕБРО-ТРИГГЕРНЫМ: если тем же атакующим уже владеет живая угроза, которая
-	-- УЖЕ опирается на этот самый атрибут, то для нового свинга атрибут — не доказательство, а
+	-- ��ЖЕ опирается на этот самый атрибут, то для нового свинга атрибут — не доказательство, а
 	-- унаследованное состояние. Такой свинг живёт как suspect и обязан подтвердиться
 	-- пер-свинговым VictimSwingId живого хитбокса.
 	-- [V142/ОТКАТ V140] Здесь стояла проверка «атрибут уже занят другой живой угрозой → новый
@@ -4254,7 +4265,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 	-- Один AnimationTrack имеет ОДНУ TimePosition, поэтому физически не может представлять два
 	-- одновременных свинга. Но угрозы складывались в список без всякой проверки, а каждая из них
 	-- держит ссылку на ЭТОТ ЖЕ объект трека и каждый кадр пересчитывает контакт от живого tp
-	-- (`th.contactAbs = now + remaining`). Как только враг переигрывает тот же трек, ВСЕ старые
+	-- (`th.contactAbs = now + remaining`). Как только враг переигрывает т��т же трек, ВСЕ старые
 	-- записи, привязанные к нему, пересчитываются от новой TimePosition и съезжаются в одну точку.
 	-- Р��вно это в диаге:
 	--   TRACE-GEOM ClawPixelatedZero M1 first=+941ms dt=+185ms   ← запись возрастом 941мс
@@ -4873,7 +4884,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 					-- [V90] suspect-свинг НЕ получает ProofGrace-байпас: если пер-свинговая
 					-- истина (VictimSwingId) так и не появилась — это фейк, и жечь на него блок
 					-- нельзя, иначе уходим в BlockCooldown=0.5с ровно к приходу настоящего удара.
-					-- Реальный свинг всегда создаёт парт в Workspace.Hitboxes, поэтому честную
+					-- Реальный свинг всегда создаёт парт в Workspace.Hitboxes, поэтому че��тную
 					-- атаку этот гейт не режет.
 					-- [V142] Гейт вернулся к исходному условию: держим нажатие, пока доказательства нет
 					-- и до контакта ещё больше ProofGraceSec, либо свинг помечен suspect. Попытка
@@ -5169,7 +5180,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		-- [V92] ЦЕЛИМСЯ В ЦЕНТР i-frame ОКНА, а не в его дальний край. Нижняя граница остаётся
 		-- прежней (поздно замеченную угрозу всё равно надо покрыть, даже если центр уже прошёл),
 		-- а верхнюю подтягиваем к центру: планировщик опрашивается каждый кадр, поэтому «ещё не
-		-- время» просто означает подождать следующий кадр. Даёт ~±150мс запаса с обеих сторон
+		-- время» просто означает подождать следующий кадр. Даёт ~±150мс запаса с обе��х сторон
 		-- вместо 40мс только справа. Ровно та же математика, что в ветке DodgeCenter ниже.
 		local coverLo = ifLat - 0.03
 		local coverHi = ifLat + ifDur * (Config.DodgeCenterFrac or 0.5)
@@ -6661,7 +6672,7 @@ end
 -- ��огда ВТОРОЙ клиент будет логировать каждый трек, который РЕАЛЬ��О реплицировался ему
 -- от твоего главного. Свингни ��а главном — �� в дебаге второго аккаунта увидишь, что
 -- ему при��ло: реальная атака, decoy-idle, или (если raknet-rewrite заработает) только idle.
--- Это и есть объективная проверка desync с ��очк�� зрения противника.
+-- Это и есть объективна�� проверка desync с ��очк�� зрения противника.
 local Observers = {}
 local function observeOtherPlayer(name)
 	local target = Players:FindFirstChild(name)
@@ -6923,7 +6934,7 @@ task.spawn(function()
 						State.lastSwingLog = now
 						aclog(("[desync] %s send held +%dms"):format(tostring(a1.Action), math.floor(d * 1000)))
 					end
-					return   -- глотаем немедленную отправку, реальный пакет уйдёт из task.delay
+					return   -- глотаем немедленную отправку, реальны�� пакет уйдёт из task.delay
 				end
 			elseif kind == "dash" then
 				State.selfBusyUntil = now + Config.DashDuration
@@ -7544,7 +7555,7 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	-- [V139/PERF] АВТО-ДЕГРАДАЦИЯ. Троттл по VizMaxFPS помогает только когда игра БЫСТРЕЕ кэпа.
 	-- Когда FPS ПРОСЕЛ (20 FPS = 50мс ка��р > interval 16мс) условие ниже всегда ложно, и полная
 	-- перерисовка (~280 операций проекции + пулы Drawing) платится КАЖДЫЙ кадр — ровно тогда,
-	-- когда бюджета и так нет. ESP усугублял просадку, из-за которой сам же и вызывался.
+	-- когда бюджета и так нет. ESP усугублял просадку, из-за которой сам ��е и вызывался.
 	-- Привязываем интервал к РЕАЛЬНОЙ дельте кадра: на 20 FPS рисуем раз в ~2 кадра вместо
 	-- каждого. Визуально ESP там и так дискретный, а кадру возвращается полов����на стоимости.
 	if Config.VizAutoDegrade ~= false then
@@ -7815,7 +7826,7 @@ return function(_Lib, _Core)
 			}, ctx.flag(o.Flag))
 		end
 
-		-- ════════════════��══ TAB: AutoParry ════════════��═���════
+		-- ════════════════��══ TAB: AutoParry ════════════���═���════
 		local AP = ctx.tabs.AutoParry
 
 		-- ── Section 1 — AutoParry core (Left box): Detection + Rotation groups ���─
