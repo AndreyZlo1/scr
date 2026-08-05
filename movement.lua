@@ -258,7 +258,7 @@ return function(Lib, Core)
         return result
     end
 
-    -- ══════════════════════════ Move-vector math ═════════��══════════════════
+    -- ══════════════════════════ Move-vector math ═════════���══════════════════
     -- MoveDirection is world-space horizontal input, already camera-relative
     -- (PC WASD + mobile thumbstick). For Fly we optionally remap it onto the
     -- camera basis so camera PITCH gives vertical movement → full 3D from a
@@ -756,6 +756,7 @@ return function(Lib, Core)
     -- [V112] Резолвер M1 → tryM1 → индексы гейтов. Выполняется ОДИН раз (ленивая карта).
     local _tryM1 = nil
     local _ndGateIdx, _ndParryIdx, _ndBlockIdx = nil, nil, nil
+    local _ndComboIdx = nil   -- [V128] индекс u19 (счётчик комбо) в tryM1
     -- Персистентные обёртки для pcall — БЕЗ аллокации замыкания на кадр.
     local function _getUp(fn, i) return debug.getupvalue(fn, i) end
     local function _setUp(fn, i, v) return debug.setupvalue(fn, i, v) end
@@ -797,6 +798,25 @@ return function(Lib, Core)
             end
         end
         if not _ndGateIdx then return false end
+        -- ═══════ [V128] ИНДЕКС СЧЁТЧИКА КОМБО u19 (для пропуска 4-го удара) ═══════
+        -- Порядок upvalue'ов tryM1 из дампа (M1.lua:322), считаем от найденного u21 (=G):
+        --     G+0 u21 (boolean)                  ← уже найден выше как _ndGateIdx
+        --     G+1 u32 (number)  G+2 u33 (number)
+        --     G+3 isCombatInputBlocked (function)
+        --     G+4 getFinalM1AnimSpeed  (function)
+        --     G+5 u19 (number)   ← СЧЁТЧИК КОМБО
+        --     G+6 getM1Animations      (function)
+        -- Проверяем всю подпись целиком, а не только тип числа: u25/u26 тоже числа, и без
+        -- окружающих функций их легко перепутать со счётчиком комбо.
+        local okF1, f1 = pcall(_getUp, fn, _ndGateIdx + 3)
+        local okF2, f2 = pcall(_getUp, fn, _ndGateIdx + 4)
+        local okC,  c19 = pcall(_getUp, fn, _ndGateIdx + 5)
+        local okF3, f3 = pcall(_getUp, fn, _ndGateIdx + 6)
+        if okF1 and okF2 and okC and okF3
+           and type(f1) == "function" and type(f2) == "function"
+           and type(c19) == "number" and type(f3) == "function" then
+            _ndComboIdx = _ndGateIdx + 5
+        end
         _tryM1 = fn
         return true
     end
@@ -805,7 +825,7 @@ return function(Lib, Core)
     -- хук task.delay (installNoDelayHook) и список GATE_ATTRS.
     -- ПОЧЕМУ ПРЕЖНИЙ КОД БЫЛ НЕВЕРЕН И ПОЧЕМУ ОН ЖЕ ДАВАЛ ЛАГИ:
     --
-    --   • Хук task.delay — разобран ��ыше: фильтр по числовому значению не мог отличить
+    --   • Хук task.delay — разобра�� ��ыше: фильтр по числовому значению не мог отличить
     --     кулдаун боя от таймера визуального эффекта (у обоих 0.45), поэтому одновременно
     --     ЛОМАЛ эффект парирования (M1.lua:699/713) и НЕ ЛОВИЛ перезарядку после комбо
     --     (1.25/spd не попадала в допуск). Плюс это глобальный хук: он выполнялся на
@@ -844,7 +864,7 @@ return function(Lib, Core)
     -- V112 закрывал только путь (1), поэтому путь (2) ������родол����ал д��рж����ть комбо. Симптом
     -- «после последнего удара долгая задержка» описывал ровно это.
     --
-    -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМСЯ. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
+    -- ЧТО ЧИСТИМ И ЧЕГО НЕ КАСАЕМ��Я. Только кулдауны и локауты атаки. Осознанно НЕ трогаем:
     --   Blocking            — снятие сломало бы собственный блок;
     --   Greenzone/RpCombatLocked — это безопасные зоны, ими занимается Dodge Everywhere;
     --   CantAnything/GuardBroken/M2/PendingM2 — это состояния стана и M2, а не задержка;
@@ -888,6 +908,39 @@ return function(Lib, Core)
         if okP and type(p) == "number" and p ~= 0 then pcall(_setUp, _tryM1, _ndParryIdx, 0) end
         local okB, b = pcall(_getUp, _tryM1, _ndBlockIdx)
         if okB and type(b) == "number" and b ~= 0 then pcall(_setUp, _tryM1, _ndBlockIdx, 0) end
+
+        -- ═══════ [V128] ПРОПУСК ПОСЛЕДНЕГО (4-го) УДАРА КОМБО ═══════
+        -- Ты прав: последний удар долгий, и вот точная причина из дампа (M1.lua:305):
+        --     u22 = task.delay((p47 == 4 and FinisherCooldown or AttackDuration) / p48, ...)
+        -- где p47 — номер удара, а значения из CombatConfig:119-120:
+        --     AttackDuration   = 0.45   (удары 1,2,3)
+        --     FinisherCooldown = 1.25   (удар 4)
+        -- То есть 4-й удар стоит в 2.8 раза дороже остальных ТРЁХ вместе взятых по времени.
+        -- Плюс серверный атрибут M1Cooldown приходит именно после финишера.
+        --
+        -- КАК СЧИТАЕТСЯ НОМЕР УДАРА (M1.lua:460-461):
+        --     v51 = getFinalM1AnimSpeed(Character2, u19 % 4 + 1)
+        --     u19 = u19 % 4 + 1        ← номер текущего удара
+        --     ...
+        --     scheduleM1SwingTimers(u19, v51)   -- :483, номер уходит ПО ЗНАЧЕНИЮ
+        -- Значит достаточно не дать u19 дойти до 4: как только он стал 3, обнуляем его, и
+        -- следующий удар снова считается как 0 % 4 + 1 = 1. Получается 1,2,3,1,2,3 без финишера.
+        --
+        -- ПОЧЕМУ ЭТО БЕЗОПАСНО И НЕ ЛОМАЕТ 3-й УДАР. Мы пишем u19 ПОСЛЕ того, как tryM1
+        -- полностью отработал: tryM1 синхронна, наш Heartbeat не может вклиниться в её середину,
+        -- а номер в scheduleM1SwingTimers(u19, …) передаётся по значению — таймер на 0.45с для
+        -- 3-го удара уже создан и обнуление счётчика его не меняет. Анимация и u27[u25]=u19
+        -- тоже уже зафиксированы с номером 3, поэтому серверная сверка по swingId остаётся целой.
+        --
+        -- Отдельного тумблера нет намеренно: это часть смысла No Delay — убрать задержки, а
+        -- финишер и есть самая большая из них.
+        if _ndComboIdx then
+            local okC, c19 = pcall(_getUp, _tryM1, _ndComboIdx)
+            -- Строго == 3: только состояние «третий удар уже прошёл». Значения 0/1/2 трогать
+            -- нельзя — это оборвало бы комбо в начале, а 4 обнулять поздно и незачем
+            -- (игра сама сделает u19 % 4 + 1 = 1 следующим ударом).
+            if okC and c19 == 3 then pcall(_setUp, _tryM1, _ndComboIdx, 0) end
+        end
     end
     -- [V111] PERF: персистентная fn для pcall БЕЗ аллокации замыкания. clearGateAttrs к��утится
     -- КАЖДЫЙ Heartbeat при No Delay → прежний `pcall(function() ... end)` на каждый очищаемый
@@ -1009,7 +1062,7 @@ return function(Lib, Core)
     -- Решение (выбрано пользователем): при активном Dodge зануляе�� множитель до 1.0, так
     -- что ����лайдер снова означает РОВНО studs/s, а на дефолте 30 дэш вани*льный.
     --
-    -- ВТОРОЙ БАГ, НАЙДЕННЫЙ ЗДЕСЬ ЖЕ: КАРТА UPVALUE'О�� БЫЛА НЕДЕТЕРМИНИРОВАННОЙ.
+    -- ВТОРОЙ БАГ, НАЙДЕННЫЙ ЗДЕСЬ ЖЕ: К��РТА UPVALUE'О�� БЫЛА НЕДЕТЕРМИНИРОВАННОЙ.
     -- Прежний mapEvasive искал upvalue'ы ПО ЗНАЧЕНИЮ и обходил их через `pairs(ups)`.
     -- Две фатальные проблемы:
     --   • `pairs` по таблице НЕ ГАРАНТИРУЕТ порядок обхода. Порядок мог отличаться между
@@ -1088,7 +1141,7 @@ return function(Lib, Core)
     -- копию. До установки хука это ещё оригинал (_evFn), поэтому mapEvasive, которая
     -- работает ДО хука, продолжает верно сверять значения с конфигом.
     -- Список upvalue'ов подтверждён дампом (Evasive.lua:508), индексы 22/23/24/27 верны —
-    -- ошибка была только в объекте, а не в индексах.
+    -- ошибка была только в объекте, а не в и��дексах.
     local _evHooked, _origEvasive = false, nil
     local function evTarget() return _origEvasive or _evFn end
     local _nextDodgeAllowed = 0  -- OUR client-authoritative cooldown deadline (os.clock)
@@ -1773,9 +1826,9 @@ return function(Lib, Core)
                     notify("No Delay", "Disabled")
                 end
             end,
-            Desc = "clears M1 cooldowns (0.45/1.25/1.55s) via tryM1 upvalues\nplus the server gate attributes, parry FX stays intact",
+            Desc = "clears M1 cooldowns (0.45/1.25/1.55s) via tryM1 upvalues\nplus the server gate attributes, parry FX stays intact\nskips the slow 4th hit: combo runs 1-2-3, never the finisher",
         })
-        sCbt:SubLabel({ Text = "Damage is server-side \u{00b7} only the client-side wait is removed" })
+        sCbt:SubLabel({ Text = "Combo 1-2-3 only \u{00b7} 4th hit costs 1.25s (finisher) vs 0.45s" })
 
         -- ─────────────── Section 5: Sprint (Right) ───��───────────
         local sSpr = MV:Section({ Side = "Right" })
