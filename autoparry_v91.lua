@@ -194,7 +194,7 @@ local Config = {
 	MinDeactGap   = 0.050,
 
 	MatchWindow   = 1.30,
-	-- [V125] ок����о, в котором ВТОРОЙ (и далее) серверный OUT того же типа от того же врага
+	-- [V125] ок������о, в котором ВТОРОЙ (и далее) серверный OUT того же типа от того же врага
 	-- считается доп-ударом ОДНОГО мультихит-свинга (Boxing M2MultiHitCount=2 шлёт 2 события
 	-- Hit/Blocked на одну анимацию), а НЕ новой атакой. В логе 2-й страйк приходил +0.44..1.20с
 	-- после свинга → берём с запасом = MatchWindow.
@@ -502,7 +502,7 @@ local Config = {
 	--   • track.Speed = 2.36  —  у ВСЕХ реальных игроков в диагах 649919/580903 ровно 1.00
 	-- Последствия: attacks=2872 при 204 исходах, CLUSTER раздувался до n=8, и 154 промаха
 	-- по��учили причину «in-window но не выбран EDF» — фантомы вытесняли настоящий удар.
-	-- AntiDecoyGap=0.12 этот поток НЕ ловил: 170мс > 120мс, т.е. брейкер шёл ровно над порог��м.
+	-- AntiDecoyGap=0.12 этот поток НЕ ловил: 170мс > 120мс, т.е. брейкер шёл ровно над по��ог��м.
 	-- ��ва независимых физических инварианта (оба проверены на реальных сессиях):
 	DecoyRefireSec  = 0.60,   -- один и тот же animId от одного врага не может стартовать заново
 	                          -- быстрее этого. Замер: реальные игроки переиспользуют тот же id
@@ -2041,7 +2041,7 @@ local function loadGameModules()
 end
 
 -- [V151] getPingAnimMult (V132) УДАЛЁН: за всё время не был вызван ни разу — ноль ссылок.
--- Держать его = держать регистр главного чанка, а мы вылезли за лимит Luau 200 и получили
+-- Держать его = держать регистр главного чанка, а мы вылезли за ��имит Luau 200 и получили
 -- "out of local registers". Множитель пинга при необходимости берётся напрямую через
 -- GameData.pau.GetPingAnimSpeedMultiplier там, где он реально понадобится.
 
@@ -2069,7 +2069,7 @@ local function attackSpeedMult(model)
 		end
 	end
 	if mult == 1 then
-		-- фолбэк: атрибут Height + формула из дампа CombatUtils
+		-- фолбэк: атрибу�� Height + формула из дампа CombatUtils
 		local h
 		pcall(function()
 		local pd = model:FindFirstChild("PlayerData")
@@ -2438,7 +2438,7 @@ end
 -- [V91] ЛУНЖ (StepForward) — НАЙДЕННАЯ ПРИЧИНА №1 пропусков «NOT-BLOCKED».
 -- Дамп ReplicatedStorage.Shared.Utils.CombatStepUtils:
 --   ApplyStepForward(char, studs): speed = min(studs/Shared.StepForward.Duration(0.14), MaxSpeed(30))
---   → на HRP навешивается LinearVelocity "CombatStepForwardLinearVelocity" на 0.14с,
+--   → на HRP навешивае��ся LinearVelocity "CombatStepForwardLinearVelocity" на 0.14с,
 --     т.е. атакующий ГАРАНТИРОВАННО доезжает вперёд ровно `studs` за время замаха.
 --   Вызовы: M1_ModuleScript ApplyM1StepForward(style, char, combo) на старте свинга,
 --           M2_ModuleScript ApplyM2StepForward(style, char).
@@ -3065,7 +3065,7 @@ end
 -- [V152/BOXING-COUNTER] Один авторитетный апдейтер транзакции. До V152 FireServer сразу
 -- объявлялся успехом через counterIFramesUntil, поэтому отклонённая M2 могла отменить fallback.
 -- Теперь SEND, CONFIRM и FAIL — разные факты. Новая top-level local-функция здесь запрещена
--- лимитом регистров, поэтому, как и V146/V151, держим функцию полем уже существующей State.
+-- лимитом регистров, поэтому, как и V146/V151, держим функцию полем уже существ��ющей State.
 function State.updateCounterTxn(now)
 	local tx = State.counterTxn
 	if not tx or (not tx.pending and not tx.confirmed) then return end
@@ -3260,6 +3260,28 @@ function State.aliDodgeAbuseEligible(th, now, imminent, ifLat, ifDur)
 	-- глобальный nil и runtime-error. State.isMustDodge публикуется до первого scheduler.
 	if not th or not th.serverProven then return false, nil, "not-server-proven" end
 	if State.isMustDodge and State.isMustDodge(th) then return false, nil, "must-dodge" end
+
+	-- ═══════ [V162] НЕ ЖЖЁМ ABUSE-ДОДЖ В ЗАВЕДОМЫЙ ОТКАЗ СЕРВЕРА ═══════
+	-- ЭТО ПРИЧИНА «ALI COUNTER НЕ РАБОТАЕТ ВООБЩЕ». Цепочка контры такая:
+	--     abuse-dodge → perfect dodge → серверный проц StyleEvasiveCounter → бесплатная M2.
+	-- В диаге первое звено проваливалось, и дальше не шло НИЧЕГО (ни ALI-PERFECT-CONFIRM,
+	-- ни ALI-EVCOUNTER-SEND за всю сессию):
+	--     ALI-DODGE-ABUSE t=1738.89 target=SuperMegaCookie135/M1 s1 contactIn=266ms
+	--     DODGE-REJECT/EARLY-FALLBACK t=1740.11 ali-dodge-abuse ack=1218ms IFRAMES not confirmed
+	-- То есть Evasive был ОТКЛОНЁН сервером: атрибут IFRAMES так и не появился за 1218мс.
+	-- Спасло нас парри (OUT ... PERFECT pressDt=132ms), а проц не наступил — доджа фактически не было.
+	-- Дамп Evasive_ModuleScript отказывает по каждому из этих флагов ДО отправки:
+	--     :588 Stunned | :592 GuardBroken | :600 CantAnything | :613 CombatAttacking
+	-- причём :613 не делает поблажки ни на грант, ни на force. CombatAttacking выставляет наш же
+	-- AutoPlay M1, поэтому «выстрел» abuse-доджа в этот момент гарантированно уходит в никуда и
+	-- вместе с ним сгорает право на контру с кулдауном 6с. Проверяем состояние ДО решения.
+	local meC = localChar()
+	if meC then
+		if meC:GetAttribute("CombatAttacking") == true then return false, nil, "self-attacking" end
+		if meC:GetAttribute("Stunned") == true then return false, nil, "stunned" end
+		if meC:GetAttribute("CantAnything") == true then return false, nil, "cant-anything" end
+		if meC:GetAttribute("GuardBroken") == true then return false, nil, "guard-broken" end
+	end
 
 	-- [V155/BOXING] Boxing M2 имеет два контакта и собственные IFRAMES. По выбранной безопасной
 	-- политике Ali никогда не меняет его на dodge/M2: оба EDF-контакта остаются parry/held-guard.
@@ -3555,7 +3577,7 @@ local function counterCandidate(now, ignoreTransient)
 	end
 	local myHRP = localHRP()
 	if not myHRP then return nil end
-	-- [V91] реч контры зависит от стиля: Ali M2 сама доводит на M2StepForwardStuds=2 студа
+	-- [V91] реч контры зависит от стиля: Ali M2 сама довод��т на M2StepForwardStuds=2 студа
 	-- (CombatStepUtils.ApplyM2StepForward), поэтому её эффективный радиус больше боксёрского.
 	local cstyle = counterStyle()
 	local reach = (cstyle == "ali") and (Config.AliCounterReach or 7.5)
@@ -3696,11 +3718,31 @@ local function tryBoxingCounter(now)
 	-- сетевой путь + lookahead + один physics-frame; если он не помещается, M2 вообще не трогаем.
 	local contactIn = (best.contactAbs or now) - now
 	local iframeLead = math.max(uplink(), 0.02) + math.max(V93.lookahead or 0, 0) + (1 / 60)
-	if contactIn <= iframeLead then
+	-- ═══════════ [V162] КОНТРА ОТСТУПАЕТ ПО ДЕДЛАЙНУ ПАРРИ, А НЕ ПО ДЕДЛАЙНУ IFRAMES ═══════════
+	-- ЭТО И ЕСТЬ «СКРИПТ ИГНОРИРУЕТ 2-3 УДАРА». Доказательство из диага — каждая угроза шла по
+	-- одному и тому же сценарию: сначала окно парри открыто и НИЧЕГО не нажато
+	--     PRESS-STARVED t=1715.659 M1 s1 dtWas=+181ms | step aborted BEFORE press branch
+	--                   txnPending=false counterPend=false blockUp=true reason=-      ← всё чисто!
+	-- и лишь через 111мс контра сдавалась, когда парировать уже поздно:
+	--     COUNTER-SKIP/PARRY t=1715.77 contactIn=48ms need=131ms gate=IFRAMES-cannot-precede-contact
+	-- Пары повторяются: 1716.342/1716.46, 1721.291/1721.42, 1724.657/1724.79, 1725.332/1725.46.
+	-- Причина: пока контра держит угрозу кандидатом, угроза не попадает в EDF (строка ~5921
+	-- «transaction owns this threat only»), а сдавалась контра по iframeLead ≈ 131мс — то есть
+	-- ПОЗЖЕ момента, когда обязано уйти нажатие парри. В диаге целевой press был dt≈+177мс
+	-- (TRACE-PRESS dt=+132ms lateBy=+45ms), поэтому к моменту отказа контры окно парри уже утекло.
+	-- Дедлайн парри НАСТУПАЕТ РАНЬШЕ дедлайна контры, значит именно он и должен решать: если
+	-- отправка контры не помещается до него — угроза сразу отдаётся парри, без 130мс простоя.
+	local parryLead = math.max(Config.PerfectLead - math.max(uplink(), 0.02), 0) + (1 / 60)
+	local yieldLead = math.max(iframeLead, parryLead)
+	if contactIn <= yieldLead then
+		-- Окончательно: ждать больше нечего, иначе парри тоже опоздает.
+		best.counterCommittedToParry = true
 		if not best.counterLateSkipLogged then
 			best.counterLateSkipLogged = true
-			diagPush(("COUNTER-SKIP/PARRY t=%.2f target=%s/%s contactIn=%.0fms need=%.0fms gate=IFRAMES-cannot-precede-contact")
-				:format(now, tostring(best.name), tostring(best.kind), contactIn * 1000, iframeLead * 1000))
+			diagPush(("COUNTER-SKIP/PARRY t=%.2f target=%s/%s contactIn=%.0fms need=%.0fms (iframe=%.0f parry=%.0f) gate=%s")
+				:format(now, tostring(best.name), tostring(best.kind), contactIn * 1000,
+					yieldLead * 1000, iframeLead * 1000, parryLead * 1000,
+					parryLead >= iframeLead and "PARRY-DEADLINE-FIRST" or "IFRAMES-cannot-precede-contact"))
 		end
 		return false
 	end
@@ -3770,7 +3812,7 @@ local function isMustDodge(th)
 	end
 	return false
 end
--- [V140] Публикуем на State, чтобы counterCandidate (объявлен ВЫШЕ) мог отфильтровать
+-- [V140] Публи��уем на State, чтобы counterCandidate (объявлен ВЫШЕ) мог отфильтровать
 -- must-dodge угрозы. Через State, а не forward-declare: в этом чанке лимит Luau 200 локалов
 -- на функцию уже поджимает (см. комментарий про do-block у визуалов), новый top-level local
 -- добавлять нельзя.
@@ -3792,7 +3834,7 @@ State.isMustDodge = isMustDodge
 -- поэ��ому НИ ОДНОГО нового top-level local (это переполняло регистры → CompileError).
 State.ap = {
 	m1         = nil,    -- кэш РОДНОГО модуля M1 игры (return-таблица v1 с .OnM1Activated)
-	tryM1Fn    = nil,    -- сам локальный tryM1() (upvalue #1 в OnM1Activated) — даёт bool успеха
+	tryM1Fn    = nil,    -- сам локальный tryM1() (upvalue #1 в OnM1Activated) — даёт bool успе��а
 	comboIdx   = nil,    -- upvalue-индекс u19 (combo-счётчик) в tryM1 — для Fixed-режима и custom-fire
 	m1Tried    = false,  -- уже пытались резолвить модуль (не с��амить резолв каждый кад��)
 	-- [V105] CUSTOM FIRE: свой быстрый M1 в обход 450мс-троттла игры. Разметка upvalue tryM1
@@ -4037,7 +4079,7 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		-- по ALI-EVCOUNTER-EXPIRE. Это и есть «Ali Counter то работает, то нет».
 		-- Гейт по CombatAttacking в самой контре ВЕРЕН и снять его нельзя — M2_ModuleScript:1494
 		-- (`if v188:GetAttribute("CombatAttacking") then return end`) стоит в предполётном списке
-		-- перед Fire("M2","ServerCheck") на :1568, поэтому M2 при этом флаге физически не уйдёт.
+		-- перед Fire("M2","ServerCheck") на :1568, поэто��у M2 при этом флаге физически не уйдёт.
 		-- Виноват не гейт, а ИСТОЧНИК флага: CombatAttacking во всём клиентском дампе только
 		-- ЧИТАЕТСЯ и нигде не ставится — это серверный флаг нашей собственной атаки. Его держал
 		-- наш же AutoPlay M1, непрерывно спамящий ServerCheck, и тем сжигал проц с cooldown 6с
@@ -4046,12 +4088,35 @@ function State.ap.fireM1Custom(char, model, wantCombo, ignoreRate, priority, dro
 		-- perfect-dodge. Поэтому на время живого неотстрелянного проца M1 молчит.
 		-- Важно: IgnoreM2Cooldown снимает ТОЛЬКО M2Cooldown и делает это на сервере; на
 		-- CombatAttacking он не распространяется, так что уступка обязательна, а не косметична.
-		if Config.SkillAddon and Config.AliEvasiveCounter then
-			local etx = State.dodgeTxn
-			if etx and etx.pending and etx.perfectConfirmed and not etx.evCounterFired then
-				return
+	if Config.SkillAddon and Config.AliEvasiveCounter then
+		local etx = State.dodgeTxn
+		if etx and etx.pending and etx.perfectConfirmed and not etx.evCounterFired then
+			return
+		end
+		-- ═══════ [V162] НЕ НАЧИНАЕМ СВИНГ ПЕРЕД ABUSE-ДОДЖЕМ ═══════
+		-- Парная правка к гейту "self-attacking" в aliDodgeAbuseEligible. Тот гейт запрещает жечь
+		-- abuse-додж в заведомый отказ Evasive по CombatAttacking (дамп Evasive:613), но сам по себе
+		-- он бы просто ОТКЛЮЧИЛ контру: AutoPlay свингует непрерывно, поэтому свободного окна не
+		-- появилось бы никогда. Поэтому симметрично: пока приближается server-proven угроза, под
+		-- которую нужен abuse-додж, НОВЫЙ M1 не начинаем — уже начатый доигрывает сам.
+		-- Окно намеренно узкое (до контакта не больше pre-окна доджа), чтобы не терять урон:
+		-- M1 повторяется каждые ~90мс, а право на контру даётся раз в 6с (CombatConfig:261).
+		if Config.AliDodgeAbuse and Config.AutoDodge then
+			local cdA = State.aliM2CD
+			-- Abuse-додж осмыслен только когда обычная M2 на кулдауне (иначе бьём ей напрямую).
+			if cdA and cdA.active and cdA.known then
+				local holdUntilContact = math.max(uplink(), 0.02)
+					+ (GameData.iframeDur or Config.IFrameDur or 0.30) + 0.10
+				for i = 1, #Threats do
+					local th = Threats[i]
+					if th and th.serverProven and not th.resolved and not th.dodged then
+						local dtA = (th.contactAbs or 0) - os.clock()
+						if dtA > 0 and dtA <= holdUntilContact then return end
+					end
+				end
 			end
 		end
+	end
 		-- [V153] u21/u32/u33 больше НЕ пишем. Дамп M1.lua показывает, что их читает только мёртвая
 		-- tryM1/OnM1Activated; custom builder всё равно строит и шлёт M1 сам. Запись создавала лишь
 		-- ложное ощущение «снятых задержек» и второго владельца M1-машины.
@@ -4624,7 +4689,7 @@ function State.ap.step(now)
 	-- а fireM1 самогейтится на Blocking. Раньше step рон��л guard и делал `return` → первый добив
 	-- терял ЦЕЛЫЙ Heartbeat (~16мс) + воспринимался как «медленный старт». Но sendDeactivate снимает
 	-- ЛОКАЛЬНЫЙ атрибут Blocking СИНХРОННО (c:SetAttribute("Blocking", nil)) → canAttack() проходит
-	-- уже в этом кадре. Поэтому НЕ делаем return — сразу бьём. Deactivated и ServerCheck уходят на
+	-- уже в этом кадре. Поэтому Н�� делаем return — сразу бьём. Deactivated и ServerCheck уходят на
 	-- сервер по одному remote по порядку: сервер снимает guard, затем принимает M1. Угроз нет
 	-- (#imminent==0) и цель застанена → ронять guard б��зопасно.
 	if State.blocking then
@@ -5100,7 +5165,7 @@ local onAttack = LPH_NO_VIRTUALIZE(function(attackerHRP, info, model, id, track)
 	--   TRACE-PROOF ClawPixelatedZero M2 PROVEN by=attr      (s2)
 	--   TRACE-PROOF ClawPixelatedZero M2 HOLD unproven       (s1 — тот же свинг!)
 	--   MISS! ... in-window но не выбран EDF | proof=NO HELD-BY-GATE
-	-- То ��е ломало комбо: угроза живёт ещё 350мс после к��нтакта, поэтому c3 «владел» атрибутом,
+	-- То ��е ломало комбо: угроза живёт ещё 350мс после к��нтакта, поэ��ому c3 «владел» атрибутом,
 	-- когда прилетал законный c4 → `HOLD unproven SUSPECT` → LATE, NOT-BLOCKED. Отсюда и
 	-- «скр��пт перестал реагировать на атаки». Посылка «один атрибут = один удар» ложна.
 	local attrProof = serverAttackProof(model)
@@ -5426,7 +5491,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 	end
 	local tx0 = State.dodgeTxn
 	if tx0 and tx0.pending then return false end
-	-- [V146] ФИЗИЧЕСКОЕ ВЕТО. Стоит в мастер-гейте, чтобы его не могла обойти НИ ОДНА ветка —
+	-- [V146] ФИЗИЧЕСКОЕ ВЕТО. Стоит в мастер-ге��те, чтобы его не могла обойти НИ ОДНА ветка —
 	-- включая must-dodge с bypassAutoOff и blatant с force. Под живым IFRAMES дэш не добавляет
 	-- ничего (мы уже неуязвимы по VictimHitboxServiceClient:139), зато сжигает грант/кулдаун, а
 	-- сервер его всё равно отклоняет, пока мы в атаке (Evasive:613 → «IFRAMES not confirmed»).
@@ -5766,38 +5831,6 @@ end)
 
 -- Per-Heartbeat threat scheduler — kept native under Luraph (direct macro call on literal).
 local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
-	-- ═══════════════════ [V161] ПРОБА «ПОЧЕМУ НАЖАТИЕ НЕ УШЛО В ЭТОМ КАДРЕ» ═══════════════════
-	-- Диаг 16:51:54 показывает систематическое опоздание, которое НЕЧЕМ объяснить существующими
-	-- логами, и это главная причина, почему прошлые правки били мимо. Факты из него:
-	--   TRACE-PRESS dt=+48ms lateBy=+146ms tp=0.350   (цель была tp≈0.191)
-	--   pressDt = 48/40/33/36/35/33/50мс — окно [50,150], то есть ВСЕ нажатия ниже нижней границы
-	--   при этом proof приходит на +2ms, геометрия принята, FACEWAIT нет, «BLOCK? refused:» нет
-	-- Значит окно press открывалось вовремя, но кадров ~9 подряд шаг вообще НЕ ДОХОДИЛ до ветки
-	-- нажатия: где-то выше сработал один из многочисленных `return` (dodge in-flight, counter,
-	-- must-dodge, cluster-стратегии). Какой именно — не логирует ни одна строка.
-	-- Поэтому: в цикле угроз помечаем «окно открыто, нажатия ещё нет» (State.pwTh/pwFrame), в
-	-- ветке нажатия помечаем «до решения дошли» (State.pwReached). Здесь, в НАЧАЛЕ следующего
-	-- кадра — то есть гарантированно после любого early-return — сверяем эти метки и печатаем
-	-- недостающий факт один раз на угрозу. Стоимость: два сравнения на кадр.
-	if State.pwTh and State.pwFrame and State.pwReached ~= State.pwFrame then
-		local pth = State.pwTh
-		if not pth.pwStarvedLogged then
-			pth.pwStarvedLogged = true
-			local dtx = State.dodgeTxn
-			diagPush(("PRESS-STARVED t=%.3f %s %s s%d dtWas=%+.0fms | step aborted BEFORE press branch"
-				.. " | strategy=%s txnPending=%s txnInFlightLeft=%.0fms counterPend=%s blockUp=%s reason=%s")
-				:format(now, tostring(pth.name), tostring(pth.kind), pth.strike or 1,
-					(State.pwDt or 0) * 1000,
-					tostring(State.pwStrategy or "?"),
-					tostring(dtx and dtx.pending or false),
-					dtx and dtx.pending
-						and math.max(((dtx.fire or 0) + math.max(uplink(), 0.02) + (1/60) - now) * 1000, 0) or 0,
-					tostring(State.counterTxn and State.counterTxn.pending or false),
-					tostring((canBlockNow())),
-					tostring(State.blockedReason or "-")))
-		end
-	end
-	State.pwTh, State.pwFrame, State.pwDt = nil, nil, nil
 	updateDodgeTxn(now)
 	State.updateAliM2Cooldown(now)
 	-- [V152] Обновляем Counter до idle fast-path: FAIL/FALLBACK обязан сработать даже если
@@ -5942,7 +5975,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 			elseif dt < -0.35 or noTrackExpired
 				or (trackGone and (now - th.detectClock) > 0.5 and dt < Config.PerfectLead) then
 			-- [V66] POST-MORTEM: угроз�� уходит. Если на неё ни разу не нажали и не
-			-- задоджили — это независимый пропуск. Логируем ТОЧН��Ю прич��ну, чтобы
+			-- задоджили — это независимый пропус��. Логируем ТОЧН��Ю прич��ну, чтобы
 			-- закрыть "скрипт проёбывает атаку" по фактам, а н�� догадкам.
 			-- [V69] при ненаправленном блоке угроза, ���оше��шая в окно, покрыта поднятым
 			-- guard'ом (один блок = защита от всех). ���то НЕ промах — раньше логировалось
@@ -6136,11 +6169,6 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 						th.pressHeldForProof = true
 					else
 						th.pressHeldForProof = false
-					-- [V161] Метка пробы: окно нажатия открыто, доказательство есть, нажатия ещё нет.
-					-- Сверяется с State.pwReached в начале следующего кадра (см. PRESS-STARVED).
-					if not th.pressed and not State.pwTh then
-						State.pwTh, State.pwFrame, State.pwDt = th, FrameId, th.contactAbs - now
-					end
 					-- [V65] EDF (Earliest Deadline First) с приоритетом НЕОБСЛУЖЕННЫМ.
 					-- Баг до V65: выбирался просто минимальный contactAbs. У Boxing-комбо
 					-- быстрый M1 (contact=352ms) всегда имел contactAbs меньше медленной
@@ -6279,7 +6307,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		for _, th in ipairs(cluster) do
 			th.clusterStrategy = clusterStrategy
 		end
-		State.pwStrategy = clusterStrategy   -- [V161] контекст для PRESS-STARVED (стратегия уже финальна)
+
 
 		local signature = ("%d:%d:%s"):format(clusterN, math.floor(clusterSpread * 1000 + 0.5), clusterStrategy)
 		if State.lastClusterSignature ~= signature or now >= (State.lastClusterLogAt or 0) + 0.5 then
@@ -6580,7 +6608,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- guardbreak-save перед ним не было.
 	-- Единственный клиентский сигнал — уже СВЕРШИВШИЙСЯ факт: M1.lua:634 / M2.lua:1682 вызывают
 	-- Block.ApplyLocalGuardbreakLockout() по СЕТЕВОМУ событию GuardBroken от сервера, то есть
-	-- предсказать пролом заранее клиент не может в принципе.
+	-- предск��зать пролом заранее клиент не может в принципе.
 	-- Ветку оставляю: она безвредна и сработает на стилях/режимах, где атрибут всё же появится.
 	-- Честный вывод: полноценная защита от гардбрейка требует учёта числа подряд заблокированных
 	-- ударов (эвристика), а не отсутствующего атрибута — это отдельная задача, не молчаливый «фикс».
@@ -6628,7 +6656,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	if turnTo and turnTo.attackerHRP then
 		local dtc = turnTo.contactAbs - now
 		-- HARD-снап должен успеть ДО разрешения удара: victim-р��порт читает наш facing у контакта,
-		-- а пакет летит к серверу ~пол-RTT. Значит жёстко доворачиваемся заранее — за (окно + RTT)
+		-- а пакет летит к серверу ~пол-RTT. Значит жёстко доворачиваемся заранее — за (о��но + RTT)
 		-- до ��онтак��а. В ��ультибое (2+) — всегда hard, чтобы мг��овенно пе��екидываться ме��ду целями
 		-- и не терять кадры на лерп. Иначе (одиночная, далеко) — плавный трекинг.
 		local hardWin = (Config.BlockFaceHardDt or 0.30) + up
@@ -6728,9 +6756,6 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		end
 		-- Single-attacker path retains per-hit re-arm; multi held-guard cannot re-arm.
 		if not wantBlock.pressed then
-			-- [V161] Метка пробы: до ветки решения о нажатии в этом кадре мы ДОШЛИ. Если её нет,
-			-- значит шаг вышел раньше — и PRESS-STARVED назовёт состояние, при котором это случилось.
-			State.pwReached = FrameId
 			local sent = fireBlock(serverNow)
 			if sent then
 				wantBlock.pressed  = true
@@ -7118,7 +7143,7 @@ local function hookAnimator(animator)
 			S[dk] = nowd
 			-- [V139/PERF] Было: полный pairs-обход раз в 256 вставок, удаляющий только записи
 			-- старше 8с. В людном лобби почти все записи МОЛОЖЕ 8с → обход не удалял ни��его, но
-			-- счётчик всё равно сбрасывался в 0 → та же дорогая развёртка запускалась снова через
+			-- счётчик всё ��авно сбрасывался в 0 → та же дорогая развёртка запускалась снова через
 			-- 256 вставок, и так по кругу. ��торой наблюдаемый «фриз при сбросе кэша», и он же
 			-- объясняет, почему таблица всё равно продолжала расти.
 			-- Теп��рь: (1) развёртка по ВРЕМЕНИ (раз в DecoySweepSec) — её стоимость больше не
@@ -8005,7 +8030,7 @@ end
 -- н��шем аниматоре — а это ровно то, что Roblox реплицируе�� другим клиентам. Значит
 -- если при свинге сюда прилетают И реальная атака, И decoy-idle — оба уходят в се��ь,
 -- и чужо�� AnimationPlayed увидит оба трека. Э���� объективное доказательство, что
--- decoy-overlay реально загрязняет чужой детект (а не только крутится локально).
+-- decoy-overlay реально загрязняет чужой детект (�� не только крутится локально).
 -- Помечаем строку [DECOY] когда id совпал с нашим decoy — сразу видно попадание.
 -- SelfVerify объявлен выше (перед тест-режимом)
 -- [V91] installDesyncSelfVerify REMOVED (dead code): it was never called anywhere, so
@@ -8263,7 +8288,7 @@ task.spawn(function()
 			local now = os.clock()
 				if kind == "attack" then
 					State.selfBusyUntil = now + Config.SelfBusyDur
-					State.attackBusyUntil = now + Config.SelfBusyDur   -- [V117] busy из-за АТАКИ
+					State.attackBusyUntil = now + Config.SelfBusyDur   -- [V117] busy из-за ��ТАКИ
 				-- FIREDELAY/PRERUN: задер����ваем САМ боевой паке�� (ServerCheck), анимацию не
 				-- трогаем. Г��йт стро��о по Func=="ServerCheck" (реальный удар; Hold*-пакеты не
 				-- трогаем — иначе рассинхрон чарджа). Перехват на RemoteEvent Remotes.Server —
@@ -8638,7 +8663,7 @@ end)
 -- лимит 200 живых локалов на функцию — модуль впритык).
 Viz.bboxRaw = function(m) return m:GetBoundingBox() end
 Viz.bbModel, Viz.bbClock, Viz.bbC, Viz.bbS = nil, -1, nil, nil
--- [V112] PERF: ПЕРСИСТЕНТНЫЕ scratch-буферы для точек кольца/конуса. Раньше drawFlatRing де��ал
+-- [V112] PERF: ПЕРСИ��ТЕНТНЫЕ scratch-буферы для точек кольца/конуса. Раньше drawFlatRing де��ал
 -- `wpts={}` и drawTargetHitbox — `wArc={}`,`a2d={}`,`az={}` НА КАЖДЫЙ кадр отр��совки = 4 таблицы +
 -- ~100 Vector2/Vector3 а��локаций/кадр → GC-дёрганье (главная оставшаяся причина «лагает»). Теперь
 -- переиспользуем таблицы (индексы просто перезаписываются, размер сегментов константный). Держим
