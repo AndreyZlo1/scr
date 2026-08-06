@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V169",
+	Version       = "V171",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -84,6 +84,10 @@ local Config = {
 	PingSourceMaxRatio = 2.5,
 	PingWindow    = 24,
 	PingSampleGap = 0.03,
+
+	OverlapLeadBase = 2.0,
+	OverlapReaction = 0.050,
+	OverlapLeadCap  = 18.0,
 
 	MoveLeadMax   = 0.045,
 	MoveSpeedFull = 22,
@@ -682,16 +686,8 @@ local function flatDirTo(fromPos, targetPos)
 end
 
 local function faceDotToThreat(th)
-	local targetPos
-	local hb = th and th.hitboxPart
-	if hb and hb.Parent then
-		local okp, pos = pcall(function() return hb.Position end)
-		if okp and pos then targetPos = pos end
-	end
-	if not targetPos then
-		local a = th and th.attackerHRP
-		if a and a.Parent then targetPos = a.Position end
-	end
+	local a = th and th.attackerHRP
+	local targetPos = (a and a.Parent) and a.Position or nil
 	local myHRP = localHRP()
 	if not myHRP or not targetPos then return nil end
 	local dir = flatDirTo(myHRP.Position, targetPos)
@@ -895,8 +891,10 @@ local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
 		V93.hbParams = params
 	end
 	if V93.hbChar ~= char then params.FilterDescendantsInstances = { char }; V93.hbChar = char end
-	local hit = #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0
-	if hit and not th.hbOverlapClock then
+
+	-- РЕАЛЬНЫЙ игровой тест 1:1 как VictimHitboxServiceClient: пересекает ли хитбокс нас ПРЯМО СЕЙЧАС.
+	local realHit = #Workspace:GetPartBoundsInBox(part.CFrame, part.Size, params) > 0
+	if realHit and not th.hbOverlapClock then
 		th.hbOverlapClock, th.hbOverlapServer = os.clock(), Workspace:GetServerTimeNow()
 		local my = localHRP()
 		local av = th.attackerHRP and th.attackerHRP.AssemblyLinearVelocity or Vector3.zero
@@ -907,6 +905,32 @@ local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
 				(th.hbOverlapClock-th.detectClock)*1000,
 				(th.hbOverlapClock-(th.contactAbs or th.hbOverlapClock))*1000,
 				av.X, av.Z, mv.X, mv.Z))
+	end
+
+	-- РАЗДУТИЕ НА ПИНГ: сервер должен увидеть Blocking=true ДО реального касания.
+	-- Растим бокс на путь, который хитбокс/атакующий пройдёт за (ping + reaction),
+	-- чтобы триггер сработал заранее. Это НЕ facing и НЕ reach — это тот же самый
+	-- игровой overlap-тест, только с временным упреждением на задержку сети.
+	local hit = realHit
+	if not hit then
+		local leadTime = getPing() + (Config.OverlapReaction or 0.050)
+		local sp = 0
+		local pv = part.AssemblyLinearVelocity
+		if pv then sp = math.sqrt(pv.X * pv.X + pv.Z * pv.Z) end
+		local ah = th.attackerHRP
+		if ah and ah.Parent then
+			local apv = ah.AssemblyLinearVelocity
+			if apv then local asp = math.sqrt(apv.X * apv.X + apv.Z * apv.Z); if asp > sp then sp = asp end end
+		end
+		local lead = math.clamp((Config.OverlapLeadBase or 2.0) + sp * leadTime, 0, Config.OverlapLeadCap or 18.0)
+		local infl = part.Size + Vector3.new(lead * 2, lead, lead * 2)
+		hit = #Workspace:GetPartBoundsInBox(part.CFrame, infl, params) > 0
+		if hit and not th.gtLeadClock then
+			th.gtLeadClock = os.clock()
+			diagPush(("TRACE-LEAD t=%.3f %s %s s%d lead=%.1f sp=%.1f ping=%.0fms toContact=%+.0fms")
+				:format(th.gtLeadClock, th.name or "?", th.kind or "?", th.strike or 1,
+					lead, sp, getPing() * 1000, ((th.contactAbs or th.gtLeadClock) - th.gtLeadClock) * 1000))
+		end
 	end
 	th.gtQueryFrame, th.gtQueryResult = FrameId, hit
 	return hit
@@ -1083,15 +1107,25 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 		th.geomFaceToMe = faceToMe
 
 		local approachAllow = 0
-		if dist2d > reach then
+		do
 			local dtc = (th.contactAbs or now) - now
 			if dtc > 0 and dtc <= (Config.MaxWait or 1.2) then
+				local velToMe = 0
+				local pp, pt = th.prevPos, th.prevPosT
+				if pp and pt then
+					local dtm = now - pt
+					if dtm > 1e-3 and dtm < 0.5 then
+						local mvx, mvz = (aHRP.Position.X - pp.X) / dtm, (aHRP.Position.Z - pp.Z) / dtm
+						velToMe = mvx * toMeX + mvz * toMeZ
+					end
+				end
 				local avOk, av = pcall(function() return aHRP.AssemblyLinearVelocity end)
 				if avOk and av then
-					local velToMe = av.X * toMeX + av.Z * toMeZ
-					if velToMe > 0.5 then
-						approachAllow = math.clamp(velToMe * dtc, 0, Config.HighApproachCap or 6.0)
-					end
+					local physVel = av.X * toMeX + av.Z * toMeZ
+					if physVel > velToMe then velToMe = physVel end
+				end
+				if velToMe > 0.5 then
+					approachAllow = math.clamp(velToMe * dtc, 0, Config.HighApproachCap or 10.0)
 				end
 			end
 		end
@@ -4444,20 +4478,22 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				th.coveredByHeldGuard = true
 			end
 		end
-		if not wantBlock.pressed and Config.AutoFace and Config.FaceGateBlock ~= false
+		-- Игра НЕ требует смотреть на врага, чтобы блок/парри засчитался
+		-- (Block_ModuleScript и VictimHitConfirm не проверяют направление — шлётся
+		-- только флаг Blocking). Поэтому доворот делаем ПАРАЛЛЕЛЬНО с нажатием, а не
+		-- вместо него: раньше здесь стоял return, который держал парри до доворота —
+		-- это и был баг "поворачивается на врага, но больше нихуя не делает".
+		if not wantBlock.pressed and Config.AutoFace
 		   and not (clusterStrategy == "HELD_GUARD") then
 			local fd = faceDotToThreat(wantBlock)
-			local dtc = wantBlock.contactAbs - now
-			local faceFloor = Config.FaceGateMin or (Config.HighFaceMin or 0.25)
-			local lastResort = dtc <= ((Config.PerfectLead or 0.0625) + up + 0.02)
-			if fd ~= nil and fd < faceFloor and not lastResort then
+			if fd ~= nil and fd < (Config.FaceGateMin or 0.2) then
+				local dtc = wantBlock.contactAbs - now
 				setFaceGoal(wantBlock.attackerHRP, true, math.max(dtc, 0) + (Config.HoldAfter or 0.12) + 0.06)
 				if not wantBlock.faceWaitLogged then
 					wantBlock.faceWaitLogged = true
-					diagPush(("FACEWAIT t=%.2f %s %s face=%.2f<%.2f dt=%+.0fms → rotating, hold press")
-						:format(now, wantBlock.name or "?", wantBlock.kind or "?", fd, faceFloor, dtc * 1000))
+					diagPush(("FACETURN t=%.2f %s %s face=%.2f dt=%+.0fms → rotating + pressing")
+						:format(now, wantBlock.name or "?", wantBlock.kind or "?", fd, (wantBlock.contactAbs - now) * 1000))
 				end
-				return
 			end
 		end
 		if not wantBlock.pressed then
