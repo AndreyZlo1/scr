@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V172",
+	Version       = "V173",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -32,6 +32,8 @@ local Config = {
 	HighSlack     = 0.35,
 	HighReachPad  = 2.0,
 	HighFaceFloor = -0.85,
+	ProvenReachPad    = 6.0,   -- бонус к reach для server-proven угроз (= игровой префильтр Size/2+6)
+	ProvenReachWindow = 0.18,  -- только когда контакт ближе этого (сек) — чтоб не ловить далёкий фейк-спам
 	WillHitLeadFrac = 0.90,
 	FilterFailSafe= true,
 
@@ -191,7 +193,7 @@ local Config = {
 	AutoPlay          = false,
 	AP_ForceNativeM1  = true,   -- true = бить через родную tryM1() игры (переживает обновления); false = хрупкий fast-path на debug-индексах
 	AP_PunishOnParry  = true,
-	AP_Interrupt      = true,
+	AP_Interrupt      = false,
 	AP_InterruptMargin= 0.055,
 	AP_InterruptNetK  = 0.50,
 	AP_BaseReach      = 5.5,
@@ -1141,7 +1143,21 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 		local faceExempt = (dist2d <= coreReach) or th.serverProven
 		local faceOk = faceExempt or (faceToMe >= faceFloor)
 		th.geomFaceFloor = faceExempt and -1.01 or faceFloor
-		hit = (dist2d <= reach + approachAllow) and faceOk
+		-- Игра сама решает попадание только через GetPartBoundsInBox, а её грубый
+		-- префильтр дистанции = Size.Magnitude/2 + 6 (см. VictimHitboxServiceClient).
+		-- Наша реконструкция reach из combo-геометрии может ошибаться на пару стадов,
+		-- и тогда РЕАЛЬНЫЙ, подтверждённый сервером свинг у самого контакта отлетал в
+		-- OUT-OF-REACH (диаг: Maria_Branzica predicted-overlap contactIn=-0ms). Для
+		-- server-proven угроз даём бонус к reach = игровой префильтр (+6), НО только
+		-- когда контакт уже близко (<=~180мс) — чтобы не ловить далёкий фейк-спам.
+		local reachEff = reach + approachAllow
+		if th.serverProven then
+			local dtc = (th.contactAbs or now) - now
+			if dtc <= (Config.ProvenReachWindow or 0.18) then
+				reachEff = math.max(reachEff, coreReach + (Config.ProvenReachPad or 6.0))
+			end
+		end
+		hit = (dist2d <= reachEff) and faceOk
 	else
 		th.geomFaceToMe = nil
 		hit = depth >= (forward - halfD) and depth <= (forward + halfD) and side <= halfW
@@ -2410,6 +2426,13 @@ local function counterCandidate(now, ignoreTransient)
 	local myPos = myHRP.Position
 	local best, bestDist
 	local mustDodgeFn = State.isMustDodge
+	-- Когда стиль Ali и включён dodge-abuse, приоритет у ДОДЖА (Q → пассивка → лишний M2),
+	-- а не у counter. Раньше counter хватал этот же threat, ставил pending-txn →
+	-- counterPreemptsDodge(true) глушил Ali dodge abuse, а сам pending-counter выставлял
+	-- нам CombatAttacking/CantAnything и ломал парри. Пусть додж владеет такими угрозами.
+	local styleIsAli = (styleOf(localChar()) or ""):lower() == "ali"
+	local aliAbuseOn = styleIsAli and Config.SkillAddon and Config.AliDodgeAbuse
+		and Config.AliEvasiveCounter and Config.AutoDodge ~= false
 	for i = 1, #Threats do
 		local th = Threats[i]
 		local aHRP = th.attackerHRP
@@ -2419,7 +2442,14 @@ local function counterCandidate(now, ignoreTransient)
 			diagPush(("ALI-BOXING-M2=PARRY t=%.2f target=%s strike=%d contactIn=%.0fms gate=counter")
 				:format(now, tostring(th.name), th.strike or 1, (th.contactAbs-now)*1000))
 		end
-		if aHRP and aHRP.Parent and not aliVsBoxingM2 and not th.feinted and not th.dodged
+		local yieldToAbuse = false
+		if aliAbuseOn then
+			local ifLat = math.max(uplink(), 0.02)
+			local ifDur = GameData.iframeDur or Config.IFrameDur or 0.30
+			local ok = State.aliDodgeAbuseEligible(th, now, Threats, ifLat, ifDur)
+			if ok then yieldToAbuse = true end
+		end
+		if aHRP and aHRP.Parent and not aliVsBoxingM2 and not yieldToAbuse and not th.feinted and not th.dodged
 		   and not th.coveredByDodge and not th.coveredByCounter and not th.counterPendingId
 		   and not th.counterCommittedToParry
 		   and not (mustDodgeFn and mustDodgeFn(th))
@@ -3007,8 +3037,18 @@ end
 
 function State.ap.tryInterrupt(now, th, threatCount)
 	local ap = State.ap
-	if not Config.AutoPlay or Config.AP_Interrupt == false then return false end
+	if not Config.AutoPlay or Config.AP_Interrupt ~= true then return false end
 	if not th or th.pressed or th.dodged or th.interruptAttempted then return false end
+	-- DEFENSE-FIRST: never trade a parry for an interrupt. If this threat is still
+	-- blockable and we can block right now, let AutoParry handle it. Swinging here
+	-- drops guard + sets CombatAttacking/CantAnything on us, which is exactly what
+	-- was eating real hits (see diag: blocked=CantAnything on proven swings).
+	if not isMustDodge(th) then
+		local contactLeft = (th.contactAbs or now) - now
+		if canBlockNow() and contactLeft > (Config.PerfectLead or 0.10) then
+			return false
+		end
+	end
 	if threatCount >= 2 then
 		local secondClose = false
 		for _, other in ipairs(Threats) do
@@ -3100,12 +3140,12 @@ function State.ap.fireM1(model, why, priority, dropGuard)
 	ap.snapTo(hrp)
 	ap.nextM1At = now + (Config.AP_PollGap or 0)
 		local swung = false
-		-- НАДЁЖНЫЙ путь по умолчанию: родная tryM1() из M1-модуля игры.
+		-- НАДЁЖНЫЙ путь по умолчанию: родная tryM1() и�� M1-модуля игры.
 		-- Она version-proof (сама читает combo/anim/cooldown и шлёт ServerCheck
 		-- изнутри), поэтому переживает обновления игры. Хрупкий fast-path
 		-- (fireM1Custom с debug.setupvalue по индексам upvalue) включается только
 		-- если пользователь ЯВНО отключил AP_ForceNativeM1 — при обновлении игры
-		-- индексы протухают, setupvalue пишет мусор и сервер отклоняет свинг =
+		-- индексы протухаю��, setupvalue пишет мусор и сервер отклоняет свинг =
 		-- "autoplay не бьёт, а раз не бьёт — стоит и не парирует".
 		local useFast = ap.fireOK and (Config.AP_ForceNativeM1 == false)
 		if useFast then
@@ -6506,32 +6546,32 @@ return function(_Lib, _Core)
 		apMain:Header({ Name = "Detection" })
 		slider(apMain, { Name = "FOV", Flag = "AP_FOV", Default = Config.FOV or 360,
 			Min = 1, Max = 360, Suffix = "°", Callback = function(v) Config.FOV = v end })
-		apMain:SubLabel({ Text = "only reacts to enemies in this cone\n360 = all around u" })
+		apMain:SubLabel({ Text = "only reacts inside this cone · 360 = all around" })
 		slider(apMain, { Name = "Range", Flag = "AP_Range", Default = Config.Range or 32,
 			Min = 8, Max = 64, Suffix = " st", Callback = function(v) Config.Range = v end })
 		slider(apMain, { Name = "Max Height Diff", Flag = "AP_MaxHeight", Default = Config.MaxHeightDiff or 12,
 			Min = 4, Max = 40, Suffix = " st", Callback = function(v) Config.MaxHeightDiff = v end })
-		apMain:SubLabel({ Text = "ignore enemies this far above/below u (anti platform-cheese)" })
+		apMain:SubLabel({ Text = "ignore enemies this far above/below you" })
 		boolToggle(apMain, "Server Proof", "Server Proof",
 			function() return Config.ServerProofGate ~= false end,
 			function(v) Config.ServerProofGate = v end)
-		apMain:SubLabel({ Text = "counters ppl running anti-autoparry\nonly parries swings the server actually confirmed, fake anims get ignored" })
+		apMain:SubLabel({ Text = "ignores fake anims — only parries server-confirmed swings" })
 		slider(apMain, { Name = "Proof Grace", Flag = "AP_ProofGrace",
 			Default = math.floor((Config.ProofGraceSec or 0.06) * 1000),
 			Min = 20, Max = 150, Suffix = " ms",
 			Callback = function(v) Config.ProofGraceSec = v / 1000 end })
-		apMain:SubLabel({ Text = "this close to the hit we press anyway even if unconfirmed\nlower = harsher on fakes, higher = safer if server data is late" })
+		apMain:SubLabel({ Text = "lower = harsher on fakes · higher = safer if data is late" })
 		apMain:Divider()
 		apMain:Header({ Name = "Time Spoof" })
 		boolToggle(apMain, "Time Spoof", "Time Spoof",
 			function() return Config.TimeSpoof == true end,
 			function(v) Config.TimeSpoof = v end)
-		apMain:SubLabel({ Text = "parry sends its own timestamp, so we back-date it\nlate parries still land as perfect. tbh idk how much the server checks — test it" })
+		apMain:SubLabel({ Text = "back-dates the parry so late presses still land perfect" })
 		slider(apMain, { Name = "Back-date", Flag = "AP_TimeShift",
 			Default = Config.TimeShiftMs or 40,
 			Min = 0, Max = 120, Suffix = " ms",
 			Callback = function(v) Config.TimeShiftMs = v end })
-		apMain:SubLabel({ Text = "how far back we claim u pressed. perfect window is 125ms\nstart ~40, creep up til it stops helping" })
+		apMain:SubLabel({ Text = "how far back to claim you pressed · start ~40" })
 
 		apMain:Divider()
 		apMain:Header({ Name = "Rotation" })
@@ -6571,15 +6611,8 @@ return function(_Lib, _Core)
 			Title = "Auto Dodge", Flag = "AP_AutoDodge",
 			get = function() return Config.AutoDodge ~= false end,
 			set = function(v) Config.AutoDodge = v end,
-			Desc = "master switch for ALL dodging (heavies, escapes, grabs, cluster)\nOFF = never dodge, block/parry only",
+			Desc = "master dodge switch — OFF = block/parry only",
 		})
-		boolToggle(apDodge, "Dodge All Heavies", "Dodge All Heavies",
-			function() return Config.DodgeHeavy end, function(v) Config.DodgeHeavy = v end)
-		apDodge:SubLabel({ Text = "when block is unavailable and a heavy (M2) is coming:\ndodge it instead of eating the hit\n(unblockable grabs always dodged via Must-Dodge)" })
-		boolToggle(apDodge, "Dodge If Cant Parry", "Dodge If Cant Parry",
-			function() return Config.DodgeOnParryCooldown ~= false end,
-			function(v) Config.DodgeOnParryCooldown = v end)
-		apDodge:SubLabel({ Text = "dodge when block is on cooldown / cant parry in time\nOFF = eat the hit instead (unblockable must-dodge unaffected)" })
 		local aggroEls = {}
 		local function aggroVis()
 			local on = (Config.DodgeMode or "Defensive") == "Aggressive"
@@ -6593,12 +6626,19 @@ return function(_Lib, _Core)
 				if type(v) == "string" and v ~= "" then Config.DodgeMode = v; aggroVis() end
 			end,
 		}, ctx.flag("AP_DodgeMode"))
-		apDodge:SubLabel({ Text = "Defensive = roll AWAY from the attacker (retreat, make distance)\nAggressive = orbit AROUND the attacker and close in (spins them, like Ali dodge abuse)" })
+		apDodge:SubLabel({ Text = "Defensive = roll away · Aggressive = orbit + close in" })
 		aggroEls[#aggroEls + 1] = slider(apDodge, { Name = "Aggro Close-In", Flag = "AP_DodgeAggroClose",
 			Default = math.floor((Config.DodgeAggroClose or 0.45) * 100), Min = 0, Max = 100, Suffix = "%",
 			Callback = function(v) Config.DodgeAggroClose = v / 100 end })
-		apDodge:SubLabel({ Text = "in Aggressive: 0% = pure orbit around them, 100% = cut straight in" })
+		apDodge:SubLabel({ Text = "0 = pure orbit · 100 = cut straight in" })
 		aggroVis()
+		boolToggle(apDodge, "Dodge All Heavies", "Dodge All Heavies",
+			function() return Config.DodgeHeavy end, function(v) Config.DodgeHeavy = v end)
+		apDodge:SubLabel({ Text = "dodge M2 heavies when block is down" })
+		boolToggle(apDodge, "Dodge If Cant Parry", "Dodge If Cant Parry",
+			function() return Config.DodgeOnParryCooldown ~= false end,
+			function(v) Config.DodgeOnParryCooldown = v end)
+		apDodge:SubLabel({ Text = "dodge when parry is on cooldown, else eat it" })
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Dodge Tuning" })
@@ -6711,19 +6751,19 @@ return function(_Lib, _Core)
 		boolToggle(apBox, "Counter Instead Of Dodge", "Counter Instead Of Dodge",
 			function() return Config.CounterPreemptsDodge ~= false end,
 			function(v) Config.CounterPreemptsDodge = v end)
-		apBox:SubLabel({ Text = "dont burn a dodge when the counter M2 already covers u\nunblockable grabs still always dodge" })
+		apBox:SubLabel({ Text = "counter instead of dodge when it already covers you" })
 
 		apBox:Divider()
 		apBox:Header({ Name = "Anti-Grab" })
 		boolToggle(apBox, "Wrestling Anti-Grab", "Wrestling Anti-Grab",
 			function() return Config.SA_WrestlingGrab end, function(v) Config.SA_WrestlingGrab = v end)
-		apBox:SubLabel({ Text = "wrestling M2 is an unblockable grab\nalways roll it" })
+		apBox:SubLabel({ Text = "always roll the unblockable wrestling grab" })
 		boolToggle(apBox, "Dirty Anti-Grab", "Dirty Anti-Grab",
 			function() return Config.SA_DirtyGrab end, function(v) Config.SA_DirtyGrab = v end)
-		apBox:SubLabel({ Text = "dirty grab ignores immunity n eats blocks\nroll it instead" })
+		apBox:SubLabel({ Text = "always roll the dirty grab (eats blocks)" })
 		boolToggle(apBox, "Hakari Double Read", "Hakari Double Read",
 			function() return Config.SA_HakariRead end, function(v) Config.SA_HakariRead = v end)
-		apBox:SubLabel({ Text = "hakari momentum M2 hits late\nwidens the window to match" })
+		apBox:SubLabel({ Text = "widens the window for late hakari M2" })
 
 		apBox:Divider()
 		apBox:Header({ Name = "Force-Dodge (client)" })
@@ -6741,35 +6781,35 @@ return function(_Lib, _Core)
 			Title = "AutoPlay", Flag = "AP_AutoPlay",
 			get = function() return Config.AutoPlay end,
 			set = function(v) Config.AutoPlay = v end,
-			Desc = "aggressive addon: auto-M1 a stunned enemy after ur perfect parry\nmaster switch for the stuff below",
+			Desc = "auto-M1 a stunned enemy after your perfect parry",
 		})
 
 		apPlay:Divider()
 		apPlay:Header({ Name = "Behaviour" })
 		boolToggle(apPlay, "Reliable Attacks", "Reliable Attacks",
 			function() return Config.AP_ForceNativeM1 ~= false end, function(v) Config.AP_ForceNativeM1 = v end)
-		apPlay:SubLabel({ Text = "ON = swing via the game's own M1 function (survives game updates, recommended)\nOFF = raw fast-path — breaks after updates → 'autoplay stops attacking' → parry stalls" })
+		apPlay:SubLabel({ Text = "swing via the game's own M1 (survives updates)" })
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
-	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
+	apPlay:SubLabel({ Text = "auto-M1 the enemy your parry just stunned" })
 	boolToggle(apPlay, "Smooth Swings", "Smooth Swings",
 		function() return Config.AP_AnimGuard ~= false end,
 		function(v) Config.AP_AnimGuard = v end)
-	apPlay:SubLabel({ Text = "stops the swing anim restarting mid-play when the server desyncs" })
+	apPlay:SubLabel({ Text = "stops the swing anim restarting on desync" })
 	boolToggle(apPlay, "Counter Interrupt", "Counter Interrupt",
-		function() return Config.AP_Interrupt ~= false end, function(v) Config.AP_Interrupt = v end)
-	apPlay:SubLabel({ Text = "if ur next hit lands first and enemy is in reach → hit now instead of parrying" })
+		function() return Config.AP_Interrupt == true end, function(v) Config.AP_Interrupt = v end)
+	apPlay:SubLabel({ Text = "swing instead of parry when you land first (risky — can drop the parry, off by default)" })
 	boolToggle(apPlay, "Interrupt With M2", "Interrupt With M2",
 		function() return Config.AP_InterruptM2 ~= false end, function(v) Config.AP_InterruptM2 = v end)
-	apPlay:SubLabel({ Text = "also check ur M2, not just M1\nM2 hits way harder n knocks the whole combo off" })
+	apPlay:SubLabel({ Text = "let the interrupt use M2, not just M1" })
 	boolToggle(apPlay, "Prefer M2", "Prefer M2",
 		function() return Config.AP_InterruptPreferM2 ~= false end, function(v) Config.AP_InterruptPreferM2 = v end)
-	apPlay:SubLabel({ Text = "both in time → take M2\noff = take whichever lands earlier" })
+	apPlay:SubLabel({ Text = "take M2 when both land in time" })
 	slider(apPlay, { Name = "Interrupt M2 Range", Flag = "AP_M2BaseReach",
 		Default = Config.AP_M2BaseReach or 6.5,
 		Min = 3, Max = 14, Precision = 1, Suffix = " studs",
 		Callback = function(v) Config.AP_M2BaseReach = v end })
-	apPlay:SubLabel({ Text = "M2 reach (scaled by style n height)" })
+	apPlay:SubLabel({ Text = "M2 reach (scaled by style/height)" })
 
 	apPlay:Divider()
 			apPlay:Header({ Name = "Combo" })
@@ -6782,10 +6822,10 @@ return function(_Lib, _Core)
 					notify("Combo Mode", "Selected: " .. tostring(v))
 				end,
 			}, ctx.flag("AP_ComboMode"))
-			apPlay:SubLabel({ Text = "Follow = natural combo 1→2→3→4→1.  Fixed = always throw one chosen hit" })
+			apPlay:SubLabel({ Text = "Follow = natural 1→2→3→4 · Fixed = one chosen hit" })
 			slider(apPlay, { Name = "Fixed Combo Hit", Flag = "AP_FixedHit", Default = Config.AP_FixedHit or 1,
 				Min = 1, Max = 4, Callback = function(v) Config.AP_FixedHit = v end })
-			apPlay:SubLabel({ Text = "which hit of the 4-move combo to throw (only used in Fixed mode)" })
+			apPlay:SubLabel({ Text = "which combo hit to throw (Fixed mode)" })
 			apPlay:Button({
 				Name = "Test Swing",
 				Callback = function()
@@ -7007,4 +7047,3 @@ return function(_Lib, _Core)
 	return M
 end
 end
-
