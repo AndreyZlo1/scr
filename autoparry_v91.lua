@@ -421,7 +421,7 @@ local Config = {
 	-- (80мс burst / ~4-в-сек). Тумблеров Turbo/Fast больше нет — это база, всегда включено.
 
 	-- [V98] реагировать только когда руки одеты (Equip==true). Иначе сервер всё равно
-	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-плат��ормен��о.
+	-- откажет и в блоке, и в атаке (Block.lua/M1.lua требуют Equip). Кросс-пл��т��ормен��о.
 	RequireEquip      = true,
 
 	RestrictZone      = true,
@@ -696,7 +696,7 @@ local LEGACY_ATTACKS = {
 	[70642098724811]={t="M2",d=0.67,s="Ali",v="Right"},
 }
 
--- [V90] Аварийный маппинг имени анима��ии → id M2-варианта. Работает, только если живой
+-- [V90] Аварийный маппинг имени анима��ии → id M2-вариант��. Работает, только если живой
 -- CombatConfig.GetStyleM2Variants недоступен (модуль не подгрузился). Живой ��онфиг приоритетнее.
 local LEGACY_M2_VARIANT = { M2 = "Left", M2Right = "Right", M2Left = "Left" }
 
@@ -1771,7 +1771,7 @@ local function nextCombo(attacker)
 	return c.idx
 end
 
-local GameData = { cfg = nil, cau = nil, cu = nil, evasive = nil, resolved = false }
+local GameData = { cfg = nil, cau = nil, cu = nil, resolved = false }
 
 local function loadGameModules()
 	if GameData.resolved then return end
@@ -1782,22 +1782,9 @@ local function loadGameModules()
 		if cfgMod then GameData.cfg = require(cfgMod) end
 		local cauMod = shared and shared:FindFirstChild("Utils") and shared.Utils:FindFirstChild("CombatAnimationUtils")
 		if cauMod then GameData.cau = require(cauMod) end
-		-- [V158/NATIVE-EVASIVE] Предыдущий sendDodge бил прямо в ServerRemote и потому обходил
-		-- настоящие локальные гейты Evasive (u5/u6/u7/u8, Stunned, CantAnything, CombatAttacking).
-		-- Результат был ложным «DODGE» без IFRAMES. Кэшируем ровно тот ModuleScript, который
-		-- обслуживает ручной dodge; его Evasive() теперь является единственным путём отправки.
-		local combatClient = ReplicatedStorage:FindFirstChild("CombatSystemClient")
-		local combat = combatClient and combatClient:FindFirstChild("Combat")
-		local base = combat and combat:FindFirstChild("Base")
-		local evasiveMod = base and base:FindFirstChild("Evasive")
-		if evasiveMod then
-			-- Ошибка отдельного require не должна оборвать загрузку pau/cu ниже: эти модули нужны
-			-- predictor независимо от доступности native dodge.
-			local okEvasive, evasive = pcall(require, evasiveMod)
-			if okEvasive and type(evasive) == "table" and type(evasive.Evasive) == "function" then
-				GameData.evasive = evasive
-			end
-		end
+		-- [V159/DODGE-REVERT] require(Evasive) удалён вместе с нативным вызовом доджа: модуль
+		-- больше никем не читается, а держать ссылку на чужой upvalue-набор, которым уже
+		-- управляет movement.lua, — тот самый конфликт двух источников истины.
 		-- [V132] CombatPingAnimUtils: реальная скорость аним��ции M2/M1 затормаживается на пинге
 		-- (PingAnimSpeedMultiplier), поэтому контакт прилетает позже, чем base / aMult.
 		local pauMod = shared and shared:FindFirstChild("Utils") and shared.Utils:FindFirstChild("CombatPingAnimUtils")
@@ -1811,7 +1798,7 @@ local function loadGameModules()
 	end)
 	-- [V90] ФИЗИЧЕСКИЕ КОНСТАНТЫ ДОДЖА — ИЗ ИГРЫ, А НЕ ИЗ СОХРАНЁННОГО КОНФИГА.
 	-- Config.IFrameDur сидит на UI-слайдере "i-Frame Window", поэтому авто-восстановление
-	-- настроек прошлой сессии молча затирало бы им реальную Evasive.IFrameDuration и ломало
+	-- настроек прошлой сессии молча затирало бы и�� реальную Evasive.IFrameDuration и ломало
 	-- центрирование доджа (ровно тот класс регрессий, который потом не отладить по логам).
 	-- Берём авторитетное значение из живого CombatConfig; слайдер остаётся ручным override.
 	pcall(function()
@@ -2078,7 +2065,7 @@ GameData.m2VariantId = function(style, animName)
 			for id, v in pairs(vs) do
 				if type(v) == "table" and v.Anim == animName then out = id; return end
 			end
-			-- 2) имя анимации содержит id варианта ("M2Right" ⊃ "Right")
+			-- 2) имя ан��мации содержит id варианта ("M2Right" ⊃ "Right")
 			local ln = animName:lower()
 			for id in pairs(vs) do
 				local lid = tostring(id):lower()
@@ -2253,7 +2240,7 @@ end
 --           M2_ModuleScript ApplyM2StepForward(style, char).
 --   ��туды: GetStyleM1StepForwardStuds(style, comboIdx) / GetStyleM2StepForwardStuds(style).
 --   Ali: M1StepForwardStuds={[1]=1.5,[3]=1.5}, M2StepForwardStuds=2.
--- Почему это ломало распознавание: willHitMe в High сравнивает dist2d <= forward+halfD+HighReachPad.
+-- Почему это ломало распознавание: willHitMe в High ср��внивает dist2d <= forward+halfD+HighReachPad.
 -- forward брался ТОЛЬКО из GetStyleHitboxForwardOffset (Ali M1 = 4.3), а лунж не учитывался вовс��.
 -- Замер по диагам: у пропущенных без нажатия ударов дистанция p75=8, p95=11 студов при рече 8.2 —
 -- ровно полоса, которую закрывает лунж. Лунж НЕ всегда виден в velocity: он живёт 0.14с в нача��е
@@ -2614,7 +2601,7 @@ local function playDodgeMotion(dirOverride, speedOverride)
 		local lv   = Instance.new("LinearVelocity"); lv.Name = "EvasiveDashLinearVelocity"
 		lv.MaxForce = 100000
 		-- [V156/ALI-TRAJECTORY] Обычный dodge сохраняет DashSpeed. Ali perfect-dodge может
-		-- передать меньшую скорость, чтобы 6-stud импульс не пронёс близкую цель насквозь.
+		-- передать меньшую скорость, чтоб�� 6-stud импульс не пронёс близкую цель насквозь.
 		lv.VectorVelocity = dir * math.min(speedOverride or Config.DashSpeed, Config.DashSpeed)
 		lv.Attachment0 = att
 		lv.RelativeTo = Enum.ActuatorRelativeTo.World
@@ -2672,47 +2659,21 @@ local function sendDeactivate(force)
 end
 
 local function sendDodge(dir, speedOverride)
-	-- ═══════ [V158/NATIVE-EVASIVE] АТОМАРНОЕ ПРИНЯТИЕ ДОДЖА ═══════
-	-- V157 всё ещё отправлял Evasive remote напрямую и затем безусловно рисовал собственный dash.
-	-- Поэтому локальный лог говорил DODGE даже когда родная Evasive() отвергла бы запрос по u5/u6/u7/u8,
-	-- Stunned, CantAnything или CombatAttacking. Теперь remote руками НЕ отправляется вообще.
-	loadGameModules()
-	local native = GameData.evasive
-	if type(native) ~= "table" or type(native.Evasive) ~= "function" then
-		return false, "module-unavailable"
-	end
-	local c = localChar()
-	local hrp = c and c:FindFirstChild("HumanoidRootPart")
-	local hum = c and c:FindFirstChildOfClass("Humanoid")
-	if not c or not hrp or not hum then return false, "character-parts" end
-
-	-- Evasive.lua синхронно читает Humanoid.MoveDirection и жёстко отказывает при Blocking.
-	-- Направление и реальный Deactivated обязаны быть выставлены ДО native-вызова.
-	if dir and dir.Magnitude > 0.05 then
-		pcall(V93.humMove, hum, dir)
-	end
+	-- ═══════ [V159/DODGE-REVERT] НАТИВНЫЙ ВЫЗОВ Evasive() ОТКАЧЁН ПОЛНОСТЬЮ ═══════
+	-- V158 звал GameData.evasive.Evasive() и считал доджем только появление нового
+	-- EvasiveDashLinearVelocity. Runtime это опроверг: за всю сессию `dodges=0` и в диаге НЕТ ни
+	-- одной строки DODGE-NATIVE-ACCEPT / DODGE-SKIP/NATIVE-GATE, то есть путь либо не доходил до
+	-- отправки, либо гасился внутри чужого модуля молча. Плюс клиентский вызов тащит за собой
+	-- CombatRemoteLimits (Evasive 4/сек) и upvalue-гейты u5/u6/u7/u8, которыми уже управляет
+	-- movement.lua — два источника истины на одни и те же регистры.
+	-- Возврат к V157: пакет уходит в ServerRemote напрямую, гейты решает НАШ canDodgeNow().
 	if State.guardUp or State.blocking then
 		State.blocking, State.holdUntil = false, 0
 		sendDeactivate(true)
 		stopBlockAnim()
 	end
-
-	local before = hrp:FindFirstChild("EvasiveDashLinearVelocity")
-	local ok = pcall(native.Evasive)
-	local dash = hrp:FindFirstChild("EvasiveDashLinearVelocity")
-	-- В дампе LinearVelocity создаётся синхронно только ПОСЛЕ всех native-гейтов и отправки
-	-- CombatRemoteClient.Fire. Новый объект — точный локальный commit; nil/старый объект = отказ.
-	if not ok or not dash or dash == before then
-		return false, ok and "native-gate" or "native-error"
-	end
-	-- Родная Evasive уже создала dash и анимацию. Для Ali меняем только вектор существующего
-	-- объекта, чтобы попасть в sweet spot; второй Attachment/LinearVelocity больше не создаётся.
-	if dir and dir.Magnitude > 0.05 and speedOverride then
-		local flat = Vector3.new(dir.X, 0, dir.Z)
-		if flat.Magnitude > 0.001 then
-			dash.VectorVelocity = flat.Unit * math.min(speedOverride, Config.DashSpeed)
-		end
-	end
+	ServerRemote:FireServer({ Type = "Combat", Action = "Evasive", Func = "Evasive" })
+	playDodgeMotion(dir, speedOverride)
 	State.lastDodge  = os.clock()
 	State.dodgeCount = State.dodgeCount + 1
 	State.flashUntil = os.clock() + 0.25
@@ -2847,7 +2808,7 @@ end
 --     коммит 01ca31c → 210 объявлений  (компилировался)
 --     коммит 09f31ce → 211 объявлений  ← мой V146, НЕ компилируется
 -- Разница ровно в единице — это мой `local function markOwnM2IFrames`. Ошибка не в логике
--- V146, а в том, что я добавил НОВУЮ top-level локаль в файл с исчерпанными регистрами.
+-- V146, а в том, что я добавил Н��ВУЮ top-level локаль в файл с исчерпанными регистрами.
 -- Поэтому функция становится ПОЛЕМ уже существующей таблицы V93 (:898): сама таблица свой
 -- регистр занимает давно, а её поля регистров не требуют вообще.
 -- ПРАВИЛО НА БУДУЩЕЕ: в этом файле новые top-level `local` добавлять НЕЛЬЗЯ — только поля
@@ -3104,7 +3065,7 @@ local function fireBoxingCounter(th, targetDist)
 	tx.pending, tx.confirmed, tx.sent = true, false, sentAt
 	tx.ackDeadline = sentAt + net + (V93.lookahead or 0) + 0.08
 	-- [V156/COUNTER-VIABILITY] Runtime опроверг половину RTT: IFRAMES приходил через ~100мс.
-	-- Используем полное наблюдаемое плечо; тот же срок проверяется ДО отправки в tryBoxingCounter.
+	-- Используем полное наблюдае��ое плечо; тот же срок проверяется ДО отправки в tryBoxingCounter.
 	tx.expectedIFramesAt = sentAt + net + math.max(V93.lookahead or 0, 0) + (1 / 60)
 	tx.threat, tx.source, tx.result = th, cs, "sent"
 	tx.threatId = tostring(th.serverSwingId or (th.group and th.group.serverSwingId)
@@ -3336,7 +3297,7 @@ local function counterCandidate(now, ignoreTransient)
 			diagPush(("ALI-BOXING-M2=PARRY t=%.2f target=%s strike=%d contactIn=%.0fms gate=counter")
 				:format(now, tostring(th.name), th.strike or 1, (th.contactAbs-now)*1000))
 		end
-		-- «враг атаковал» = активная угроза (свинг задетекчен) и контакт ещё не прошёл давно.
+		-- «враг атаковал» = активная угроза (свинг задетекчен) и контак�� ещё не прошёл давно.
 		-- [V140/BUG] ВТОРАЯ ПОЛОВИНА ТОЙ ЖЕ ПРОБЛЕМЫ — обратный порядок событий. Раньше здесь
 		-- стояло только `not th.dodged`, но при выдаче доджа угроза помечается `coveredByDodge`
 		-- (строки ~4788 и ~4812), а `dodged` там НЕ выставляется — его ставит лишь ветка 4284.
@@ -3366,7 +3327,7 @@ local function counterPreemptsDodge(now)
 	--     return p22:GetAttribute("IFRAMES") == true and true
 	--            or (p22:GetAttribute("Ragdoll") == true ... "Downed" ... "UltraInstinct")
 	-- Это ЧИТАЕМЫЙ атрибут, а не внутреннее состояние. Значит вычислять окно по конфигу нужно
-	-- только как опережение (атрибут приходит с сервера через ~ping), а сам факт неуязвимости
+	-- только как опережение (атрибут приходит с сервера через ~ping), а сам факт ��еуязвимости
 	-- надо просто СПРОСИТЬ. Раньше мы этого не делали ни разу и полагались только на свой
 	-- расчётный counterIFramesUntil — который, как показано в markOwnM2IFrames, ставился не
 	-- всеми путями и считался по nil-таблице.
@@ -3418,14 +3379,28 @@ local function tryBoxingCounter(now)
 	if not best then return false end
 	local ready, gate = counterReady()
 	if not ready then
-		-- После первого live-отказа эта конкретная угроза целиком принадлежит EDF/parry.
-		-- Не пытаемся украсть окно повторной Heavy через несколько кадров у самого контакта.
-		best.counterCommittedToParry = true
+		-- ═══════ [V159/COUNTER-TRANSIENT] ПОЧЕМУ V157 ДАВАЛ `boxing-counter fired=0` ═══════
+		-- V157 на ПЕРВОМ же live-отказе ставил counterCommittedToParry=true навсегда. Но в диаге
+		-- отказ на детекте — это всегда ВРЕМЕННЫЙ гейт от наших же действий:
+		--   COUNTER-FALLBACK/PARRY t=3822.99 ... contactIn=346ms gate=Stunned
+		--   COUNTER-FALLBACK/PARRY t=3831.44 ... contactIn=346ms gate=CombatAttacking
+		-- До контакта оставалось 346мс, а Stunned/CombatAttacking/BoxingCounterGap снимаются
+		-- заметно раньше. Пожизненный запрет превращал каждую такую угрозу в parry, и за всю
+		-- сессию контра не вышла ни разу.
+		-- Теперь решение принимается по УЖЕ ИЗВЕСТНОМУ времени снятия гейтов (counterReadyAt) и
+		-- тому же сетевому плечу, что проверяется перед отправкой. Если после снятия IFRAMES
+		-- физически успевают встать до контакта — угроза остаётся кандидатом и пробуется дальше;
+		-- если не успевают — только тогда она окончательно уходит в parry. Новых настроек нет.
+		local contactAt = best.contactAbs or now
+		local lead = math.max(uplink(), 0.02) + math.max(V93.lookahead or 0, 0) + (1 / 60)
+		local viableAgain = State.counterReadyAt(now) + lead < contactAt
+		if not viableAgain then best.counterCommittedToParry = true end
 		if best.counterFallbackGate ~= gate then
 			best.counterFallbackGate = gate
-			diagPush(("COUNTER-FALLBACK/PARRY t=%.2f target=%s/%s contactIn=%.0fms gate=%s")
+			diagPush(("COUNTER-FALLBACK/PARRY t=%.2f target=%s/%s contactIn=%.0fms gate=%s retry=%s readyIn=%.0fms")
 				:format(now, tostring(best.name), tostring(best.kind),
-					((best.contactAbs or now)-now)*1000, tostring(gate or "unknown")))
+					(contactAt-now)*1000, tostring(gate or "unknown"),
+					tostring(viableAgain), (State.counterReadyAt(now)-now)*1000))
 		end
 		return false
 	end
@@ -4440,7 +4415,7 @@ local function dodgeReady()
 		-- держал его там, пока не случится удачное попадание в 300-мс окно IFRAMES. При
 		-- пинге ~300мс (в логе rawRTT=292…314мс) промахи подтверждения — норма, а не сбой,
 		-- поэтому на практике додж переставал выстреливать вовсе. Это репорт пользователя
-		-- «додж в принципе не вызывается»; регрессию внёс я в V147.
+		-- «додж в принципе ��е вызывается»; регрессию внёс я в V147.
 		--
 		-- ЧТО НЕ ТАК БЫЛО МЕТОДОЛОГИЧЕСКИ: эскалация до 2с не выведена из дампа. Дамп даёт
 		-- ровно одно число — игра сама, ДАЖЕ под активным грантом, пишет в u6 (:627):
@@ -5184,7 +5159,14 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 			end
 		end
 	end
-	if timingTarget and type(timingTarget.contactAbs) == "number" then
+	-- [V159/DODGE-TIMING-SCOPE] Центрирование и TOO-LATE применимы только к ОПЦИОНАЛЬНОМУ доджу,
+	-- у которого есть альтернатива в виде parry. Для must-dodge (грэбы/анблокаблы) и явно
+	-- форсированных веток блока не существует вовсе: пропуск = гарантированный хит, поэтому там
+	-- поздний додж всё равно лучше отсутствия доджа. V158 гейтил их наравне со всеми — это и был
+	-- второй способ вообще не увидеть додж в логе.
+	local optionalDodge = not (reason == "must-dodge" or reason == "must-dodge(unblockable→back)"
+		or (type(reason) == "string" and reason:sub(1, 9) == "must-dodge"))
+	if optionalDodge and timingTarget and type(timingTarget.contactAbs) == "number" then
 		local contactIn = timingTarget.contactAbs - now
 		local net = math.max(uplink(), 0.02)
 		local duration = GameData.iframeDur or Config.IFrameDur or 0.30
@@ -5231,31 +5213,16 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 		State.ap.dodgeSteerDir = dir
 		State.ap.dodgeSteerUntil = now + math.max((uplink() * 0.5) + 0.06, 0.12)
 	end
-	local accepted, nativeWhy = sendDodge(dir, dodgeSpeed)
-	if not accepted then
-		local c = localChar()
-		local gate = tostring(nativeWhy or "native-gate")
-		local gateKey = "native:" .. gate
-		if State.lastDodgeRefuse ~= gateKey then
-			State.lastDodgeRefuse = gateKey
-			diagPush(("DODGE-SKIP/NATIVE-GATE t=%.2f %s gate=%s attrs=[IFRAMECD=%s Stunned=%s CantAnything=%s Blocking=%s CombatAttacking=%s Ragdoll=%s]")
-				:format(now, tostring(reason), gate,
-					tostring(c and c:GetAttribute("IFRAMECD") == true),
-					tostring(c and c:GetAttribute("Stunned") == true),
-					tostring(c and c:GetAttribute("CantAnything") == true),
-					tostring(c and c:GetAttribute("Blocking") == true),
-					tostring(c and c:GetAttribute("CombatAttacking") == true),
-					tostring(c and c:GetAttribute("Ragdoll") == true)))
-		end
-		return false
-	end
-	State.lastDodgeRefuse = nil
+	-- [V159/DODGE-REVERT] sendDodge снова безусловно отправляет пакет, поэтому проверка «принял ли
+	-- чужой модуль» удалена как мёртвая. Гейты остаются там, где им и место — в canDodgeNow().
+	sendDodge(dir, dodgeSpeed)
 	if granted then State.grantEscapes = (State.grantEscapes or 0) + 1 end
 	if type(reason) == "string" and reason:sub(1, 4) == "dual" then
 		State.dualDodgeCount = (State.dualDodgeCount or 0) + 1
 	end
-	diagPush(("DODGE-NATIVE-ACCEPT t=%.2f %s dir=%s")
-		:format(now, tostring(reason), tostring(dirMode or "input")))
+	-- [V159/DODGE-REVERT] DODGE-NATIVE-ACCEPT удалён: без нативного вызова «accept» — это просто
+	-- факт отправки пакета, а он уже печатается строкой DODGE ниже вместе с окном iframe.
+	State.lastDodgeRefuse = nil
 	local tx = State.dodgeTxn
 	-- [V90] Планируемое окно iframe считаем от РЕАЛЬНОЙ латентности (uplink ≈ RTT), а не от
 	-- Config.DodgeConfirm: последний — ServerConfirmTimeout игры, т.е. таймаут ожидания, а не
@@ -5284,7 +5251,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 			:format(now, tostring(reason), (tx.untilAt-now)*1000))
 	end
 	-- [V91] ОБЯЗАТЕЛЬНЫЙ СБРОС: State.dodgeTxn — ОДНА переиспользуемая таблица на всю сессию.
-	-- Без сброса Ali EvasiveCounter выстрелил бы РОВНО ОДИН раз за сессию (флаг остался бы true
+	-- Без сброс�� Ali EvasiveCounter выстрелил бы РОВНО ОДИН раз за сессию (флаг остался бы true
 	-- на все последующие доджи).
 	tx.evCounterFired, tx.evCounterExpiredLogged = false, false
 	tx.evCounterAwaitIframeLogged, tx.evCounterTargetGateLogged, tx.evCounterStateGate = false, false, nil
@@ -5479,7 +5446,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	-- Config.DodgeConfirm (0.18) — это ServerConfirmTimeout игры, ТАЙМАУТ, а не латентность:
 	-- на низком пинге окно пок��ытия завышалось на 150мс, на высоком — занижалось.
 	local ifDur     = GameData.iframeDur or Config.IFrameDur or 0.30
-	-- Пол 0.02с: ��а ��чень низком пинге up→0.01 и «coverLo = ifLat - 0.03» уходил в минус, т.е.
+	-- Пол 0.02с: ��а ��чень низком пинге up���0.01 и «coverLo = ifLat - 0.03» уходил в минус, т.е.
 	-- уже прилетевший удар ��читался покрываемым. Дэш не защищает назад во вр��мени.
 	local ifLat     = math.max(up, 0.02)
 	local wantBlock = nil
@@ -5607,7 +5574,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 				end
 				-- [V141, ОСТАВЛЕНО] Proof-состояние в каждой MISS-строке. Без него по логу нельзя
 				-- отличить «промах по таймингу» от «гейт сознательно держал нажатие» — именн�� эти
-				-- две пометки и показали, чт�� владелец-тест V140 глушил законные удары.
+				-- две пометки и пока��али, чт�� владелец-тест V140 глушил законные удары.
 				reason = reason .. (" | proof=%s%s"):format(
 					th.serverProven and ("yes/" .. tostring(th.provenBy or "?")) or "NO",
 					th.pressHeldForProof and " HELD-BY-GATE" or "")
@@ -6053,7 +6020,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 
 		-- [V65] iframe-окно доджа фиксированное: [fire+DodgeConfirm, fire+DodgeConfirm
 		-- +IFrameDur] = [+180,+480]мс. Удар «покрываем», только если его контакт
-		-- попадает �� это ��кно (с малым за��асом п�� кр��ям). В логе оба мистайминга
+		-- попадает �� это ��кно (с малым за��асом п�� кр��ям). �� логе оба мистайминга
 		-- (TOO EARLY/TOO LATE) были у GRANT-доджей (outnumbered-escape), которые
 		-- жглись по факту выдачи эв��йда, а не по удару: если удар ближе 180мс —
 		-- iframes не успевали (hit before window), если фитил�� заранее — окно
@@ -6144,7 +6111,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 		if Config.DodgeCenter then
 			-- [V90] КОРНЕВОЙ ФИКС ТАЙМИНГА ДОДЖА.
 			-- Модель времени (проверена по дампу): contactAbs живёт в КЛИЕНТСКИХ часах
-			-- (onAttack: contactAbs = nowClock + remaining0), а getPingRaw() отдаёт RTT
+			-- (onAttack: contactAbs = nowClock + remaining0), а getPingRaw() отда��т RTT
 			-- (источник A = GetNetworkPing()*2) ⇒ up ≈ RTT. Сервер поднимает IFRAMES через
 			-- oneWay после отправки, iframe жив��т IFrameDur; серверный контакт наступает на
 			-- oneWay РАНЬШЕ предсказанного клиентского. Отсюда допустимый суммарный lead
@@ -6245,7 +6212,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 
 	-- [V62] Оценка ��ультиугрозы: считаем РАЗНЫХ атакующих среди imminent и самый
 	-- дальний угр��жающий контакт кластера. В логе провалы (NO-PRESS NOT-BLOCKED,
-	-- BlockCooldown) и����ут именно когда 2+ врага бьют внахлёст: guard роняется
+	-- BlockCooldown) и����ут именно когда 2+ врага б��ют внахлёст: guard роняется
 	-- между их ударами (boxing-counter/deactivate/release) → re-press ловит
 	-- BlockCooldown 0.5с (dump: CombatConfig.Block.CooldownSeconds).
 	local threatN, farContact = 0, nil
@@ -7315,7 +7282,7 @@ local function toggleDesyncTest()
 		end)
 		-- [V76.1] maintenance-цикл: при ходьбе игра запускает walk-а��имацию и перебивает
 		-- нашу по весу/событию AnimationPlayed → обсервер свалив��лся на WALK. Тут мы каждые
-		-- ~0.35с ПЕРЕУТВЕРЖДАЕМ атаку: если её вырубили/понизили вес — перезапускаем, чем
+		-- ~0.35с ПЕРЕУТВЕРЖДАЕМ атаку: если её вырубили/понизили вес — перезапус��аем, чем
 		-- держим её постоянно доминирую��ей и заставляем AnimationPlayed по ней срабатывать
 		-- снова (иначе обсерв��р показал бы последнюю walk-анимацию).
 		-- [V76.2] БЕЗ рывка TimePosition=0 (он и вызывал дёрганье у тебя и в репликации).
@@ -7585,7 +7552,7 @@ end
 -- Config.DesyncSelfVerify was wired to nothing. Its SelfVerify.lastLog table also grew
 -- unbounded (one key per distinct animation id ever seen).
 
--- [V75] КРОСС-КЛИЕНТНАЯ ПРОВЕРКА (отвечает на "как это видят другие игроки").
+-- [V75] КРОСС-КЛИЕНТНАЯ ПРОВЕРКА (отвечает на "как это видят ��ругие игроки").
 -- Ты прав: self-verify и Drawing-текст показывают то, что видит ТВОЙ клиент — это лишь
 -- ��РОКСИ репликации, а не док��зательство тог��, ��то реально приходит врагу. Единственн��й
 -- надёжный способ увидеть чужую картину — смотреть с ДРУГОГО клиента.
@@ -8494,7 +8461,7 @@ vizUpdate = LPH_NO_VIRTUALIZE(function(dt)
 	end
 	if (nowc - (Viz.lastDraw or 0)) < interval then return end
 	-- [V139] ПРИОРИТЕТ ЗАЩИТЫ. Если press-дедлайн внутри VizSkipNearPress — кадр целиком
-	-- отдаётся парированию: ESP не рисуется вообще. Это те 1–2 кадра, где точность тайминга
+	-- отдаётся парирован��ю: ESP не рисуется вообще. Это те 1–2 кадра, где точность тайминга
 	-- решает исход, а полная пер��рисовка стоит больше, чем весь schedulerStep.
 	-- [V140] Пропуск теперь ОГРАНИЧЕН с двух сторон, иначе он превращается в вечную заморо��ку:
 	--   1) метрика обязана быть СВЕЖЕЙ — nearPress пишется на Heartbeat, а читается здесь, на
@@ -8575,7 +8542,7 @@ local applyFacing = LPH_NO_VIRTUALIZE(function()
 	-- враге (в логе face=0.14/-0.58 BACK! на LATE-мисс��х). Причина: на нашем экране другой игрок
 	-- отрисован в ПРОШЛОМ (интерп-лаг + ping), а ��ервер держит его ВПЕРЕДИ. При рывке рассинхрон
 	-- = vel*latency растёт → мы смотрим туда, гд�� враг БЫЛ, сервер видит спину → блок отклонё��.
-	-- Упреждаем: aim = pos + flatVel * (ping-based lead). Стоит на месте (vel≈0) �� lead≈0 → как
+	-- Упреждаем: aim = pos + flatVel * (ping-based lead). Стоит н�� месте (vel≈0) �� lead≈0 → как
 	-- раньше (нет регресса на статичном боксинг��). Рывок → смотрим на СЕРВЕРНУЮ позицию врага.
 	local aimPos = goalPos or goalHRP.Position
 	local lead   = math.clamp(getPing() * (Config.FacePingLead or 1.0), 0, Config.FaceLeadCap or 0.28)
