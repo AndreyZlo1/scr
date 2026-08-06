@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V173",
+	Version       = "V174",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -30,7 +30,7 @@ local Config = {
 	HitHalfWidth  = 3.0,
 	HitboxSlack   = 0.5,
 	HighSlack     = 0.35,
-	HighReachPad  = 2.0,
+	HighReachPad  = 3.5,
 	HighFaceFloor = -0.85,
 	ProvenReachPad    = 6.0,   -- бонус к reach для server-proven угроз (= игровой префильтр Size/2+6)
 	ProvenReachWindow = 0.18,  -- только когда контакт ближе этого (сек) — чтоб не ловить далёкий фейк-спам
@@ -144,6 +144,7 @@ local Config = {
 	DodgeMode      = "Defensive",
 	DodgeAggroSteer   = true,   -- в Aggressive-режиме толкать персонажа по орбите (hum:Move)
 	DodgeAggroClose   = 0.45,   -- доля "внутрь" к врагу при обкрутке (0=чистая орбита,1=прямо в него)
+	DodgeExitSteer    = true,   -- в защитных доджах толкать ПРОЧЬ по вектору доджа, чтобы выйти из живого хитбокса до конца iframe
 	DodgeWallCheck = true,
 	DodgeWallDist  = 8,
 
@@ -180,7 +181,12 @@ local Config = {
 	AliEvasiveCounter = false,
 	AliDodgeAbuse     = false,
 	CounterPreemptsDodge = true,
-	DodgeCenterFrac   = 0.5,
+	-- Хитбокс игры проверяется КАЖДЫЙ кадр всё время, пока часть жива в workspace.Hitboxes
+	-- (VictimHitboxServiceClient, Heartbeat), а спасает только IFRAMES. Если задоджить
+	-- слишком рано — iframe кончится, а часть-хитбокс ещё жива и пересекает нас → ловим
+	-- удар после успешного доджа. Поэтому центрируем iframe ПОЗЖЕ (меньше frac = позже фаер),
+	-- чтобы окно неуязвимости покрывало "хвост" жизни хитбокса за моментом контакта.
+	DodgeCenterFrac   = 0.38,
 
 	SkillAddon        = true,
 	SA_WrestlingGrab  = true,
@@ -2288,6 +2294,11 @@ local function tryAliEvasiveCounter(now)
 	if (counterStyle() or "") ~= "ali" then return false end
 	local tx = State.dodgeTxn
 	if not (tx and tx.pending and tx.perfectConfirmed) then return false end
+	-- Строгая семантика тумблеров: Evasive Counter вкл → M2 после доджа. Но если
+	-- Ali Dodge Abuse ВЫКЛючен, лишний M2 кидаем ТОЛЬКО после ВЫНУЖДЕННОГО доджа
+	-- (must-dodge/blatant/exposed), а не после обычного защитного — иначе выглядит
+	-- как работающий abuse при выключенном тумблере (баг, о котором сообщил юзер).
+	if not Config.AliDodgeAbuse and not tx.forced then return false end
 	if tx.evCounterFired then return false end
 	if not tx.confirmed then
 		if not tx.evCounterAwaitIframeLogged then
@@ -3836,12 +3847,15 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 		dir = bestDodgeDir(now, preferBack)
 		dirMode = dir and "smart" or "input"
 	end
-	-- Стиринг персонажа по вектору доджа:
-	--  • Ali-abuse — всегда (как раньше);
-	--  • Aggressive-режим — толкаем по орбите вокруг врага (обкрутка/сближение),
-	--    но НЕ на форс-ретрите (preferBack).
+	-- Стиринг персонажа по вектору доджа (dir уже = "прочь" для защиты, "орбита" для агро):
+	--  • Ali-abuse — всегда;
+	--  • Aggressive (не форс-ретрит) — орбита вокруг врага (обкрутка/сближение);
+	--  • всё остальное (Defensive / must-dodge) — толкаем ПРОЧЬ, чтобы физически выйти из
+	--    объёма живого хитбокса до конца iframe (хитбокс проверяется каждый кадр, пока жив).
+	local aggressiveOrbit = (Config.DodgeMode == "Aggressive") and not preferBack
 	local wantSteer = isAliAbuse
-		or (Config.DodgeMode == "Aggressive" and Config.DodgeAggroSteer ~= false and not preferBack)
+		or (aggressiveOrbit and Config.DodgeAggroSteer ~= false)
+		or (not aggressiveOrbit and Config.DodgeExitSteer ~= false)
 	if dir and wantSteer then
 		local c = localChar()
 		local hum = c and c:FindFirstChildOfClass("Humanoid")
@@ -3867,6 +3881,10 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 	tx.ackDeadline = now + ackWindow
 	tx.untilAt, tx.reason = iframeHi + 0.08, reason
 	tx.abuseThreat = isAliAbuse and dodgeTarget or nil
+	-- вынужденный додж = must-dodge / blatant-override / exposed-escape (preferBack|force).
+	-- Нужно для гейта evasive-counter: при выключенном Ali Dodge Abuse M2 после доджа
+	-- кидается ТОЛЬКО если додж был вынужденным (см. tryAliEvasiveCounter).
+	tx.forced = (preferBack == true) or (force == true)
 	tx.dodgeDirMode = dirMode
 	tx.perfectConfirmed, tx.perfectAt = false, nil
 	if (counterStyle() or "") == "ali" and Config.SkillAddon and Config.AliEvasiveCounter then
@@ -4190,7 +4208,10 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 										(now - th.detectClock) * 1000,
 										(th.contactAbs - now) * 1000))
 							end
-						elseif (th.contactAbs - now) < 0.18 and serverHitboxProof(th.name) then
+						elseif serverHitboxProof(th.name) then
+							-- часть в workspace.Hitboxes с Owner+AttackName+VictimSwingId = реальная
+							-- атака (фейк-аним её НЕ создаёт). Это земная правда — принимаем в любой
+							-- момент, не только у контакта.
 							th.serverProven, th.serverProofClock = true, now
 							th.provenBy = "hitbox"
 						end
@@ -7047,3 +7068,4 @@ return function(_Lib, _Core)
 	return M
 end
 end
+
