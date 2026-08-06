@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V168",
+	Version       = "V169",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -31,7 +31,7 @@ local Config = {
 	HitboxSlack   = 0.5,
 	HighSlack     = 0.35,
 	HighReachPad  = 2.0,
-	HighFaceFloor = -0.15,
+	HighFaceFloor = -0.85,
 	WillHitLeadFrac = 0.90,
 	FilterFailSafe= true,
 
@@ -1097,9 +1097,10 @@ local willHitMe = LPH_NO_VIRTUALIZE(function(th)
 		end
 		th.geomApproach = approachAllow
 
-		local faceFloor = Config.HighFaceFloor or -0.35
-		local faceOk = (dist2d <= coreReach) or (faceToMe >= faceFloor)
-		th.geomFaceFloor = (dist2d <= coreReach) and -1.01 or faceFloor
+		local faceFloor = Config.HighFaceFloor or -0.85
+		local faceExempt = (dist2d <= coreReach) or th.serverProven
+		local faceOk = faceExempt or (faceToMe >= faceFloor)
+		th.geomFaceFloor = faceExempt and -1.01 or faceFloor
 		hit = (dist2d <= reach + approachAllow) and faceOk
 	else
 		th.geomFaceToMe = nil
