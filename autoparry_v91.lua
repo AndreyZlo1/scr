@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V167",
+	Version       = "V168",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -681,7 +681,17 @@ local function flatDirTo(fromPos, targetPos)
 	return d.Unit
 end
 
-local function faceDotToPos(targetPos)
+local function faceDotToThreat(th)
+	local targetPos
+	local hb = th and th.hitboxPart
+	if hb and hb.Parent then
+		local okp, pos = pcall(function() return hb.Position end)
+		if okp and pos then targetPos = pos end
+	end
+	if not targetPos then
+		local a = th and th.attackerHRP
+		if a and a.Parent then targetPos = a.Position end
+	end
 	local myHRP = localHRP()
 	if not myHRP or not targetPos then return nil end
 	local dir = flatDirTo(myHRP.Position, targetPos)
@@ -690,17 +700,6 @@ local function faceDotToPos(targetPos)
 	local flatLook = Vector3.new(look.X, 0, look.Z)
 	if flatLook.Magnitude < 0.05 then return nil end
 	return flatLook.Unit:Dot(dir)
-end
-
-local function faceDotToThreat(th)
-	local hb = th and th.hitboxPart
-	if hb and hb.Parent then
-		local okp, pos = pcall(function() return hb.Position end)
-		if okp and pos then return faceDotToPos(pos) end
-	end
-	local a = th and th.attackerHRP
-	if a and a.Parent then return faceDotToPos(a.Position) end
-	return nil
 end
 
 local function computeMultiFaceGoal()
@@ -4528,6 +4527,7 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	end
 end)
 
+do
 local function parseEvent(ev)
 	local kind = ev:match("^(M%d)")
 	if not kind then return nil end
@@ -5294,8 +5294,10 @@ end
 
 local SelfVerify = { conn = nil, lastLog = {}, decoyId = nil }
 
-local _testAnim, _testTrack, _testId
 local DesyncTest = { on = false }
+local toggleDesyncTest
+do
+local _testAnim, _testTrack, _testId
 local function pickAttackId()
 	if Config.DesyncTestId then return Config.DesyncTestId end
 	for id, e in pairs(AttackIds) do
@@ -5320,7 +5322,7 @@ local function getTestDecoy(animator)
 		end
 		return _testTrack, id
 end
-local function toggleDesyncTest()
+function toggleDesyncTest()
 	local char = LocalPlayer.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	local animator = hum and hum:FindFirstChildOfClass("Animator")
@@ -5366,6 +5368,7 @@ local function toggleDesyncTest()
 		if DesyncTest.conn then pcall(function() DesyncTest.conn:Disconnect() end); DesyncTest.conn = nil end
 		pcall(function() if _testTrack then _testTrack:Stop(0.1) end end)
 	end
+end
 end
 if type(getgenv) == "function" then getgenv().AP_DESYNC_TEST = toggleDesyncTest end
 
@@ -6914,3 +6917,5 @@ return function(_Lib, _Core)
 
 	return M
 end
+end
+
