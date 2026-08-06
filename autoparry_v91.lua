@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V171",
+	Version       = "V172",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -71,7 +71,6 @@ local Config = {
 	ChargeStallMs = 45,
 	ReleaseGap    = 0.40,
 
-	FaceGateBlock = true,
 	FaceGateMin   = 0.2,
 
 	UplinkFactor  = 1.0,
@@ -136,7 +135,13 @@ local Config = {
 	FrameLookaheadCapK   = 0.75,
 	FrameLookaheadCapHi  = 0.11,
 	FrameStepCostComp    = 0.60,
-	SmartDodgeDir = true,
+	-- Направление доджа теперь всегда "умное" (тумблер убран — выключать его смысла нет).
+	-- Режим задаёт КУДА уходить:
+	--   "Defensive" — отходить ОТ врага (ретрит, разрыв дистанции)
+	--   "Aggressive" — сближаться и ОБКРУЧИВАТЬ врага (орбита, как Ali dodge abuse)
+	DodgeMode      = "Defensive",
+	DodgeAggroSteer   = true,   -- в Aggressive-режиме толкать персонажа по орбите (hum:Move)
+	DodgeAggroClose   = 0.45,   -- доля "внутрь" к врагу при обкрутке (0=чистая орбита,1=прямо в него)
 	DodgeWallCheck = true,
 	DodgeWallDist  = 8,
 
@@ -184,6 +189,7 @@ local Config = {
 	SA_BlatantWindow  = 0.32,
 
 	AutoPlay          = false,
+	AP_ForceNativeM1  = true,   -- true = бить через родную tryM1() игры (переживает обновления); false = хрупкий fast-path на debug-индексах
 	AP_PunishOnParry  = true,
 	AP_Interrupt      = true,
 	AP_InterruptMargin= 0.055,
@@ -3093,17 +3099,28 @@ function State.ap.fireM1(model, why, priority, dropGuard)
 	if not hrp then return false end
 	ap.snapTo(hrp)
 	ap.nextM1At = now + (Config.AP_PollGap or 0)
-	local swung = false
-	if ap.fireOK then
-		local char = localChar()
-		if char then swung = ap.fireM1Custom(char, model, nil, false, priority, dropGuard) end
-	elseif ap.tryM1Fn then
-		local ok, res = pcall(ap.tryM1Fn)
-		swung = ok and res == true
-	else
-		pcall(function() m1.OnM1Activated() end)
-		swung = true
-	end
+		local swung = false
+		-- НАДЁЖНЫЙ путь по умолчанию: родная tryM1() из M1-модуля игры.
+		-- Она version-proof (сама читает combo/anim/cooldown и шлёт ServerCheck
+		-- изнутри), поэтому переживает обновления игры. Хрупкий fast-path
+		-- (fireM1Custom с debug.setupvalue по индексам upvalue) включается только
+		-- если пользователь ЯВНО отключил AP_ForceNativeM1 — при обновлении игры
+		-- индексы протухают, setupvalue пишет мусор и сервер отклоняет свинг =
+		-- "autoplay не бьёт, а раз не бьёт — стоит и не парирует".
+		local useFast = ap.fireOK and (Config.AP_ForceNativeM1 == false)
+		if useFast then
+			local char = localChar()
+			if char then swung = ap.fireM1Custom(char, model, nil, false, priority, dropGuard) end
+			if not swung and ap.tryM1Fn then
+				local ok, res = pcall(ap.tryM1Fn); swung = ok and res == true
+			end
+		elseif ap.tryM1Fn then
+			local ok, res = pcall(ap.tryM1Fn)
+			swung = ok and res == true
+		else
+			pcall(function() m1.OnM1Activated() end)
+			swung = true
+		end
 		if swung then
 			State.status      = "AUTO-M1"
 			State.flashUntil  = now + 0.2
@@ -3594,8 +3611,11 @@ local function dirIsClear(origin, dir, allowedModel)
 	return false
 end
 
+-- Возвращает направление доджа. Режим Config.DodgeMode:
+--   Defensive  → уходим ОТ врага (ретрит).
+--   Aggressive → обкручиваем врага по орбите + подрезаем внутрь (сближение).
+-- preferBack форсирует ретрит независимо от режима (must-dodge/escape уходы).
 local function bestDodgeDir(now, preferBack)
-	if not Config.SmartDodgeDir then return nil, false end
 	local me = localHRP(); if not me then return nil, false end
 	local best, bestC
 	for _, th in ipairs(Threats) do
@@ -3609,29 +3629,38 @@ local function bestDodgeDir(now, preferBack)
 	local flook = Vector3.new(aLook.X, 0, aLook.Z)
 	local toMe  = me.Position - aHRP.Position
 	toMe = Vector3.new(toMe.X, 0, toMe.Z)
-	if flook.Magnitude < 0.05 or toMe.Magnitude < 0.05 then return nil, false end
-	flook = flook.Unit
+	if toMe.Magnitude < 0.05 then return nil, false end
 	local away = toMe.Unit
-	local perp = Vector3.new(-flook.Z, 0, flook.X)
-	if perp:Dot(away) < 0 then perp = -perp end
+	local toward = -away
+	-- перпендикуляр к линии враг↔я = касательная к орбите вокруг врага
+	local orbit = Vector3.new(-toMe.Z, 0, toMe.X).Unit
+	-- если знаем куда враг смотрит — орбитим в ту же сторону, куда он доворачивает
+	if flook.Magnitude >= 0.05 then
+		flook = flook.Unit
+		local perp = Vector3.new(-flook.Z, 0, flook.X)
+		if perp:Dot(orbit) < 0 then orbit = -orbit end
+	end
 
+	local aggressive = (Config.DodgeMode == "Aggressive") and not preferBack
 	local candidates
-	if preferBack then
+	if aggressive then
+		-- обкрутка: касательная + подрезка внутрь к врагу (сближение)
+		local close = math.clamp(tonumber(Config.DodgeAggroClose) or 0.45, 0, 1)
 		candidates = {
-			away,
-			(away * 0.7 + perp * 0.5).Unit,
-			(away * 0.7 - perp * 0.5).Unit,
-			perp,
-			-perp,
+			(orbit + toward * close).Unit,
+			(-orbit + toward * close).Unit,
+			orbit,
+			-orbit,
+			toward,
 		}
-	else
-		local ideal = (perp * 0.8 + away * 0.5)
+	elseif preferBack or Config.DodgeMode ~= "Aggressive" then
+		-- Defensive / форс-ретрит: уходим от врага
 		candidates = {
-			ideal.Magnitude > 0.05 and ideal.Unit or away,
-			((-perp) * 0.8 + away * 0.5).Unit,
 			away,
-			perp,
-			-perp,
+			(away * 0.7 + orbit * 0.5).Unit,
+			(away * 0.7 - orbit * 0.5).Unit,
+			orbit,
+			-orbit,
 		}
 	end
 	local origin = me.Position
@@ -3767,7 +3796,13 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 		dir = bestDodgeDir(now, preferBack)
 		dirMode = dir and "smart" or "input"
 	end
-	if dir and isAliAbuse then
+	-- Стиринг персонажа по вектору доджа:
+	--  • Ali-abuse — всегда (как раньше);
+	--  • Aggressive-режим — толкаем по орбите вокруг врага (обкрутка/сближение),
+	--    но НЕ на форс-ретрите (preferBack).
+	local wantSteer = isAliAbuse
+		or (Config.DodgeMode == "Aggressive" and Config.DodgeAggroSteer ~= false and not preferBack)
+	if dir and wantSteer then
 		local c = localChar()
 		local hum = c and c:FindFirstChildOfClass("Humanoid")
 		if hum then pcall(V93.humMove, hum, dir) end
@@ -6545,11 +6580,25 @@ return function(_Lib, _Core)
 			function() return Config.DodgeOnParryCooldown ~= false end,
 			function(v) Config.DodgeOnParryCooldown = v end)
 		apDodge:SubLabel({ Text = "dodge when block is on cooldown / cant parry in time\nOFF = eat the hit instead (unblockable must-dodge unaffected)" })
-		boolToggle(apDodge, "Smart Dodge Direction", "Smart Dodge", function() return Config.SmartDodgeDir end, function(v) Config.SmartDodgeDir = v end)
-		apDodge:SubLabel({ Text = "roll away from the attacker instead of a fixed direction" })
-		boolToggle(apDodge, "Face-Gate Block", "Face-Gate Block",
-			function() return Config.FaceGateBlock ~= false end, function(v) Config.FaceGateBlock = v end)
-		apDodge:SubLabel({ Text = "dont waste a block (and its 0.5s cooldown) pressing while facing away\nwait for the turn — block is directional, the server rejects back-facing parries" })
+		local aggroEls = {}
+		local function aggroVis()
+			local on = (Config.DodgeMode or "Defensive") == "Aggressive"
+			for _, el in ipairs(aggroEls) do pcall(function() el:SetVisibility(on) end) end
+		end
+		apDodge:Dropdown({
+			Name = "Dodge Mode",
+			Options = { "Defensive", "Aggressive" },
+			Default = Config.DodgeMode or "Defensive",
+			Callback = function(v)
+				if type(v) == "string" and v ~= "" then Config.DodgeMode = v; aggroVis() end
+			end,
+		}, ctx.flag("AP_DodgeMode"))
+		apDodge:SubLabel({ Text = "Defensive = roll AWAY from the attacker (retreat, make distance)\nAggressive = orbit AROUND the attacker and close in (spins them, like Ali dodge abuse)" })
+		aggroEls[#aggroEls + 1] = slider(apDodge, { Name = "Aggro Close-In", Flag = "AP_DodgeAggroClose",
+			Default = math.floor((Config.DodgeAggroClose or 0.45) * 100), Min = 0, Max = 100, Suffix = "%",
+			Callback = function(v) Config.DodgeAggroClose = v / 100 end })
+		apDodge:SubLabel({ Text = "in Aggressive: 0% = pure orbit around them, 100% = cut straight in" })
+		aggroVis()
 
 		apDodge:Divider()
 		apDodge:Header({ Name = "Dodge Tuning" })
@@ -6697,6 +6746,9 @@ return function(_Lib, _Core)
 
 		apPlay:Divider()
 		apPlay:Header({ Name = "Behaviour" })
+		boolToggle(apPlay, "Reliable Attacks", "Reliable Attacks",
+			function() return Config.AP_ForceNativeM1 ~= false end, function(v) Config.AP_ForceNativeM1 = v end)
+		apPlay:SubLabel({ Text = "ON = swing via the game's own M1 function (survives game updates, recommended)\nOFF = raw fast-path — breaks after updates → 'autoplay stops attacking' → parry stalls" })
 		boolToggle(apPlay, "Punish After Parry", "Punish After Parry",
 			function() return Config.AP_PunishOnParry ~= false end, function(v) Config.AP_PunishOnParry = v end)
 	apPlay:SubLabel({ Text = "a perfect parry stuns them → instantly auto-M1 the stunned enemy in range" })
