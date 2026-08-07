@@ -14,7 +14,7 @@ do
 	end
 end
 local Config = {
-	Version       = "V174",
+	Version       = "V175",
 	Enabled       = false,
 	Mode          = "Perfect",
 
@@ -30,7 +30,7 @@ local Config = {
 	HitHalfWidth  = 3.0,
 	HitboxSlack   = 0.5,
 	HighSlack     = 0.35,
-	HighReachPad  = 3.5,
+	HighReachPad  = 3.0,
 	HighFaceFloor = -0.85,
 	ProvenReachPad    = 6.0,   -- бонус к reach для server-proven угроз (= игровой префильтр Size/2+6)
 	ProvenReachWindow = 0.18,  -- только когда контакт ближе этого (сек) — чтоб не ловить далёкий фейк-спам
@@ -921,7 +921,7 @@ local realHitboxHitsMe = LPH_NO_VIRTUALIZE(function(ownerName, th)
 				av.X, av.Z, mv.X, mv.Z))
 	end
 
-	-- РАЗДУТИЕ НА ПИНГ: сервер должен увидеть Blocking=true ДО реального касания.
+	-- РАЗДУТИЕ НА ПИНГ: сер��ер должен увидеть Blocking=true ДО реального касания.
 	-- Растим бокс на путь, который хитбокс/атакующий пройдёт за (ping + reaction),
 	-- чтобы триггер сработал заранее. Это НЕ facing и НЕ reach — это тот же самый
 	-- игровой overlap-тест, только с временным упреждением на задержку сети.
@@ -2297,7 +2297,7 @@ local function tryAliEvasiveCounter(now)
 	-- Строгая семантика тумблеров: Evasive Counter вкл → M2 после доджа. Но если
 	-- Ali Dodge Abuse ВЫКЛючен, лишний M2 кидаем ТОЛЬКО после ВЫНУЖДЕННОГО доджа
 	-- (must-dodge/blatant/exposed), а не после обычного защитного — иначе выглядит
-	-- как работающий abuse при выключенном тумблере (баг, о котором сообщил юзер).
+	-- как работающий abuse при вы��люченном тумблере (баг, о котором сообщил юзер).
 	if not Config.AliDodgeAbuse and not tx.forced then return false end
 	if tx.evCounterFired then return false end
 	if not tx.confirmed then
@@ -3807,6 +3807,21 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 			end
 		end
 	end
+	-- Capoeira M2: доджить ТОЛЬКО назад, независимо от Dodge Mode (Defensive/Aggressive).
+	-- Форсим preferBack и запрещаем агрессивную орбиту для этого доджа.
+	local forceBackOnly = false
+	do
+		local ct = timingTarget
+		if ct and ct.kind == "M2" and type(ct.style) == "string" and ct.style:lower() == "capoeira" then
+			forceBackOnly = true
+			preferBack = true
+			if not ct.capoBackLogged then
+				ct.capoBackLogged = true
+				diagPush(("DODGE-CAPO t=%.2f  %s Capoeira M2 → back-only (mode ignored)")
+					:format(now, tostring(ct.name)))
+			end
+		end
+	end
 	local optionalDodge = not (reason == "must-dodge" or reason == "must-dodge(unblockable→back)"
 		or (type(reason) == "string" and reason:sub(1, 9) == "must-dodge"))
 	if optionalDodge and timingTarget and type(timingTarget.contactAbs) == "number" then
@@ -3835,7 +3850,7 @@ local function performDodge(now, reason, preferBack, force, bypassAutoOff, dodge
 	end
 
 	local dir, dirMode, dodgeSpeed, startDist, targetDist, travel
-	if isAliAbuse then
+	if isAliAbuse and not forceBackOnly then
 		dir, dirMode, dodgeSpeed, startDist, targetDist, travel = State.bestAliForwardDodgeDir(dodgeTarget)
 		if not dir then
 			diagPush(("ALI-DODGE-SKIP t=%.2f gate=trajectory reason=%s"):format(now, tostring(dirMode)))
@@ -4208,13 +4223,16 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 										(now - th.detectClock) * 1000,
 										(th.contactAbs - now) * 1000))
 							end
-						elseif serverHitboxProof(th.name) then
-							-- часть в workspace.Hitboxes с Owner+AttackName+VictimSwingId = реальная
-							-- атака (фейк-аним её НЕ создаёт). Это земная правда — принимаем в любой
-							-- момент, не только у контакта.
-							th.serverProven, th.serverProofClock = true, now
-							th.provenBy = "hitbox"
-						end
+						elseif associatedHitbox(th) then
+								-- ВАЖНО: фейк-атаки могут идти ВМЕСТЕ с настоящей. Настоящий свинг = РОВНО
+								-- одна часть в workspace.Hitboxes с уникальным VictimSwingId. associatedHitbox
+								-- претендует на неё через hbClaimBySid (по threat-группе), поэтому ДВЕ
+								-- угрозы от одного врага НЕ могут делить один хитбокс: фейк-анимация своего
+								-- хитбокса не создаёт → пруф не получит. Раньше здесь был serverHitboxProof
+								-- (owner-only) — он отдавал пруф фейку от хитбокса реального свинга. Исправлено.
+								th.serverProven, th.serverProofClock = true, now
+								th.provenBy = "hitbox"
+							end
 				end
 
 				if now >= pressAtQ and now <= holdEnd then
@@ -4660,7 +4678,6 @@ local schedulerStep = LPH_NO_VIRTUALIZE(function(now)
 	end
 end)
 
-do
 local function parseEvent(ev)
 	local kind = ev:match("^(M%d)")
 	if not kind then return nil end
@@ -7066,6 +7083,5 @@ return function(_Lib, _Core)
 	end
 
 	return M
-end
 end
 
